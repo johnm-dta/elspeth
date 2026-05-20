@@ -100,6 +100,18 @@ class RowProcessorHandle(Protocol):
         """Return whether the durable scheduler has active non-terminal work."""
         ...
 
+    def active_scheduled_row_ids(self) -> frozenset[str]:
+        """Return row IDs represented by active durable scheduler work."""
+        ...
+
+    def summarize_scheduled_work(self) -> tuple[str, ...]:
+        """Return grouped active scheduler work for invariant diagnostics."""
+        ...
+
+    def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
+        """Mark durable scheduler work consumed by a barrier as terminal."""
+        ...
+
     def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
         """Return serializable aggregation checkpoint state."""
         ...
@@ -520,11 +532,12 @@ class ResumeState:
     run_id: str
     restored_aggregation_state: Mapping[str, AggregationCheckpointState]
     restored_coalesce_state: CoalesceCheckpointState | None
-    unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]]
+    unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]]
     schema_contract: SchemaContract
+    schema_contracts_by_source: Mapping[NodeID, SchemaContract] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "restored_aggregation_state")
+        freeze_fields(self, "restored_aggregation_state", "schema_contracts_by_source")
         # unprocessed_rows contains raw row dicts that PipelineRow expects as
         # plain dict — deep_freeze would convert them to MappingProxyType.
         if not isinstance(self.unprocessed_rows, tuple):

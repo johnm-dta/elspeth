@@ -47,7 +47,14 @@ defaults:
     # newline-collapse coaching hint. Same trust boundary semantics as
     # the existing ``WebScrapeHTTPConfig._validate_allowed_hosts`` R5
     # entry — config_snapshot is unvalidated LLM-supplied options.
-    max_allow_hits: 415
+    #
+    # Bumped from 415 → 423 on 2026-05-21 for the multi-source scheduler branch:
+    # bounded entries for scheduler transition-status normalization, source-scoped
+    # checkpoint payload validation, credential-safe URL loopback parsing, composer
+    # named-source compatibility, web_scrape wire-visible identity validation, and
+    # DAG source-name recovery. Entries expire 2026-08-20 unless promoted into typed
+    # boundary helpers first.
+    max_allow_hits: 423
     # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
     # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
     # — W5 load-bearing telemetry-only exemption per
@@ -70,7 +77,10 @@ defaults:
     # Bumped from 507 → 508 on 2026-05-20 for the same composer-jit-hints
     # Phase 1 ``WebScrapeTransform.get_post_call_hints`` bump as
     # ``max_allow_hits`` above (net +1).
-    max_total_entries: 508
+    #
+    # Bumped from 508 → 516 on 2026-05-21 for the same multi-source scheduler branch
+    # trust-tier entries described under ``max_allow_hits`` above.
+    max_total_entries: 516
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import cast
 
@@ -67,19 +68,31 @@ def _run_rule(rule_id: str, root: str) -> list[dict[str, object]]:
     """
     env = {**os.environ, "PYTHONPATH": str(ELSPETH_LINTS_SRC)}
     resolved_root = root if Path(root).is_absolute() else str(REPO_ROOT / root)
+    command = [
+        str(PYTHON),
+        "-m",
+        "elspeth_lints.core.cli",
+        "check",
+        "--rules",
+        rule_id,
+        "--format",
+        "json",
+        "--root",
+        resolved_root,
+    ]
+    if rule_id == "trust_tier.tier_model":
+        # The baseline intentionally fingerprints the raw tier-model finding
+        # stream. CI's production allowlist suppresses currently accepted debt,
+        # which would turn the baseline into "zero findings" and stop detecting
+        # fingerprint rotation.
+        with tempfile.TemporaryDirectory() as empty_allowlist:
+            return _run_rule_command(rule_id, [*command, "--allowlist-dir", empty_allowlist], env)
+    return _run_rule_command(rule_id, command, env)
+
+
+def _run_rule_command(rule_id: str, command: list[str], env: dict[str, str]) -> list[dict[str, object]]:
     result = subprocess.run(
-        [
-            str(PYTHON),
-            "-m",
-            "elspeth_lints.core.cli",
-            "check",
-            "--rules",
-            rule_id,
-            "--format",
-            "json",
-            "--root",
-            resolved_root,
-        ],
+        command,
         capture_output=True,
         text=True,
         check=False,

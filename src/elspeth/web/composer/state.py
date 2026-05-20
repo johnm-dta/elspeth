@@ -29,7 +29,14 @@ from elspeth.contracts.schema import (
     get_raw_sink_required_fields,
     raw_options_have_schema,
 )
-from elspeth.core.config import TriggerConfig
+from elspeth.contracts.wire_visible_identity import is_wire_visible_placeholder
+from elspeth.core.config import (
+    _MAX_NODE_NAME_LENGTH,
+    _RESERVED_EDGE_LABELS,
+    TriggerConfig,
+    _validate_max_length,
+    _validate_node_name_chars,
+)
 from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
 from elspeth.engine.orchestrator.validation import (
     _ALLOWED_FAILSINK_PLUGINS,
@@ -52,6 +59,20 @@ _DISCARD_ROUTE_TARGET = "discard"
 # advertises plugins that don't exist (false positive). Enforced by
 # tests/unit/web/composer/test_skill_drift.py::test_file_sinks_subset_of_registered_sinks.
 _FILE_SINK_PLUGINS: frozenset[str] = frozenset({"csv", "json"})
+
+
+def validate_composer_source_name(source_name: str) -> None:
+    """Validate a composer source name against runtime settings constraints."""
+    if not source_name or not source_name.strip():
+        raise ValueError("source_name must be a non-empty string.")
+    if source_name != source_name.lower():
+        raise ValueError(f"Source name '{source_name}' must be lowercase. Suggested fix: '{source_name.lower()}'.")
+    _validate_max_length(source_name, field_label="Source name", max_length=_MAX_NODE_NAME_LENGTH)
+    _validate_node_name_chars(source_name, field_label="Source name")
+    if source_name in _RESERVED_EDGE_LABELS:
+        raise ValueError(f"Source name '{source_name}' is reserved. Reserved source/edge labels: {sorted(_RESERVED_EDGE_LABELS)}")
+    if source_name.startswith("__"):
+        raise ValueError(f"Source name '{source_name}' starts with '__', which is reserved for system edges")
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,7 +488,8 @@ def _producer_declared_field_type(
     field_name: str,
 ) -> str | None:
     """Return a declared schema field type for a producer, or None when unknown."""
-    owner = "source" if producer_id == "source" else f"node:{producer_id}"
+    is_source_producer = producer_id == "source" or producer_id.startswith("source:")
+    owner = producer_id if is_source_producer else f"node:{producer_id}"
     raw_schema = get_raw_schema_config(options, owner=owner)
     if raw_schema is not None and raw_schema.fields is not None:
         for field in raw_schema.fields:
@@ -475,7 +497,7 @@ def _producer_declared_field_type(
                 return field.field_type
         return None
 
-    if producer_id == "source":
+    if is_source_producer:
         return None
 
     if producer_id not in node_by_id:
@@ -519,8 +541,17 @@ def _is_static_contract_probe_exception(exc: Exception) -> bool:
     return type(exc) is ValueError and str(exc).startswith("Invalid configuration for transform ")
 
 
+def _coerce_source_mapping(sources: Mapping[str, SourceSpec] | SourceSpec | None) -> Mapping[str, SourceSpec]:
+    """Return canonical source mapping for helpers that still support legacy callers."""
+    if sources is None:
+        return {}
+    if isinstance(sources, SourceSpec):
+        return {"source": sources}
+    return sources
+
+
 def _batch_distribution_profile_value_field_entries(
-    source: SourceSpec | None,
+    sources: Mapping[str, SourceSpec] | SourceSpec | None,
     nodes: tuple[NodeSpec, ...],
 ) -> tuple[tuple[ValidationEntry, ...], tuple[ValidationEntry, ...]]:
     """Validate numeric-only batch_distribution_profile value_field contracts."""
@@ -529,8 +560,10 @@ def _batch_distribution_profile_value_field_entries(
     errors: list[ValidationEntry] = []
     warnings: list[ValidationEntry] = []
     node_by_id = {node.id: node for node in nodes}
+    source_map = _coerce_source_mapping(sources)
     resolver = ProducerResolver.build(
-        source=source,
+        source=None,
+        sources=source_map,
         nodes=nodes,
         sink_names=frozenset(),
     )
@@ -807,6 +840,35 @@ def _validate_web_scrape_abuse_contact_not_reserved(node: NodeSpec) -> Validatio
     return None
 
 
+def _validate_web_scrape_http_identity_not_placeholder(node: NodeSpec) -> tuple[ValidationEntry, ...]:
+    """Reject placeholder values in web_scrape's wire-visible HTTP identity fields."""
+    if node.plugin != "web_scrape":
+        return ()
+    http = node.options.get("http")
+    if not isinstance(http, Mapping):
+        return ()
+
+    errors: list[ValidationEntry] = []
+    for field_name in ("abuse_contact", "scraping_reason"):
+        value = http.get(field_name)
+        if not isinstance(value, str):
+            continue
+        if not is_wire_visible_placeholder(value):
+            continue
+        errors.append(
+            ValidationEntry(
+                component=f"node:{node.id}",
+                message=(
+                    f"web_scrape.http.{field_name} is a placeholder value. This field ships as an HTTP "
+                    "header to the scraped host, so it must be supplied by the operator or deployment "
+                    "identity before the pipeline can be considered valid."
+                ),
+                severity="high",
+            )
+        )
+    return tuple(errors)
+
+
 def _locked_input_field_set(options: Mapping[str, Any], owner: str) -> frozenset[str] | None:
     """Return the consumer's accepted-input field set when its input is locked.
 
@@ -848,7 +910,7 @@ def _sink_locked_input_set(output: OutputSpec) -> frozenset[str] | None:
 
 
 def _check_schema_contracts(
-    source: SourceSpec | None,
+    sources: Mapping[str, SourceSpec] | SourceSpec | None,
     nodes: tuple[NodeSpec, ...],
     outputs: tuple[OutputSpec, ...],
 ) -> tuple[
@@ -857,7 +919,7 @@ def _check_schema_contracts(
     tuple[EdgeContract, ...],
 ]:
     """Validate producer/consumer schema contracts across declarative routing."""
-    from elspeth.web.composer._producer_resolver import ProducerEntry, ProducerResolver
+    from elspeth.web.composer._producer_resolver import ProducerEntry, ProducerResolver, is_source_producer_id, source_producer_id
 
     errors: list[ValidationEntry] = []
     contract_warnings: list[ValidationEntry] = []
@@ -867,6 +929,7 @@ def _check_schema_contracts(
     sink_names = {output.name for output in outputs}
     sink_names_frozen = frozenset(sink_names)
     internal_connection_names: set[str] = set()
+    source_map = _coerce_source_mapping(sources)
 
     _err = ValidationEntry
     _warn = ValidationEntry
@@ -885,7 +948,8 @@ def _check_schema_contracts(
     # source-as-source-sentinel and same-node carve-out semantics), and
     # reports which connections have multiple distinct producers.
     resolver = ProducerResolver.build(
-        source=source,
+        source=None,
+        sources=source_map,
         nodes=nodes,
         sink_names=sink_names_frozen,
     )
@@ -921,16 +985,18 @@ def _check_schema_contracts(
             direct_sink_producers[sink_name] = []
         direct_sink_producers[sink_name].append(ProducerEntry(producer_id=producer_id, plugin_name=plugin_name, options=options))
 
-    if source is not None:
+    for source_name, source in source_map.items():
+        producer_id = source_producer_id(source_name)
         if source.on_success in sink_names:
             _record_direct_sink(
                 source.on_success,
-                "source",
+                producer_id,
                 source.plugin,
                 source.options,
             )
         else:
-            _record_description(source.on_success, f"source '{source.plugin}'")
+            source_desc = f"source '{source.plugin}'" if source_name == "source" else f"source '{source_name}' ({source.plugin})"
+            _record_description(source.on_success, source_desc)
 
     for node in nodes:
         if node.node_type == "coalesce" and node.on_success is None:
@@ -1042,7 +1108,7 @@ def _check_schema_contracts(
         visited_connections: set[str] = set()
         current_producer = producer
         while True:
-            if current_producer.producer_id == "source":
+            if is_source_producer_id(current_producer.producer_id):
                 return current_producer
 
             producer_node = resolver.get_node(current_producer.producer_id)
@@ -1099,7 +1165,7 @@ def _check_schema_contracts(
         )
 
     def _producer_owner(producer: ProducerEntry) -> str:
-        return "source" if producer.producer_id == "source" else f"node:{producer.producer_id}"
+        return producer.producer_id if is_source_producer_id(producer.producer_id) else f"node:{producer.producer_id}"
 
     def _producer_label(producer: ProducerEntry) -> str:
         if producer.plugin_name is not None:
@@ -1168,7 +1234,7 @@ def _check_schema_contracts(
             # observed-mode schema itself abstains.
             raw_participates = True
 
-        if producer.producer_id == "source":
+        if is_source_producer_id(producer.producer_id):
             return raw_participates, raw_guaranteed
 
         producer_node = node_by_id[producer.producer_id]
@@ -1265,7 +1331,7 @@ def _check_schema_contracts(
         if producer is None:
             return False, frozenset()
 
-        if producer.producer_id == "source":
+        if is_source_producer_id(producer.producer_id):
             return _effective_producer_vote(producer)
 
         producer_node = node_by_id[producer.producer_id]
@@ -1347,7 +1413,7 @@ def _check_schema_contracts(
         the declared set — those are the cases where we don't have a separate
         emission inference, and the declared/raw set is the best signal.
         """
-        if producer.producer_id == "source":
+        if is_source_producer_id(producer.producer_id):
             return _effective_producer_guarantees(producer)
 
         producer_node = node_by_id.get(producer.producer_id)
@@ -1421,9 +1487,12 @@ def _check_schema_contracts(
                 )
             )
             if missing_fields:
+                error_component = (
+                    _producer_owner(actual_producer) if is_source_producer_id(actual_producer.producer_id) else f"node:{node.id}"
+                )
                 errors.append(
                     _err(
-                        f"node:{node.id}",
+                        error_component,
                         f"Schema contract violation: '{actual_producer.producer_id}' -> '{node.id}'. "
                         f"Consumer ({node.plugin or node.node_type}) requires fields: [{_format_fields(consumer_required)}]. "
                         f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
@@ -1713,8 +1782,7 @@ class CompositionState:
 
     def with_named_source(self, source_name: str, source: SourceSpec) -> CompositionState:
         """Add or replace a named source root. Version incremented."""
-        if not source_name or not source_name.strip():
-            raise ValueError("source_name must be a non-empty string.")
+        validate_composer_source_name(source_name)
         sources = dict(self.sources)
         sources[source_name] = source
         return replace(self, source=next(iter(sources.values())), sources=sources, version=self.version + 1)
@@ -1900,7 +1968,7 @@ class CompositionState:
             state == CompositionState.from_dict(state.to_dict())
         """
         source_data = d["source"]
-        raw_sources = d.get("sources", {})
+        raw_sources = d["sources"] if "sources" in d else {}
         sources = {name: SourceSpec.from_dict(source) for name, source in raw_sources.items()}
         return cls(
             source=SourceSpec.from_dict(source_data) if source_data is not None else None,
@@ -1926,6 +1994,12 @@ class CompositionState:
         # 1. Source exists
         if not self.sources:
             errors.append(_err("source", "No source configured.", "high"))
+        for source_name in self.sources:
+            try:
+                validate_composer_source_name(source_name)
+            except ValueError as exc:
+                component = "source" if source_name == "source" else f"source:{source_name}"
+                errors.append(_err(component, str(exc), "high"))
 
         # 2. At least one output
         if not self.outputs:
@@ -1947,6 +2021,14 @@ class CompositionState:
         for node in self.nodes:
             if node.id in seen_node_ids:
                 errors.append(_err(f"node:{node.id}", f"Duplicate node ID: '{node.id}'.", "high"))
+            if node.id == "source" or node.id.startswith("source:"):
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Reserved node id '{node.id}' cannot use the source producer namespace.",
+                        "high",
+                    )
+                )
             seen_node_ids.add(node.id)
 
         # 5. Output names unique
@@ -1987,6 +2069,7 @@ class CompositionState:
             abuse_contact_error = _validate_web_scrape_abuse_contact_not_reserved(node)
             if abuse_contact_error is not None:
                 errors.append(abuse_contact_error)
+            errors.extend(_validate_web_scrape_http_identity_not_placeholder(node))
 
             if node.node_type == "gate":
                 if node.condition is None:
@@ -2049,7 +2132,6 @@ class CompositionState:
         errors.extend(_validate_runtime_route_destinations(self.sources, self.nodes, self.outputs))
 
         # 8. Connection completeness
-        source_on_success = self.source.on_success if self.source else None
         runtime_connections = _runtime_connection_targets(self.sources, self.nodes)
         for node in self.nodes:
             if node.node_type == "coalesce":
@@ -2082,7 +2164,7 @@ class CompositionState:
         semantic_errors, semantic_contracts = validate_semantic_contracts(self)
         errors.extend(semantic_errors)
 
-        numeric_contract_errors, numeric_contract_warnings = _batch_distribution_profile_value_field_entries(self.source, self.nodes)
+        numeric_contract_errors, numeric_contract_warnings = _batch_distribution_profile_value_field_entries(self.sources, self.nodes)
         errors.extend(numeric_contract_errors)
 
         # --- Warnings (advisory, non-blocking) ---
@@ -2119,13 +2201,20 @@ class CompositionState:
                 )
 
         # W2: Source on_success target doesn't match any node input or output name
-        if source_on_success is not None:
-            node_inputs = {n.input for n in self.nodes if n.input is not None}
+        node_inputs = {n.input for n in self.nodes if n.input is not None}
+        for source_name, source in self.sources.items():
+            source_on_success = source.on_success
             if source_on_success not in node_inputs and source_on_success not in output_names:
+                component = "source" if source_name == "source" else f"source:{source_name}"
+                message = (
+                    f"Source on_success '{source_on_success}' does not match any node input or output — data may not flow."
+                    if source_name == "source"
+                    else f"Source '{source_name}' on_success '{source_on_success}' does not match any node input or output — data may not flow."
+                )
                 warnings.append(
                     _warn(
-                        "source",
-                        f"Source on_success '{source_on_success}' does not match any node input or output — data may not flow.",
+                        component,
+                        message,
                         "medium",
                     )
                 )
@@ -2278,14 +2367,24 @@ class CompositionState:
         # W8: Source on_validation_failure reference validation
         # Mirrors rules from engine/orchestrator/validation.py so LLMs get
         # early feedback instead of failing at pipeline build time.
-        if self.source is not None:
-            vf_dest = self.source.on_validation_failure
+        for source_name, source in self.sources.items():
+            vf_dest = source.on_validation_failure
             if vf_dest != "discard" and vf_dest not in output_name_set:
+                component = "source" if source_name == "source" else f"source:{source_name}"
+                if source_name == "source":
+                    message = (
+                        f"Source on_validation_failure references '{vf_dest}' which is not a configured output — "
+                        "validation failures will cause a pipeline build error."
+                    )
+                else:
+                    message = (
+                        f"Source '{source_name}' on_validation_failure references '{vf_dest}' which is not a configured output — "
+                        "validation failures will cause a pipeline build error."
+                    )
                 warnings.append(
                     _warn(
-                        "source",
-                        f"Source on_validation_failure references '{vf_dest}' which is not a configured output — "
-                        "validation failures will cause a pipeline build error.",
+                        component,
+                        message,
                         "high",
                     )
                 )
@@ -2324,15 +2423,19 @@ class CompositionState:
                 )
 
         # S3: Source has no schema under the current composer/plugin config contract
-        if self.source is not None:
-            has_schema = _source_options_have_schema(self.source.options)
+        for source_name, source in self.sources.items():
+            has_schema = _source_options_have_schema(source.options)
             if not has_schema:
-                suggestions.append(
-                    _sug("source", "Source has no explicit schema. Downstream field references depend on runtime column names.", "low")
+                component = "source" if source_name == "source" else f"source:{source_name}"
+                message = (
+                    "Source has no explicit schema. Downstream field references depend on runtime column names."
+                    if source_name == "source"
+                    else f"Source '{source_name}' has no explicit schema. Downstream field references depend on runtime column names."
                 )
+                suggestions.append(_sug(component, message, "low"))
 
         # 9. Schema contract validation
-        contract_errors, contract_warnings, edge_contracts = _check_schema_contracts(self.source, self.nodes, self.outputs)
+        contract_errors, contract_warnings, edge_contracts = _check_schema_contracts(self.sources, self.nodes, self.outputs)
         errors.extend(contract_errors)
         warnings.extend(contract_warnings)
 

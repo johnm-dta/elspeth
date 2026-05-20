@@ -91,6 +91,7 @@ from elspeth.web.composer.state import (
     _serialize_branches,
     _source_options_have_schema,
     _validate_gate_expression,
+    validate_composer_source_name,
 )
 from elspeth.web.execution.schemas import ValidationResult
 from elspeth.web.paths import allowed_sink_directories, allowed_source_directories, resolve_data_path
@@ -2892,6 +2893,10 @@ def _execute_set_source(
     plugin = validated.plugin
     options = validated.options
     source_name = validated.source_name
+    try:
+        validate_composer_source_name(source_name)
+    except ValueError as exc:
+        return _failure_result(state, str(exc))
 
     # Validate plugin exists in catalog
     plugin_error = _validate_plugin_name(catalog, "source", plugin)
@@ -4799,8 +4804,10 @@ def _execute_set_pipeline(
         if not validated.sources:
             return _failure_result(state, "set_pipeline sources must include at least one named source.")
         for source_name, source_model in validated.sources.items():
-            if not source_name.strip():
-                return _failure_result(state, "set_pipeline sources keys must be non-empty source names.")
+            try:
+                validate_composer_source_name(source_name)
+            except ValueError as exc:
+                return _failure_result(state, f"Source '{source_name}': {exc}")
             if source_model.blob_id is not None or source_model.inline_blob is not None:
                 return _failure_result(
                     state,
@@ -6262,10 +6269,11 @@ def _source_field_reaches_connection_without_type_change(
     transforms may coerce, overwrite, delete, or synthesize the field, so the
     proof step abstains instead of emitting a false positive.
     """
-    from elspeth.web.composer._producer_resolver import ProducerResolver
+    from elspeth.web.composer._producer_resolver import ProducerResolver, is_source_producer_id
 
     resolver = ProducerResolver.build(
-        source=state.source,
+        source=None,
+        sources=state.sources,
         nodes=state.nodes,
         sink_names=frozenset(output.name for output in state.outputs),
     )
@@ -6279,7 +6287,7 @@ def _source_field_reaches_connection_without_type_change(
         producer = resolver.find_producer_for(current)
         if producer is None:
             return False
-        if producer.producer_id == "source":
+        if is_source_producer_id(producer.producer_id):
             return True
 
         node = resolver.get_node(producer.producer_id)

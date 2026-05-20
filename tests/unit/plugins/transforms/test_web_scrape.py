@@ -976,6 +976,27 @@ def test_http_config_missing_scraping_reason_raises() -> None:
         WebScrapeTransform(_base_config(http={"abuse_contact": "test@example.com"}))
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("abuse_contact", "<OPERATOR_REQUIRED>"),
+        ("abuse_contact", "operator required"),
+        ("scraping_reason", "<OPERATOR_REQUIRED>"),
+        ("scraping_reason", "operator required"),
+    ],
+)
+def test_http_config_rejects_operator_required_placeholders(field_name: str, value: str) -> None:
+    """Wire-visible HTTP identity fields must not accept placeholder sentinels."""
+    http = {
+        "abuse_contact": "ops@somecompany.gov.au",
+        "scraping_reason": "User-authorised page colour lookup",
+    }
+    http[field_name] = value
+
+    with pytest.raises(PluginConfigError, match=field_name):
+        WebScrapeTransform(_base_config(http=http))
+
+
 def test_http_config_extra_field_raises() -> None:
     """Unknown fields in http config must be rejected (extra=forbid)."""
     with pytest.raises(PluginConfigError, match="extra_field"):

@@ -156,6 +156,8 @@ class TestTransformErrorPersistence:
             source_node_id="source_test",
             row_index=1,
             data={"id": "test"},
+            source_row_index=1,
+            ingest_sequence=1,
         )
         # Manually create token with specified ID to match test expectations
         from datetime import datetime
@@ -241,6 +243,8 @@ class TestTransformErrorPersistence:
             source_node_id="source_test",
             row_index=1,
             data={"id": "test"},
+            source_row_index=1,
+            ingest_sequence=1,
         )
         # Manually create token with specified ID to match test expectations
         from datetime import datetime
@@ -326,6 +330,8 @@ class TestErrorEventExplainQuery:
             source_node_id=source_node.node_id,
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         token = factory.data_flow.create_token(row_id=row.row_id)
@@ -400,6 +406,8 @@ class TestErrorEventExplainQuery:
                 destination="quarantine_sink",
             ),
             validation_error_id=error_token.error_id,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         lineage = explain(
@@ -455,6 +463,8 @@ class TestErrorEventExplainQuery:
                 destination="quarantine_sink",
             ),
             validation_error_id=error_token.error_id,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         lineage = explain(
@@ -504,6 +514,8 @@ class TestErrorEventExplainQuery:
             source_node_id=source_node.node_id,
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -561,6 +573,8 @@ class TestErrorEventExplainQuery:
             source_node_id=source_node.node_id,
             row_index=0,
             data={"id": "clean-row", "value": 42},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -623,6 +637,8 @@ class TestErrorEventExplainQuery:
             source_node_id=source_node.node_id,
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 

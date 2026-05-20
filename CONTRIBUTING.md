@@ -87,6 +87,9 @@ Open an issue on GitHub with:
 - Steps to reproduce (for bugs).
 - Expected vs. actual behavior.
 
+For security-sensitive issues, follow [SECURITY.md](SECURITY.md) instead of
+opening a public issue with details. Do not include exploit details, secrets, personal data, or sensitive audit material in a public issue.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).

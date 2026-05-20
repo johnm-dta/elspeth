@@ -30,6 +30,7 @@ from hypothesis import strategies as st
 import elspeth.contracts.declaration_contracts as dc
 from elspeth.contracts.declaration_contracts import (
     DeclarationContract,
+    DeclarationContractViolation,
     DispatchSite,
     ExampleBundle,
     PostEmissionInputs,
@@ -45,6 +46,12 @@ from elspeth.contracts.declaration_contracts import (
 
 class _Payload(TypedDict):
     reason: str
+
+
+class _GeneratedViolation(DeclarationContractViolation):
+    """Test-only violation class matching generated property contracts."""
+
+    payload_schema = _Payload
 
 
 def _make_contract(name: str, sites: frozenset[str]) -> DeclarationContract:
@@ -84,6 +91,7 @@ def _make_contract(name: str, sites: frozenset[str]) -> DeclarationContract:
     body: dict[str, Any] = {
         "name": name,
         "payload_schema": _Payload,
+        "violation_class": _GeneratedViolation,
         "applies_to": applies_to,
         "negative_example": negative_example,
         "positive_example_does_not_apply": positive_example_does_not_apply,

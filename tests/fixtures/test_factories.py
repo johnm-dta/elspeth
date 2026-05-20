@@ -126,6 +126,8 @@ class TestMakeSourceContext:
             source_node_id=setup.source_node_id,
             row_index=0,
             data={"field": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         assert row.row_id is not None
 

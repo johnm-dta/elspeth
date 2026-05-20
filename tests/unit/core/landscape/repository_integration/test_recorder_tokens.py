@@ -36,6 +36,8 @@ class TestRecorderFactoryTokens:
             source_node_id=source.node_id,
             row_index=0,
             data={"value": 42},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         assert row.row_id is not None
@@ -67,6 +69,8 @@ class TestRecorderFactoryTokens:
             source_node_id=source.node_id,
             row_index=0,
             data=test_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Verify hash correctness (not just existence)
@@ -90,6 +94,8 @@ class TestRecorderFactoryTokens:
             source_node_id=source.node_id,
             row_index=0,
             data={"value": 42},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         token = factory.data_flow.create_token(row_id=row.row_id)
@@ -115,6 +121,8 @@ class TestRecorderFactoryTokens:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -155,6 +163,8 @@ class TestRecorderFactoryTokens:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -193,6 +203,8 @@ class TestRecorderFactoryTokens:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent = factory.data_flow.create_token(row_id=row.row_id)
         children, _fork_group_id = factory.data_flow.fork_token(
@@ -228,6 +240,8 @@ class TestRecorderFactoryTokens:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -272,6 +286,8 @@ class TestRecorderFactoryTokens:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -301,6 +317,8 @@ class TestRecorderFactoryTokens:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent = factory.data_flow.create_token(row_id=row.row_id)
         children, _fork_group_id = factory.data_flow.fork_token(
@@ -350,6 +368,8 @@ class TestExpandToken:
             source_node_id=node.node_id,
             row_index=0,
             data={"items": [1, 2, 3]},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -401,6 +421,8 @@ class TestExpandToken:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -432,6 +454,8 @@ class TestExpandToken:
             source_node_id=node.node_id,
             row_index=0,
             data={"list": [1, 2]},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -470,6 +494,8 @@ class TestExpandToken:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -509,6 +535,8 @@ class TestExpandToken:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -556,6 +584,8 @@ class TestAtomicTokenOperations:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -594,6 +624,8 @@ class TestAtomicTokenOperations:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -635,6 +667,8 @@ class TestAtomicTokenOperations:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -675,6 +709,8 @@ class TestAtomicTokenOperations:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -718,6 +754,8 @@ class TestAtomicTokenOperations:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent = factory.data_flow.create_token(row_id=row.row_id)
         children, _fork_group_id = factory.data_flow.fork_token(
@@ -765,6 +803,8 @@ class TestAtomicTokenOperations:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent = factory.data_flow.create_token(row_id=row.row_id)
         children, _fork_group_id = factory.data_flow.fork_token(
@@ -820,6 +860,8 @@ class TestAtomicTokenOperations:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent = factory.data_flow.create_token(row_id=row.row_id)
         children, _fork_group_id = factory.data_flow.fork_token(
@@ -864,6 +906,8 @@ class TestAtomicTokenOperations:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent = factory.data_flow.create_token(row_id=row.row_id)
         children, _fork_group_id = factory.data_flow.fork_token(
@@ -908,6 +952,8 @@ class TestAtomicTokenOperations:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 

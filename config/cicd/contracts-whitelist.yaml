@@ -567,6 +567,8 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/state.py:CompositionState.from_dict:d"
   - "src/elspeth/web/composer/state.py:CompositionState.with_metadata:patch"
   - "src/elspeth/web/composer/state.py:CompositionState.to_dict:return"
+  - "src/elspeth/web/composer/yaml_generator.py:_source_entry:source"
+  - "src/elspeth/web/composer/yaml_generator.py:_source_entry:return"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # WEB COMPOSER — GuidedSession state-machine serialization (Tier 1 audit)
@@ -579,12 +581,12 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/guided/state_machine.py:TerminalState.from_dict:d"
   - "src/elspeth/web/composer/guided/state_machine.py:TurnRecord.to_dict:return"
   - "src/elspeth/web/composer/guided/state_machine.py:TurnRecord.from_dict:d"
-  - "src/elspeth/web/composer/guided/state_machine.py:SourceResolved.to_dict:return"
-  - "src/elspeth/web/composer/guided/state_machine.py:SourceResolved.from_dict:d"
-  - "src/elspeth/web/composer/guided/state_machine.py:SinkOutputResolved.to_dict:return"
-  - "src/elspeth/web/composer/guided/state_machine.py:SinkOutputResolved.from_dict:d"
-  - "src/elspeth/web/composer/guided/state_machine.py:SinkResolved.to_dict:return"
-  - "src/elspeth/web/composer/guided/state_machine.py:SinkResolved.from_dict:d"
+  - "src/elspeth/web/composer/guided/resolved.py:SourceResolved.to_dict:return"
+  - "src/elspeth/web/composer/guided/resolved.py:SourceResolved.from_dict:d"
+  - "src/elspeth/web/composer/guided/resolved.py:SinkOutputResolved.to_dict:return"
+  - "src/elspeth/web/composer/guided/resolved.py:SinkOutputResolved.from_dict:d"
+  - "src/elspeth/web/composer/guided/resolved.py:SinkResolved.to_dict:return"
+  - "src/elspeth/web/composer/guided/resolved.py:SinkResolved.from_dict:d"
   - "src/elspeth/web/composer/guided/state_machine.py:SourceIntent.to_dict:return"
   - "src/elspeth/web/composer/guided/state_machine.py:SourceIntent.from_dict:d"
   - "src/elspeth/web/composer/guided/state_machine.py:SinkIntent.to_dict:return"

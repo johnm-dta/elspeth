@@ -79,6 +79,8 @@ def _feed_rows(
             source_node_id=node_id,
             row_index=i,
             data=row,
+            source_row_index=i,
+            ingest_sequence=i,
         )
         token_record = factory.data_flow.create_token(row_id=row_record.row_id)  # type: ignore[attr-defined]
         state = factory.execution.begin_node_state(  # type: ignore[attr-defined]
@@ -952,6 +954,8 @@ class TestMixedErrors:
                 source_node_id=node_id,
                 row_index=i,
                 data=row,
+                source_row_index=i,
+                ingest_sequence=i,
             )
             row_ids.append(row_record.row_id)
 
@@ -1043,6 +1047,8 @@ class TestMixedErrors:
                 source_node_id=node_id,
                 row_index=i,
                 data=row,
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token_record = factory.data_flow.create_token(row_id=row_record.row_id)
             state = factory.execution.begin_node_state(

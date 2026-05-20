@@ -15,6 +15,8 @@ def test_diagnose_counts_quarantined_under_new_path() -> None:
             source_node_id=setup.source_node_id,
             row_index=row_index,
             data={"col": f"bad-{row_index}"},
+            source_row_index=row_index,
+            ingest_sequence=row_index,
         )
         token = setup.data_flow.create_token(row.row_id)
         setup.data_flow.record_token_outcome(

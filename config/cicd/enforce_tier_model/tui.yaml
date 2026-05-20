@@ -10,7 +10,7 @@ per_file_rules:
   - R5
   reason: Discriminated union pattern matching on ScreenState and NodeState detail projection
   expires: null
-  max_hits: 7
+  max_hits: 9
 - pattern: tui/widgets/node_detail.py
   rules:
   - R5

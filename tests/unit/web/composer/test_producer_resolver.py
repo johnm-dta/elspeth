@@ -46,6 +46,23 @@ class TestProducerResolverBuild:
         assert producer.producer_id == "source"
         assert producer.plugin_name == "csv"
 
+    def test_named_sources_register_stable_producer_ids(self):
+        sources = {
+            "customers": SourceSpec(plugin="csv", on_success="customer_rows", options={}, on_validation_failure="discard"),
+            "orders": SourceSpec(plugin="json", on_success="order_rows", options={}, on_validation_failure="discard"),
+        }
+        resolver = ProducerResolver.build(source=None, sources=sources, nodes=(), sink_names=frozenset())
+
+        customers = resolver.find_producer_for("customer_rows")
+        orders = resolver.find_producer_for("order_rows")
+
+        assert customers is not None
+        assert customers.producer_id == "source:customers"
+        assert customers.plugin_name == "csv"
+        assert orders is not None
+        assert orders.producer_id == "source:orders"
+        assert orders.plugin_name == "json"
+
     def test_node_on_success_registers_producer(self):
         nodes = (_node("a", plugin="p1", input="src_out", on_success="b_in"), _node("b", plugin="p2", input="b_in", on_success="sink"))
         resolver = ProducerResolver.build(source=None, nodes=nodes, sink_names=frozenset({"sink"}))

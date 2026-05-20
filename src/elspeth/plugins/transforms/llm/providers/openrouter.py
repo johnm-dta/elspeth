@@ -133,7 +133,7 @@ class OpenRouterConfig(LLMConfig):
     @field_validator("base_url")
     @classmethod
     def _normalize_base_url(cls, value: str) -> str:
-        return normalize_openrouter_base_url(validate_credential_safe_https_url(value, field_name="base_url"))
+        return normalize_openrouter_base_url(validate_credential_safe_https_url(value, field_name="base_url", allow_http_loopback=True))
 
     # Tier 2: Plugin-internal tracing (optional, Langfuse only)
     # Azure AI tracing is NOT supported - it auto-instruments the OpenAI SDK,

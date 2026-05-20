@@ -304,14 +304,6 @@ allow_hits:
     yet
   safety: Legitimate cleanup pattern in error path
   expires: '2026-07-02'
-- key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=4b8cc1b6067415ff
-  owner: bugfix
-  reason: Thread pool may be shut down concurrently during submit(); RuntimeError
-    is translated into deterministic per-row shutdown results so submission-order
-    slots are still completed
-  safety: Catch scope is RuntimeError-only; reserved buffer slots are completed with
-    explicit shutdown_requested errors while unrelated exception types still propagate
-  expires: '2026-07-17'
 - key: plugins/infrastructure/pooling/executor.py:R5:PooledExecutor:_build_retry_timeout_result:fp=5ce04fa54ab80b94
   owner: bugfix
   pattern: union-dispatch
@@ -610,22 +602,6 @@ allow_hits:
     is genuinely optional with empty-string default
   safety: Empty string default is meaning-preserving (feature disabled); no data fabrication
   expires: '2026-07-02'
-- key: plugins/transforms/web_scrape.py:R5:WebScrapeHTTPConfig:_validate_allowed_hosts:fp=82e38bfffad2dc7d
-  owner: architecture
-  reason: Pydantic field_validator wraps ipaddress.ip_network() on user-provided CIDR
-    strings — Tier 3 config boundary
-  safety: ValueError re-raised as Pydantic ValidationError; invalid config crashes
-    at load time, not at runtime
-  expires: null
-- key: plugins/transforms/web_scrape.py:R5:WebScrapeTransform:get_post_call_hints:fp=26f7b958a2092a7c
-  owner: composer-jit-hints
-  reason: Tier 3 boundary — config_snapshot is the LLM-supplied options dict passed
-    to get_post_call_hints; sep value type is unknown at this seam. The isinstance
-    guard is the correct way to narrow before the substring membership check.
-  safety: Non-str sep skips the hint silently; the override returns () and the composer
-    surfaces no coaching, which is the right failure mode for malformed config (the
-    validator catches the real config error separately).
-  expires: null
 - key: plugins/transforms/rag/transform.py:R2:RAGRetrievalTransform:_configured_collection_name:fp=757eb1e99aea1a3e
   owner: architecture
   reason: Provider config comes from a validated provider-specific model union; getattr
@@ -797,3 +773,34 @@ allow_hits:
   safety: Records schema validation evidence and yields quarantine unless discard;
     programmer errors still propagate.
   expires: '2026-08-17'
+- key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=d90958e285a74a8e
+  owner: bugfix
+  reason: Thread pool may be shut down concurrently during submit(); RuntimeError
+    is translated into deterministic per-row shutdown results so submission-order
+    slots are still completed
+  safety: Catch scope is RuntimeError-only; reserved buffer slots are completed with
+    explicit shutdown_requested errors while unrelated exception types still propagate
+  expires: '2026-07-17'
+- key: plugins/infrastructure/url_validation.py:R6:_is_loopback_host:fp=149402b631b6eb46
+  owner: security
+  reason: URL validation parses operator-supplied hostnames at the credential-bearing
+    config boundary; ipaddress.ip_address raises ValueError for DNS names.
+  safety: Invalid IP literal parsing falls back to False for loopback detection, so
+    HTTP is not allowed unless the hostname is localhost or a valid loopback address.
+  expires: '2026-08-20'
+- key: plugins/transforms/web_scrape.py:R5:WebScrapeHTTPConfig:_validate_allowed_hosts:fp=922ac0bb4c76376b
+  owner: architecture
+  reason: Pydantic field_validator wraps ipaddress.ip_network() on user-provided CIDR
+    strings — Tier 3 config boundary
+  safety: ValueError re-raised as Pydantic ValidationError; invalid config crashes
+    at load time, not at runtime
+  expires: null
+- key: plugins/transforms/web_scrape.py:R5:WebScrapeTransform:get_post_call_hints:fp=f919002b3beb8525
+  owner: composer-jit-hints
+  reason: Tier 3 boundary — config_snapshot is the LLM-supplied options dict passed
+    to get_post_call_hints; sep value type is unknown at this seam. The isinstance
+    guard is the correct way to narrow before the substring membership check.
+  safety: Non-str sep skips the hint silently; the override returns () and the composer
+    surfaces no coaching, which is the right failure mode for malformed config (the
+    validator catches the real config error separately).
+  expires: null

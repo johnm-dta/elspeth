@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-![Status: RC-5.1](https://img.shields.io/badge/status-RC--5.1-yellow.svg)
+![Status: RC-5.2](https://img.shields.io/badge/status-RC--5.2-yellow.svg)
 
 Elspeth is a high-assurance pipeline substrate for consequential workflows:
 systems where the wrong output can cause operational, legal, safety, financial,
@@ -27,6 +27,7 @@ artifact that the executor runs directly.
 - [Architecture At A Glance](#architecture-at-a-glance)
 - [What Changed In RC-5](#what-changed-in-rc-5)
   - [RC-5.1 Updates](#rc-51-updates)
+  - [RC-5.2 Updates](#rc-52-updates)
 - [Getting Started](#getting-started)
   - [YAML Operator Path](#yaml-operator-path)
   - [Web Composer Path](#web-composer-path)
@@ -52,6 +53,7 @@ artifact that the executor runs directly.
 - [Documentation](#documentation)
 - [When to Use Elspeth](#when-to-use-elspeth)
 - [Contributing](#contributing)
+  - [Security And Governance](#security-and-governance)
 - [License](#license)
 
 ---
@@ -206,6 +208,42 @@ surface release. The notable deltas:
 - **Unknown-plugin composer error is actionable** —
   `_prevalidate_plugin_options` surfaces unknown plugin ids as structured,
   actionable rejections instead of silent fail-open.
+
+### RC-5.2 Updates
+
+RC-5.2 turns the Web Composer into a more durable, recoverable authoring system:
+
+- **Guided Composer mode** — a structured authoring path for first-time users,
+  with deterministic recipe pre-match and a read-only LLM role for guided state.
+- **Durable composer progress** — persisted transcript rows, redacted tool-call
+  records, composition-state snapshots, and recovery diffs survive interrupted
+  or failed turns.
+- **Recovery UX** — operators can resume an interrupted authoring session with
+  the transcript, redacted tool evidence, and a before/after pipeline-state
+  comparison.
+- **Completion gestures and catalog polish** — the composer separates save,
+  run, execute, and YAML-export actions, while the catalog is now a searchable
+  reference surface.
+- **CI and documentation hardening** — release reports, docs cleanup, Playwright
+  gating, CodeQL, and `elspeth-lints` checks make the release train easier to
+  review and repeat.
+
+The RC-5.2 release documentation is intentionally explicit. The 2026-05-19
+docs cleanout consolidated older point-in-time release pages into
+`docs-archive/`; the current release entry points are:
+
+- [Executive Summary](docs/release/executive-summary.md) is the current
+  public-sector evaluation brief.
+- [Progress Report: RC-1 to RC-5](docs/release/elspeth-progress-rc1-to-rc5.md)
+  records shipped capability period by period, including the RC-5.2 composer
+  maturation stream.
+- [Velocity Report: RC-1 to RC-5](docs/release/elspeth-velocity-rc1-to-rc5.md)
+  records release cadence and peak-day attribution.
+- [Audit and Lineage Guarantees](docs/release/guarantees.md) is the current
+  assurance surface for audit, lineage, execution, data, identity,
+  secret-reference handling, sessions, and Composer authoring.
+- [Release Documentation Index](docs/release/README.md) identifies the current
+  RC-5.2 documents and the archived historical snapshots.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
 
@@ -416,10 +454,10 @@ calls, payload hashes, route decisions, terminal outcomes, and artifact
 provenance. Telemetry and logs are secondary: useful for operations, but not the
 source of truth.
 
-The current product-level guarantees are summarised in the
-[Assurance Contract](docs/contracts/assurance-contract.md).
+The current product-level guarantees are summarised in
+[Audit and Lineage Guarantees](docs/release/guarantees.md).
 
-RC-5 makes several assurance mechanisms product-visible:
+The RC-5 line makes several assurance mechanisms product-visible:
 
 - **Declaration-trust:** plugin declarations that the graph builder trusts are
   also backed by runtime VAL checks, invariant tests, and CI scanners.
@@ -836,11 +874,12 @@ Rate limits are **per-service** - all plugins using the same service share the b
 
 ## Docker
 
-Elspeth can run from a published Docker image. Replace `v0.5.1` with the tag
-published for the release you are evaluating.
+Elspeth can run from a published Docker image. Replace `v0.5.2` with the tag
+published for the release you are evaluating; use the exact tag for older
+release lines when evaluating an earlier RC.
 
 ```bash
-IMAGE_TAG=v0.5.1
+IMAGE_TAG=v0.5.2
 
 # Run a pipeline
 docker run --rm \
@@ -916,7 +955,9 @@ See [Architecture Documentation](ARCHITECTURE.md) for C4 diagrams and detailed d
 | [docs/architecture/requirements.md](docs/architecture/requirements.md) | All | Verified requirements with implementation status |
 | [docs/architecture/adr/](docs/architecture/adr/) | Architects | Architecture Decision Records for routing, declaration-trust, terminal outcomes, and other load-bearing decisions |
 | [CLAUDE.md](CLAUDE.md) | AI Assistants | Project context, trust model, patterns |
+| [docs/guides/data-trust-and-error-handling.md](docs/guides/data-trust-and-error-handling.md) | Developers | Trust model, external-boundary handling, quarantine, and plugin error semantics |
 | [docs/guides/](docs/guides/) | All | Tutorials, MCP analysis guide, data trust model |
+| [docs/release/](docs/release/) | Evaluators | Executive summary, progress and velocity reports, guarantees, release evidence, and archive map |
 | [docs/reference/](docs/reference/) | Developers | Configuration reference |
 | [docs/runbooks/](docs/runbooks/) | Operators | Deployment and operations |
 
@@ -964,6 +1005,17 @@ npm install
 # Linting
 .venv/bin/python -m ruff check src/
 ```
+
+### Security And Governance
+
+- Report suspected vulnerabilities through [SECURITY.md](SECURITY.md). Do not
+  disclose exploit details in a public issue before a maintainer confirms a safe
+  disclosure path.
+- Community behaviour expectations are in
+  [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- Support boundaries and response expectations are in [SUPPORT.md](SUPPORT.md).
+- Project decision-making, release authority, and continuity risks are
+  described in [GOVERNANCE.md](GOVERNANCE.md).
 
 ---
 

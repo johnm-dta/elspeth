@@ -30,9 +30,9 @@ def pytest_cmdline_main(config: pytest.Config) -> None:
     # xdist workers set PYTEST_XDIST_WORKER in child processes.
     # Without this guard, the plugin fork-bombs: each worker loads
     # the entry point, sets -n auto, spawns more workers, repeat.
-    if os.environ.get("CI") or os.environ.get("PYTEST_XDIST_WORKER"):
+    if "CI" in os.environ or "PYTEST_XDIST_WORKER" in os.environ:
         return
 
-    numprocesses = getattr(config.option, "numprocesses", None)
+    numprocesses = config.option.numprocesses
     if numprocesses is None:
         config.option.numprocesses = "auto"

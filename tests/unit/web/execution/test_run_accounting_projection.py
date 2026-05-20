@@ -37,7 +37,7 @@ def _setup_run_with_row(db: LandscapeDB, *, run_id: str, row_id: str = "row-1") 
         config={},
         schema_config=_OBSERVED_SCHEMA,
     )
-    factory.data_flow.create_row(run_id, "source", 0, {"value": "input"}, row_id=row_id)
+    factory.data_flow.create_row(run_id, "source", 0, {"value": "input"}, row_id=row_id, source_row_index=0, ingest_sequence=0)
 
 
 def _setup_empty_run(db: LandscapeDB, *, run_id: str) -> None:

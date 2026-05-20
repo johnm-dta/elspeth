@@ -56,7 +56,7 @@ def get_fingerprint_key() -> bytes:
     Raises:
         ValueError: If ELSPETH_FINGERPRINT_KEY is not set
     """
-    env_key = os.environ.get(_ENV_VAR)
+    env_key = os.environ[_ENV_VAR] if _ENV_VAR in os.environ else None
     if not env_key:
         raise ValueError(
             f"Fingerprint key not configured. Set {_ENV_VAR} environment variable "

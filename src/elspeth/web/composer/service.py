@@ -1468,6 +1468,7 @@ class ComposerServiceImpl:
         return StatePayload(
             data=CompositionStateData(
                 source=state_d["source"],
+                sources=state_d.get("sources"),
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
                 outputs=state_d["outputs"],

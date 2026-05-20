@@ -226,7 +226,7 @@ def test_test_to_source_mapping_yaml_loads_with_core_loader() -> None:
 
     path = Path("config/cicd/test_to_source_mapping/migration_files.yaml")
     result = load_allowlist(path, valid_rule_ids={"manifest.test_to_source_mapping"})
-    assert len(result.per_file_rules) == 3
+    assert len(result.per_file_rules) == 4
 
 
 def test_symbol_inventory_yaml_loads_with_core_loader() -> None:

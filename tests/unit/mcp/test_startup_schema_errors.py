@@ -15,6 +15,7 @@ from mcp.types import (
 )
 from sqlalchemy import create_engine, text
 
+from elspeth.mcp import server as mcp_server
 from elspeth.mcp.server import create_server
 
 
@@ -39,6 +40,21 @@ def _create_stale_landscape_url(tmp_path: Path) -> str:
         )
     engine.dispose()
     return f"sqlite:///{db_path}"
+
+
+def test_database_descriptor_does_not_swallow_unexpected_url_parser_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only SQLAlchemy parse errors should become the safe invalid-URL marker."""
+    import sqlalchemy.engine.url as url_module
+
+    def fail_unexpectedly(database_url: str) -> object:
+        raise RuntimeError(f"unexpected parser failure for {database_url}")
+
+    monkeypatch.setattr(url_module, "make_url", fail_unexpectedly)
+
+    with pytest.raises(RuntimeError, match="unexpected parser failure"):
+        mcp_server._safe_database_descriptor("sqlite:///audit.db")
 
 
 @pytest.mark.asyncio

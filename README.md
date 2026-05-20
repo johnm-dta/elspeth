@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-![Status: RC-5.1](https://img.shields.io/badge/status-RC--5.1-yellow.svg)
+![Status: RC-5.2](https://img.shields.io/badge/status-RC--5.2-yellow.svg)
 
 Elspeth is a high-assurance pipeline substrate for consequential workflows:
 systems where the wrong output can cause operational, legal, safety, financial,
@@ -27,6 +27,7 @@ artifact that the executor runs directly.
 - [Architecture At A Glance](#architecture-at-a-glance)
 - [What Changed In RC-5](#what-changed-in-rc-5)
   - [RC-5.1 Updates](#rc-51-updates)
+  - [RC-5.2 Updates](#rc-52-updates)
 - [Getting Started](#getting-started)
   - [YAML Operator Path](#yaml-operator-path)
   - [Web Composer Path](#web-composer-path)
@@ -206,6 +207,25 @@ surface release. The notable deltas:
 - **Unknown-plugin composer error is actionable** —
   `_prevalidate_plugin_options` surfaces unknown plugin ids as structured,
   actionable rejections instead of silent fail-open.
+
+### RC-5.2 Updates
+
+RC-5.2 turns the Web Composer into a more durable, recoverable authoring system:
+
+- **Guided Composer mode** — a structured authoring path for first-time users,
+  with deterministic recipe pre-match and a read-only LLM role for guided state.
+- **Durable composer progress** — persisted transcript rows, redacted tool-call
+  records, composition-state snapshots, and recovery diffs survive interrupted
+  or failed turns.
+- **Recovery UX** — operators can resume an interrupted authoring session with
+  the transcript, redacted tool evidence, and a before/after pipeline-state
+  comparison.
+- **Completion gestures and catalog polish** — the composer separates save,
+  run, execute, and YAML-export actions, while the catalog is now a searchable
+  reference surface.
+- **CI and documentation hardening** — release reports, docs cleanup, Playwright
+  gating, CodeQL, and `elspeth-lints` checks make the release train easier to
+  review and repeat.
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
 
@@ -416,10 +436,10 @@ calls, payload hashes, route decisions, terminal outcomes, and artifact
 provenance. Telemetry and logs are secondary: useful for operations, but not the
 source of truth.
 
-The current product-level guarantees are summarised in the
-[Assurance Contract](docs/contracts/assurance-contract.md).
+The current product-level guarantees are summarised in
+[Audit and Lineage Guarantees](docs/release/guarantees.md).
 
-RC-5 makes several assurance mechanisms product-visible:
+The RC-5 line makes several assurance mechanisms product-visible:
 
 - **Declaration-trust:** plugin declarations that the graph builder trusts are
   also backed by runtime VAL checks, invariant tests, and CI scanners.
@@ -506,13 +526,13 @@ landscape:
 
 ## Status And Direction
 
-RC-5 is the release where the Web Composer becomes a real product surface, but
-the structural change is broader than the web UI. The project now has two
-authoring paths over a single high-assurance substrate, richer run evidence,
-declared plugin contracts, a stronger terminal outcome model, and more
-mechanical CI policy around audit integrity.
+The RC-5 line is where the Web Composer becomes a real product surface, but the
+structural change is broader than the web UI. The project now has two authoring
+paths over a single high-assurance substrate, richer run evidence, declared
+plugin contracts, a stronger terminal outcome model, and more mechanical CI
+policy around audit integrity.
 
-Current RC-5 behaviour:
+Current RC-5.2 behaviour:
 
 - YAML remains a first-class operator path.
 - The Web Composer builds through discovery, mutation, blob, secret-reference,
@@ -915,7 +935,7 @@ See [Architecture Documentation](ARCHITECTURE.md) for C4 diagrams and detailed d
 | [PLUGIN.md](PLUGIN.md) | Plugin Authors | How to create sources, transforms, sinks |
 | [docs/architecture/requirements.md](docs/architecture/requirements.md) | All | Verified requirements with implementation status |
 | [docs/architecture/adr/](docs/architecture/adr/) | Architects | Architecture Decision Records for routing, declaration-trust, terminal outcomes, and other load-bearing decisions |
-| [CLAUDE.md](CLAUDE.md) | AI Assistants | Project context, trust model, patterns |
+| [docs/guides/data-trust-and-error-handling.md](docs/guides/data-trust-and-error-handling.md) | Developers | Trust model, external-boundary handling, quarantine, and plugin error semantics |
 | [docs/guides/](docs/guides/) | All | Tutorials, MCP analysis guide, data trust model |
 | [docs/reference/](docs/reference/) | Developers | Configuration reference |
 | [docs/runbooks/](docs/runbooks/) | Operators | Deployment and operations |

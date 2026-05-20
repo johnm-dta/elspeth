@@ -1,7 +1,7 @@
 # ELSPETH Progress Report — RC1 to RC5
 
 **Period covered:** 12 January 2026 → 19 May 2026 (128 days)
-**Repository state:** 4,521 unique commits across `origin/full-history-pre-rc1`, `origin/pre-RC2`, and `HEAD` (branch `RC5.2`)
+**Repository state:** 4,521 unique commits across the RC-1, RC-2, and RC-5.2 history snapshots as of 19 May 2026
 **Author of record:** John Morrissey
 **Audience:** Engineering team and engineering leadership
 **Register:** Technical
@@ -13,7 +13,7 @@ This document is the **progress / outputs** view. For per-day work volume, see [
 
 1. **Framing.** This is a cumulative *outputs* view, not a feature roadmap and not a release record. The authoritative line-by-line release records are the archived `CHANGELOG-RC1.md` and `CHANGELOG-RC2.md` (now under `docs-archive/2026-05-19-docs-cleanout/`) plus the active `/CHANGELOG.md` (RC-3 onwards). This report aggregates and narrates those records by Period.
 2. **Periods, not releases.** The report's grouping unit is the "Period" — a chunk of work bounded by phase change, not always by RC tag. Period boundaries are documented in each Period's header. Where a Period spans multiple RC tags, the RC tags appear as sub-headings inside the Period.
-3. **Commit counts.** Counts are deduplicated across the three RC-snapshot branches (`full-history-pre-rc1`, `pre-RC2`, `HEAD`). Small gaps in the cumulative-commit column of the executive timeline reflect that dedup, not missing work.
+3. **Commit counts.** Counts are deduplicated across the RC-1, RC-2, and RC-5.2 history snapshots. Small gaps in the cumulative-commit column of the executive timeline reflect that dedup, not missing work.
 4. **Date qualification.** Where the `CHANGELOG.md` does not stamp explicit release commits (notably RC-4.0 and RC-4.1), date ranges are inferred from the dominant feature-commit cluster. Inferred dates carry an in-period date callout.
 5. **Per-Period *Sized* blocks.** Every Period closes with a standardised `Sized` block (commits, calendar days, active days, peak day, tests at end of period, notable infrastructure). The standardised shape is intended to make Periods diff-comparable across the project's life.
 6. **What this report does not cover.** Plugin internals (see the plugin README under each plugin directory), frontend internals (see `src/elspeth/web/frontend/`), pipeline-author UX (see `pipeline-composer` skill), and operational procedures (see `docs/runbooks/`).
@@ -36,9 +36,9 @@ This document is the **progress / outputs** view. For per-day work volume, see [
 | **RC-5 (0.5.0)** cut | 2026-04-03 | Web UX Composer, auth, blob store, secret refs, MCP composer | 3,073 | [Period 5](#period-5) |
 | **RC-5.1 (0.5.1)** | 2026-05-11 | Composer correctness + audit-integrity coverage | 3,883 | [Period 6](#period-6) |
 | **RC-5.2 (0.5.2)** | 2026-05-14 | Guided composer + durable progress + recovery UX | 4,210 | [Period 7](#period-7) |
-| Current `HEAD` (RC-5.2 hot-fix + Phase 6/7/8) | 2026-05-19 | Composer Phase 6 completion gestures, Phase 7 catalog reshape, Phase 8 polish | **4,521** | [Period 7](#period-7) |
+| RC-5.2 documentation snapshot | 2026-05-19 | Composer Phase 6 completion gestures, Phase 7 catalog reshape, Phase 8 polish | **4,521** | [Period 7](#period-7) |
 
-> Commit counts are cumulative across the three RC-snapshot branches; the small gaps reflect merge-commit dedup. Cutover dates are taken from the canonical RC commit message (`ELSPETH - Release Candidate N`), the version-bump commit, or the release tag.
+> Commit counts are cumulative across the RC-1, RC-2, and RC-5.2 history snapshots; the small gaps reflect merge-commit dedup. Cutover dates are taken from the canonical RC commit message (`ELSPETH - Release Candidate N`), the version-bump commit, or the release tag.
 >
 > **Date qualification — RC-4.0 and RC-4.1:** `CHANGELOG.md` does not stamp explicit release commits for `[0.4.0]` or `[0.4.1]`. The date ranges shown are inferred from the dominant feature-commit clusters between RC-3.4 (10 Mar) and the RC-5 cut (3 Apr): Dataverse + RAG + output-schema-contracts landed around 22–29 March; ChromaSink + `depends_on` + commencement gates landed 30 March – 2 April. Read the boundary as the dominant work-cluster, not a release stamp.
 
@@ -338,7 +338,7 @@ A full web application platform for **chat-first pipeline composition**. This is
 - **Engine / plugin correctness fixes** — checkpoint resume parsing; empty coalesce checkpoint state; pending batch row identities; JSON sink parent creation; sink preflight collision timing; Web Scrape fail-closed boundaries; LLM provider preflight; shared LLM telemetry helpers.
 - **Frontend accessibility + theming fixes** — improved contrast on guided/catalog/run UI; forced-colors fallback; theme initialisation + cross-tab sync; screen-reader-safe status symbols; catalog retry controls; keyboard shortcut support; preserved plugin descriptions.
 
-### Phase 6 / 7 / 8 (post-5.2 merge stream, currently on `RC5.2`)
+### Phase 6 / 7 / 8 (post-5.2 merge stream)
 
 - **Phase 5** — chat-data-entry: dynamic 1-row source from chat text for hello-world / canonical-test-case shapes.
 - **Phase 6** — completion gestures: Save-for-review / Run-analysis / Execute / Copy-YAML differentiated by persona.
@@ -353,7 +353,7 @@ A full web application platform for **chat-first pipeline composition**. This is
 
 | Metric | Value |
 |---|---|
-| Commits | 638 (12 → 19 May; period continues — `HEAD` count as of 2026-05-19) |
+| Commits | 638 (12 → 19 May; count frozen for this report on 2026-05-19) |
 | Calendar days | 8 |
 | Active days | 8 |
 | Peak day | 142 (2026-05-12) — RC-5.2 composer redaction MANIFEST pass; 97 (2026-05-14) RC-5.2 release-stamp; 94 (2026-05-18, 2026-05-19) |
@@ -450,9 +450,10 @@ A full web application platform for **chat-first pipeline composition**. This is
 
 ---
 
-## What's next (post-RC-5.2)
+## Post-RC-5.2 follow-up themes
 
-Visible from the in-progress filigree state and the current `RC5.2` branch:
+The following themes are visible from the release evidence and remain useful
+planning inputs after RC-5.2:
 
 - **Composer correctness cluster** — validator parity, runtime dry-run, operator visibility (elspeth-528bde62bb).
 - **Fork / coalesce audit-integrity epic** — schema reconciliation, field provenance, merge safety (elspeth-e20903300c).
@@ -485,5 +486,5 @@ This is the project-level outputs view. For depth on the topics it summarises:
 - `/CHANGELOG.md` — active release changelog from RC-3.2 through RC-5.2 + Unreleased (Feb 13, 2026 – present)
 - `../../docs-archive/2026-05-19-docs-cleanout/docs/release/feature-inventory.md` — RC-3.3 feature reconciliation (1 March 2026) — archived snapshot
 - `../../docs-archive/2026-05-19-docs-cleanout/docs/release/rc4-executive-brief.md` — RC-4 work-package summary (3 March 2026) — archived planning brief
-- Git remotes: `origin/full-history-pre-rc1`, `origin/pre-RC2`, `origin/RC5.2`, `origin/main`
-- Filigree session-context snapshot (19 May 2026)
+- Git history snapshots for RC-1, RC-2, RC-5.2, and `main`
+- Maintainer planning snapshot (19 May 2026)

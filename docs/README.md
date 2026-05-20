@@ -3,10 +3,9 @@
 Index of the documentation shipped in this repository.
 
 **Framework status:** `0.5.2` (RC-5.2 line)
-**Tracking note:** active delivery work lives in Filigree. Current release,
-architecture, contract, runbook, and composer evidence docs remain visible here;
-point-in-time audit, architecture-pack, generated-review, and handover snapshots
-from earlier workstreams were moved to
+**Archive note:** current release, architecture, contract, guide, reference, and
+runbook docs remain visible here. Point-in-time audit, architecture-pack,
+generated-review, and handover snapshots from earlier workstreams were moved to
 [`docs-archive/2026-05-19-docs-cleanout/`](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md).
 
 ---
@@ -19,7 +18,7 @@ from earlier workstreams were moved to
 | Building or operating pipelines | [Configuration Reference](reference/configuration.md), [Runbooks](runbooks/index.md), and [Troubleshooting](guides/troubleshooting.md) |
 | Investigating audit data | [Landscape MCP Analysis](guides/landscape-mcp-analysis.md) and [Architecture Overview](../ARCHITECTURE.md) |
 | Developing plugins | [Data Trust and Error Handling](guides/data-trust-and-error-handling.md), [Plugin Development Guide](../PLUGIN.md), then [Plugin Protocol](contracts/plugin-protocol.md) |
-| Contributing to the codebase | [Contributing](../CONTRIBUTING.md) and [CLAUDE.md](../CLAUDE.md) |
+| Contributing to the codebase | [Contributing](../CONTRIBUTING.md) |
 | Evaluating ELSPETH | [Executive Summary](release/executive-summary.md), [Progress Report](release/elspeth-progress-rc1-to-rc5.md), and [Velocity Report](release/elspeth-velocity-rc1-to-rc5.md) |
 
 ---
@@ -82,14 +81,6 @@ Lookup material for configuration, tools, and plugin-specific behavior.
 - [ChaosLLM MCP Server](reference/chaosllm-mcp.md)
 - [Web Scrape Transform](reference/web-scrape-transform.md)
 
-## Current Audit Work
-
-Active audit syntheses and ticket-filing packets that still drive current work.
-
-- [CI/CD Allowlist Audit](audit/2026-05-19-cicd-allowlist-audit.md) — live gate inventory and burn-down findings for `elspeth-297b8f5c5d`
-- [CI/CD Allowlist Findings](audit/findings/) — SME reports and draft subticket list retained until filing is complete
-- [Test Suite Audit](audit/test-suite/README.md) — incomplete but still actionable test-quality audit waves and filed issue map
-
 ## Operations
 
 Runbooks and production procedures.
@@ -121,6 +112,5 @@ Intentional point-in-time documents retained for reference.
 
 - [RC-3 Release Notes](../docs-archive/2026-05-19-docs-cleanout/docs/release/rc-3-release-notes.md) — RC-3 release-history snapshot, relocated into the 2026-05-19 dated docs archive
 - [Plans index](plans/README.md) — curated in-tree design and implementation plans
-- [Composer UX Redesign](composer/ux-redesign-2026-05/) — current RC5.2 composer planning and implementation phase documents
-- [Superpowers specs and active plans](superpowers/) — internal assistant-driven planning/spec artifacts retained while still load-bearing
+- [Composer UX Redesign](composer/ux-redesign-2026-05/) — RC-5.2 composer planning and implementation phase documents
 - [Archived docs cleanout manifest](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md) — relocation map for archived release docs, audits, frozen architecture packs, generated review sidecars, and completed handovers

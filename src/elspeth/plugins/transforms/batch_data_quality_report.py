@@ -120,7 +120,7 @@ class BatchDataQualityReport(BaseTransform):
                     "Use batch_data_quality_report under aggregations with a trigger; it inspects a flushed batch.",
                     "inspect_fields must name existing input fields and must not be empty or duplicated.",
                     "It emits one report row per inspected field with missing, blank, non-finite, non-scalar, and type counts.",
-                    "Output rows replace the source row shape; downstream stages should consume quality_report_* fields.",
+                    "Output rows replace the source row shape; downstream stages should consume fields like field, missing_count, valid_rate, and batch_size.",
                 ),
             )
         return None

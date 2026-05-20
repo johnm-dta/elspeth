@@ -1,5 +1,5 @@
 # tests/property/core/test_fingerprint_properties.py
-"""Property-based tests for secret fingerprinting (PBKDF2-HMAC-SHA256).
+"""Property-based tests for secret fingerprinting (HMAC-SHA256).
 
 These tests verify the fundamental cryptographic properties of ELSPETH's
 secret fingerprinting system:
@@ -230,7 +230,7 @@ class TestFingerprintEdgeCaseProperties:
     def test_single_byte_key_works(self, secret: str) -> None:
         """Property: Minimum-length key (1 byte) produces valid fingerprint.
 
-        PBKDF2 accepts short salts.
+        HMAC accepts short keys and still produces a valid digest.
         """
         key = b"x"
         fp = secret_fingerprint(secret, key=key)
@@ -243,7 +243,7 @@ class TestFingerprintEdgeCaseProperties:
     def test_long_key_works(self, secret: str) -> None:
         """Property: Long keys produce valid fingerprints.
 
-        The fingerprint context accepts long keys as part of the derivation salt.
+        HMAC accepts long keys and still produces a valid digest.
         """
         key = b"x" * 128  # > 64 byte block size
         fp = secret_fingerprint(secret, key=key)

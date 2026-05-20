@@ -34,6 +34,20 @@ class TestBatchDataQualityReport:
         assert BatchDataQualityReport.name == "batch_data_quality_report"
         assert BatchDataQualityReport.is_batch_aware is True
 
+    def test_composer_hints_reference_real_output_fields(self) -> None:
+        """Discovery guidance must stay aligned with emitted report schema."""
+        from elspeth.plugins.transforms.batch_data_quality_report import BatchDataQualityReport
+
+        transform = BatchDataQualityReport({"schema": DYNAMIC_SCHEMA, "inspect_fields": ["score"]})
+        assistance = BatchDataQualityReport.get_agent_assistance(issue_code=None)
+
+        assert assistance is not None
+        hints = "\n".join(assistance.composer_hints)
+        assert "quality_report_*" not in hints
+        for field_name in ("field", "missing_count", "valid_rate", "batch_size"):
+            assert field_name in transform.declared_output_fields
+            assert field_name in hints
+
     def test_emits_one_quality_row_per_inspected_field(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_data_quality_report import BatchDataQualityReport
 

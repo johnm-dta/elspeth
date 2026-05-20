@@ -264,4 +264,7 @@ docs/assets/*.pdf
 docs/release/*
 !docs/release/pdf/output/
 
+
+# No
 clarion
+clarion.yaml

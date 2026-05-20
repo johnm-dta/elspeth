@@ -130,6 +130,8 @@ def _insert_rows_with_refs(
                     run_id=run_id,
                     source_node_id=SOURCE_NODE_ID,
                     row_index=i,
+                    source_row_index=i,
+                    ingest_sequence=i,
                     source_data_ref=ref,
                     source_data_hash=stable_hash({"row": i}),
                     created_at=_REFERENCE_TIME,

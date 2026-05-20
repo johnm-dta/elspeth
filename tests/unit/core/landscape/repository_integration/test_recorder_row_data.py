@@ -57,6 +57,8 @@ class TestGetRowDataExplicitStates:
             row_index=0,
             data={"name": "test"},
             # No payload_store configured - source_data_ref will be None
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         result = factory.query.get_row_data(row.row_id)
@@ -88,6 +90,8 @@ class TestGetRowDataExplicitStates:
             source_node_id=source.node_id,
             row_index=0,
             data=test_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Create new factory WITHOUT payload store, using same db
@@ -121,6 +125,8 @@ class TestGetRowDataExplicitStates:
             source_node_id=source.node_id,
             row_index=0,
             data=test_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Delete the payload (simulating retention policy purge)
@@ -154,6 +160,8 @@ class TestGetRowDataExplicitStates:
             source_node_id=source.node_id,
             row_index=0,
             data=test_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         result = factory.query.get_row_data(row.row_id)
@@ -200,6 +208,8 @@ class TestGetRowDataTier1Corruption:
             source_node_id=source.node_id,
             row_index=0,
             data=test_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Corrupt the payload file by tampering with its contents
@@ -246,6 +256,8 @@ class TestGetRowDataTier1Corruption:
             source_node_id=source.node_id,
             row_index=0,
             data={"placeholder": "ignored"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Store non-JSON bytes separately (hash-valid but not JSON)
@@ -286,6 +298,8 @@ class TestGetRowDataTier1Corruption:
             source_node_id=source.node_id,
             row_index=0,
             data={"placeholder": "ignored"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Store non-object JSON separately (hash-valid but not a JSON object)

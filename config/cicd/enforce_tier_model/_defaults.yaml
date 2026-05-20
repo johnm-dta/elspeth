@@ -194,7 +194,13 @@ defaults:
     # carried forward from the pre-rename _requirement_matches_prompt_template
     # function). Two stale entries dropped: _requirement_matches_prompt_template
     # R1×2 (function renamed in this commit). Net 9 − 2 = +7.
-    max_allow_hits: 652
+    #
+    # Bumped to 657 on 2026-05-26 (net +5) while rebasing the multi-source
+    # token scheduler branch onto RC5.2. The replay preserved 33 same-symbol
+    # trust-tier rotations, removed stale RC fingerprints, fixed 22 branch
+    # dict/protocol probes in code, and retained two bounded reviewed entries
+    # for plugin validation metadata and aggregation-trigger validation.
+    max_allow_hits: 657
     # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
     # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
     # — W5 load-bearing telemetry-only exemption per
@@ -267,7 +273,10 @@ defaults:
     # Bumped to 744 on 2026-05-25 (net +7) for the same llm_model_choice
     # algorithmic-surfacing addition accounted for in ``max_allow_hits``
     # above.
-    max_total_entries: 744
+    #
+    # Bumped to 749 on 2026-05-26 for the same multi-source scheduler rebase
+    # reconciliation described under ``max_allow_hits`` above.
+    max_total_entries: 749
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.

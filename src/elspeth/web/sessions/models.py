@@ -96,14 +96,16 @@ from sqlalchemy.types import JSON
 #        bypass the verbatim-side nullability invariant.
 #   17 → interpretation_events.kind CHECK gains pipeline_decision for
 #        LLM-authored cleanup/shape decisions that gate execution.
-SESSION_SCHEMA_EPOCH = 17
+#   18 → ``composition_states.sources`` added so named multi-source composer
+#        states survive save/load instead of collapsing to the legacy singular
+#        ``source`` compatibility column.
+SESSION_SCHEMA_EPOCH = 18
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 
 
 def _sql_non_blank_text(column_name: str) -> str:
     return f"length(trim({column_name}, {_SQLITE_ASCII_WHITESPACE})) > 0"
-
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -317,6 +319,7 @@ composition_states_table = Table(
     ),
     Column("version", Integer, nullable=False),
     Column("source", JSON, nullable=True),
+    Column("sources", JSON, nullable=True),
     Column("nodes", JSON, nullable=True),
     Column("edges", JSON, nullable=True),
     Column("outputs", JSON, nullable=True),

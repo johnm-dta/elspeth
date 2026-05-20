@@ -166,6 +166,8 @@ def run_with_checkpoint_and_payloads(
                     run_id=run_id,
                     source_node_id="source-node",
                     row_index=i,
+                    source_row_index=i,
+                    ingest_sequence=i,
                     source_data_hash=f"hash{i}",
                     source_data_ref=payload_ref,
                     created_at=now,

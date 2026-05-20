@@ -55,6 +55,8 @@ class TestTokenManagerCreateInitialToken:
             source_node_id="source_001",
             row_index=0,
             source_row=source_row,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Token has PipelineRow

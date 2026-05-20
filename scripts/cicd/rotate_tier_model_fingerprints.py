@@ -42,9 +42,10 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ALLOWLIST_DIR = REPO_ROOT / "config" / "cicd" / "enforce_tier_model"
 SRC_ROOT = REPO_ROOT / "src" / "elspeth"
+ROTATABLE_RULE_IDS = frozenset({"R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "TC", "L1"})
 KEY_RE = re.compile(
     r"^Stale tier-model allowlist entry: "
-    r"(?P<file>[^:]+):(?P<rule>R\d+):(?P<symbol>.+?):fp=(?P<fp>[0-9a-f]+)$"
+    r"(?P<file>[^:]+):(?P<rule>R\d+|TC|L1):(?P<symbol>.+?):fp=(?P<fp>[0-9a-f]+)$"
 )
 
 
@@ -79,39 +80,26 @@ def run_tier_model() -> list[dict[str, Any]]:
 
 
 def find_enclosing_symbol(source_path: Path, target_line: int) -> str:
-    """Return ``ClassName:method_name`` (or just ``function_name``) at target_line."""
+    """Return the tier-model symbol context enclosing ``target_line``."""
     tree = ast.parse(source_path.read_text())
+    enclosing_symbols: list[tuple[int, int, str]] = []
 
-    best_context: list[str] = []
-    best_depth = -1
+    def _contains_target(node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+        end_line = node.end_lineno if node.end_lineno is not None else node.lineno
+        return node.lineno <= target_line <= end_line
 
-    def _contains_line(node: ast.AST) -> bool:
-        if not hasattr(node, "lineno"):
-            return True
-        start = int(node.lineno)
-        end_lineno = getattr(node, "end_lineno", None)
-        end = start if end_lineno is None else int(end_lineno)
-        return start <= target_line <= end
-
-    def _record(context: list[str]) -> None:
-        nonlocal best_context, best_depth
-        if len(context) > best_depth:
-            best_context = context
-            best_depth = len(context)
-
-    def _walk(node: ast.AST, symbol_stack: list[str]) -> None:
+    def _walk(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-                if not _contains_line(child):
-                    continue
-                child_stack = [*symbol_stack, child.name]
-                _record(child_stack)
-                _walk(child, child_stack)
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                if _contains_target(child):
+                    enclosing_symbols.append((child.lineno, child.col_offset, child.name))
+                    _walk(child)
             else:
-                _walk(child, symbol_stack)
+                _walk(child)
 
-    _walk(tree, [])
-    return ":".join(best_context) if best_context else "_module_"
+    _walk(tree)
+    enclosing_symbols.sort(key=lambda item: (item[0], item[1]))
+    return ":".join(symbol for _, _, symbol in enclosing_symbols) if enclosing_symbols else "_module_"
 
 
 def split_findings(
@@ -123,7 +111,7 @@ def split_findings(
     for f in findings:
         if f["rule_id"] == "trust_tier.tier_model" and f["message"].startswith("Stale tier-model allowlist entry:"):
             stale.append(f)
-        elif re.fullmatch(r"R\d+", f["rule_id"]) and f["severity"] == "error":
+        elif f["rule_id"] in ROTATABLE_RULE_IDS and f["severity"] == "error":
             new.append(f)
     return stale, new
 
@@ -195,8 +183,11 @@ def main() -> int:
                 stale_keys_to_remove.setdefault(ypath, set()).add(full_key)
                 break
 
-    # For each new violation, compute its canonical key and emit a rotated entry.
+    # For each new violation, compute its canonical key and emit a rotated entry
+    # only when it pairs with stale metadata. Genuinely new findings must stay
+    # review-visible; manufacturing TODO allowlist entries would weaken the gate.
     new_entries: dict[Path, list[dict[str, Any]]] = {}
+    unmatched_new: list[str] = []
     for f in new:
         rel_file = f["file_path"]
         rule = f["rule_id"]
@@ -209,14 +200,8 @@ def main() -> int:
         if metadata_queue:
             metadata = metadata_queue.popleft()
         else:
-            # Genuinely new violation (no rotation pair). Emit a bounded
-            # follow-up entry, not permanent debt.
-            metadata = {
-                "owner": "trust-tier-maintenance",
-                "reason": "ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint rotation; review whether this is new debt that needs a source fix or a more specific justification",
-                "safety": "Exact-fingerprint allowlist entry only; bounded expiry forces follow-up review instead of adding permanent debt",
-                "expires": "2026-08-24",
-            }
+            unmatched_new.append(new_key)
+            continue
         entry = {"key": new_key, **metadata}
         new_entries.setdefault(ypath, []).append(entry)
 
@@ -237,6 +222,14 @@ def main() -> int:
             f"{before} → {after} entries "
             f"(removed {len(keys_to_remove)} stale, added {len(new_entries.get(ypath, []))})"
         )
+
+    if unmatched_new:
+        sys.stderr.write(
+            "Refusing to auto-allow genuinely new tier-model violation(s); review or fix explicitly:\n"
+            + "\n".join(f"  {key}" for key in unmatched_new)
+            + "\n"
+        )
+        return 1
 
     return 0
 

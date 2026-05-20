@@ -35,6 +35,8 @@ class TestRecorderFactoryNodeStates:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -77,6 +79,8 @@ class TestRecorderFactoryNodeStates:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -130,6 +134,8 @@ class TestRecorderFactoryNodeStates:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -173,6 +179,8 @@ class TestRecorderFactoryNodeStates:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -228,6 +236,8 @@ class TestRecorderFactoryNodeStates:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -297,6 +307,8 @@ class TestRecorderFactoryNodeStates:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -352,6 +364,8 @@ class TestRecorderFactoryNodeStates:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -398,6 +412,8 @@ class TestRecorderFactoryNodeStates:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -440,6 +456,8 @@ class TestRecorderFactoryNodeStates:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -504,6 +522,8 @@ class TestNodeStateIntegrityValidation:
             source_node_id=node.node_id,
             row_index=0,
             data={"test": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row_record.row_id)
 
@@ -567,6 +587,8 @@ class TestNodeStateIntegrityValidation:
             source_node_id=node.node_id,
             row_index=0,
             data={"test": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row_record.row_id)
 
@@ -646,6 +668,8 @@ class TestNodeStateOrderingWithRetries:
             source_node_id=node1.node_id,
             row_index=0,
             data={"test": "value"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row_record.row_id)
 
@@ -746,6 +770,8 @@ class TestContextAfterRoundTrip:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -812,6 +838,8 @@ class TestContextAfterRoundTrip:
             source_node_id=node.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 

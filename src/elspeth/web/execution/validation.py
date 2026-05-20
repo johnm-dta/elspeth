@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import yaml
@@ -191,13 +191,19 @@ def _node_schema_patch_target(component_id: str, component_type: str | None) -> 
     )
 
 
-def _source_schema_patch_target(plugin_name: str | None) -> _EdgePatchTarget:
-    display = "source" if plugin_name is None else f"source '{plugin_name}'"
+def _source_schema_patch_target(source_name: str, plugin_name: str | None) -> _EdgePatchTarget:
+    component_id = "source" if source_name == "source" else f"source:{source_name}"
+    if source_name == "source":
+        display = "source" if plugin_name is None else f"source '{plugin_name}'"
+        schema_patch_tool_call = "patch_source_options(patch={'schema': {...}})"
+    else:
+        display = f"source '{source_name}'" if plugin_name is None else f"source '{source_name}' ({plugin_name})"
+        schema_patch_tool_call = f"patch_source_options(source_name={source_name!r}, patch={{'schema': {{...}}}})"
     return _EdgePatchTarget(
-        component_id="source",
+        component_id=component_id,
         component_type="source",
         display_name=display,
-        schema_patch_tool_call="patch_source_options(patch={'schema': {...}})",
+        schema_patch_tool_call=schema_patch_tool_call,
     )
 
 
@@ -219,13 +225,31 @@ def _unmapped_schema_patch_target(dag_node_id: str, component_type: str | None) 
     )
 
 
+def _source_name_for_dag_source(state: CompositionState, graph: Any, dag_source_id: str) -> str | None:
+    node_info = graph.get_node_info(dag_source_id)
+    config = node_info.config
+    if "source_name" in config:
+        source_name = config["source_name"]
+        if source_name in state.sources:
+            return cast(str, source_name)
+    if len(state.sources) == 1:
+        return next(iter(state.sources))
+    return None
+
+
 def _edge_patch_targets_by_dag_id(state: CompositionState, graph: Any) -> dict[str, _EdgePatchTarget]:
     """Map runtime DAG node IDs back to composer patch-tool targets."""
     targets: dict[str, _EdgePatchTarget] = {}
     nodes_by_id = {node.id: node for node in state.nodes}
 
-    if state.source is not None:
-        targets[str(graph.get_source())] = _source_schema_patch_target(state.source.plugin)
+    if state.sources:
+        for source_id in graph.get_sources():
+            dag_source_id = str(source_id)
+            source_name = _source_name_for_dag_source(state, graph, dag_source_id)
+            if source_name is None:
+                continue
+            source = state.sources[source_name]
+            targets[dag_source_id] = _source_schema_patch_target(source_name, source.plugin)
 
     transform_nodes = [node for node in state.nodes if node.node_type == "transform"]
     transform_id_map = graph.get_transform_id_map()
@@ -730,44 +754,46 @@ def validate_pipeline(
 
     allowed_source_dirs = allowed_source_directories(str(settings.data_dir))
     allowed_sink_dirs = allowed_sink_directories(str(settings.data_dir))
-    # state is a CompositionState (typed domain object). state.source is a
-    # SourceSpec with typed .options attribute (Mapping[str, Any]).
-    source_options = dict(state.source.options) if state.source is not None else {}
     path_checked = False
-    for key in ("path", "file"):
-        value = source_options.get(key)
-        if value is not None:
-            path_checked = True
-            resolved = resolve_data_path(value, str(settings.data_dir))
-            if not any(resolved.is_relative_to(d) for d in allowed_source_dirs):
-                return ValidationResult(
-                    is_valid=False,
-                    checks=[
-                        ValidationCheck(
-                            name=_CHECK_PATH_ALLOWLIST,
-                            passed=False,
-                            detail=f"Source {key} '{value}' is outside allowed source directories",
-                            affected_nodes=(),
-                            outcome_code=None,
-                        ),
-                        *_skipped_checks(_CHECK_PATH_ALLOWLIST),
-                    ],
-                    errors=[
-                        ValidationError(
-                            component_id="source",
+    for source_name, source in state.sources.items():
+        source_options = dict(source.options)
+        source_component = "source" if source_name == "source" else f"source:{source_name}"
+        for key in ("path", "file"):
+            value = source_options.get(key)
+            if value is not None:
+                path_checked = True
+                resolved = resolve_data_path(value, str(settings.data_dir))
+                if not any(resolved.is_relative_to(d) for d in allowed_source_dirs):
+                    return ValidationResult(
+                        is_valid=False,
+                        checks=[
+                            ValidationCheck(
+                                name=_CHECK_PATH_ALLOWLIST,
+                                passed=False,
+                                detail=f"Source '{source_name}' {key} '{value}' is outside allowed source directories",
+                                affected_nodes=(source_component,),
+                                outcome_code=None,
+                            ),
+                            *_skipped_checks(_CHECK_PATH_ALLOWLIST),
+                        ],
+                        errors=[
+                            ValidationError(
+                                component_id=source_component,
+                                component_type="source",
+                                message=(
+                                    f"Path traversal blocked: source '{source_name}' {key}='{value}' resolves outside allowed directories"
+                                ),
+                                suggestion="Use a file within the blobs directory.",
+                                error_code=None,
+                            ),
+                        ],
+                        readiness=_blocked_readiness(
+                            code="path_allowlist",
+                            detail=f"source '{source_name}' {key} resolves outside allowed source directories",
+                            component_id=source_component,
                             component_type="source",
-                            message=f"Path traversal blocked: {key}='{value}' resolves outside allowed directories",
-                            suggestion="Use a file within the blobs directory.",
-                            error_code=None,
                         ),
-                    ],
-                    readiness=_blocked_readiness(
-                        code="path_allowlist",
-                        detail=f"source {key} resolves outside allowed source directories",
-                        component_id="source",
-                        component_type="source",
-                    ),
-                )
+                    )
 
     # Sink path allowlist — prevents arbitrary file writes via sink options.
     for output in state.outputs or ():
@@ -850,18 +876,19 @@ def validate_pipeline(
     if secret_service is not None and user_id is not None:
         env_ref_names = {item.name for item in secret_service.list_refs(user_id)}
         # Walk source options, node configs, and output options for secret refs
-        if state.source is not None:
-            all_refs.extend(_collect_secret_refs(state.source.options, env_ref_names))
-            fabricated = collect_credential_field_violations(state.source.options, env_ref_names)
+        for source_name, source in state.sources.items():
+            source_component = "source" if source_name == "source" else f"source:{source_name}"
+            all_refs.extend(_collect_secret_refs(source.options, env_ref_names))
+            fabricated = collect_credential_field_violations(source.options, env_ref_names)
             if fabricated:
-                fabricated_components.append(("source", "source", fabricated))
+                fabricated_components.append((source_component, "source", fabricated))
             disallowed = collect_disallowed_secret_ref_markers(
-                state.source.options,
+                source.options,
                 env_ref_names,
-                additional_allowed_fields=allowed_secret_ref_fields("source", state.source.plugin),
+                additional_allowed_fields=allowed_secret_ref_fields("source", source.plugin),
             )
             if disallowed:
-                disallowed_secret_ref_components.append(("source", "source", state.source.plugin, disallowed))
+                disallowed_secret_ref_components.append((source_component, "source", source.plugin, disallowed))
         for node in state.nodes or ():
             all_refs.extend(_collect_secret_refs(node.options, env_ref_names))
             fabricated = collect_credential_field_violations(node.options, env_ref_names)
@@ -1040,7 +1067,7 @@ def validate_pipeline(
         batch_required_error = _batch_aware_required_input_fields_error(node.id, node.plugin, node.options)
         if batch_required_error is not None:
             batch_option_errors.append((node.id, batch_required_error))
-    numeric_contract_errors, _numeric_contract_warnings = _batch_distribution_profile_value_field_entries(state.source, state.nodes)
+    numeric_contract_errors, _numeric_contract_warnings = _batch_distribution_profile_value_field_entries(state.sources, state.nodes)
     for entry in numeric_contract_errors:
         batch_option_errors.append((entry.component.removeprefix("node:"), entry.message))
     if batch_option_errors:
@@ -1523,6 +1550,7 @@ def validate_pipeline(
     try:
         assemble_and_validate_pipeline_config(
             source=bundle.source,
+            sources=bundle.sources,
             transforms=bundle.transforms,
             sinks=bundle.sinks,
             aggregations=bundle.aggregations,

@@ -222,6 +222,8 @@ class TestResumeEdgeIDs:
                 source_node_id="source",
                 row_index=i,
                 data=row_data,
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)

@@ -274,6 +274,8 @@ class TestSignedExportDeterminism:
                 source_node_id="node_0",
                 row_index=i,
                 data={"value": i * 10},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             state = factory.execution.begin_node_state(

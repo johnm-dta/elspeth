@@ -346,6 +346,8 @@ class TestCheckpointRecoveryIntegration:
                         run_id=run_id,
                         source_node_id=f"node-{run_suffix}",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"hash{i}",
                         created_at=now,
                     )
@@ -460,6 +462,8 @@ class TestCheckpointTopologyHashAtomicity:
             source_node_id="source",
             row_index=0,
             data={"test": "data"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -531,6 +535,8 @@ class TestCheckpointTopologyHashAtomicity:
             source_node_id="source",
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -589,6 +595,8 @@ class TestCheckpointTopologyHashAtomicity:
             source_node_id="source",
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -685,6 +693,8 @@ class TestResumeCheckpointCleanup:
             source_node_id="source",
             row_index=0,
             data={"id": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -790,7 +800,9 @@ class TestCanResumeErrorHandling:
         )
 
         # Create row/token
-        row = factory.data_flow.create_row(run_id=run.run_id, source_node_id="source", row_index=0, data={})
+        row = factory.data_flow.create_row(
+            run_id=run.run_id, source_node_id="source", row_index=0, data={}, source_row_index=0, ingest_sequence=0
+        )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Mark run as failed

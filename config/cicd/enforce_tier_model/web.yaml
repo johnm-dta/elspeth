@@ -748,160 +748,6 @@ allow_hits:
   reason: Tier 3 boundary — JSON schema field 'default' is optional
   safety: Returns None; ConfigFieldSummary.default accepts None
   expires: null
-- key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=1be9831e03d16765
-  owner: web-composer
-  reason: Same Tier-3 boundary as the paired R5 entry above; the helper uses options.get('http')
-    and http.get('abuse_contact') because the composer state's options dict is an
-    opaque LLM/user-supplied mapping whose internal keys may legitimately be absent
-    (a web_scrape transform under construction may not yet have an http block, or
-    an http block under construction may not yet have abuse_contact set). The plugin's
-    pydantic schema reports the absence elsewhere; this rule short-circuits with None
-    when the key is missing, deferring to that authoritative reporter rather than
-    double- surfacing the same defect.
-  safety: Missing-key paths return None (no error reported), letting the plugin's
-    pydantic schema validator surface the missing-required-field defect. The rule's
-    own error path fires only when the value is shape-valid AND the domain is reserved.
-  expires: null
-- key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=cacfb09cb1ee4078
-  owner: web-composer
-  reason: Tier 3 boundary — abuse_contact is an optional sub-key of the operator-supplied
-    http options block. Missing key is a documented optional configuration, not an
-    error.
-  safety: Returns None when key is absent; reserved-domain check only fires when the
-    operator explicitly set abuse_contact.
-  expires: null
-- key: web/composer/state.py:R1:_validate_web_scrape_http_identity_not_placeholder:fp=bea652fff29d7051
-  owner: web-composer
-  reason: Tier 3 boundary — the composer state stores raw user/LLM-authored node options.
-    The helper uses options.get('http') because a web_scrape node under construction
-    may legitimately omit the optional HTTP block; plugin schema validation remains
-    the authoritative missing-field reporter.
-  safety: Missing-key paths return no identity-placeholder error; the helper only
-    rejects explicit wire-visible placeholder values before they can ship as HTTP
-    headers to scraped hosts.
-  expires: '2026-08-20'
-- key: web/composer/state.py:R5:_validate_web_scrape_http_identity_not_placeholder:fp=d7b50b5c57e5c231
-  owner: web-composer
-  reason: Tier 3 boundary — the HTTP options value is raw Mapping content from composer
-    state. The isinstance guard narrows the 'http' subobject before reading wire-visible
-    identity fields.
-  safety: Non-mapping HTTP options are ignored by this placeholder guard and remain
-    subject to the plugin schema validator; no identity value is fabricated.
-  expires: '2026-08-20'
-- key: web/composer/state.py:R1:_validate_web_scrape_http_identity_not_placeholder:fp=976e77012c7cb2f6
-  owner: web-composer
-  reason: Tier 3 boundary — abuse_contact and scraping_reason are optional keys inside
-    raw operator/LLM-authored HTTP options while the node is being composed. The placeholder
-    guard must tolerate absence and let schema validation report required-field defects.
-  safety: Missing-key paths continue without producing an error; explicit placeholder
-    strings are rejected with a high-severity ValidationEntry before execution.
-  expires: '2026-08-20'
-- key: web/composer/state.py:R5:_validate_web_scrape_http_identity_not_placeholder:fp=8e9f7b0aaa21d365
-  owner: web-composer
-  reason: Tier 3 boundary — field values in the raw HTTP options mapping are untyped
-    until plugin schema validation runs. The guard narrows each candidate value before
-    checking for placeholder identity text.
-  safety: Non-string values are ignored by this placeholder-specific check and are
-    still rejected by schema validation where required; no replacement identity is
-    invented.
-  expires: '2026-08-20'
-- key: web/composer/state.py:R1:_check_schema_contracts:_producer_emit_set:fp=553d63b88e277081
-  owner: web-composer
-  reason: _producer_emit_set looks up a producer's NodeSpec in node_by_id; sources
-    have producer_id == "source" which is not a node, so the lookup may legitimately
-    miss. Direct dict access would crash on every source-as-producer call. The None
-    branch falls back to _effective_producer_guarantees, which is the established
-    source-aware path.
-  safety: Missing-key triggers the established declared-set fallback used by all source/non-transform
-    producers — Rule A/B membership check then operates on the source's raw guarantee
-    set rather than crashing. No data fabrication; no audit divergence
-  expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=93e6d0f366d473f2
-  owner: web-composer
-  reason: Contract helper ValueError (consumer required-fields parse) is intentionally
-    converted into a blocking ValidationEntry on the consumer node instead of raising
-    immediately
-  safety: The pipeline remains invalid; no contract telemetry is fabricated for that
-    consumer edge
-  expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=f4ef2614439ba941
-  owner: web-composer
-  reason: _consumer_locked_input_set ValueError (consumer schema parse) is intentionally
-    converted into a blocking ValidationEntry on the consumer node instead of raising
-    immediately. Same pattern as the consumer required-fields parse path above; both
-    feed Rule A's membership check and must surface as a structured validation error
-    rather than a /validate crash.
-  safety: The pipeline remains invalid; no contract telemetry is fabricated for that
-    consumer edge and Rule A is short-circuited for that consumer
-  expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=5c3102391a7ef9dc
-  owner: web-composer
-  reason: Producer contract parse failures are intentionally converted into blocking
-    ValidationEntry results and the producer is marked uncheckable
-  safety: The invalid producer blocks validation and suppresses downstream edge contracts
-    instead of silently continuing
-  expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=3aff3816428e3590
-  owner: web-composer
-  reason: Rule A producer-emit ValueError swallowed silently because _effective_producer_guarantees
-    has already raised the same producer parse error above and surfaced it as a blocking
-    ValidationEntry. Re-surfacing here would duplicate the error message; the continue
-    short-circuits Rule A for this consumer-producer pair without losing the diagnostic.
-  safety: The producer's parse failure is already in errors[] from the previous _effective_producer_guarantees
-    call; pipeline remains invalid; Rule A is correctly skipped for this edge
-  expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=ad8e4160808d1d4d
-  owner: web-composer
-  reason: Sink contract parse failures are intentionally converted into blocking ValidationEntry
-    results on the output
-  safety: The pipeline remains invalid and the sink edge contract is skipped rather
-    than fabricated
-  expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=0a40378bed99324c
-  owner: web-composer
-  reason: _sink_locked_input_set ValueError (sink schema parse) is intentionally converted
-    into a blocking ValidationEntry on the output. Mirrors the sink required-fields
-    parse path above; both feed Rule B's membership check and must surface as a structured
-    error rather than a /validate crash.
-  safety: The pipeline remains invalid; no contract telemetry is fabricated for that
-    sink and Rule B is short-circuited for that output
-  expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=1c4db9634cd49938
-  owner: web-composer
-  reason: Sink-side producer parse failures are intentionally converted into blocking
-    ValidationEntry results and the producer is marked uncheckable
-  safety: The pipeline remains invalid and downstream sink contract evidence is suppressed
-    for the bad producer
-  expires: null
-- key: web/composer/state.py:R6:_check_schema_contracts:fp=0438e025d4ddc0b3
-  owner: web-composer
-  reason: 'Rule B producer-emit ValueError swallowed silently because _effective_producer_guarantees
-    has already raised the same producer parse error above and surfaced it as a blocking
-    ValidationEntry. Same dedup rationale as Rule A''s symmetric path: re-surfacing
-    would duplicate the error message; the continue short-circuits Rule B for this
-    sink-producer pair without losing the diagnostic.'
-  safety: The producer's parse failure is already in errors[] from the previous _effective_producer_guarantees
-    call; pipeline remains invalid; Rule B is correctly skipped for this edge
-  expires: null
-- key: web/composer/state.py:R1:_check_schema_contracts:fp=c09544503f550037
-  owner: web-composer
-  reason: Rule C reads field_mapper's select_only flag from raw Tier-3 user/LLM-supplied
-    options. dict.get with default False matches FieldMapperConfig.select_only's pydantic
-    default, so missing-key behaviour is documented and identical to the plugin's
-    own config parsing. Direct dict access would falsely reject configs that omit
-    the optional flag (legal per the plugin contract).
-  safety: Missing-key falls back to False (the documented default); Rule C then short-circuits
-    because select_only=False puts field_mapper into the additive/loose-bound regime
-    that Rule C explicitly does not adjudicate
-  expires: null
-- key: web/composer/state.py:R6:CompositionState:validate:fp=d30f04f5c3109e3f
-  owner: web-composer
-  reason: Aggregation trigger PydanticValidationError is intentionally converted into
-    a blocking ValidationEntry so composer rejects malformed trigger.condition values
-    before runtime settings load
-  safety: The pipeline remains invalid; no trigger config is fabricated and unexpected
-    exception types propagate
-  expires: null
 - key: web/composer/_required_paths_validator.py:R5:_optional_ancestor_present:fp=b07f5f9d3d7a04bf
   owner: composer-tools
   reason: Tier 3 JSON-Schema required-path walker; values come from the LLM and the
@@ -1976,10 +1822,10 @@ allow_hits:
     be absent or non-string while the LLM is still authoring a pipeline; the helper
     only proceeds for a real non-empty string. Finding: Potential dict.get() usage:
     model = node.options.get("model")'
-  safety: Absent or non-string model skips the model-choice hash guard for that
-    node — preserving the existing prompt-template path's behavior; no model id,
-    hash, or review site is fabricated. Valid string models pass through hash
-    validation before execution.
+  safety: Absent or non-string model skips the model-choice hash guard for that node
+    — preserving the existing prompt-template path's behavior; no model id, hash,
+    or review site is fabricated. Valid string models pass through hash validation
+    before execution.
   expires: '2026-08-24'
 - key: web/interpretation_state.py:R5:_materialize_node_for_execution:fp=9548e9320a95f4c0
   owner: web-interpretation
@@ -2003,21 +1849,21 @@ allow_hits:
     be absent or non-string while the LLM is still authoring a pipeline; the helper
     only proceeds for a real non-empty string. Finding: isinstance() used: if isinstance(model,
     str) and model:'
-  safety: Absent or non-string model skips the model-choice hash guard for that
-    node — preserving the existing prompt-template path's behavior; no model id,
-    hash, or review site is fabricated. Valid string models pass through hash
-    validation before execution.
+  safety: Absent or non-string model skips the model-choice hash guard for that node
+    — preserving the existing prompt-template path's behavior; no model id, hash,
+    or review site is fabricated. Valid string models pass through hash validation
+    before execution.
   expires: '2026-08-24'
 - key: web/interpretation_state.py:R1:_missing_model_choice_review_sites:fp=e00c3c59a5c8d523
   owner: web-interpretation
   pattern: tier3-boundary-validator
   reason: '2026-05-25 llm_model_choice surfacing addition: _missing_model_choice_review_sites
-    is the state-load gate that enumerates a pending review site when an LLM
-    node has a non-empty options[''model''] but no llm_model_choice requirement
-    yet (covers pre-auto-stager sessions). Parallel to _missing_prompt_template_review_sites.
-    The field may be absent or non-string while the LLM is still authoring a
-    pipeline; the helper only proceeds for a real non-empty string. Finding:
-    Potential dict.get() usage: model = node.options.get("model")'
+    is the state-load gate that enumerates a pending review site when an LLM node
+    has a non-empty options[''model''] but no llm_model_choice requirement yet (covers
+    pre-auto-stager sessions). Parallel to _missing_prompt_template_review_sites.
+    The field may be absent or non-string while the LLM is still authoring a pipeline;
+    the helper only proceeds for a real non-empty string. Finding: Potential dict.get()
+    usage: model = node.options.get("model")'
   safety: Absent or non-string model returns empty site tuple; no model id, hash,
     or review site is fabricated. Only a non-empty string triggers the enumerator,
     which emits a single InterpretationReviewSite for user review.
@@ -2026,12 +1872,12 @@ allow_hits:
   owner: web-interpretation
   pattern: tier3-boundary-validator
   reason: '2026-05-25 llm_model_choice surfacing addition: _missing_model_choice_review_sites
-    is the state-load gate that enumerates a pending review site when an LLM
-    node has a non-empty options[''model''] but no llm_model_choice requirement
-    yet (covers pre-auto-stager sessions). Parallel to _missing_prompt_template_review_sites.
-    The field may be absent or non-string while the LLM is still authoring a
-    pipeline; the helper only proceeds for a real non-empty string. Finding:
-    isinstance() used: if not isinstance(model, str) or not model:'
+    is the state-load gate that enumerates a pending review site when an LLM node
+    has a non-empty options[''model''] but no llm_model_choice requirement yet (covers
+    pre-auto-stager sessions). Parallel to _missing_prompt_template_review_sites.
+    The field may be absent or non-string while the LLM is still authoring a pipeline;
+    the helper only proceeds for a real non-empty string. Finding: isinstance() used:
+    if not isinstance(model, str) or not model:'
   safety: Absent or non-string model returns empty site tuple; no model id, hash,
     or review site is fabricated. Only a non-empty string triggers the enumerator,
     which emits a single InterpretationReviewSite for user review.
@@ -2517,20 +2363,6 @@ allow_hits:
     collector cannot escalate to a traceback-leaking 500. Allowlist expiry deliberately
     bounded (90d) per project policy on new suggested entries.
   expires: '2026-08-19'
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=b238a979c662822d
-  owner: web-composer
-  reason: Function receives multiple dict shapes — to_dict() output always has "source",
-    but component dicts from _execute_get_pipeline_state do not. .get() handles the
-    absent-key case (no-op early return).
-  safety: Returns input unchanged when "source" key absent — no data loss or fabrication
-  expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=07a8be5fa3d363e3
-  owner: web-composer
-  reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
-    — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.
-    Not all source shapes include "options".
-  safety: Returns input unchanged when "options" absent — no data loss or fabrication
-  expires: null
 - key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=327fe9a5a3e59ac5
   owner: web-composer
   reason: Tier-3 trust boundary — JSONL line-by-line parsing of operator-supplied
@@ -3032,52 +2864,6 @@ allow_hits:
   safety: Missing optional links remain absent, narrow cleanup failures are surfaced
     as recovery notes, and programmer bugs propagate.
   expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=3aba7cf3d76c43d9
-  owner: web-execution
-  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
-    placeholder tokens at the Tier 3 config boundary.
-  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
-    prompt or secret value is fabricated.
-  expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=ec32acfc57602caa
-  owner: web-execution
-  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
-    placeholder tokens at the Tier 3 config boundary.
-  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
-    prompt or secret value is fabricated.
-  expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=a1d34b9af2f7e3db
-  owner: web-execution
-  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
-    placeholder tokens at the Tier 3 config boundary.
-  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
-    prompt or secret value is fabricated.
-  expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=7022ce32f26888c2
-  owner: web-execution
-  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
-    placeholder tokens at the Tier 3 config boundary.
-  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
-    prompt or secret value is fabricated.
-  expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=733611406e3fefe3
-  owner: web-execution
-  reason: Tier 3 path-allowlist boundary check — source options are user-authored
-    pipeline YAML; path and file keys are mutually exclusive (neither required); .get()
-    returns None for the absent key and the loop continues to the other
-  safety: Absent path/file means no source-side path-allowlist check needed for that
-    key; the other key is still checked in the same iteration. If both are absent,
-    path_checked stays False and no Tier-3 boundary error is generated. No data loss
-    or fabrication.
-  expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=0c7d6399be7e8ecd
-  owner: web-execution
-  reason: Tier 3 path-allowlist boundary check — sink options are user-authored pipeline
-    YAML; path and file keys are mutually exclusive (neither required); .get() returns
-    None for the absent key and the loop continues to the other
-  safety: Absent path/file means no sink-side path-allowlist check needed for that
-    key; the other key is still checked in the same iteration. No data loss or fabrication.
-  expires: null
 - key: web/sessions/routes/sessions.py:R5:_copied_blob_for_inline_marker:fp=361f453445f65a4f
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
@@ -3139,82 +2925,6 @@ allow_hits:
     and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
   safety: Malformed data returns structured HTTP errors or preserves the primary exception;
     recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/composer/tools/sources.py:R1:_resolve_source_blob:fp=5b29016c3826c2c7
-  owner: composer-tools-sources
-  reason: 'Constant-table lookup: ``_MIME_TO_SOURCE`` maps known MIME types to (plugin,
-    mime_extra) pairs. ``blob[''mime_type'']`` was just read from a validated blob
-    row; a value not in the inference table means we cannot auto-pick a source plugin
-    — the caller must specify ``plugin`` explicitly. The ``.get(...)`` is the lookup;
-    the None branch emits a typed _failure_result naming the unsupported MIME (line
-    161-164).'
-  safety: Missing MIME maps to a typed _failure_result with an actionable repair message
-    (specify plugin explicitly); not a silent swallow.
-  expires: '2026-08-23'
-- key: web/composer/tools/sources.py:R5:_execute_set_source_from_blob:fp=b9536a22b9e37eda
-  owner: composer-tools-sources
-  reason: Sum-type discrimination on ``_resolve_source_blob`` return (``_ResolvedSourceBlob
-    | ToolResult``). Same pattern as the sessions.py sibling at fp=ce8c53eb04fd5d3b
-    — failure variants are propagated, success variants are unpacked.
-  safety: Both arms of the union are handled; the function cannot fall through with
-    an unresolved value.
-  expires: '2026-08-23'
-- key: web/composer/tools/sources.py:R6:_execute_inspect_source:fp=88b260427087c8ec
-  owner: composer-tools-sources
-  reason: Tier-3 conversion of LLM-tool-call ``blob_id`` to UUID. The user (LLM) may
-    have supplied a blob_id that matched a row but is not a parseable UUID (e.g. a
-    legacy string ID); ``UUID(blob_id)`` raises ValueError. The except branch sets
-    ``blob_uuid = None`` and emits a structured warning (``blob_id_not_uuid``) that
-    surfaces in the inspect_source response.
-  safety: Narrowed to ValueError (not bare Exception); the warning is part of the
-    audit-recorded response payload, so the auditor can see exactly which blob_id
-    was non-UUID. Downstream callers receive a redacted_identity record without blob_id
-    (only content_hash_prefix).
-  expires: '2026-08-23'
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=a12ab183df5dc425
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(resolved, ToolResult):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=a9b4b8adc81c4f9b
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: mime_entry = _MIME_TO_SOURCE.get(prepared_inline_blob.mime_type)'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=dbb2f95a63783167
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: raw_outputs = args.get("outputs")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=8a8cb7d027f0f2f1
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(raw_outputs,
-    list) and 0 <= index < len(raw_outputs):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=f8d3f1fc01dbefb4
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(raw_entry, Mapping):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=87b1f78f92cca424
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: branches = dict(n.branches)
-    if isinstance(n.branches, Mapping) else tuple(n.branches) if n.branches is not
-    None else None'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
   expires: null
 - key: web/composer/tools/sessions.py:R5:_execute_apply_pipeline_recipe:fp=6fb832f3172fdeb1
   owner: composer-tools-rearchitect
@@ -3390,11 +3100,11 @@ allow_hits:
     validates a request_interpretation_review call against the current node.options.
     The model-choice branch reads options[''model''] to compare against the supplied
     llm_draft (Tier-3 LLM tool argument). The field may be absent or non-string while
-    the LLM is still authoring the node. Finding: Potential dict.get() usage:
-    current_model = options.get("model")'
-  safety: Absent or non-string current_model raises ToolArgumentError with an
-    actionable message; no model id or hash is fabricated. The strict draft-equality
-    check below only runs when current_model is a non-empty string.
+    the LLM is still authoring the node. Finding: Potential dict.get() usage: current_model
+    = options.get("model")'
+  safety: Absent or non-string current_model raises ToolArgumentError with an actionable
+    message; no model id or hash is fabricated. The strict draft-equality check below
+    only runs when current_model is a non-empty string.
   expires: '2026-08-24'
 - key: web/composer/tools/sessions.py:R5:_assert_affected_component:fp=078d581fa15ba3a8
   owner: composer-tools
@@ -3404,9 +3114,9 @@ allow_hits:
     The model-choice branch reads options[''model''] and type-narrows before comparing
     against the supplied llm_draft (Tier-3 LLM tool argument). Finding: isinstance()
     used: if not isinstance(current_model, str) or not current_model:'
-  safety: Absent or non-string current_model raises ToolArgumentError with an
-    actionable message; no model id or hash is fabricated. Type check guards the
-    strict equality below.
+  safety: Absent or non-string current_model raises ToolArgumentError with an actionable
+    message; no model id or hash is fabricated. Type check guards the strict equality
+    below.
   expires: '2026-08-24'
 - key: web/composer/tools/_common.py:R1:_requirement_matches_field_value:fp=fe48281fe07a5e76
   owner: composer-tools
@@ -3416,38 +3126,36 @@ allow_hits:
     Reads the existing requirement''s ''draft'' field for pending status; the field
     is present by construction in our auto-stager but absent in third-party-stored
     requirements during the auto-stager migration window. Carried forward from the
-    pre-rename function _requirement_matches_prompt_template. Finding: Potential
-    dict.get() usage: return requirement.get("draft") == field_value'
-  safety: Absent draft compares unequal to field_value (returns False), causing
-    the caller to replace rather than retain the existing requirement; no requirement
+    pre-rename function _requirement_matches_prompt_template. Finding: Potential dict.get()
+    usage: return requirement.get("draft") == field_value'
+  safety: Absent draft compares unequal to field_value (returns False), causing the
+    caller to replace rather than retain the existing requirement; no requirement
     state is fabricated. Behavior unchanged from the pre-rename function.
   expires: '2026-08-24'
 - key: web/composer/tools/_common.py:R1:_requirement_matches_field_value:fp=b3c1edb91718dbfb
   owner: composer-tools
   pattern: tier3-boundary-validator
   reason: '2026-05-25 llm_model_choice surfacing addition: _requirement_matches_field_value
-    compares the existing requirement''s ''resolved_prompt_template_hash'' (the
-    universal resolved-value hash field — name retained for backward
-    compatibility) against the stable_hash of the current field value, for
-    requirements in ''resolved'' status. Carried forward from the pre-rename
-    function _requirement_matches_prompt_template. Finding: Potential dict.get()
-    usage: return requirement.get("resolved_prompt_template_hash") == stable_hash(field_value)'
-  safety: Absent hash compares unequal to stable_hash(field_value), causing the
-    caller to treat the resolved requirement as stale; no hash is fabricated.
-    Behavior unchanged from the pre-rename function.
+    compares the existing requirement''s ''resolved_prompt_template_hash'' (the universal
+    resolved-value hash field — name retained for backward compatibility) against
+    the stable_hash of the current field value, for requirements in ''resolved'' status.
+    Carried forward from the pre-rename function _requirement_matches_prompt_template.
+    Finding: Potential dict.get() usage: return requirement.get("resolved_prompt_template_hash")
+    == stable_hash(field_value)'
+  safety: Absent hash compares unequal to stable_hash(field_value), causing the caller
+    to treat the resolved requirement as stale; no hash is fabricated. Behavior unchanged
+    from the pre-rename function.
   expires: '2026-08-24'
 - key: web/composer/tools/_common.py:R5:_options_with_default_model_choice_review:fp=cb05cf6498ea8182
   owner: composer-tools
   pattern: tier3-boundary-validator
   reason: '2026-05-25 llm_model_choice surfacing addition: _options_with_default_model_choice_review
-    is the mutation-time auto-stager that creates a pending llm_model_choice
-    interpretation requirement whenever an LLM node''s options.model is set.
-    Reads composer-authored options[''model''] and type-narrows before staging.
-    Parallel to _options_with_default_prompt_template_review. Finding: isinstance()
-    used: if not isinstance(model, str) or not model:'
-  safety: Absent or non-string model returns options unchanged (no requirement
-    staged); no model id is fabricated. Only a non-empty string triggers the
-    auto-stager.
+    is the mutation-time auto-stager that creates a pending llm_model_choice interpretation
+    requirement whenever an LLM node''s options.model is set. Reads composer-authored
+    options[''model''] and type-narrows before staging. Parallel to _options_with_default_prompt_template_review.
+    Finding: isinstance() used: if not isinstance(model, str) or not model:'
+  safety: Absent or non-string model returns options unchanged (no requirement staged);
+    no model id is fabricated. Only a non-empty string triggers the auto-stager.
   expires: '2026-08-24'
 - key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=400e7fa8db4f1ead
   owner: composer-tools-rearchitect
@@ -4001,13 +3709,6 @@ allow_hits:
     are exhaustive; pending arm raises and never returns; happy arm rebinds composition_state.
     No fabrication.
   expires: '2026-08-23'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=a91add5d5970814d
-  owner: web-execution
-  reason: Optional keys in user-authored config — source options key may be absent.
-    Fingerprint shifted from 1814e5926bbae2eb by the F-17/F-21 pre-execute placeholder
-    gate ImportFroms.
-  safety: Returns None; validation handles absence
-  expires: null
 - key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=d458fff4dd2be32e
   owner: web-execution
   reason: Optional keys in user-authored config — source options key may be absent.
@@ -4140,6 +3841,297 @@ allow_hits:
     BlobNotFoundError, BlobQuotaExceededError, BlobStateError); RuntimeError deliberately
     excluded (too broad); programmer bugs propagate; partial failures logged from
     structured result
+  expires: null
+- key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=fdf1dc65d3f04236
+  owner: web-composer
+  reason: Same Tier-3 boundary as the paired R5 entry above; the helper uses options.get('http')
+    and http.get('abuse_contact') because the composer state's options dict is an
+    opaque LLM/user-supplied mapping whose internal keys may legitimately be absent
+    (a web_scrape transform under construction may not yet have an http block, or
+    an http block under construction may not yet have abuse_contact set). The plugin's
+    pydantic schema reports the absence elsewhere; this rule short-circuits with None
+    when the key is missing, deferring to that authoritative reporter rather than
+    double- surfacing the same defect.
+  safety: Missing-key paths return None (no error reported), letting the plugin's
+    pydantic schema validator surface the missing-required-field defect. The rule's
+    own error path fires only when the value is shape-valid AND the domain is reserved.
+  expires: null
+- key: web/composer/state.py:R1:_validate_web_scrape_abuse_contact_not_reserved:fp=5c34e914f46e097f
+  owner: web-composer
+  reason: Tier 3 boundary — abuse_contact is an optional sub-key of the operator-supplied
+    http options block. Missing key is a documented optional configuration, not an
+    error.
+  safety: Returns None when key is absent; reserved-domain check only fires when the
+    operator explicitly set abuse_contact.
+  expires: null
+- key: web/composer/state.py:R1:_validate_web_scrape_http_identity_not_placeholder:fp=68540d2b7dd1cf05
+  owner: web-composer
+  reason: Tier 3 boundary — the composer state stores raw user/LLM-authored node options.
+    The helper uses options.get('http') because a web_scrape node under construction
+    may legitimately omit the optional HTTP block; plugin schema validation remains
+    the authoritative missing-field reporter.
+  safety: Missing-key paths return no identity-placeholder error; the helper only
+    rejects explicit wire-visible placeholder values before they can ship as HTTP
+    headers to scraped hosts.
+  expires: '2026-08-20'
+- key: web/composer/state.py:R5:_validate_web_scrape_http_identity_not_placeholder:fp=d3a29131ec415c13
+  owner: web-composer
+  reason: Tier 3 boundary — the HTTP options value is raw Mapping content from composer
+    state. The isinstance guard narrows the 'http' subobject before reading wire-visible
+    identity fields.
+  safety: Non-mapping HTTP options are ignored by this placeholder guard and remain
+    subject to the plugin schema validator; no identity value is fabricated.
+  expires: '2026-08-20'
+- key: web/composer/state.py:R1:_validate_web_scrape_http_identity_not_placeholder:fp=34aadb8555624b8d
+  owner: web-composer
+  reason: Tier 3 boundary — abuse_contact and scraping_reason are optional keys inside
+    raw operator/LLM-authored HTTP options while the node is being composed. The placeholder
+    guard must tolerate absence and let schema validation report required-field defects.
+  safety: Missing-key paths continue without producing an error; explicit placeholder
+    strings are rejected with a high-severity ValidationEntry before execution.
+  expires: '2026-08-20'
+- key: web/composer/state.py:R5:_validate_web_scrape_http_identity_not_placeholder:fp=04b04f962f4da7ee
+  owner: web-composer
+  reason: Tier 3 boundary — field values in the raw HTTP options mapping are untyped
+    until plugin schema validation runs. The guard narrows each candidate value before
+    checking for placeholder identity text.
+  safety: Non-string values are ignored by this placeholder-specific check and are
+    still rejected by schema validation where required; no replacement identity is
+    invented.
+  expires: '2026-08-20'
+- key: web/composer/state.py:R1:_check_schema_contracts:_producer_emit_set:fp=060b445a7f6436b2
+  owner: web-composer
+  reason: _producer_emit_set looks up a producer's NodeSpec in node_by_id; sources
+    have producer_id == "source" which is not a node, so the lookup may legitimately
+    miss. Direct dict access would crash on every source-as-producer call. The None
+    branch falls back to _effective_producer_guarantees, which is the established
+    source-aware path.
+  safety: Missing-key triggers the established declared-set fallback used by all source/non-transform
+    producers — Rule A/B membership check then operates on the source's raw guarantee
+    set rather than crashing. No data fabrication; no audit divergence
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=c99eaf598da6ea90
+  owner: web-composer
+  reason: Contract helper ValueError (consumer required-fields parse) is intentionally
+    converted into a blocking ValidationEntry on the consumer node instead of raising
+    immediately
+  safety: The pipeline remains invalid; no contract telemetry is fabricated for that
+    consumer edge
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=807a0672c5be80e8
+  owner: web-composer
+  reason: _consumer_locked_input_set ValueError (consumer schema parse) is intentionally
+    converted into a blocking ValidationEntry on the consumer node instead of raising
+    immediately. Same pattern as the consumer required-fields parse path above; both
+    feed Rule A's membership check and must surface as a structured validation error
+    rather than a /validate crash.
+  safety: The pipeline remains invalid; no contract telemetry is fabricated for that
+    consumer edge and Rule A is short-circuited for that consumer
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=fa5fd087828710e3
+  owner: web-composer
+  reason: Producer contract parse failures are intentionally converted into blocking
+    ValidationEntry results and the producer is marked uncheckable
+  safety: The invalid producer blocks validation and suppresses downstream edge contracts
+    instead of silently continuing
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=e31dd5e21c5333e0
+  owner: web-composer
+  reason: Rule A producer-emit ValueError swallowed silently because _effective_producer_guarantees
+    has already raised the same producer parse error above and surfaced it as a blocking
+    ValidationEntry. Re-surfacing here would duplicate the error message; the continue
+    short-circuits Rule A for this consumer-producer pair without losing the diagnostic.
+  safety: The producer's parse failure is already in errors[] from the previous _effective_producer_guarantees
+    call; pipeline remains invalid; Rule A is correctly skipped for this edge
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=c392a2364ca36851
+  owner: web-composer
+  reason: Sink contract parse failures are intentionally converted into blocking ValidationEntry
+    results on the output
+  safety: The pipeline remains invalid and the sink edge contract is skipped rather
+    than fabricated
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=c179cab006269789
+  owner: web-composer
+  reason: _sink_locked_input_set ValueError (sink schema parse) is intentionally converted
+    into a blocking ValidationEntry on the output. Mirrors the sink required-fields
+    parse path above; both feed Rule B's membership check and must surface as a structured
+    error rather than a /validate crash.
+  safety: The pipeline remains invalid; no contract telemetry is fabricated for that
+    sink and Rule B is short-circuited for that output
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=5dce7c331abe8d3a
+  owner: web-composer
+  reason: Sink-side producer parse failures are intentionally converted into blocking
+    ValidationEntry results and the producer is marked uncheckable
+  safety: The pipeline remains invalid and downstream sink contract evidence is suppressed
+    for the bad producer
+  expires: null
+- key: web/composer/state.py:R6:_check_schema_contracts:fp=196e599c34bff7ea
+  owner: web-composer
+  reason: 'Rule B producer-emit ValueError swallowed silently because _effective_producer_guarantees
+    has already raised the same producer parse error above and surfaced it as a blocking
+    ValidationEntry. Same dedup rationale as Rule A''s symmetric path: re-surfacing
+    would duplicate the error message; the continue short-circuits Rule B for this
+    sink-producer pair without losing the diagnostic.'
+  safety: The producer's parse failure is already in errors[] from the previous _effective_producer_guarantees
+    call; pipeline remains invalid; Rule B is correctly skipped for this edge
+  expires: null
+- key: web/composer/state.py:R1:_check_schema_contracts:fp=90639ec070afebcb
+  owner: web-composer
+  reason: Rule C reads field_mapper's select_only flag from raw Tier-3 user/LLM-supplied
+    options. dict.get with default False matches FieldMapperConfig.select_only's pydantic
+    default, so missing-key behaviour is documented and identical to the plugin's
+    own config parsing. Direct dict access would falsely reject configs that omit
+    the optional flag (legal per the plugin contract).
+  safety: Missing-key falls back to False (the documented default); Rule C then short-circuits
+    because select_only=False puts field_mapper into the additive/loose-bound regime
+    that Rule C explicitly does not adjudicate
+  expires: null
+- key: web/composer/state.py:R6:CompositionState:validate:fp=b2c436c49bc35782
+  owner: web-composer
+  reason: Aggregation trigger PydanticValidationError is intentionally converted into
+    a blocking ValidationEntry so composer rejects malformed trigger.condition values
+    before runtime settings load
+  safety: The pipeline remains invalid; no trigger config is fabricated and unexpected
+    exception types propagate
+  expires: null
+- key: web/composer/state.py:R6:CompositionState:validate:fp=bcb7318205f2ed8a
+  owner: web-composer
+  reason: Aggregation trigger PydanticValidationError is intentionally converted into
+    a blocking ValidationEntry so composer rejects malformed trigger.condition values
+    before runtime settings load
+  safety: The pipeline remains invalid; no trigger config is fabricated and unexpected
+    exception types propagate
+  expires: '2026-08-20'
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=c275fbb3581caa44
+  owner: web-execution
+  reason: Optional keys in user-authored config — source options key may be absent.
+    Fingerprint shifted from 1814e5926bbae2eb by the F-17/F-21 pre-execute placeholder
+    gate ImportFroms.
+  safety: Returns None; validation handles absence
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=70190f340a2a11a1
+  owner: web-execution
+  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
+    placeholder tokens at the Tier 3 config boundary.
+  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
+    prompt or secret value is fabricated.
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=3f1293e24ebfd5da
+  owner: web-execution
+  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
+    placeholder tokens at the Tier 3 config boundary.
+  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
+    prompt or secret value is fabricated.
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=482516abde8a67da
+  owner: web-execution
+  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
+    placeholder tokens at the Tier 3 config boundary.
+  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
+    prompt or secret value is fabricated.
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=72c4269fdf7af69f
+  owner: web-execution
+  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
+    placeholder tokens at the Tier 3 config boundary.
+  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
+    prompt or secret value is fabricated.
+  expires: null
+- key: web/execution/validation.py:R1:validate_pipeline:fp=601ace816bf69633
+  owner: web-execution
+  reason: Tier 3 path-allowlist boundary check — source options are user-authored
+    pipeline YAML; path and file keys are mutually exclusive (neither required); .get()
+    returns None for the absent key and the loop continues to the other
+  safety: Absent path/file means no source-side path-allowlist check needed for that
+    key; the other key is still checked in the same iteration. If both are absent,
+    path_checked stays False and no Tier-3 boundary error is generated. No data loss
+    or fabrication.
+  expires: null
+- key: web/execution/validation.py:R1:validate_pipeline:fp=05150209164500d2
+  owner: web-execution
+  reason: Tier 3 path-allowlist boundary check — sink options are user-authored pipeline
+    YAML; path and file keys are mutually exclusive (neither required); .get() returns
+    None for the absent key and the loop continues to the other
+  safety: Absent path/file means no sink-side path-allowlist check needed for that
+    key; the other key is still checked in the same iteration. No data loss or fabrication.
+  expires: null
+- key: web/composer/tools/sources.py:R1:_resolve_source_blob:fp=25e8314e28d8c21b
+  owner: composer-tools-sources
+  reason: 'Constant-table lookup: ``_MIME_TO_SOURCE`` maps known MIME types to (plugin,
+    mime_extra) pairs. ``blob[''mime_type'']`` was just read from a validated blob
+    row; a value not in the inference table means we cannot auto-pick a source plugin
+    — the caller must specify ``plugin`` explicitly. The ``.get(...)`` is the lookup;
+    the None branch emits a typed _failure_result naming the unsupported MIME (line
+    161-164).'
+  safety: Missing MIME maps to a typed _failure_result with an actionable repair message
+    (specify plugin explicitly); not a silent swallow.
+  expires: '2026-08-23'
+- key: web/composer/tools/sources.py:R5:_execute_set_source_from_blob:fp=95963038dadbe1f4
+  owner: composer-tools-sources
+  reason: Sum-type discrimination on ``_resolve_source_blob`` return (``_ResolvedSourceBlob
+    | ToolResult``). Same pattern as the sessions.py sibling at fp=ce8c53eb04fd5d3b
+    — failure variants are propagated, success variants are unpacked.
+  safety: Both arms of the union are handled; the function cannot fall through with
+    an unresolved value.
+  expires: '2026-08-23'
+- key: web/composer/tools/sources.py:R6:_execute_inspect_source:fp=8a47a130612594ef
+  owner: composer-tools-sources
+  reason: Tier-3 conversion of LLM-tool-call ``blob_id`` to UUID. The user (LLM) may
+    have supplied a blob_id that matched a row but is not a parseable UUID (e.g. a
+    legacy string ID); ``UUID(blob_id)`` raises ValueError. The except branch sets
+    ``blob_uuid = None`` and emits a structured warning (``blob_id_not_uuid``) that
+    surfaces in the inspect_source response.
+  safety: Narrowed to ValueError (not bare Exception); the warning is part of the
+    audit-recorded response payload, so the auditor can see exactly which blob_id
+    was non-UUID. Downstream callers receive a redacted_identity record without blob_id
+    (only content_hash_prefix).
+  expires: '2026-08-23'
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=03353aea24d825b0
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: isinstance() used: if isinstance(resolved, ToolResult):'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=a8e0226619eb86dd
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: Potential dict.get() usage: mime_entry = _MIME_TO_SOURCE.get(prepared_inline_blob.mime_type)'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=316ae9b2e8b83ea0
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: Potential dict.get() usage: raw_outputs = args.get("outputs")'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=994a1968a2feb0b5
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: isinstance() used: if isinstance(raw_outputs,
+    list) and 0 <= index < len(raw_outputs):'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=99ac50d1746414b0
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: isinstance() used: if isinstance(raw_entry, Mapping):'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=753eaf4f4cd42b6a
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: isinstance() used: branches = dict(n.branches)
+    if isinstance(n.branches, Mapping) else tuple(n.branches) if n.branches is not
+    None else None'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
   expires: null
 per_file_rules:
 - pattern: web/composer/guided/chat_solver.py

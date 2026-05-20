@@ -47,6 +47,7 @@ def state_from_record(record: CompositionStateRecord) -> CompositionState:
     state_dict = {
         "version": record.version,
         "source": deep_thaw(record.source) if record.source is not None else None,
+        "sources": deep_thaw(record.sources) if record.sources is not None else None,
         # nodes/edges/outputs: None is the legitimate initial state when no
         # nodes have been added yet. Mapping None -> [] is meaning-preserving
         # (empty collection, not fabricated data).

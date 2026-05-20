@@ -374,6 +374,7 @@ class CompositionStateData:
     """
 
     source: Mapping[str, Any] | None = None
+    sources: Mapping[str, Mapping[str, Any]] | None = None
     nodes: Sequence[Mapping[str, Any]] | None = None
     edges: Sequence[Mapping[str, Any]] | None = None
     outputs: Sequence[Mapping[str, Any]] | None = None
@@ -389,6 +390,8 @@ class CompositionStateData:
         non_none = []
         if self.source is not None:
             non_none.append("source")
+        if self.sources is not None:
+            non_none.append("sources")
         if self.nodes is not None:
             non_none.append("nodes")
         if self.edges is not None:
@@ -428,11 +431,14 @@ class CompositionStateRecord:
     # from ``metadata_`` which carries user-facing PipelineMetadata. ``None``
     # is honest for revert/fork paths and for non-compose write paths.
     composer_meta: Mapping[str, Any] | None = None
+    sources: Mapping[str, Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         non_none = []
         if self.source is not None:
             non_none.append("source")
+        if self.sources is not None:
+            non_none.append("sources")
         if self.nodes is not None:
             non_none.append("nodes")
         if self.edges is not None:

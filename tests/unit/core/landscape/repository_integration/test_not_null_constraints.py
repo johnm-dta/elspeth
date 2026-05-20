@@ -154,6 +154,8 @@ class TestSchemaNotNullConstraints:
                     run_id="test_run",
                     source_node_id="test_node",
                     row_index=0,
+                    source_row_index=0,
+                    ingest_sequence=0,
                     source_data_hash="test_hash",
                     created_at=now,
                 )

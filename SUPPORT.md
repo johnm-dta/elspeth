@@ -16,7 +16,8 @@ It is not offered with a public service-level agreement.
   public issue with details.
 - For public-sector evaluation, start with
   `docs/release/executive-summary.md`,
-  `docs/release/assessment-mapping.md`, and `docs/release/guarantees.md`.
+  `docs/release/assessment-mapping.md`, `docs/release/guarantees.md`, and the
+  `docs/release/README.md` release-documentation index.
 
 ## What Maintainers Need
 

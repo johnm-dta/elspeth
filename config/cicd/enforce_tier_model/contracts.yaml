@@ -351,11 +351,6 @@ allow_hits:
   safety: Narrow ValueError/TypeError catch falls back to repr_hash, logs no row content,
     and still records a validation-error token.
   expires: null
-- key: contracts/security.py:R1:get_fingerprint_key:fp=e763a5c875c64b76
-  owner: architecture
-  reason: os.environ.get() is the correct API for checking env var existence — followed
-    by explicit ValueError raise
-  safety: Raises ValueError immediately if env var not set — not a silent fallback
 - key: contracts/composer_interpretation.py:R5:_validate_enum_member:fp=ffdde8578491891c
   owner: contracts
   reason: Contract construction/parsing boundary; this check rejects malformed enum/schema

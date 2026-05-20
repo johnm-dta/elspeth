@@ -32,6 +32,8 @@ These run immediately with no setup:
 | `fork_coalesce` | 5 | Parallel path fork/join DAG pattern |
 | `json_explode` | 3 | JSON source with array expansion (3→6 output) |
 | `landscape_journal` | 2 | JSON source, audit journal |
+| `multi_flow` | 4 | Two independent named source flows in one run |
+| `multi_source_queue` | 3 | Multiple named sources fan into a queue |
 | `large_scale_test` | 50,000 | Performance test — takes ~7 minutes |
 | `retention_purge` | 5 | Payload retention policy demo |
 | `schema_contracts_demo` | 5 | Schema validation contracts |

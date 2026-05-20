@@ -103,6 +103,90 @@ class TestSchemaCompatibilityGuards:
         """Per-run checkpoint ordering must be mechanically unique in fresh and stale DBs."""
         assert ("checkpoints", "ix_checkpoints_run_sequence_unique") in database_module._REQUIRED_INDEXES
 
+    def test_run_sources_source_node_fk_is_required_schema_contract(self) -> None:
+        """Per-source resume metadata must point at a registered source node in the same run."""
+        assert (
+            "run_sources",
+            ("source_node_id", "run_id"),
+            "nodes",
+            ("node_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+
+    def test_token_work_items_run_scoped_fks_are_required_schema_contract(self) -> None:
+        """Scheduler resume rows must point at token/node cursors owned by the same run."""
+        assert (
+            "token_work_items",
+            ("token_id", "run_id"),
+            "tokens",
+            ("token_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+        assert (
+            "token_work_items",
+            ("node_id", "run_id"),
+            "nodes",
+            ("node_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+        assert (
+            "token_work_items",
+            ("coalesce_node_id", "run_id"),
+            "nodes",
+            ("node_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+
+    def test_token_work_items_resume_identity_columns_are_required_schema_contract(self) -> None:
+        """Epoch-12 scheduler resume fields must participate in stale-DB detection."""
+        required_token_work_columns = {column for table, column in database_module._REQUIRED_COLUMNS if table == "token_work_items"}
+        assert {
+            "on_success_sink",
+            "branch_name",
+            "fork_group_id",
+            "join_group_id",
+            "expand_group_id",
+            "coalesce_node_id",
+            "coalesce_name",
+        } <= required_token_work_columns
+
+    def test_validate_schema_rejects_missing_scheduler_resume_identity_column(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Epoch-12 scheduler resume identity columns must fail stale DBs early."""
+        db_path = tmp_path / "missing_scheduler_resume_identity.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE token_work_items (
+                        work_item_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        available_at TEXT NOT NULL,
+                        row_payload_json TEXT NOT NULL,
+                        on_success_sink TEXT
+                    )
+                    """
+                )
+            )
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        monkeypatch.setattr(database_module, "metadata", SimpleNamespace(tables={"token_work_items": object()}))
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "token_work_items.branch_name" in msg
+        assert "Landscape database schema is outdated" in msg
+        assert "To fix this, either:" in msg
+        instance.close()
+
     def test_validate_schema_rejects_incompatible_schema_epoch(self, tmp_path: Path) -> None:
         """Stamped SQLite schema epochs provide an explicit future migration seam."""
         db_path = tmp_path / "wrong_epoch.db"

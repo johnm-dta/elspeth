@@ -577,6 +577,14 @@ allow_hits:
     skipped and the original Pydantic msg passes through unchanged. No silent coercion
     of error data.
   expires: null
+- key: plugins/infrastructure/config_base.py:R1:DataPluginConfig:__init_subclass__:fp=e9064dddb97b1895
+  owner: plugin-infrastructure
+  reason: cls.__dict__ is a Tier-1 Python-internal mapping with guaranteed shape;
+    the .get() reads an opt-in `_component_type_exempt` marker on subclass definition.
+    The flag is class-internal metadata, not external data.
+  safety: Default False; absent marker behaves as non-exempt, which is the stricter
+    side. The fall-through path enforces _plugin_component_type or raises TypeError.
+  expires: '2026-08-20'
 - key: plugins/infrastructure/validation.py:R1:_extract_errors:fp=9240c6f6517a323b
   owner: plugin-validation
   reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
@@ -587,14 +595,6 @@ allow_hits:
   safety: Default None compares unequal to 'missing', so the enrichment branch is
     skipped and the original Pydantic msg passes through unchanged. No silent coercion
     of error data.
-  expires: null
-- key: plugins/infrastructure/config_base.py:R1:DataPluginConfig:__init_subclass__:fp=e9064dddb97b1895
-  owner: plugin-infrastructure
-  reason: cls.__dict__ is a Tier-1 Python-internal mapping with guaranteed shape;
-    the .get() reads an opt-in `_component_type_exempt` marker on subclass definition.
-    The flag is class-internal metadata, not external data.
-  safety: Default False; absent marker behaves as non-exempt, which is the stricter
-    side. The fall-through path enforces _plugin_component_type or raises TypeError.
   expires: '2026-08-20'
 - key: plugins/sinks/database_sink.py:R1:DatabaseSink:__init__:fp=f42e3ff1c27193b5
   owner: architecture
@@ -781,6 +781,13 @@ allow_hits:
   safety: Catch scope is RuntimeError-only; reserved buffer slots are completed with
     explicit shutdown_requested errors while unrelated exception types still propagate
   expires: '2026-07-17'
+- key: plugins/infrastructure/url_validation.py:R6:_is_loopback_host:fp=149402b631b6eb46
+  owner: security
+  reason: URL validation parses operator-supplied hostnames at the credential-bearing
+    config boundary; ipaddress.ip_address raises ValueError for DNS names.
+  safety: Invalid IP literal parsing falls back to False for loopback detection, so
+    HTTP is not allowed unless the hostname is localhost or a valid loopback address.
+  expires: '2026-08-20'
 - key: plugins/transforms/web_scrape.py:R5:WebScrapeHTTPConfig:_validate_allowed_hosts:fp=922ac0bb4c76376b
   owner: architecture
   reason: Pydantic field_validator wraps ipaddress.ip_network() on user-provided CIDR
@@ -796,26 +803,4 @@ allow_hits:
   safety: Non-str sep skips the hint silently; the override returns () and the composer
     surfaces no coaching, which is the right failure mode for malformed config (the
     validator catches the real config error separately).
-  expires: null
-- key: plugins/infrastructure/config_base.py:R1:_format_validation_error_cause:fp=d62fb21952dcf3f2
-  owner: plugin-validation
-  reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
-    field is documented but Pydantic does not guarantee its presence in every error
-    dict shape across versions. error.get(''type'') == ''missing'' is the schema-required-on-DataPluginConfig
-    discriminator for the LLM-composer mode-guidance enrichment (cf. elspeth-861b0c58f5).
-    Bare error[''type''] would crash on any Pydantic version that omitted the key.'
-  safety: Default None compares unequal to 'missing', so the enrichment branch is
-    skipped and the original Pydantic msg passes through unchanged. No silent coercion
-    of error data.
-  expires: null
-- key: plugins/infrastructure/validation.py:R1:_extract_errors:fp=9240c6f6517a323b
-  owner: plugin-validation
-  reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
-    field is documented but Pydantic does not guarantee its presence in every error
-    dict shape across versions. error.get(''type'') == ''missing'' is the schema-required-on-DataPluginConfig
-    discriminator for the LLM-composer mode-guidance enrichment (cf. elspeth-861b0c58f5).
-    Bare error[''type''] would crash on any Pydantic version that omitted the key.'
-  safety: Default None compares unequal to 'missing', so the enrichment branch is
-    skipped and the original Pydantic msg passes through unchanged. No silent coercion
-    of error data.
   expires: null

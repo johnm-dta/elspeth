@@ -28,7 +28,7 @@ def _make_composition_snapshot() -> dict[str, object]:
     """Build a minimal valid composition_snapshot wire shape.
 
     Mirrors the dict shape produced by ``CompositionState.to_dict()`` —
-    version, metadata, source, nodes, edges, outputs. With the FIX-A
+    version, metadata, source, sources, nodes, edges, outputs. With the FIX-A
     tightening of SharedInspectResponse (Plan 19a:891-892) the
     composition_snapshot field is a strict Pydantic model and partial
     dicts are rejected at construction.
@@ -37,6 +37,7 @@ def _make_composition_snapshot() -> dict[str, object]:
         "version": 1,
         "metadata": {"name": "Demo", "description": ""},
         "source": None,
+        "sources": {},
         "nodes": [],
         "edges": [],
         "outputs": [],
@@ -157,6 +158,34 @@ def test_shared_inspect_response_carries_audit_readiness() -> None:
     )
     assert resp.audit_readiness is snapshot
     assert resp.yaml == "version: 1\n"
+
+
+def test_shared_inspect_response_accepts_plural_sources_snapshot() -> None:
+    """Shareable-review snapshots accept CompositionState's canonical sources map."""
+    snapshot = _make_audit_readiness_snapshot()
+    composition = _make_composition_snapshot()
+    source = {
+        "plugin": "csv",
+        "on_success": "normalize",
+        "options": {"schema": {"mode": "observed"}},
+        "on_validation_failure": "discard",
+    }
+    composition["source"] = source
+    composition["sources"] = {"source": source}
+
+    resp = SharedInspectResponse(
+        session_id=str(uuid4()),
+        state_id=str(uuid4()),
+        pipeline_metadata={"name": "Demo", "description": ""},
+        composition_snapshot=composition,
+        yaml="version: 1\n",
+        audit_readiness=snapshot,
+        created_by_user_id="user-1",
+        created_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC),
+    )
+
+    assert resp.composition_snapshot.sources["source"].plugin == "csv"
 
 
 def test_shared_inspect_response_rejects_extra_field() -> None:

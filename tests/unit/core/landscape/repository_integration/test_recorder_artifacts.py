@@ -35,6 +35,8 @@ class TestRecorderFactoryArtifacts:
             source_node_id=sink.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -78,6 +80,8 @@ class TestRecorderFactoryArtifacts:
             source_node_id=sink.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -140,6 +144,8 @@ class TestRecorderFactoryArtifacts:
             source_node_id=sink.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -202,6 +208,8 @@ class TestRecorderFactoryArtifacts:
             source_node_id=sink.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -247,6 +255,8 @@ class TestRecorderFactoryArtifacts:
                 source_node_id=source.node_id,
                 row_index=i,
                 data={"idx": i},
+                source_row_index=i,
+                ingest_sequence=i,
             )
 
         rows = factory.query.get_rows(run.run_id)
@@ -274,6 +284,8 @@ class TestRecorderFactoryArtifacts:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Create initial token and fork
@@ -316,6 +328,8 @@ class TestRecorderFactoryArtifacts:
             source_node_id=node1.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 

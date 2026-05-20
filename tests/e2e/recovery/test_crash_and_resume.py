@@ -394,6 +394,8 @@ class TestResumeIdempotence:
                 source_node_id="source",
                 row_index=i,
                 data=row_data,
+                source_row_index=i,
+                ingest_sequence=i,
             )
             row_ids.append(row.row_id)
             token = factory.data_flow.create_token(row_id=row.row_id)
@@ -710,6 +712,8 @@ class TestCheckpointRecovery:
                         run_id=run_id,
                         source_node_id="source",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"hash-{i}",
                         created_at=now,
                     )
@@ -824,6 +828,8 @@ class TestCheckpointRecovery:
                     run_id=run_id,
                     source_node_id="source",
                     row_index=0,
+                    source_row_index=0,
+                    ingest_sequence=0,
                     source_data_hash="hash-0",
                     created_at=now,
                 )
@@ -1028,6 +1034,8 @@ class TestAggregationRecovery:
                 source_node_id="source",
                 row_index=i,
                 data={"id": i, "value": (i + 1) * 100},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)

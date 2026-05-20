@@ -35,6 +35,8 @@ These examples run locally with no credentials or external services.
 | [`retention_purge`](retention_purge/) | Payload retention lifecycle and `elspeth purge` |
 | [`audit_export`](audit_export/) | Export the Landscape audit trail to JSON |
 | [`landscape_journal`](landscape_journal/) | Event journaling for real-time audit monitoring |
+| [`multi_flow`](multi_flow/) | Two independent named source flows in one run |
+| [`multi_source_queue`](multi_source_queue/) | Multiple named sources fan into a durable pass-through queue |
 | [`schema_contracts_demo`](schema_contracts_demo/) | DAG-time schema validation (`guaranteed_fields` / `required_input_fields`) |
 | [`large_scale_test`](large_scale_test/) | Performance testing with large datasets |
 | [`threshold_gate_container`](threshold_gate_container/) | Docker-packaged pipeline deployment |
@@ -92,6 +94,8 @@ These examples use ELSPETH's built-in fault injection servers to test pipeline r
 | You want to learn about... | Look at... |
 |---------------------------|-----------|
 | **How wiring works** | [`explicit_routing`](explicit_routing/) — the canonical minimal example |
+| **Named source roots** | [`multi_source_queue`](multi_source_queue/) — two sources feeding one queue |
+| **Independent flows in one run** | [`multi_flow`](multi_flow/) — two source→transform→sink branches with shared audit |
 | **Simple routing** | [`threshold_gate`](threshold_gate/) or [`boolean_routing`](boolean_routing/) |
 | **Complex decision trees** | [`deep_routing`](deep_routing/) — 5 gates, 7 sinks, 8-node-deep DAG |
 | **Fork/join patterns** | [`fork_coalesce`](fork_coalesce/) — parallel paths with merge policies |

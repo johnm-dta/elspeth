@@ -3340,18 +3340,6 @@
       "fingerprint": "c397ada9d03dc445"
     },
     {
-      "file_path": "testing/pytest_xdist_auto.py",
-      "fingerprint": "13b2d64afea58737"
-    },
-    {
-      "file_path": "testing/pytest_xdist_auto.py",
-      "fingerprint": "24415af176ca0560"
-    },
-    {
-      "file_path": "testing/pytest_xdist_auto.py",
-      "fingerprint": "4ff2752055e3b85a"
-    },
-    {
       "file_path": "tui/screens/explain_screen.py",
       "fingerprint": "03a00dbb62ba5c6b"
     },

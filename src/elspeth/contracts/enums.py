@@ -95,6 +95,7 @@ class NodeType(StrEnum):
     """
 
     SOURCE = "source"
+    QUEUE = "queue"
     TRANSFORM = "transform"
     GATE = "gate"
     AGGREGATION = "aggregation"

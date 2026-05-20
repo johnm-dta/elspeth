@@ -148,6 +148,8 @@ class LandscapeWriteRepository:
                             run_id=run_id,
                             source_node_id=source_node_id,
                             row_index=row_index,
+                            source_row_index=row_index,
+                            ingest_sequence=row_index,
                             source_data_hash=source_data_hash,
                             source_data_ref=None,
                             created_at=started_at,

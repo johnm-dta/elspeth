@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import queue
+import signal
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -27,7 +29,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import chain
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
@@ -984,6 +986,7 @@ class Orchestrator:
             clock=self._clock,
             max_workers=self._concurrency_config.max_workers if self._concurrency_config else None,
             telemetry_manager=self._telemetry,
+            scheduler=factory.scheduler,
         )
 
         return processor, coalesce_node_map, coalesce_executor
@@ -1406,9 +1409,13 @@ class Orchestrator:
         # Get execution order from graph
         execution_order = graph.topological_order()
 
-        # Build node_id -> plugin instance mapping for metadata extraction
-        # Source: single plugin from config.source
-        source_id = graph.get_source()
+        # Build node_id -> plugin instance mapping for metadata extraction.
+        source_id_map: dict[str, NodeID] = {}
+        for candidate_source_id in graph.get_sources():
+            source_info = graph.get_node_info(candidate_source_id)
+            source_name = str(source_info.config.get("source_name", "source"))
+            source_id_map[source_name] = candidate_source_id
+        source_id = next(iter(source_id_map.values()))
         transform_id_map: dict[int, NodeID] = graph.get_transform_id_map()
         sink_id_map: dict[SinkName, NodeID] = graph.get_sink_id_map()
         config_gate_id_map: dict[GateName, NodeID] = graph.get_config_gate_id_map()
@@ -1421,7 +1428,9 @@ class Orchestrator:
         # Map plugin instances to their node IDs for metadata extraction
         # Config gates and coalesce nodes don't have plugin instances (they're structural)
         # Aggregation transforms DO have instances - they're in config.transforms with node_id set
-        node_to_plugin: dict[NodeID, Any] = {source_id: config.source}
+        node_to_plugin: dict[NodeID, Any] = {}
+        for source_name, source_node_id in source_id_map.items():
+            node_to_plugin[source_node_id] = config.sources[source_name]
         for seq, transform in enumerate(config.transforms):
             if seq in transform_id_map:
                 # Regular transform - mapped by sequence number
@@ -1519,10 +1528,11 @@ class Orchestrator:
 
             # Validate source quarantine destination
             # Call module function directly (no wrapper method)
-            validate_source_quarantine_destination(
-                source=config.source,
-                available_sinks=set(config.sinks.keys()),
-            )
+            for source in config.sources.values():
+                validate_source_quarantine_destination(
+                    source=source,
+                    available_sinks=set(config.sinks.keys()),
+                )
 
             # Validate sink failsink destinations
 
@@ -1542,6 +1552,7 @@ class Orchestrator:
         return GraphArtifacts(
             edge_map=edge_map,
             source_id=source_id,
+            source_id_map=source_id_map,
             sink_id_map=sink_id_map,
             transform_id_map=transform_id_map,
             config_gate_id_map=config_gate_id_map,
@@ -1585,10 +1596,10 @@ class Orchestrator:
 
         # Assign node_ids to all plugins
         assign_plugin_node_ids(
-            source=config.source,
+            sources=config.sources,
             transforms=config.transforms,
             sinks=config.sinks,
-            source_id=source_id,
+            source_id_map=artifacts.source_id_map,
             transform_id_map=transform_id_map,
             sink_id_map=sink_id_map,
         )
@@ -1612,7 +1623,8 @@ class Orchestrator:
 
         try:
             if include_source_on_start:
-                config.source.on_start(ctx)
+                for source in config.sources.values():
+                    source.on_start(ctx)
             for transform in config.transforms:
                 transform.on_start(ctx)
             for sink in config.sinks.values():
@@ -1728,7 +1740,8 @@ class Orchestrator:
         run_id: str,
         source_id: NodeID,
         source_item: SourceRow,
-        row_index: int,
+        source_row_index: int,
+        ingest_sequence: int,
         edge_map: Mapping[tuple[NodeID, str], str],
         loop_ctx: LoopContext,
     ) -> None:
@@ -1761,14 +1774,16 @@ class Orchestrator:
         if not quarantine_sink:
             raise RouteValidationError(
                 f"Source '{config.source.name}' yielded quarantined row "
-                f"(row_index={row_index}) with missing quarantine_destination. "
+                f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
+                f"with missing quarantine_destination. "
                 f"This is a plugin bug: quarantined rows MUST specify a destination. "
                 f"Use SourceRow.quarantined(row, error, destination) factory method."
             )
         if quarantine_sink not in config.sinks:
             raise RouteValidationError(
                 f"Source '{config.source.name}' yielded quarantined row "
-                f"(row_index={row_index}) with invalid quarantine_destination='{quarantine_sink}'. "
+                f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
+                f"with invalid quarantine_destination='{quarantine_sink}'. "
                 f"No sink named '{quarantine_sink}' exists. "
                 f"Available sinks: {sorted(config.sinks.keys())}. "
                 f"This is a plugin bug: quarantine_destination must match "
@@ -1792,7 +1807,9 @@ class Orchestrator:
         quarantine_token = processor.token_manager.create_quarantine_token(
             run_id=run_id,
             source_node_id=source_id,
-            row_index=row_index,
+            row_index=ingest_sequence,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
             source_row=source_item,
             validation_error_id=validation_error_id,
         )
@@ -1935,6 +1952,99 @@ class Orchestrator:
 
     _PROGRESS_ROW_INTERVAL = 100
     _PROGRESS_TIME_INTERVAL = 5.0  # seconds
+    _SOURCE_IDLE_POLL_INTERVAL_SECONDS = 0.01
+
+    def _requires_idle_aggregation_polling(self, config: PipelineConfig) -> bool:
+        """Return True when a pipeline has time-sensitive aggregation triggers."""
+        return any(settings.trigger.has_timeout or settings.trigger.has_condition for settings in config.aggregation_settings.values())
+
+    def _process_idle_timeout_flushes(
+        self,
+        loop_ctx: LoopContext,
+        *,
+        agg_transform_lookup: Mapping[str, AggNodeEntry],
+        coalesce_node_map: Mapping[CoalesceName, NodeID],
+        source_id: NodeID,
+        source_operation_id: str,
+    ) -> None:
+        """Flush time-sensitive aggregation/coalesce state while no source row is ready."""
+        ctx = loop_ctx.ctx
+        # Match the existing pre-row timeout path: a source item has not been
+        # handed to transforms, so transform state should be established by the
+        # transform executor instead of inheriting the source operation id.
+        ctx.operation_id = None
+        timeout_result = check_aggregation_timeouts(
+            config=loop_ctx.config,
+            processor=loop_ctx.processor,
+            ctx=ctx,
+            pending_tokens=loop_ctx.pending_tokens,
+            agg_transform_lookup=dict(agg_transform_lookup),
+        )
+        loop_ctx.counters.accumulate_flush_result(timeout_result)
+
+        if loop_ctx.coalesce_executor is not None:
+            handle_coalesce_timeouts(
+                coalesce_executor=loop_ctx.coalesce_executor,
+                coalesce_node_map=dict(coalesce_node_map),
+                processor=loop_ctx.processor,
+                ctx=ctx,
+                counters=loop_ctx.counters,
+                pending_tokens=loop_ctx.pending_tokens,
+            )
+
+        self._restore_source_iteration_context(
+            ctx,
+            source_id=source_id,
+            source_operation_id=source_operation_id,
+        )
+
+    def _next_source_item_with_idle_timeout_flushes(
+        self,
+        source_iterator: Iterator[SourceRow],
+        loop_ctx: LoopContext,
+        *,
+        agg_transform_lookup: Mapping[str, AggNodeEntry],
+        coalesce_node_map: Mapping[CoalesceName, NodeID],
+        source_id: NodeID,
+        source_operation_id: str,
+    ) -> SourceRow:
+        """Fetch the next source row while periodically flushing idle timeouts."""
+        result_queue: queue.Queue[tuple[str, SourceRow | BaseException | None]] = queue.Queue(maxsize=1)
+
+        self._restore_source_iteration_context(
+            loop_ctx.ctx,
+            source_id=source_id,
+            source_operation_id=source_operation_id,
+        )
+
+        def fetch_next() -> None:
+            try:
+                result_queue.put(("row", next(source_iterator)))
+            except StopIteration:
+                result_queue.put(("stop", None))
+            except BaseException as exc:  # pragma: no cover - re-raised on orchestrator thread
+                result_queue.put(("error", exc))
+
+        threading.Thread(target=fetch_next, daemon=True).start()
+
+        while True:
+            try:
+                kind, payload = result_queue.get(timeout=self._SOURCE_IDLE_POLL_INTERVAL_SECONDS)
+            except queue.Empty:
+                self._process_idle_timeout_flushes(
+                    loop_ctx,
+                    agg_transform_lookup=agg_transform_lookup,
+                    coalesce_node_map=coalesce_node_map,
+                    source_id=source_id,
+                    source_operation_id=source_operation_id,
+                )
+                continue
+
+            if kind == "stop":
+                raise StopIteration
+            if kind == "error":
+                raise cast(BaseException, payload)
+            return cast(SourceRow, payload)
 
     def _maybe_emit_progress(
         self,
@@ -2083,6 +2193,7 @@ class Orchestrator:
         config: PipelineConfig,
         run_id: str,
         ctx: PluginContext,
+        source: SourceProtocol | None = None,
     ) -> Iterator[SourceRow]:
         """Execute SOURCE phase: emit lifecycle events, load source, handle errors.
 
@@ -2090,8 +2201,9 @@ class Orchestrator:
         (file not found, auth failure) are emitted as PhaseError before re-raising.
         """
 
+        active_source = source or config.source
         phase_start = time.perf_counter()
-        self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=config.source.name))
+        self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=active_source.name))
         self._emit_telemetry(
             PhaseChanged(
                 timestamp=datetime.now(UTC),
@@ -2102,15 +2214,15 @@ class Orchestrator:
         )
 
         try:
-            with self._span_factory.source_span(config.source.name):
-                source_iterator = iter(config.source.load(ctx))
+            with self._span_factory.source_span(active_source.name):
+                source_iterator = iter(active_source.load(ctx))
                 try:
                     first_row = next(source_iterator)
                 except StopIteration:
                     self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
                     return iter(())
         except Exception as e:
-            self._emit_phase_error(PipelinePhase.SOURCE, e, target=config.source.name)
+            self._emit_phase_error(PipelinePhase.SOURCE, e, target=active_source.name)
             raise
 
         self._events.emit(PhaseCompleted(phase=PipelinePhase.SOURCE, duration_seconds=time.perf_counter() - phase_start))
@@ -2189,7 +2301,27 @@ class Orchestrator:
 
             interrupted_by_shutdown = False
             try:
-                for row_index, source_item in enumerate(source_iterator):
+                source_row_index = 0
+                use_idle_polling = self._requires_idle_aggregation_polling(config)
+                while True:
+                    try:
+                        if use_idle_polling:
+                            source_item = self._next_source_item_with_idle_timeout_flushes(
+                                source_iterator,
+                                loop_ctx,
+                                agg_transform_lookup=agg_transform_lookup,
+                                coalesce_node_map=coalesce_node_map,
+                                source_id=source_id,
+                                source_operation_id=source_operation_id,
+                            )
+                        else:
+                            source_item = next(source_iterator)
+                    except StopIteration:
+                        break
+
+                    current_source_row_index = source_row_index
+                    source_row_index += 1
+                    ingest_sequence = counters.rows_processed
                     counters.rows_processed += 1
 
                     # Record field resolution on first iteration (generators execute body on first next())
@@ -2204,7 +2336,8 @@ class Orchestrator:
                             run_id,
                             source_id,
                             source_item,
-                            row_index,
+                            current_source_row_index,
+                            ingest_sequence,
                             edge_map,
                             loop_ctx,
                         )
@@ -2244,10 +2377,14 @@ class Orchestrator:
                     counters.accumulate_flush_result(timeout_result)
 
                     results = processor.process_row(
-                        row_index=row_index,
+                        row_index=ingest_sequence,
                         source_row=source_item,
                         transforms=config.transforms,
                         ctx=ctx,
+                        source_node_id=source_id,
+                        source_plugin=config.source,
+                        source_row_index=current_source_row_index,
+                        ingest_sequence=ingest_sequence,
                     )
                     if results:
                         loop_ctx.last_token_id = results[-1].token.token_id
@@ -2292,6 +2429,24 @@ class Orchestrator:
                     field_resolution_recorded,
                     schema_contract_recorded,
                     interrupted_by_shutdown=interrupted_by_shutdown,
+                )
+                source_name = next(iter(config.sources))
+                field_resolution = config.source.get_field_resolution()
+                resolution_mapping: Mapping[str, str] | None = None
+                normalization_version: str | None = None
+                if field_resolution is not None:
+                    resolution_mapping, normalization_version = field_resolution
+                factory.run_lifecycle.record_run_source(
+                    run_id=run_id,
+                    source_node_id=source_id,
+                    source_name=source_name,
+                    plugin_name=config.source.name,
+                    config_hash=stable_hash(config.source.config),
+                    source_schema_json=json.dumps(config.source.output_schema.model_json_schema()),
+                    schema_contract=config.source.get_schema_contract(),
+                    field_resolution_mapping=resolution_mapping,
+                    normalization_version=normalization_version,
+                    lifecycle_state="interrupted" if interrupted_by_shutdown else "loaded",
                 )
 
             except Exception as e:
@@ -2353,14 +2508,38 @@ class Orchestrator:
 
         try:
             # 3. Source + Process phase
-            loop_result = self._run_main_processing_loop(
-                loop_ctx,
-                factory,
-                run_id,
-                artifacts.source_id,
-                artifacts.edge_map,
-                shutdown_event=shutdown_event,
-            )
+            loop_result: LoopResult | None = None
+            for source_name, source_id in artifacts.source_id_map.items():
+                source_config = replace(
+                    config,
+                    source=config.sources[source_name],
+                    sources={source_name: config.sources[source_name]},
+                )
+                source_loop_ctx = LoopContext(
+                    counters=loop_ctx.counters,
+                    pending_tokens=loop_ctx.pending_tokens,
+                    processor=loop_ctx.processor,
+                    ctx=loop_ctx.ctx,
+                    config=source_config,
+                    agg_transform_lookup=loop_ctx.agg_transform_lookup,
+                    coalesce_executor=loop_ctx.coalesce_executor,
+                    coalesce_node_map=loop_ctx.coalesce_node_map,
+                    last_token_id=loop_ctx.last_token_id,
+                )
+                loop_result = self._run_main_processing_loop(
+                    source_loop_ctx,
+                    factory,
+                    run_id,
+                    source_id,
+                    artifacts.edge_map,
+                    shutdown_event=shutdown_event,
+                )
+                loop_ctx.last_token_id = source_loop_ctx.last_token_id
+                if loop_result.interrupted:
+                    break
+
+            if loop_result is None:
+                raise OrchestrationInvariantError("Pipeline has no sources to process")
 
             # 4. Sink writes — outside source_load track_operation context.
             # Each sink write has its own track_operation (sink_write) in SinkExecutor.

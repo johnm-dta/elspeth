@@ -258,6 +258,7 @@ from elspeth.contracts.routing import (
     RoutingAction,
     RoutingSpec,
 )
+from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
 
 # Schema contracts — core types
 from elspeth.contracts.schema_contract import (
@@ -412,6 +413,9 @@ __all__ = [  # Grouped by category for readability
     "error_edge_label",
     # identity
     "TokenInfo",
+    # scheduler
+    "TokenWorkItem",
+    "TokenWorkStatus",
     # checkpoint
     "AggregationCheckpointState",
     "AggregationNodeCheckpoint",

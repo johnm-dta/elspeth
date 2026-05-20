@@ -22,10 +22,11 @@ from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.engine.orchestrator import prepare_for_run
+from elspeth.engine.orchestrator import PipelineConfig, prepare_for_run
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.core import Orchestrator
-from elspeth.engine.orchestrator.types import ExecutionCounters, ResumeState
+from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext, ResumeState
+from elspeth.testing import make_row_result
 from tests.fixtures.landscape import make_landscape_db
 from tests.fixtures.stores import MockPayloadStore
 
@@ -142,6 +143,42 @@ class TestResumeFinalizesAsFailed:
         assert found_failed, (
             f"Run should be finalized as FAILED when resume fails with non-shutdown exception. finalize_run calls: {finalize_calls}"
         )
+
+    def test_resume_loop_drains_scheduler_work_before_replaying_rows(self) -> None:
+        """Persisted scheduler work supersedes the old unprocessed-row replay path."""
+        orch = _make_orchestrator(make_landscape_db())
+        processor = MagicMock()
+        processor.has_scheduled_work.side_effect = [True, False]
+        processor.drain_scheduled_work.return_value = [make_row_result({"value": 1}, sink_name="default")]
+        processor.process_existing_row.side_effect = AssertionError("source row replay must not run while scheduler work exists")
+        config = PipelineConfig(
+            source=MagicMock(),
+            transforms=(),
+            sinks={"default": MagicMock()},
+        )
+        loop_ctx = LoopContext(
+            counters=ExecutionCounters(),
+            pending_tokens={"default": []},
+            processor=processor,
+            ctx=MagicMock(),
+            config=config,
+            agg_transform_lookup={},
+            coalesce_executor=None,
+            coalesce_node_map={},
+        )
+
+        interrupted = orch._run_resume_processing_loop(
+            loop_ctx,
+            unprocessed_rows=(("row-should-not-replay", 0, {"value": 1}),),
+            schema_contract=MagicMock(),
+        )
+
+        assert interrupted is False
+        processor.drain_scheduled_work.assert_called_once_with(loop_ctx.ctx)
+        processor.process_existing_row.assert_not_called()
+        assert loop_ctx.counters.rows_processed == 1
+        assert loop_ctx.counters.rows_succeeded == 1
+        assert len(loop_ctx.pending_tokens["default"]) == 1
 
     def test_resume_treats_empty_coalesce_checkpoint_as_all_rows_processed(self) -> None:
         """Empty restored coalesce state must not force a resume processing pass."""
@@ -352,6 +389,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
         config.transforms = [tracked_transform]
         config.sinks = {}
         config.source = MagicMock()
+        config.sources = {"source": config.source}
 
         cleanup_plugins(config, ctx)
 
@@ -382,6 +420,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
         tracked_transform.name = "tracked"
         tracked_transform.node_id = None
         config.source = tracked_source
+        config.sources = {"source": tracked_source}
         config.transforms = [tracked_transform]
         config.sinks = {}
         config.config = {}
@@ -395,6 +434,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
         artifacts = GraphArtifacts(
             edge_map={},
             source_id=NodeID("source-1"),
+            source_id_map={"source": NodeID("source-1")},
             sink_id_map={},
             transform_id_map={0: NodeID("transform-1")},
             config_gate_id_map={},

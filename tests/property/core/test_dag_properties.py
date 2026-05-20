@@ -311,8 +311,8 @@ class TestValidationFailureProperties:
         with pytest.raises(GraphValidationError, match="source"):
             graph.validate()
 
-    def test_validate_rejects_multiple_sources(self) -> None:
-        """Property: Graphs with multiple sources are rejected."""
+    def test_validate_allows_multiple_sources_when_all_roots_reach_sink(self) -> None:
+        """Property: Multiple source roots are valid when all roots reach a sink."""
         graph = ExecutionGraph()
         graph.add_node("source1", node_type=NodeType.SOURCE, plugin_name="test")
         graph.add_node("source2", node_type=NodeType.SOURCE, plugin_name="test")
@@ -320,10 +320,7 @@ class TestValidationFailureProperties:
         graph.add_edge("source1", "sink", label="path1")
         graph.add_edge("source2", "sink", label="path2")
 
-        import pytest
-
-        with pytest.raises(GraphValidationError, match="exactly one source"):
-            graph.validate()
+        graph.validate()
 
     def test_validate_rejects_no_sink(self) -> None:
         """Property: Graphs without sink are rejected."""

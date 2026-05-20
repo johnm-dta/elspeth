@@ -120,11 +120,14 @@ def build_runtime_graph(settings: Any, bundle: PluginBundle) -> ExecutionGraph:
     return ExecutionGraph.from_plugin_instances(
         source=bundle.source,
         source_settings=bundle.source_settings,
+        sources=bundle.sources,
+        source_settings_map=bundle.source_settings_map,
         transforms=bundle.transforms,
         sinks=bundle.sinks,
         aggregations=bundle.aggregations,
         gates=list(settings.gates),
         coalesce_settings=(list(settings.coalesce) if settings.coalesce else None),
+        queues=settings.queues,
     )
 
 

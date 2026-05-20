@@ -195,23 +195,10 @@ def check_aggregation_timeouts(
 ) -> AggregationFlushResult:
     """Check and flush any aggregations whose timeout has expired.
 
-    Called BEFORE processing each row to ensure timeouts fire during active
-    processing, not just at end-of-source. Checking BEFORE buffering ensures
-    timed-out batches don't include the newly arriving row.
-
-    Before this was added, should_flush() was only called from buffer_row(),
-    meaning timeouts never fired during idle periods between rows.
-
-    KNOWN LIMITATION (True Idle):
-    Timeouts fire when the next row arrives, not during "true idle" periods.
-    If no rows arrive, buffered data will not flush until either:
-    1. A new row arrives (triggering this timeout check), or
-    2. The source completes (triggering flush_remaining_aggregation_buffers)
-
-    Example: If timeout_seconds=5 and rows stop arriving at T=10, the batch
-    won't flush until either a new row arrives or the source ends. For
-    streaming sources that may never end, consider using count triggers or
-    implementing periodic polling at the source level.
+    Called BEFORE processing each row and by the orchestrator's idle source
+    polling path. Checking BEFORE buffering ensures timed-out batches don't
+    include the newly arriving row; polling while source iteration waits lets
+    timeout batches flush even when no additional row arrives.
 
     Routing uses result.sink_name (set by on_success in the processor) rather
     than a default_sink_name parameter.

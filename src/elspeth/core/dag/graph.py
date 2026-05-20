@@ -52,6 +52,7 @@ if TYPE_CHECKING:
         AggregationSettings,
         CoalesceSettings,
         GateSettings,
+        QueueSettings,
         SourceSettings,
     )
     from elspeth.core.dag.models import WiredTransform
@@ -282,11 +283,12 @@ class ExecutionGraph:
 
         Validates:
         1. Graph is acyclic (no cycles)
-        2. Exactly one source node exists
+        2. One or more source nodes exist
         3. At least one sink node exists
-        4. All nodes are reachable from source (no disconnected/orphaned nodes)
+        4. All nodes are reachable from at least one source (no disconnected/orphaned nodes)
         5. Edge labels are unique per source node
         6. Every gate→sink MOVE edge has a corresponding route label entry
+        7. Fan-in to ordinary executable nodes is explicit through QUEUE nodes
 
         Does NOT check schema compatibility - plugins validate their own
         schemas during construction.
@@ -304,21 +306,22 @@ class ExecutionGraph:
             except nx.NetworkXNoCycle as exc:
                 raise GraphValidationError("Graph contains a cycle") from exc
 
-        # Check for exactly one source
+        # Check for one or more sources
         # All nodes have "info" - added via add_node(), direct access is safe
         sources = [node_id for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == NodeType.SOURCE]
-        if len(sources) != 1:
-            raise GraphValidationError(f"Graph must have exactly one source, found {len(sources)}")
+        if not sources:
+            raise GraphValidationError("Graph must have at least one source")
 
         # Check for at least one sink
         sinks = self.get_sinks()
         if len(sinks) < 1:
             raise GraphValidationError("Graph must have at least one sink")
 
-        # Check for unreachable nodes (nodes not reachable from source)
-        source_id = sources[0]  # We already validated exactly one source exists
-        reachable = nx.descendants(self._graph, source_id)
-        reachable.add(source_id)  # Include source itself in reachable set
+        # Check for unreachable nodes (nodes not reachable from any source)
+        reachable: set[str] = set()
+        for source_id in sources:
+            reachable.update(nx.descendants(self._graph, source_id))
+            reachable.add(source_id)
 
         all_nodes = set(self._graph.nodes())
         unreachable = all_nodes - reachable
@@ -329,8 +332,25 @@ class ExecutionGraph:
             raise GraphValidationError(
                 f"Graph validation failed: {len(unreachable)} unreachable node(s) detected:\n"
                 f"  {', '.join(unreachable_details)}\n"
-                f"All nodes must be reachable from the source node '{source_id}'."
+                f"All nodes must be reachable from at least one source node."
             )
+
+        for node_id_str, node_attrs in self._graph.nodes(data=True):
+            node_info = cast(NodeInfo, node_attrs["info"])
+            if node_info.node_type in {NodeType.QUEUE, NodeType.SINK, NodeType.COALESCE}:
+                continue
+            incoming_move_predecessors = {
+                from_id
+                for from_id, _to_id, _key, edge_data in self._graph.in_edges(node_id_str, keys=True, data=True)
+                if edge_data["mode"] == RoutingMode.MOVE
+            }
+            if len(incoming_move_predecessors) > 1:
+                raise GraphValidationError(
+                    f"Node '{node_id_str}' has fan-in from multiple producers without a queue. "
+                    "Route multiple producers through an explicit queue node before ordinary processing.",
+                    component_id=node_id_str,
+                    component_type=node_info.node_type.value,
+                )
 
         # Check outgoing edge labels are unique per node.
         # The orchestrator's edge_map keys by (from_node, label), so duplicate
@@ -429,6 +449,10 @@ class ExecutionGraph:
         if len(sources) != 1:
             raise GraphValidationError(f"Expected exactly 1 source node, found {len(sources)}. This indicates a graph construction bug.")
         return sources[0]
+
+    def get_sources(self) -> list[NodeID]:
+        """Get all source node IDs."""
+        return [NodeID(node_id) for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == NodeType.SOURCE]
 
     def get_sinks(self) -> list[NodeID]:
         """Get all sink node IDs.
@@ -550,8 +574,10 @@ class ExecutionGraph:
             Node ID of the first processing node (transform/gate/aggregation),
             or None for source-only pipelines.
         """
-        source_id = self.get_source()
-        return self.get_next_node(source_id)
+        sources = self.get_sources()
+        if len(sources) != 1:
+            return None
+        return self.get_next_node(sources[0])
 
     def get_next_node(self, node_id: NodeID) -> NodeID | None:
         """Follow the continue MOVE edge to the next processing node.
@@ -586,12 +612,16 @@ class ExecutionGraph:
         if self._pipeline_nodes is not None:
             return list(self._pipeline_nodes)
 
-        first_node = self.get_first_transform_node()
-        if first_node is None:
+        sources = self.get_sources()
+        if not sources:
             return []
 
         reachable: set[NodeID] = set()
-        pending: list[NodeID] = [first_node]
+        pending: list[NodeID] = []
+        for source_id in sources:
+            next_node = self.get_next_node(source_id)
+            if next_node is not None:
+                pending.append(next_node)
         while pending:
             current = pending.pop()
             if current in reachable:
@@ -609,10 +639,10 @@ class ExecutionGraph:
         return [node_id for node_id in (NodeID(node) for node in self.topological_order()) if node_id in reachable]
 
     def build_step_map(self) -> dict[NodeID, int]:
-        """Build node -> audit step map (source=0, processing nodes start at 1)."""
-        source_id = self.get_source()
+        """Build node -> audit step map (sources=0, processing nodes start at 1)."""
+        source_ids = self.get_sources()
 
-        step_map: dict[NodeID, int] = {source_id: 0}
+        step_map: dict[NodeID, int] = dict.fromkeys(source_ids, 0)
         for idx, node_id in enumerate(self.get_pipeline_node_sequence(), start=1):
             step_map[node_id] = idx
 
@@ -667,13 +697,17 @@ class ExecutionGraph:
     @classmethod
     def from_plugin_instances(
         cls,
-        source: SourceProtocol,
-        source_settings: SourceSettings,
-        transforms: Sequence[WiredTransform],
-        sinks: Mapping[str, SinkProtocol],
-        aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]],
-        gates: Sequence[GateSettings],
+        source: SourceProtocol | None = None,
+        source_settings: SourceSettings | None = None,
+        transforms: Sequence[WiredTransform] = (),
+        sinks: Mapping[str, SinkProtocol] | None = None,
+        aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]] | None = None,
+        gates: Sequence[GateSettings] = (),
         coalesce_settings: Sequence[CoalesceSettings] | None = None,
+        *,
+        sources: Mapping[str, SourceProtocol] | None = None,
+        source_settings_map: Mapping[str, SourceSettings] | None = None,
+        queues: Mapping[str, QueueSettings] | None = None,
     ) -> ExecutionGraph:
         """Build ExecutionGraph from plugin instances.
 
@@ -691,6 +725,9 @@ class ExecutionGraph:
             aggregations: Dict of agg_name -> (transform_instance, AggregationSettings)
             gates: Config-driven gate settings
             coalesce_settings: Coalesce configs for fork/join patterns
+            sources: Named source plugin instances for multi-source graphs
+            source_settings_map: Source settings keyed by the same source names
+            queues: Declared pass-through scheduling queues
 
         Returns:
             ExecutionGraph with schemas populated
@@ -711,6 +748,9 @@ class ExecutionGraph:
             aggregations=aggregations,
             gates=gates,
             coalesce_settings=coalesce_settings,
+            sources=sources,
+            source_settings_map=source_settings_map,
+            queues=queues,
         )
 
     # ===== PUBLIC SETTERS (construction-time) =====

@@ -70,6 +70,16 @@ def setup_resume_context(
     """
     # Get explicit node ID mappings from graph
     source_id = graph.get_source()
+    source_id_map: dict[str, NodeID] = {}
+    for candidate_source_id in graph.get_sources():
+        source_info = graph.get_node_info(candidate_source_id)
+        if "source_name" not in source_info.config:
+            raise OrchestrationInvariantError(
+                f"DAG source node '{source_info.node_id}' is missing 'source_name' in its config. "
+                f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
+                f"This is a graph-construction bug — node config keys: {sorted(source_info.config.keys())}."
+            )
+        source_id_map[str(source_info.config["source_name"])] = candidate_source_id
     sink_id_map = graph.get_sink_id_map()
     transform_id_map = graph.get_transform_id_map()
     config_gate_id_map = graph.get_config_gate_id_map()
@@ -122,6 +132,7 @@ def setup_resume_context(
     return GraphArtifacts(
         edge_map=edge_map,
         source_id=source_id,
+        source_id_map=source_id_map,
         sink_id_map=sink_id_map,
         transform_id_map=transform_id_map,
         config_gate_id_map=config_gate_id_map,
@@ -180,6 +191,17 @@ def run_resume_processing_loop(
     # honor it before any end-of-source flush work so buffered state is
     # checkpointed again instead of being flushed to sinks.
     interrupted_by_shutdown = shutdown_event is not None and shutdown_event.is_set()
+
+    if not interrupted_by_shutdown and processor.has_scheduled_work():
+        results = processor.drain_scheduled_work(ctx)
+        counters.rows_processed += len({result.token.row_id for result in results})
+        accumulate_row_outcomes(results, counters, pending_tokens)
+        if processor.has_scheduled_work():
+            raise OrchestrationInvariantError(
+                f"Resume for run '{processor.run_id}' left non-terminal scheduler work after draining READY items. "
+                "Blocked or future WAITING scheduler state must be recovered explicitly before run completion."
+            )
+        unprocessed_rows = ()
 
     # Process each unprocessed row. Rows already exist in DB; only tokens need to
     # be created. Dispatch: partial-fork/expand/coalesce rows use mid-DAG continuation;

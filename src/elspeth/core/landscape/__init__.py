@@ -84,8 +84,10 @@ from elspeth.core.landscape.schema import (
     nodes_table,
     routing_events_table,
     rows_table,
+    run_sources_table,
     runs_table,
     token_parents_table,
+    token_work_items_table,
     tokens_table,
 )
 from elspeth.core.landscape.write_repository import LandscapeWriteRepository
@@ -150,9 +152,11 @@ __all__ = [
     "nodes_table",
     "routing_events_table",
     "rows_table",
+    "run_sources_table",
     "runs_table",
     "serialize_datetime",
     "token_parents_table",
+    "token_work_items_table",
     "tokens_table",
     "update_grade_after_purge",
 ]

@@ -16,7 +16,8 @@ This avoids the anti-pattern of testing mocks instead of behavior.
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -134,6 +135,7 @@ def _make_processor(
     restored_aggregation_state: dict[NodeID, AggregationCheckpointState] | None = None,
     telemetry_manager: Any = None,
     sink_names: frozenset[str] | None = None,
+    scheduler: Any = None,
 ) -> RowProcessor:
     """Create a RowProcessor with sensible defaults."""
     coalesce_nodes = dict(coalesce_node_ids or {})
@@ -185,6 +187,7 @@ def _make_processor(
         restored_aggregation_state=restored_aggregation_state,
         telemetry_manager=telemetry_manager,
         sink_names=sink_names,
+        scheduler=scheduler,
     )
 
 
@@ -2741,6 +2744,80 @@ class TestDrainWorkQueueIterationGuard:
     def test_max_iterations_constant_is_reasonable(self) -> None:
         """MAX_WORK_QUEUE_ITERATIONS should be at least 1000."""
         assert MAX_WORK_QUEUE_ITERATIONS >= 1000
+
+
+class TestDurableSchedulerResumeDrain:
+    """Tests for draining scheduler work created before this processor existed."""
+
+    def test_drains_persisted_ready_work_without_source_replay(self) -> None:
+        """A fresh processor rehydrates READY scheduler work from durable row payloads."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-ready")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        success_result = TransformResult.success(
+            make_row({"value": 42, "resumed": True}),
+            success_reason={"action": "resume_drain"},
+        )
+
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
+            assert token.token_id == "token-ready"
+            assert token.row_data.to_dict() == {"value": 42}
+            return (success_result, token, None)
+
+        with patch.object(processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+        assert results[0].token.token_id == "token-ready"
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            statuses = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
+            )
+        assert statuses == ["terminal"]
 
 
 # =============================================================================

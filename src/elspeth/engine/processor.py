@@ -15,6 +15,7 @@ import logging
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
@@ -71,10 +72,12 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import FailureInfo
 from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
+from elspeth.contracts.scheduler import TokenWorkItem
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
+from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.executors import (
     AggregationExecutor,
@@ -329,6 +332,9 @@ class RowProcessor:
         clock: Clock | None = None,
         max_workers: int | None = None,
         telemetry_manager: TelemetryManagerProtocol | None = None,
+        scheduler: TokenSchedulerRepository | None = None,
+        scheduler_lease_owner: str | None = None,
+        scheduler_lease_seconds: int = 300,
     ) -> None:
         """Initialize processor.
 
@@ -360,6 +366,9 @@ class RowProcessor:
             max_workers: Maximum concurrent workers for transform execution (None = no limit)
             telemetry_manager: Optional TelemetryManager for emitting telemetry events.
                                If None, telemetry emission is disabled.
+            scheduler: Optional durable token scheduler. When present, every
+                continuation is persisted, leased, and terminally marked as it
+                advances; when absent, the legacy in-memory queue remains active.
         """
         self._execution = execution
         self._data_flow = data_flow
@@ -440,6 +449,9 @@ class RowProcessor:
             clock=self._clock,
         )
         self._telemetry_manager = telemetry_manager
+        self._scheduler = scheduler
+        self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}"
+        self._scheduler_lease_seconds = scheduler_lease_seconds
 
         # Restore aggregation state if provided (crash recovery / resume).
         # Multiple node_id keys may map to the same state — deduplicate by
@@ -457,6 +469,11 @@ class RowProcessor:
     def token_manager(self) -> TokenManager:
         """Expose token manager for orchestrator to create tokens for quarantined rows."""
         return self._token_manager
+
+    @property
+    def run_id(self) -> str:
+        """Run identifier owned by this processor."""
+        return self._run_id
 
     def resolve_node_step(self, node_id: NodeID) -> int:
         """Resolve a node ID to processor step index (0-indexed)."""
@@ -1692,6 +1709,7 @@ class RowProcessor:
         token: TokenInfo,
         input_data: dict[str, object],
         status: NodeStateStatus,
+        source_node_id: NodeID | None = None,
         error: ExecutionError | None = None,
     ) -> None:
         """Record the source node state for a token.
@@ -1699,9 +1717,10 @@ class RowProcessor:
         Source "processing" already happened in the plugin iterator, so the
         state is recorded immediately as COMPLETED or FAILED with duration 0.
         """
+        effective_source_node_id = source_node_id or self._source_node_id
         source_state = self._execution.begin_node_state(
             token_id=token.token_id,
-            node_id=self._source_node_id,
+            node_id=effective_source_node_id,
             run_id=self._run_id,
             step_index=0,
             input_data=input_data,
@@ -1815,6 +1834,7 @@ class RowProcessor:
         transforms: Sequence[Any],
         ctx: PluginContext,
         *,
+        source_node_id: NodeID | None = None,
         coalesce_node_id: NodeID | None,
         coalesce_name: CoalesceName | None,
     ) -> list[RowResult]:
@@ -1835,15 +1855,17 @@ class RowProcessor:
         Returns:
             List of RowResults, one per terminal token
         """
+        effective_source_node_id = source_node_id or self._source_node_id
         self._record_source_node_state(
             token=token,
             input_data=input_data,
             status=NodeStateStatus.COMPLETED,
+            source_node_id=effective_source_node_id,
         )
 
-        if transforms and self._first_transform_node_id is None:
-            raise OrchestrationInvariantError("Traversal context is missing first_transform_node_id for non-empty transform pipeline")
-        initial_node_id = self._first_transform_node_id if self._first_transform_node_id is not None else self._source_node_id
+        initial_node_id = self._node_to_next.get(effective_source_node_id) or self._first_transform_node_id or effective_source_node_id
+        if transforms and initial_node_id == effective_source_node_id:
+            raise OrchestrationInvariantError("Traversal context is missing a source continuation for non-empty transform pipeline")
         return self._drain_work_queue(
             self._nav.create_work_item(
                 token=token,
@@ -1863,6 +1885,10 @@ class RowProcessor:
         *,
         coalesce_node_id: NodeID | None = None,
         coalesce_name: CoalesceName | None = None,
+        source_node_id: NodeID | None = None,
+        source_plugin: SourceProtocol | None = None,
+        source_row_index: int | None = None,
+        ingest_sequence: int | None = None,
     ) -> list[RowResult]:
         """Process a row through all transforms.
 
@@ -1881,28 +1907,32 @@ class RowProcessor:
         Returns:
             List of RowResults, one per terminal token (parent + children)
         """
+        effective_source_node_id = source_node_id or self._source_node_id
         # Create initial token from SourceRow
         # TokenManager.create_initial_token() expects SourceRow and converts to PipelineRow
         token = self._token_manager.create_initial_token(
             run_id=self._run_id,
-            source_node_id=self._source_node_id,
+            source_node_id=effective_source_node_id,
             row_index=row_index,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
             source_row=source_row,
         )
 
         # Valid SourceRows always carry mapping-shaped row payloads; once the
         # row enters the processor we treat the values as opaque objects.
         source_input = cast(dict[str, object], source_row.row)
-        if self._source_plugin is not None:
+        effective_source_plugin = source_plugin or self._source_plugin
+        if effective_source_plugin is not None:
             try:
                 run_boundary_checks(
                     inputs=BoundaryInputs(
-                        plugin=self._source_plugin,
-                        node_id=str(self._source_node_id),
+                        plugin=effective_source_plugin,
+                        node_id=str(effective_source_node_id),
                         run_id=self._run_id,
                         row_id=token.row_id,
                         token_id=token.token_id,
-                        static_contract=self._source_plugin.declared_guaranteed_fields,
+                        static_contract=effective_source_plugin.declared_guaranteed_fields,
                         row_data=source_input,
                         row_contract=source_row.contract,
                     ),
@@ -1926,6 +1956,7 @@ class RowProcessor:
             input_data=source_input,
             transforms=transforms,
             ctx=ctx,
+            source_node_id=effective_source_node_id,
             coalesce_node_id=coalesce_node_id,
             coalesce_name=coalesce_name,
         )
@@ -2362,10 +2393,40 @@ class RowProcessor:
     ) -> list[RowResult]:
         """Drain the work queue, processing tokens until empty.
 
-        Implements breadth-first DAG traversal. Each _process_single_token call
-        may produce child work items (from forks, expansions, etc.) which are
-        appended to the queue.
+        Implements breadth-first DAG traversal. With a scheduler repository,
+        each work item is durably persisted and leased before it advances; child
+        continuations are persisted as READY work before the current lease is
+        marked TERMINAL. Without a scheduler repository, this preserves the
+        legacy in-memory queue behavior used by isolated processor unit tests.
         """
+        if self._scheduler is not None:
+            return self._drain_durable_work_queue(initial_item, ctx)
+
+        return self._drain_in_memory_work_queue(initial_item, ctx)
+
+    def drain_scheduled_work(self, ctx: PluginContext) -> list[RowResult]:
+        """Advance already-persisted READY scheduler work for this run.
+
+        This is the recovery entry point: a fresh processor can resume work
+        items that were persisted by an earlier process without re-reading the
+        source or re-running source-boundary validation.
+        """
+        if self._scheduler is None:
+            raise OrchestrationInvariantError("Cannot drain scheduled work without a scheduler repository")
+        return self._drain_scheduler_claims(ctx=ctx, pending_items={})
+
+    def has_scheduled_work(self) -> bool:
+        """Return whether this run has non-terminal durable scheduler work."""
+        if self._scheduler is None:
+            return False
+        return self._scheduler.count_active_work(run_id=self._run_id) > 0
+
+    def _drain_in_memory_work_queue(
+        self,
+        initial_item: WorkItem,
+        ctx: PluginContext,
+    ) -> list[RowResult]:
+        """Drain the legacy in-memory work queue."""
         work_queue: deque[WorkItem] = deque([initial_item])
         results: list[RowResult] = []
         iterations = 0
@@ -2395,6 +2456,164 @@ class RowProcessor:
                 work_queue.extend(child_items)
 
         return results
+
+    def _drain_durable_work_queue(
+        self,
+        initial_item: WorkItem,
+        ctx: PluginContext,
+    ) -> list[RowResult]:
+        """Drain the scheduler-backed work queue for a single source token."""
+        if self._scheduler is None:
+            raise OrchestrationInvariantError("Durable work queue requested without a scheduler repository")
+
+        pending_items: dict[str, WorkItem] = {}
+
+        self._enqueue_scheduler_work_item(initial_item, pending_items)
+
+        with self._spans.row_span(initial_item.token.row_id, initial_item.token.token_id):
+            results = self._drain_scheduler_claims(ctx=ctx, pending_items=pending_items)
+
+        return results
+
+    def _drain_scheduler_claims(
+        self,
+        *,
+        ctx: PluginContext,
+        pending_items: dict[str, WorkItem],
+    ) -> list[RowResult]:
+        """Claim and advance scheduler work until no READY work remains."""
+        if self._scheduler is None:
+            raise OrchestrationInvariantError("Cannot claim scheduler work without a scheduler repository")
+
+        results: list[RowResult] = []
+        iterations = 0
+
+        while True:
+            iterations += 1
+            if iterations > MAX_WORK_QUEUE_ITERATIONS:
+                raise RuntimeError(f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. Possible infinite loop in pipeline.")
+
+            now = datetime.now(UTC)
+            self._scheduler.release_waiting(run_id=self._run_id, now=now)
+            self._scheduler.recover_expired_leases(run_id=self._run_id, now=now)
+            claimed = self._scheduler.claim_ready(
+                run_id=self._run_id,
+                lease_owner=self._scheduler_lease_owner,
+                lease_seconds=self._scheduler_lease_seconds,
+                now=now,
+            )
+            if claimed is None:
+                if pending_items:
+                    raise OrchestrationInvariantError(
+                        f"Scheduler has {len(pending_items)} in-memory continuations for run {self._run_id!r} "
+                        "but no READY work item could be claimed"
+                    )
+                break
+
+            item = pending_items.pop(claimed.work_item_id, None)
+            if item is None:
+                item = self._work_item_from_scheduler(claimed)
+            try:
+                result, child_items = self._process_single_token(
+                    token=item.token,
+                    ctx=ctx,
+                    current_node_id=item.current_node_id,
+                    coalesce_node_id=item.coalesce_node_id,
+                    coalesce_name=item.coalesce_name,
+                    on_success_sink=item.on_success_sink,
+                )
+            except Exception:
+                self._scheduler.mark_failed(work_item_id=claimed.work_item_id, now=datetime.now(UTC))
+                raise
+
+            if result is not None:
+                if isinstance(result, tuple):
+                    results.extend(result)
+                else:
+                    results.append(result)
+
+            for child_item in child_items:
+                self._enqueue_scheduler_work_item(child_item, pending_items)
+
+            if result is None and not child_items:
+                self._scheduler.mark_blocked(
+                    work_item_id=claimed.work_item_id,
+                    queue_key=self._queue_key_for_blocked_item(item),
+                    barrier_key=self._barrier_key_for_blocked_item(item),
+                    now=datetime.now(UTC),
+                )
+                continue
+
+            self._scheduler.mark_terminal(work_item_id=claimed.work_item_id, now=datetime.now(UTC))
+
+        return results
+
+    def _enqueue_scheduler_work_item(
+        self,
+        item: WorkItem,
+        pending_items: dict[str, WorkItem],
+    ) -> TokenWorkItem:
+        """Persist a READY scheduler item and retain the live token payload."""
+        if self._scheduler is None:
+            raise OrchestrationInvariantError("Cannot enqueue scheduler work without a scheduler repository")
+        scheduled = self._scheduler.enqueue_ready(
+            run_id=self._run_id,
+            token_id=item.token.token_id,
+            row_id=item.token.row_id,
+            node_id=self._scheduler_node_id(item.current_node_id),
+            step_index=self._scheduler_step_index(item.current_node_id),
+            ingest_sequence=self._data_flow.resolve_row_ingest_sequence(item.token.row_id),
+            row_payload_json=self._scheduler.serialize_row_payload(item.token.row_data),
+            available_at=datetime.now(UTC),
+            queue_key=self._queue_key_for_blocked_item(item),
+            barrier_key=self._barrier_key_for_blocked_item(item),
+        )
+        pending_items[scheduled.work_item_id] = item
+        return scheduled
+
+    def _work_item_from_scheduler(self, scheduled: TokenWorkItem) -> WorkItem:
+        """Rehydrate a scheduler work item from its durable payload snapshot."""
+        if self._scheduler is None:
+            raise OrchestrationInvariantError("Cannot rehydrate scheduler work without a scheduler repository")
+        current_node_id = None if scheduled.node_id == "__terminal__" else NodeID(scheduled.node_id)
+        token = TokenInfo(
+            row_id=scheduled.row_id,
+            token_id=scheduled.token_id,
+            row_data=self._scheduler.deserialize_row_payload(scheduled.row_payload_json),
+        )
+        return self._nav.create_work_item(token=token, current_node_id=current_node_id)
+
+    def _scheduler_node_id(self, node_id: NodeID | None) -> str:
+        """Return the persisted node cursor for a work item."""
+        if node_id is None:
+            return "__terminal__"
+        return str(node_id)
+
+    def _scheduler_step_index(self, node_id: NodeID | None) -> int:
+        """Return the durable scheduler ordering step for a work item."""
+        if node_id is None:
+            return max(self._node_step_map.values(), default=0) + 1
+        if node_id in self._node_step_map:
+            return self._node_step_map[node_id]
+        if node_id == self._source_node_id:
+            return 0
+        raise OrchestrationInvariantError(f"Cannot schedule unknown node cursor {node_id!r}")
+
+    def _queue_key_for_blocked_item(self, item: WorkItem) -> str | None:
+        """Return a queue key for structural queue blocking, if applicable."""
+        if item.current_node_id is None:
+            return None
+        if item.current_node_id in self._structural_node_ids and item.coalesce_name is None:
+            return str(item.current_node_id)
+        return None
+
+    def _barrier_key_for_blocked_item(self, item: WorkItem) -> str | None:
+        """Return a barrier key for coalesce/aggregation blocking, if applicable."""
+        if item.coalesce_name is not None:
+            return str(item.coalesce_name)
+        if item.current_node_id in self._aggregation_settings:
+            return str(item.current_node_id)
+        return None
 
     def _handle_transform_node(
         self,

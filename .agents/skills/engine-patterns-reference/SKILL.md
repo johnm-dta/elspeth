@@ -90,14 +90,9 @@ This is a **restoration**, not a transformation — the engine preserved the ori
 Aggregation triggers fire in two ways:
 
 - **Count trigger**: Fires immediately when row count threshold is reached
-- **Timeout trigger**: Checked **before** each row is processed
+- **Timeout trigger**: Checked **before** each row is processed and while source iteration waits for the next row
 
-**Known Limitation (True Idle):** Timeout triggers fire when the next row arrives, not during completely idle periods. If no rows arrive, buffered data won't flush until either:
-
-1. A new row arrives (triggering the timeout check)
-2. The source completes (triggering end-of-source flush)
-
-For streaming sources that may never end, combine timeout with count triggers, or implement periodic heartbeat rows at the source level.
+Timeout-triggered aggregation batches flush during true source-idle periods. This is implemented by the orchestrator's idle source polling path, so do not reintroduce source-level heartbeat requirements for aggregation timeout correctness.
 
 ## Canonical JSON - Two-Phase with RFC 8785
 

@@ -267,12 +267,22 @@ class RunAccounting(_StrictResponse):
     """Explicit run accounting split by unit of account."""
 
     source: RunAccountingSource
+    sources: dict[str, RunAccountingSource] = Field(default_factory=dict)
     tokens: RunAccountingTokens
     routing: RunAccountingRouting
     integrity: RunAccountingIntegrity
 
     @model_validator(mode="after")
     def _check_integrity_contract(self) -> Self:
+        if not self.sources:
+            object.__setattr__(self, "sources", {"source": self.source})
+        else:
+            source_total = sum(source.rows_processed for source in self.sources.values())
+            if source_total != self.source.rows_processed:
+                raise ValueError(
+                    "source.rows_processed must equal the sum of per-source rows "
+                    f"(got source.rows_processed={self.source.rows_processed}, per_source_total={source_total})"
+                )
         if self.routing.routed_success > self.tokens.succeeded:
             raise ValueError(
                 "routing.routed_success must be a subset of tokens.succeeded "

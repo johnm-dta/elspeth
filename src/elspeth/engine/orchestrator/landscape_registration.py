@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from elspeth import __version__ as ENGINE_VERSION
 from elspeth.contracts import Determinism, NodeType
-from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.errors import FrameworkBugError, OrchestrationInvariantError
 from elspeth.contracts.types import NodeID
 
 if TYPE_CHECKING:
@@ -73,9 +73,10 @@ def register_nodes_with_landscape(
             plugin_version = f"engine:{ENGINE_VERSION}"
             determinism = Determinism.DETERMINISTIC
             source_file_hash = None  # Engine-internal nodes have no source file
-        elif node_id in coalesce_node_ids:
-            # Coalesce nodes merge tokens from parallel paths - deterministic operation
-            # Use engine version to track which version of the coalesce logic was used
+        elif node_id in coalesce_node_ids or node_info.node_type == NodeType.QUEUE:
+            # Coalesce/queue nodes are engine-internal deterministic
+            # coordination nodes. Use engine version to track which version of
+            # the structural logic was used.
             plugin_version = f"engine:{ENGINE_VERSION}"
             determinism = Determinism.DETERMINISTIC
             source_file_hash = None  # Engine-internal nodes have no source file
@@ -104,8 +105,15 @@ def register_nodes_with_landscape(
         # Get output_contract for source nodes
         # Sources have get_schema_contract() method that returns their output contract
         output_contract = None
-        if node_id == source_id:
-            output_contract = config.source.get_schema_contract()
+        if node_info.node_type == NodeType.SOURCE:
+            if "source_name" not in node_info.config:
+                raise OrchestrationInvariantError(
+                    f"DAG source node '{node_info.node_id}' is missing 'source_name' in its config. "
+                    f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
+                    f"This is a graph-construction bug — node config keys: {sorted(node_info.config.keys())}."
+                )
+            source_name = str(node_info.config["source_name"])
+            output_contract = config.sources[source_name].get_schema_contract()
 
         factory.data_flow.register_node(
             run_id=run_id,

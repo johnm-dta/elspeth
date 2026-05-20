@@ -10,7 +10,7 @@ import re
 import warnings
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 import yaml
@@ -897,6 +897,21 @@ class SourceSettings(BaseModel):
         return _validate_connection_or_sink_name(value, field_label="Source on_success connection name")
 
 
+class QueueSettings(BaseModel):
+    """Pass-through scheduling queue declared as a DAG fan-in node.
+
+    Queues are coordination points only in v1. They do not merge row data,
+    join source schemas, or alter token identity.
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    description: str | None = Field(
+        default=None,
+        description="Optional operator-facing description for the queue.",
+    )
+
+
 class TransformSettings(BaseModel):
     """Transform plugin configuration per architecture.
 
@@ -1340,12 +1355,23 @@ class ElspethSettings(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 
     # Required - core pipeline definition
+    sources: dict[str, SourceSettings] = Field(
+        max_length=50,
+        description="Named source plugin configurations (one or more per run)",
+    )
     source: SourceSettings = Field(
-        description="Source plugin configuration (exactly one per run)",
+        default=cast(Any, None),
+        exclude=True,
+        description="Transition shim for legacy single-source callers; canonical configuration is sources.",
     )
     sinks: dict[str, SinkSettings] = Field(
         max_length=50,
         description="Named sink configurations (one or more required)",
+    )
+    queues: dict[str, QueueSettings] = Field(
+        default_factory=dict,
+        max_length=100,
+        description="Named pass-through scheduling queues for explicit fan-in.",
     )
 
     # Run mode configuration
@@ -1437,6 +1463,28 @@ class ElspethSettings(BaseModel):
         description="Telemetry and observability configuration",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_source(cls, data: Any) -> Any:
+        """Normalize legacy ``source`` into canonical named ``sources``."""
+        if not isinstance(data, dict):
+            return data
+        raw = dict(data)
+        has_source = "source" in raw and raw["source"] is not None
+        has_sources = "sources" in raw and raw["sources"] is not None
+        if has_source and has_sources:
+            raise ValueError("Use either 'sources' or legacy 'source', not both")
+        if has_source:
+            raw["sources"] = {"source": raw["source"]}
+        return raw
+
+    @model_validator(mode="after")
+    def populate_legacy_source_view(self) -> "ElspethSettings":
+        """Populate ``source`` as a read-only compatibility view."""
+        if self.sources and getattr(self, "source", None) is None:
+            object.__setattr__(self, "source", next(iter(self.sources.values())))
+        return self
+
     @model_validator(mode="after")
     def validate_export_sink_exists(self) -> "ElspethSettings":
         """Ensure export.sink references a defined sink when enabled."""
@@ -1466,6 +1514,10 @@ class ElspethSettings(BaseModel):
             all_names.append((a.name, "aggregation"))
         for c in self.coalesce:
             all_names.append((c.name, "coalesce"))
+        for source_name in self.sources:
+            all_names.append((source_name, "source"))
+        for queue_name in self.queues:
+            all_names.append((queue_name, "queue"))
         for sink_name in self.sinks:
             all_names.append((sink_name, "sink"))
 
@@ -1475,7 +1527,7 @@ class ElspethSettings(BaseModel):
                 raise ValueError(
                     f"Node name '{name}' is used by both {seen[name]} and {node_type}. "
                     f"All node names must be unique across transforms, gates, "
-                    f"aggregations, coalesce nodes, and sinks."
+                    f"aggregations, coalesce nodes, sources, queues, and sinks."
                 )
             seen[name] = node_type
         return self
@@ -1490,6 +1542,42 @@ class ElspethSettings(BaseModel):
         if self.run_mode in (RunMode.REPLAY, RunMode.VERIFY) and not self.replay_from:
             raise ValueError(f"replay_from is required when run_mode is '{self.run_mode.value}'")
         return self
+
+    @field_validator("sources")
+    @classmethod
+    def validate_sources_not_empty_and_named(cls, v: dict[str, SourceSettings]) -> dict[str, SourceSettings]:
+        """Source names are stable audit-visible identifiers."""
+        if not v:
+            raise ValueError("At least one source is required")
+        non_lowercase = [name for name in v if name != name.lower()]
+        if non_lowercase:
+            suggestions = [f"'{name}' -> '{name.lower()}'" for name in non_lowercase]
+            raise ValueError(f"Source names must be lowercase. Found: {non_lowercase}. Suggested fixes: {', '.join(suggestions)}")
+        for source_name in v:
+            _validate_max_length(source_name, field_label="Source name", max_length=_MAX_NODE_NAME_LENGTH)
+            _validate_node_name_chars(source_name, field_label="Source name")
+            if source_name in _RESERVED_EDGE_LABELS:
+                raise ValueError(f"Source name '{source_name}' is reserved. Reserved source/edge labels: {sorted(_RESERVED_EDGE_LABELS)}")
+            if source_name.startswith("__"):
+                raise ValueError(f"Source name '{source_name}' starts with '__', which is reserved for system edges")
+        return v
+
+    @field_validator("queues")
+    @classmethod
+    def validate_queue_names(cls, v: dict[str, QueueSettings]) -> dict[str, QueueSettings]:
+        """Queue names are connection identifiers and DAG node names."""
+        non_lowercase = [name for name in v if name != name.lower()]
+        if non_lowercase:
+            suggestions = [f"'{name}' -> '{name.lower()}'" for name in non_lowercase]
+            raise ValueError(f"Queue names must be lowercase. Found: {non_lowercase}. Suggested fixes: {', '.join(suggestions)}")
+        for queue_name in v:
+            _validate_max_length(queue_name, field_label="Queue name", max_length=_MAX_NODE_NAME_LENGTH)
+            _validate_node_name_chars(queue_name, field_label="Queue name")
+            if queue_name in _RESERVED_EDGE_LABELS:
+                raise ValueError(f"Queue name '{queue_name}' is reserved. Reserved queue/edge labels: {sorted(_RESERVED_EDGE_LABELS)}")
+            if queue_name.startswith("__"):
+                raise ValueError(f"Queue name '{queue_name}' starts with '__', which is reserved for system edges")
+        return v
 
     @field_validator("sinks")
     @classmethod
@@ -1907,6 +1995,11 @@ def _fingerprint_config_for_audit(
                 landscape["url_password_redacted"] = True
 
     # === Source options ===
+    if "sources" in config and isinstance(config["sources"], dict):
+        for source in config["sources"].values():
+            if isinstance(source, dict) and "options" in source and isinstance(source["options"], dict):
+                source["options"] = _fingerprint_secrets(source["options"], fail_if_no_key=fail_if_no_key)
+
     if "source" in config and isinstance(config["source"], dict):
         ds = config["source"]
         if "options" in ds and isinstance(ds["options"], dict):

@@ -84,6 +84,7 @@ EXEMPT_SETTINGS: Final[frozenset[str]] = frozenset(
     {
         # Plugin option containers - passed to plugin __init__
         "SourceSettings",
+        "QueueSettings",
         "TransformSettings",
         "SinkSettings",
         # Config-driven DAG construction - not runtime behavior

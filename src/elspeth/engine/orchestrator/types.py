@@ -126,7 +126,8 @@ class PipelineConfig:
     construction, ensuring pipeline config is immutable during a run.
 
     Attributes:
-        source: Source plugin instance
+        source: Compatibility view of the first source plugin instance
+        sources: Source plugin instances keyed by stable source name
         transforms: Transform plugin instances (processed in DAG order)
         sinks: Dict of sink_name -> sink plugin instance
         config: Additional run configuration
@@ -138,6 +139,7 @@ class PipelineConfig:
     source: SourceProtocol
     transforms: Sequence[RowPlugin]
     sinks: Mapping[str, SinkProtocol]
+    sources: Mapping[str, SourceProtocol] = field(default_factory=dict)
     config: Mapping[str, Any] = field(default_factory=dict)
     gates: Sequence[GateSettings] = field(default_factory=list)
     aggregation_settings: Mapping[str, AggregationSettings] = field(default_factory=dict)
@@ -148,6 +150,8 @@ class PipelineConfig:
             from elspeth.contracts.errors import OrchestrationInvariantError
 
             raise OrchestrationInvariantError("PipelineConfig requires at least one sink")
+        if not self.sources:
+            object.__setattr__(self, "sources", {"source": self.source})
         # Freeze mutable container fields. freeze_fields deep-freezes recursively,
         # converting nested dicts/lists to MappingProxyType/tuple throughout.
         # transforms/gates/coalesce_settings contain frozen dataclass instances
@@ -155,7 +159,7 @@ class PipelineConfig:
         object.__setattr__(self, "transforms", tuple(self.transforms))
         object.__setattr__(self, "gates", tuple(self.gates))
         object.__setattr__(self, "coalesce_settings", tuple(self.coalesce_settings))
-        freeze_fields(self, "sinks", "config", "aggregation_settings")
+        freeze_fields(self, "sources", "sinks", "config", "aggregation_settings")
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,6 +410,7 @@ class GraphArtifacts:
 
     edge_map: Mapping[tuple[NodeID, str], str]
     source_id: NodeID
+    source_id_map: Mapping[str, NodeID]
     sink_id_map: Mapping[SinkName, NodeID]
     transform_id_map: Mapping[int, NodeID]
     config_gate_id_map: Mapping[GateName, NodeID]
@@ -415,6 +420,7 @@ class GraphArtifacts:
         freeze_fields(
             self,
             "edge_map",
+            "source_id_map",
             "sink_id_map",
             "transform_id_map",
             "config_gate_id_map",

@@ -103,11 +103,13 @@ def cleanup_plugins(
     for sink in config.sinks.values():
         run_hook("sink.on_complete", sink.name, partial(sink.on_complete, ctx))
     if include_source:
-        run_hook("source.on_complete", config.source.name, partial(config.source.on_complete, ctx))
+        for source in config.sources.values():
+            run_hook("source.on_complete", source.name, partial(source.on_complete, ctx))
 
     # Close source (if included) and all sinks
     if include_source:
-        run_hook("source.close", config.source.name, config.source.close)
+        for source in config.sources.values():
+            run_hook("source.close", source.name, source.close)
 
     # Close all transforms (release resources - file handles, connections, etc.)
     for transform in config.transforms:

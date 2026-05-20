@@ -48,6 +48,7 @@ from elspeth.core.landscape.model_loaders import (
 )
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
 if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
@@ -336,6 +337,7 @@ class RecorderFactory:
             token_outcome_loader=token_outcome_loader,
             payload_store=payload_store,
         )
+        self._scheduler = TokenSchedulerRepository(db.engine)
 
     @property
     def run_lifecycle(self) -> RunLifecycleRepository:
@@ -356,6 +358,10 @@ class RecorderFactory:
     @property
     def query(self) -> QueryRepository:
         return self._query
+
+    @property
+    def scheduler(self) -> TokenSchedulerRepository:
+        return self._scheduler
 
     @property
     def payload_store(self) -> PayloadStore | None:

@@ -112,6 +112,17 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     # Postgres staleness backstop, so a stale Postgres DB would slip past validation.
     ("runs", "openrouter_catalog_sha256"),
     ("runs", "openrouter_catalog_source"),
+    # Epoch 12: multi-source foundation.
+    ("run_sources", "run_id"),
+    ("run_sources", "source_node_id"),
+    ("run_sources", "source_name"),
+    ("run_sources", "lifecycle_state"),
+    ("rows", "source_row_index"),
+    ("rows", "ingest_sequence"),
+    ("token_work_items", "work_item_id"),
+    ("token_work_items", "status"),
+    ("token_work_items", "available_at"),
+    ("token_work_items", "row_payload_json"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).

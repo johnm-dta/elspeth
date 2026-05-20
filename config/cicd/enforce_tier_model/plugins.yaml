@@ -781,13 +781,6 @@ allow_hits:
   safety: Catch scope is RuntimeError-only; reserved buffer slots are completed with
     explicit shutdown_requested errors while unrelated exception types still propagate
   expires: '2026-07-17'
-- key: plugins/infrastructure/url_validation.py:R6:_is_loopback_host:fp=149402b631b6eb46
-  owner: security
-  reason: URL validation parses operator-supplied hostnames at the credential-bearing
-    config boundary; ipaddress.ip_address raises ValueError for DNS names.
-  safety: Invalid IP literal parsing falls back to False for loopback detection, so
-    HTTP is not allowed unless the hostname is localhost or a valid loopback address.
-  expires: '2026-08-20'
 - key: plugins/transforms/web_scrape.py:R5:WebScrapeHTTPConfig:_validate_allowed_hosts:fp=922ac0bb4c76376b
   owner: architecture
   reason: Pydantic field_validator wraps ipaddress.ip_network() on user-provided CIDR

@@ -407,12 +407,14 @@ class TokenSchedulerRepository:
         work_item_id: str,
         available_at: datetime,
         now: datetime,
+        expected_lease_owner: str,
     ) -> TokenWorkItem:
         """Move a claimed item to WAITING until ``available_at``."""
         return self._transition(
             work_item_id=work_item_id,
             now=now,
             status=TokenWorkStatus.WAITING,
+            expected_lease_owner=expected_lease_owner,
             available_at=available_at,
             lease_owner=None,
             lease_expires_at=None,
@@ -440,6 +442,7 @@ class TokenSchedulerRepository:
         queue_key: str | None,
         barrier_key: str | None,
         now: datetime,
+        expected_lease_owner: str,
     ) -> TokenWorkItem:
         """Move an item to BLOCKED at a queue or barrier."""
         if queue_key is None and barrier_key is None:
@@ -451,29 +454,33 @@ class TokenSchedulerRepository:
             work_item_id=work_item_id,
             now=now,
             status=TokenWorkStatus.BLOCKED,
+            expected_lease_owner=expected_lease_owner,
             queue_key=queue_key,
             barrier_key=barrier_key,
             lease_owner=None,
             lease_expires_at=None,
         )
 
-    def mark_terminal(self, *, work_item_id: str, now: datetime) -> TokenWorkItem:
+    def mark_terminal(self, *, work_item_id: str, now: datetime, expected_lease_owner: str) -> TokenWorkItem:
         """Mark a leased work item terminal."""
         return self._transition(
             work_item_id=work_item_id,
             now=now,
             status=TokenWorkStatus.TERMINAL,
+            expected_lease_owner=expected_lease_owner,
             lease_owner=None,
             lease_expires_at=None,
         )
 
-    def mark_failed(self, *, work_item_id: str, now: datetime) -> TokenWorkItem:
+    def mark_failed(self, *, work_item_id: str, now: datetime, expected_lease_owner: str | None = None) -> TokenWorkItem:
         """Mark a work item failed after retries are exhausted."""
+        expected_statuses = (TokenWorkStatus.READY,) if expected_lease_owner is None else (TokenWorkStatus.LEASED,)
         return self._transition(
             work_item_id=work_item_id,
             now=now,
             status=TokenWorkStatus.FAILED,
-            expected_status=(TokenWorkStatus.LEASED, TokenWorkStatus.READY),
+            expected_statuses=expected_statuses,
+            expected_lease_owner=expected_lease_owner,
             lease_owner=None,
             lease_expires_at=None,
         )
@@ -630,33 +637,41 @@ class TokenSchedulerRepository:
         work_item_id: str,
         now: datetime,
         status: TokenWorkStatus,
-        expected_status: TokenWorkStatus | tuple[TokenWorkStatus, ...] = TokenWorkStatus.LEASED,
+        expected_statuses: tuple[TokenWorkStatus, ...] = (TokenWorkStatus.LEASED,),
+        expected_lease_owner: str | None = None,
         **values: object,
     ) -> TokenWorkItem:
         update_values = {"status": status.value, "updated_at": now, **values}
-        expected_statuses = expected_status if isinstance(expected_status, tuple) else (expected_status,)
         expected_status_values = tuple(candidate.value for candidate in expected_statuses)
         expected_status_text = " or ".join(candidate.name for candidate in expected_statuses)
+        predicates = [
+            token_work_items_table.c.work_item_id == work_item_id,
+            token_work_items_table.c.status.in_(expected_status_values),
+        ]
+        if expected_lease_owner is not None:
+            predicates.append(token_work_items_table.c.lease_owner == expected_lease_owner)
         with self._engine.begin() as conn:
-            result = conn.execute(
-                update(token_work_items_table)
-                .where(
-                    and_(
-                        token_work_items_table.c.work_item_id == work_item_id,
-                        token_work_items_table.c.status.in_(expected_status_values),
-                    )
-                )
-                .values(**update_values)
-            )
+            result = conn.execute(update(token_work_items_table).where(and_(*predicates)).values(**update_values))
             if result.rowcount != 1:
-                actual_status = conn.execute(
-                    select(token_work_items_table.c.status).where(token_work_items_table.c.work_item_id == work_item_id)
-                ).scalar_one_or_none()
-                actual_status_message = "missing" if actual_status is None else f"actual status {actual_status}"
+                actual = (
+                    conn.execute(
+                        select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                            token_work_items_table.c.work_item_id == work_item_id
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if actual is None:
+                    actual_message = "missing"
+                else:
+                    actual_message = f"actual status {actual['status']}, actual lease_owner {actual['lease_owner']!r}"
+                expected_owner_message = "" if expected_lease_owner is None else f" and expected lease_owner {expected_lease_owner!r}"
                 raise AuditIntegrityError(
                     f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
-                    f"affected {result.rowcount} rows; expected exactly 1 row with expected status {expected_status_text}. "
-                    f"Caller assumed ownership but the row is missing or in an unexpected state ({actual_status_message})."
+                    f"affected {result.rowcount} rows; expected exactly 1 row with expected status {expected_status_text}"
+                    f"{expected_owner_message}. Caller assumed ownership but the row is missing or in an unexpected "
+                    f"state ({actual_message})."
                 )
             row = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
         return self._item_from_mapping(row)

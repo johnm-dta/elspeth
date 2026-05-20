@@ -140,6 +140,7 @@ def _make_processor(
     telemetry_manager: Any = None,
     sink_names: frozenset[str] | None = None,
     scheduler: Any = None,
+    scheduler_lease_owner: str | None = None,
 ) -> RowProcessor:
     """Create a RowProcessor with sensible defaults."""
     coalesce_nodes = dict(coalesce_node_ids or {})
@@ -192,6 +193,7 @@ def _make_processor(
         telemetry_manager=telemetry_manager,
         sink_names=sink_names,
         scheduler=scheduler,
+        scheduler_lease_owner=scheduler_lease_owner,
     )
 
 
@@ -234,6 +236,25 @@ def _make_mock_transform(
 
 class TestConstructorErrorEdgeMap:
     """Tests for error edge map construction in __init__."""
+
+    def test_default_scheduler_lease_owner_is_instance_unique(self) -> None:
+        """Implicit scheduler lease owners must distinguish processors for the same run."""
+        _, factory = _make_factory()
+
+        first = _make_processor(factory, scheduler=factory.scheduler)
+        second = _make_processor(factory, scheduler=factory.scheduler)
+
+        assert first._scheduler_lease_owner.startswith("row-processor:test-run:")
+        assert second._scheduler_lease_owner.startswith("row-processor:test-run:")
+        assert first._scheduler_lease_owner != second._scheduler_lease_owner
+
+    def test_explicit_scheduler_lease_owner_is_honored(self) -> None:
+        """Tests and controlled workers can still provide a stable lease-owner identity."""
+        _, factory = _make_factory()
+
+        processor = _make_processor(factory, scheduler=factory.scheduler, scheduler_lease_owner="worker-a")
+
+        assert processor._scheduler_lease_owner == "worker-a"
 
     def test_extracts_error_edges_from_edge_map(self) -> None:
         """Error edges (labels like __error_0__) are extracted into error_edge_ids."""
@@ -3258,6 +3279,62 @@ class TestDurableSchedulerResumeDrain:
         assert run_id == "test-run"
         assert work_item_id
 
+    def test_scheduler_failure_write_preserves_processing_exception_context(self) -> None:
+        """If marking scheduler work failed also fails, diagnostics keep both causes."""
+        _db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 46})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-crash")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with (
+            patch.object(processor, "_process_single_token", side_effect=ValueError("transform exploded")),
+            patch.object(factory.scheduler, "mark_failed", side_effect=AuditIntegrityError("scheduler write rejected")),
+            pytest.raises(
+                AuditIntegrityError,
+                match=r"original processing exception ValueError: transform exploded.*scheduler failure write.*scheduler write rejected",
+            ) as exc_info,
+        ):
+            processor.drain_scheduled_work(ctx)
+
+        assert isinstance(exc_info.value.__cause__, AuditIntegrityError)
+
     def test_resume_restores_coalesce_cursor_for_held_branch_work(self) -> None:
         """Coalesce-held branch work must rehydrate both token lineage and work-item cursor."""
         db, factory = _make_factory()
@@ -3476,6 +3553,7 @@ class TestDurableSchedulerResumeDrain:
             queue_key=None,
             barrier_key=str(agg_node),
             now=datetime.now(UTC),
+            expected_lease_owner="test-worker",
         )
 
         second_results = processor.process_row(

@@ -3988,14 +3988,6 @@ allow_hits:
     because select_only=False puts field_mapper into the additive/loose-bound regime
     that Rule C explicitly does not adjudicate
   expires: null
-- key: web/composer/state.py:R6:CompositionState:validate:fp=b2c436c49bc35782
-  owner: web-composer
-  reason: Aggregation trigger PydanticValidationError is intentionally converted into
-    a blocking ValidationEntry so composer rejects malformed trigger.condition values
-    before runtime settings load
-  safety: The pipeline remains invalid; no trigger config is fabricated and unexpected
-    exception types propagate
-  expires: null
 - key: web/composer/state.py:R6:CompositionState:validate:fp=bcb7318205f2ed8a
   owner: web-composer
   reason: Aggregation trigger PydanticValidationError is intentionally converted into

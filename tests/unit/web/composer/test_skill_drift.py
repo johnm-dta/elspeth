@@ -201,6 +201,28 @@ class TestLLMModelGuidance:
         assert "never invent identifiers" in _WEB_SKILL_CONTENT
 
 
+class TestSecretReferenceGuidance:
+    """Pin the canonical composer-facing secret flow."""
+
+    def test_web_skill_uses_actual_secret_inventory_tool_name(self) -> None:
+        """The skill must not point the model at a non-existent secret tool."""
+        assert "list_user_secrets" not in _WEB_SKILL_CONTENT
+        assert "list_secret_refs" in _WEB_SKILL_CONTENT
+
+    def test_web_skill_teaches_secret_ref_mapping_not_secret_url_marker(self) -> None:
+        """Credential examples must match the runtime resolver marker shape."""
+        assert "secret://" not in _WEB_SKILL_CONTENT
+        assert '{"secret_ref": "OPENROUTER_API_KEY"}' in _WEB_SKILL_CONTENT
+        assert "api_key: {secret_ref: OPENROUTER_API_KEY}" in _WEB_SKILL_CONTENT
+
+    def test_web_skill_wire_secret_ref_example_matches_tool_schema(self) -> None:
+        """The post-hoc example must use the real wire_secret_ref argument names."""
+        assert "wire_secret_ref(node=" not in _WEB_SKILL_CONTENT
+        assert 'field="<credential_field>"' not in _WEB_SKILL_CONTENT
+        assert 'ref="<NAME>"' not in _WEB_SKILL_CONTENT
+        assert 'wire_secret_ref(name="<NAME>", target="node", target_id="<id>", option_key="<credential_field>")' in _WEB_SKILL_CONTENT
+
+
 class TestInterpretationReviewGuidance:
     """Pin the prompt guidance that makes Phase 5b observable in LLM runs."""
 

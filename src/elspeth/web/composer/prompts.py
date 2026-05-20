@@ -165,11 +165,16 @@ def build_context_string(
         "suggestions": [e.to_dict() for e in validation.suggestions],
     }
 
-    # Build lightweight plugin summary (names only).
-    # CatalogService returns PluginSummary instances — use .name attribute.
-    source_names = [p.name for p in catalog.list_sources()]
-    transform_names = [p.name for p in catalog.list_transforms()]
-    sink_names = [p.name for p in catalog.list_sinks()]
+    source_plugins = catalog.list_sources()
+    transform_plugins = catalog.list_transforms()
+    sink_plugins = catalog.list_sinks()
+
+    source_names = [p.name for p in source_plugins]
+    transform_names = [p.name for p in transform_plugins]
+    sink_names = [p.name for p in sink_plugins]
+
+    def composer_hint_map(plugins: list[Any]) -> dict[str, list[str]]:
+        return {p.name: list(p.composer_hints) for p in plugins if p.composer_hints}
 
     context = {
         "current_state": serialized,
@@ -180,6 +185,11 @@ def build_context_string(
             "sources": source_names,
             "transforms": transform_names,
             "sinks": sink_names,
+        },
+        "plugin_hints": {
+            "sources": composer_hint_map(source_plugins),
+            "transforms": composer_hint_map(transform_plugins),
+            "sinks": composer_hint_map(sink_plugins),
         },
     }
 

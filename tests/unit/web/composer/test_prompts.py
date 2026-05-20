@@ -44,6 +44,7 @@ class StubCatalog:
                 description="CSV source",
                 plugin_type="source",
                 config_fields=[],
+                composer_hints=("Declare headerless CSV columns before routing by field.",),
             )
         ]
 
@@ -54,6 +55,7 @@ class StubCatalog:
                 description="Uppercase transform",
                 plugin_type="transform",
                 config_fields=[],
+                composer_hints=(),
             )
         ]
 
@@ -64,6 +66,7 @@ class StubCatalog:
                 description="CSV sink",
                 plugin_type="sink",
                 config_fields=[],
+                composer_hints=("Prefer json format=jsonl when the user asks for one record per line.",),
             )
         ]
 
@@ -194,6 +197,24 @@ class TestBuildContextString:
         assert "csv" in plugins["sources"]
         assert "passthrough" in plugins["transforms"]
         assert "csv" in plugins["sinks"]
+
+    def test_context_includes_discovery_time_composer_hints(self) -> None:
+        """The LLM sees JIT hints even when it does not call list_* first."""
+        state = _empty_state()
+        catalog = _stub_catalog()
+
+        context = build_context_string(state, catalog)
+        parsed = json.loads(context.split("\n", 1)[1])
+
+        assert parsed["plugin_hints"] == {
+            "sources": {
+                "csv": ["Declare headerless CSV columns before routing by field."],
+            },
+            "transforms": {},
+            "sinks": {
+                "csv": ["Prefer json format=jsonl when the user asks for one record per line."],
+            },
+        }
 
     def test_includes_validation_summary(self) -> None:
         state = _empty_state()

@@ -28,7 +28,7 @@ OPERATION_STATUS_VALUES: tuple[OperationStatusValue, ...] = ("open", "completed"
 CallTypeValue = Literal["llm", "http", "http_redirect", "sql", "vector", "filesystem"]
 CallStatusValue = Literal["success", "error"]
 NodeStateStatusValue = Literal["open", "pending", "completed", "failed"]
-NodeTypeValue = Literal["source", "transform", "gate", "aggregation", "coalesce", "sink"]
+NodeTypeValue = Literal["source", "transform", "gate", "aggregation", "coalesce", "queue", "sink"]
 RoutingModeValue = Literal["move", "copy", "divert"]
 DAGFlowTypeValue = Literal["normal", "divert"]
 SchemaModeValue = Literal["fixed", "flexible", "observed", "parse"]
@@ -57,6 +57,8 @@ class RowRecord(TypedDict):
     run_id: str
     source_node_id: str
     row_index: int
+    source_row_index: int
+    ingest_sequence: int
     source_data_hash: str
     source_data_ref: str | None
     created_at: str | None

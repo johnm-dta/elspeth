@@ -132,7 +132,8 @@ def build_execution_graph(
     Called by ExecutionGraph.from_plugin_instances() facade. See that method
     for full documentation of parameters and semantics.
     """
-    if sources is None:
+    legacy_single_source_invocation = sources is None
+    if legacy_single_source_invocation:
         if source is None or source_settings is None:
             raise GraphValidationError("ExecutionGraph requires at least one source")
         sources = {"source": source}
@@ -227,8 +228,10 @@ def build_execution_graph(
     def _sink_name_set() -> set[str]:
         return {str(name) for name in sink_ids}
 
-    # Add sources. The source name is part of the node identity so two
-    # instances of the same plugin remain distinct DAG roots and audit records.
+    # Add sources. Explicit plural sources include the configured source name
+    # in node identity so two instances of the same plugin remain distinct DAG
+    # roots and audit records. The legacy single-source facade keeps the RC5.2
+    # plugin-name/raw-config identity for checkpoint compatibility.
     source_ids: dict[str, NodeID] = {}
     for source_name, source_instance in sources.items():
         source_config = source_instance.config
@@ -238,9 +241,13 @@ def build_execution_graph(
             component_id=source_name,
             component_type="source",
         )
-        source_node_config = dict(source_config)
-        source_node_config["source_name"] = source_name
-        source_id = node_id("source", source_name, source_node_config)
+        if legacy_single_source_invocation:
+            source_node_config = source_config
+            source_id = node_id("source", source_instance.name, source_node_config)
+        else:
+            source_node_config = dict(source_config)
+            source_node_config["source_name"] = source_name
+            source_id = node_id("source", source_name, source_node_config)
         source_ids[source_name] = source_id
         graph.add_node(
             source_id,

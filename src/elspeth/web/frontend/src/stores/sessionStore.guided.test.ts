@@ -16,6 +16,8 @@ vi.mock("@/api/client", () => ({
   createSession: vi.fn(),
   fetchMessages: vi.fn(),
   fetchCompositionState: vi.fn(),
+  fetchCompositionProposals: vi.fn(),
+  fetchComposerPreferences: vi.fn(),
   fetchComposerProgress: vi.fn(),
   sendMessage: vi.fn(),
   recompose: vi.fn(),
@@ -367,9 +369,16 @@ describe("sessionStore — guided-mode fields and actions", () => {
   // ── Test 7: session switch clears guided state (leak regression) ──────────
 
   it("selectSession: clears guidedSession, guidedNextTurn, guidedTerminal on session switch", async () => {
-    const { fetchMessages, fetchCompositionState } = await import("@/api/client");
+    const {
+      fetchMessages,
+      fetchCompositionState,
+      fetchCompositionProposals,
+      fetchComposerPreferences,
+    } = await import("@/api/client");
     (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
     (fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    (fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
 
     // Pre-seed non-null guided state from a previous session
     useSessionStore.setState({
@@ -387,6 +396,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.guidedSession).toBeNull();
     expect(state.guidedNextTurn).toBeNull();
     expect(state.guidedTerminal).toBeNull();
+    expect(state.error).toBeNull();
   });
 
   // ── Test 8: reset() clears guided state ──────────────────────────────────
@@ -482,6 +492,7 @@ describe("sessionStore — guided-mode fields and actions", () => {
       guidedSession: null,
       guidedNextTurn: null,
       guidedTerminal: null,
+      guidedResponsePending: true,
     });
 
     // Let sess-A's response arrive.
@@ -494,6 +505,54 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.guidedSession).toBeNull();
     expect(state.guidedNextTurn).toBeNull();
     expect(state.guidedTerminal).toBeNull();
+    expect(state.guidedResponsePending).toBe(true);
+  });
+
+  it("respondGuided: drops failure when active session changes before rejection", async () => {
+    const { respondGuided } = await import("@/api/client");
+
+    let rejectRespond!: (reason?: unknown) => void;
+    (respondGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise<GuidedRespondResponse>((_resolve, reject) => {
+        rejectRespond = reject;
+      }),
+    );
+
+    useSessionStore.setState({
+      activeSessionId: "sess-A",
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+      guidedTerminal: null,
+      error: null,
+    });
+
+    const respondPromise = useSessionStore.getState().respondGuided({
+      chosen: ["csv"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "sess-B",
+      guidedSession: null,
+      guidedNextTurn: null,
+      guidedTerminal: null,
+      guidedResponsePending: true,
+      error: null,
+    });
+
+    rejectRespond(new Error("network down for stale session"));
+    await respondPromise;
+
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toBeNull();
+    expect(state.guidedNextTurn).toBeNull();
+    expect(state.guidedTerminal).toBeNull();
+    expect(state.guidedResponsePending).toBe(true);
+    expect(state.error).toBeNull();
   });
 
   // ── Test 11: forkFromMessage clears guided state (default-freeform) ──

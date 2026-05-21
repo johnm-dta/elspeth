@@ -57,7 +57,7 @@ export ELSPETH_ALLOW_RAW_SECRETS=true
 ```bash
 docker run --rm \
   -e ELSPETH_FINGERPRINT_KEY="your-key" \
-  ghcr.io/johnm-dta/elspeth:v0.5.1 \
+  ghcr.io/johnm-dta/elspeth:v0.5.2 \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -301,7 +301,7 @@ uv pip install 'elspeth[tracing-langfuse]'
    ```bash
    docker run --rm \
      -v $(pwd)/input:/app/input:ro \
-     ghcr.io/johnm-dta/elspeth:v0.5.1 \
+     ghcr.io/johnm-dta/elspeth:v0.5.2 \
      ls /app/input
    ```
 

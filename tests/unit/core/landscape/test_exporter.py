@@ -699,6 +699,8 @@ class TestRowRecords:
         r = rows[0]
         assert r["row_id"] == "row-1"
         assert r["row_index"] == 0
+        assert r["source_row_index"] == 0
+        assert r["ingest_sequence"] == 0
         assert r["source_node_id"] == "node-1"
         assert r["source_data_hash"] == "data-hash"
         assert r["created_at"] is not None

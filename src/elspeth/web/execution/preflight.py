@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 
@@ -55,37 +55,52 @@ def resolve_runtime_yaml_paths(pipeline_yaml: str, data_dir: str) -> str:
     if not isinstance(pipeline_yaml, str):
         raise TypeError(f"YamlGenerator.generate_yaml() must return str; got {type(pipeline_yaml).__name__}")
 
-    config = yaml.safe_load(pipeline_yaml)
-    if not isinstance(config, dict):
-        raise TypeError(f"YAML generator produced non-dict top-level value (got {type(config).__name__})")
+    loaded_config = yaml.safe_load(pipeline_yaml)
+    if type(loaded_config) is not dict:
+        raise TypeError(f"YAML generator produced non-dict top-level value (got {type(loaded_config).__name__})")
+    config = cast(dict[str, Any], loaded_config)
 
-    source = config.get("source")
-    if source is not None:
-        if not isinstance(source, dict):
-            raise TypeError(f"YAML generator produced non-dict 'source' value (got {type(source).__name__})")
-        opts = source.get("options")
-        if opts is not None:
-            if not isinstance(opts, dict):
-                raise TypeError(f"YAML generator produced non-dict 'source.options' value (got {type(opts).__name__})")
+    def _rewrite_component_path_options(component: dict[str, Any], component_path: str) -> None:
+        if "options" in component:
+            opts = component["options"]
+            if opts is not None and type(opts) is not dict:
+                raise TypeError(f"YAML generator produced non-dict '{component_path}.options' value (got {type(opts).__name__})")
+            if opts is None:
+                return
+            path_options = cast(dict[str, Any], opts)
             for key in ("path", "file"):
-                if key in opts and not Path(str(opts[key])).is_absolute():
-                    opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
+                if key in path_options and not Path(str(path_options[key])).is_absolute():
+                    path_options[key] = str(resolve_data_path(str(path_options[key]), data_dir))
 
-    sinks = config.get("sinks")
-    if sinks is not None:
-        if not isinstance(sinks, dict):
+    if "source" in config:
+        source = config["source"]
+        if source is not None and type(source) is not dict:
+            raise TypeError(f"YAML generator produced non-dict 'source' value (got {type(source).__name__})")
+        if source is not None:
+            _rewrite_component_path_options(cast(dict[str, Any], source), "source")
+
+    if "sources" in config:
+        sources = config["sources"]
+        if sources is not None and type(sources) is not dict:
+            raise TypeError(f"YAML generator produced non-dict 'sources' value (got {type(sources).__name__})")
+        if sources is not None:
+            source_map = cast(dict[str, Any], sources)
+            for source_name, source_cfg in source_map.items():
+                if type(source_cfg) is not dict:
+                    raise TypeError(f"YAML generator produced non-dict source 'sources.{source_name}' value (got {type(source_cfg).__name__})")
+                _rewrite_component_path_options(cast(dict[str, Any], source_cfg), f"sources.{source_name}")
+
+    if "sinks" in config:
+        sinks = config["sinks"]
+        if sinks is not None and type(sinks) is not dict:
             raise TypeError(f"YAML generator produced non-dict 'sinks' value (got {type(sinks).__name__})")
-        for sink_name, sink_cfg in sinks.items():
-            if sink_cfg is not None:
-                if not isinstance(sink_cfg, dict):
-                    raise TypeError(f"YAML generator produced non-dict sink '{sink_name}' value (got {type(sink_cfg).__name__})")
-                opts = sink_cfg.get("options")
-                if opts is not None:
-                    if not isinstance(opts, dict):
-                        raise TypeError(f"YAML generator produced non-dict 'sinks.{sink_name}.options' value (got {type(opts).__name__})")
-                    for key in ("path", "file"):
-                        if key in opts and not Path(str(opts[key])).is_absolute():
-                            opts[key] = str(resolve_data_path(str(opts[key]), data_dir))
+        if sinks is not None:
+            sink_map = cast(dict[str, Any], sinks)
+            for sink_name, sink_cfg in sink_map.items():
+                if sink_cfg is not None:
+                    if type(sink_cfg) is not dict:
+                        raise TypeError(f"YAML generator produced non-dict sink '{sink_name}' value (got {type(sink_cfg).__name__})")
+                    _rewrite_component_path_options(cast(dict[str, Any], sink_cfg), f"sinks.{sink_name}")
 
     return yaml.dump(config, default_flow_style=False)
 

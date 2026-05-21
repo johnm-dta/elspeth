@@ -174,6 +174,27 @@ def test_check_constraint_accepts_export_yaml(engine) -> None:
         conn.commit()
 
 
+def test_completion_event_state_must_belong_to_same_session(engine) -> None:
+    """The audit row's state/session pair is one composite identity."""
+
+    with engine.connect() as conn:
+        _insert_session(conn, session_id="s1")
+        _insert_session(conn, session_id="s2")
+        _seed_composition_state(conn, state_id="cs1", session_id="s1")
+        with pytest.raises(IntegrityError):
+            conn.execute(
+                insert(composer_completion_events_table).values(
+                    id="e-cross-session",
+                    session_id="s2",
+                    composition_state_id="cs1",
+                    event_type="export_yaml",
+                    actor="user1",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            conn.commit()
+
+
 # ---- per-event-type partial CHECK constraints ----
 
 

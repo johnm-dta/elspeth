@@ -9,10 +9,12 @@ from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.schema import CreateIndex
 
 import elspeth.core.landscape.database as database_module
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, token_work_items_table
 
 
 def _make_instance(url: str) -> LandscapeDB:
@@ -137,6 +139,14 @@ class TestSchemaCompatibilityGuards:
         """Epoch-12 scheduler resume fields must participate in stale-DB detection."""
         required_token_work_columns = {column for table, column in database_module._REQUIRED_COLUMNS if table == "token_work_items"}
         assert {
+            "run_id",
+            "token_id",
+            "row_id",
+            "node_id",
+            "step_index",
+            "ingest_sequence",
+            "queue_key",
+            "barrier_key",
             "on_success_sink",
             "branch_name",
             "fork_group_id",
@@ -144,7 +154,28 @@ class TestSchemaCompatibilityGuards:
             "expand_group_id",
             "coalesce_node_id",
             "coalesce_name",
+            "attempt",
+            "lease_owner",
+            "lease_expires_at",
+            "created_at",
+            "updated_at",
         } <= required_token_work_columns
+        assert {
+            ("token_work_items", "ix_token_work_items_ready"),
+            ("token_work_items", "ix_token_work_items_lease"),
+            ("token_work_items", "uq_token_work_items_terminal_identity"),
+        } <= set(database_module._REQUIRED_INDEXES)
+
+    def test_terminal_scheduler_identity_index_is_partial_on_sqlite_and_postgresql(self) -> None:
+        """Terminal identity uniqueness must not constrain ordinary node work."""
+        index = next(index for index in token_work_items_table.indexes if index.name == "uq_token_work_items_terminal_identity")
+
+        sqlite_ddl = str(CreateIndex(index).compile(dialect=sqlite.dialect()))
+        postgres_ddl = str(CreateIndex(index).compile(dialect=postgresql.dialect()))
+
+        assert "WHERE node_id IS NULL" in sqlite_ddl
+        assert "WHERE node_id IS NULL" in postgres_ddl
+        assert "node_id" not in [column.name for column in index.columns]
 
     def test_validate_schema_rejects_missing_scheduler_resume_identity_column(
         self,
@@ -185,6 +216,81 @@ class TestSchemaCompatibilityGuards:
         assert "token_work_items.branch_name" in msg
         assert "Landscape database schema is outdated" in msg
         assert "To fix this, either:" in msg
+        instance.close()
+
+    @pytest.mark.parametrize("column_name", ["token_id", "row_id", "ingest_sequence", "attempt"])
+    def test_validate_schema_rejects_missing_scheduler_core_column(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        column_name: str,
+    ) -> None:
+        """Scheduler identity and ordering fields are part of the durable schema contract."""
+        db_path = tmp_path / f"missing_scheduler_{column_name}.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP TABLE token_work_items"))
+            columns = [
+                "work_item_id TEXT PRIMARY KEY",
+                "run_id TEXT NOT NULL",
+                "token_id TEXT NOT NULL",
+                "row_id TEXT NOT NULL",
+                "node_id TEXT",
+                "step_index INTEGER NOT NULL",
+                "ingest_sequence INTEGER NOT NULL",
+                "row_payload_json TEXT NOT NULL",
+                "status TEXT NOT NULL",
+                "queue_key TEXT",
+                "barrier_key TEXT",
+                "on_success_sink TEXT",
+                "branch_name TEXT",
+                "fork_group_id TEXT",
+                "join_group_id TEXT",
+                "expand_group_id TEXT",
+                "coalesce_node_id TEXT",
+                "coalesce_name TEXT",
+                "attempt INTEGER NOT NULL",
+                "lease_owner TEXT",
+                "lease_expires_at TEXT",
+                "available_at TEXT NOT NULL",
+                "created_at TEXT NOT NULL",
+                "updated_at TEXT NOT NULL",
+            ]
+            conn.execute(text(f"CREATE TABLE token_work_items ({', '.join(c for c in columns if not c.startswith(column_name + ' '))})"))
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        assert f"token_work_items.{column_name}" in str(exc_info.value)
+        instance.close()
+
+    def test_validate_schema_rejects_missing_terminal_scheduler_uniqueness_index(self, tmp_path: Path) -> None:
+        """Terminal scheduler identity uniqueness must fail stale DBs early."""
+        db_path = tmp_path / "missing_terminal_scheduler_identity_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP INDEX uq_token_work_items_terminal_identity"))
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "token_work_items.uq_token_work_items_terminal_identity" in msg
+        assert "Landscape database schema is outdated" in msg
         instance.close()
 
     def test_validate_schema_rejects_incompatible_schema_epoch(self, tmp_path: Path) -> None:

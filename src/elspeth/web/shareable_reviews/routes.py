@@ -106,7 +106,10 @@ def create_shareable_reviews_router() -> APIRouter:
         await rate_limiter.check(user.user_id)
         await verify_session_ownership(session_id, user, request)
         service: ShareableReviewService = request.app.state.shareable_review_service
-        result = await service.get_shareable_link(session_id=session_id, user_id=user.user_id)
+        try:
+            result = await service.get_shareable_link(session_id=session_id, user_id=user.user_id)
+        except CompositionNotRunnableError as exc:
+            raise HTTPException(status_code=409, detail=exc.detail or exc.reason) from exc
         return JSONResponse(
             content=result.model_dump(mode="json"),
             headers={"Cache-Control": _NO_STORE},

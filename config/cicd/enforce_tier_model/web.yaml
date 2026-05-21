@@ -409,26 +409,6 @@ allow_hits:
   safety: Continues to next delimiter; returns None for uncertain content; no data
     loss
   expires: null
-- key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=d0e7e2507b117f2d
-  owner: web-execution
-  reason: YAML navigation — source.options keys (path/file) may be absent
-  safety: Absent keys skipped; no fabrication
-  expires: null
-- key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=5f1f81fee41e3e1a
-  owner: web-execution
-  reason: YAML navigation — sink options keys (path/file) may be absent
-  safety: Absent keys skipped; no fabrication
-  expires: null
-- key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=c876a96667c425f7
-  owner: web-execution
-  reason: YAML navigation — sink options keys (path/file) may be absent
-  safety: Absent keys skipped; no fabrication
-  expires: null
-- key: web/execution/preflight.py:R1:resolve_runtime_yaml_paths:fp=42996be95a89dd56
-  owner: web-execution
-  reason: YAML navigation — source key may be absent in generated YAML
-  safety: Returns None; source path rewriting skipped
-  expires: null
 - key: web/secrets/service.py:R6:WebSecretService:check_user_ref_resolvable:fp=c1e9289fa7f9c2d9
   owner: web-secrets
   reason: 'Narrow catch by design. check_user_ref_resolvable is the typed-error

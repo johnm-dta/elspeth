@@ -37,7 +37,7 @@ Before diving into the documents below, know which sources they aggregate. **If 
 
 - **Per-release detailed changelogs:** [`/CHANGELOG.md`](../../CHANGELOG.md) (RC-3+), and the archived [`CHANGELOG-RC2.md`](../../docs-archive/2026-05-19-docs-cleanout/CHANGELOG-RC2.md) / [`CHANGELOG-RC1.md`](../../docs-archive/2026-05-19-docs-cleanout/CHANGELOG-RC1.md) — line-by-line release records.
 - **Architectural decisions:** [`/docs/architecture/adr/`](../architecture/adr/) — the binding ADRs.
-- **In-code architecture analyses:** [`/docs/architecture/`](../architecture/) and the layer-import graph emitted by `scripts/cicd/enforce_tier_model.py dump-edges`.
+- **In-code architecture analyses:** [`/docs/architecture/`](../architecture/) and the layer-import graph emitted by `elspeth-lints dump-edges`.
 
 ---
 

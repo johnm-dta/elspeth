@@ -60,6 +60,7 @@ def test_node_state_and_dag_literals_match_current_contracts() -> None:
         "gate",
         "aggregation",
         "coalesce",
+        "queue",
         "sink",
     }
     assert _literal_values(dag_edge_hints["mode"]) == {"move", "copy", "divert"}

@@ -63,6 +63,56 @@ def test_session_write_lock_sqlite_is_reentrant(service):
                 pass
 
 
+def test_session_write_lock_sqlite_commit_removes_rollback_listener(
+    service: SessionServiceImpl,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Commit release must remove the sibling rollback callback immediately."""
+
+    from elspeth.web.sessions import service as service_module
+
+    removed: list[str] = []
+    real_remove = service_module.event.remove
+
+    def spy_remove(target, identifier, fn):
+        removed.append(str(identifier))
+        return real_remove(target, identifier, fn)
+
+    monkeypatch.setattr(service_module.event, "remove", spy_remove)
+
+    with service._engine.begin() as conn, service._session_write_lock(conn, "session_listener_commit"):
+        pass
+
+    assert "rollback" in removed
+
+
+def test_session_write_lock_sqlite_rollback_removes_commit_listener(
+    service: SessionServiceImpl,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rollback release must remove the sibling commit callback immediately."""
+
+    from elspeth.web.sessions import service as service_module
+
+    removed: list[str] = []
+    real_remove = service_module.event.remove
+
+    def spy_remove(target, identifier, fn):
+        removed.append(str(identifier))
+        return real_remove(target, identifier, fn)
+
+    monkeypatch.setattr(service_module.event, "remove", spy_remove)
+
+    with (
+        pytest.raises(RuntimeError, match="force rollback"),
+        service._engine.begin() as conn,
+        service._session_write_lock(conn, "session_listener_rollback"),
+    ):
+        raise RuntimeError("force rollback")
+
+    assert "commit" in removed
+
+
 def test_reserve_sequence_range_starts_at_one_for_empty_session(service):
     with service._engine.begin() as conn:
         _make_session(conn, session_id="s1")

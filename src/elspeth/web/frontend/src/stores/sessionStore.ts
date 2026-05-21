@@ -317,6 +317,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return;
     }
     clearComposerProgressPollTimer();
+    clearInflightMessagesPollTimer();
     set((state) => ({
       sessions: [session, ...state.sessions],
       activeSessionId: session.id,
@@ -364,6 +365,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         const wasActive = state.activeSessionId === id;
         if (wasActive) {
           clearComposerProgressPollTimer();
+          clearInflightMessagesPollTimer();
         }
         return {
           sessions,
@@ -423,6 +425,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // stale validation from a previous session being visible
     getExecutionStore().clearValidation();
     clearComposerProgressPollTimer();
+    clearInflightMessagesPollTimer();
 
     set({
       activeSessionId: id,
@@ -541,6 +544,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // isComposing) without re-appending the final assistant message that
       // the poll has already pulled in.
       await get().loadInflightMessages(activeSessionId);
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       const { message, state } = result;
       const proposals = result.proposals ?? [];
       set((s) => {
@@ -634,6 +640,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             recoveryStartedCompositionVersion,
           }
         : {};
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       set((state) => ({
         isComposing: false,
         error: errorMessage,
@@ -959,6 +968,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Sync the chat panel against the DB state (see sendMessage for
       // rationale).
       await get().loadInflightMessages(activeSessionId);
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       const { message: assistantMessage, state } = result;
       const proposals = result.proposals ?? [];
       set((s) => {
@@ -1028,6 +1040,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }
         : {};
 
+      if (get().activeSessionId !== activeSessionId) {
+        return;
+      }
       set((state) => ({
         isComposing: false,
         error: errorMessage,
@@ -1050,6 +1065,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (!activeSessionId) return;
 
     clearComposerProgressPollTimer();
+    clearInflightMessagesPollTimer();
     set({ isComposing: true, error: null });
     try {
       const result = await api.forkFromMessage(
@@ -1189,7 +1205,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Stale-fetch guard (Codex #4): drop the response if the active session
       // changed while the request was in flight.
       if (get().activeSessionId !== requestedSessionId) {
-        set({ guidedResponsePending: false });
         return;
       }
       // Atomically replace all 4 wire fields — no optimistic updates (spec §7.3)
@@ -1201,6 +1216,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedResponsePending: false,
       });
     } catch {
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
       set({
         error: "Failed to submit guided response. Please try again.",
         guidedResponsePending: false,
@@ -1300,6 +1318,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedChatPending: false,
       });
     } catch {
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
       // HTTP-layer failure (network, 4xx/5xx).  Distinct from the
       // backend's synthetic-message path, which returns 200 with an
       // unavailable assistant message AND appends both turns to
@@ -1397,6 +1418,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   reset() {
     clearComposerProgressPollTimer();
+    clearInflightMessagesPollTimer();
     set(initialState);
   },
 }));

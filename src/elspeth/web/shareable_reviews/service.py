@@ -53,7 +53,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, TypedDict, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import insert
+from sqlalchemy import desc, insert, select
 from sqlalchemy.engine import Engine
 
 from elspeth.core.canonical import canonical_json
@@ -106,6 +106,10 @@ class CompositionNotRunnableError(Exception):
     * ``"readiness_error_row"`` — ``ReadinessService.compute_snapshot``
       returned a row with ``status == "error"``. Sharing a known-broken
       readiness state is share-theatre; the gate refuses.
+    * ``"readiness_state_drift"`` — validation and readiness were computed
+      against different composition versions.
+    * ``"completion_event_missing"`` — re-mint was requested before the
+      current state had passed ``mark_ready_for_review``.
     """
 
     def __init__(self, *, reason: str, detail: str = "") -> None:
@@ -130,6 +134,7 @@ class _SessionServiceLike(Protocol):
 
 class _ExecutionServiceLike(Protocol):
     async def validate(self, session_id: UUID, *, user_id: str | None = None) -> Any: ...
+    async def validate_state(self, state: Any, *, user_id: str | None = None) -> Any: ...
 
 
 class _ReadinessServiceLike(Protocol):
@@ -324,7 +329,14 @@ class ShareableReviewService:
         step (5) fails the audit row stands as honest evidence of the
         attempt; no token is returned.
         """
-        validation = await self._execution_service.validate(session_id, user_id=user_id)
+        state_record = await self._session_service.get_current_state(session_id)
+        if state_record is None:
+            raise CompositionNotRunnableError(
+                reason="state_missing",
+                detail="No composition state exists for this session",
+            )
+        composition_state = state_from_record(state_record)
+        validation = await self._execution_service.validate_state(composition_state, user_id=user_id)
         if not validation.is_valid:
             raise CompositionNotRunnableError(
                 reason="validation_failed",
@@ -337,8 +349,12 @@ class ShareableReviewService:
                 reason="readiness_error_row",
                 detail="readiness panel reports an error; resolve before sharing",
             )
+        if audit_readiness.composition_version != state_record.version:
+            raise CompositionNotRunnableError(
+                reason="readiness_state_drift",
+                detail="composition changed while preparing the review snapshot; retry against the current state",
+            )
 
-        state_record = await self._session_service.get_current_state(session_id)
         snapshot = _build_snapshot(
             session_id=session_id,
             state_record=state_record,
@@ -413,37 +429,36 @@ class ShareableReviewService:
         ``export_yaml`` are auditable completion events in v1. Re-minting
         an already-shared snapshot is a UI affordance, not a new decision.
         """
-        # No validation gate here — re-minting is a UI affordance, not a
-        # new "I want to share this" decision. The snapshot reflects the
-        # CURRENT state; if the state has drifted from the originally
-        # marked snapshot, the new digest is honest about that.
-        audit_readiness = await self._readiness_service.compute_snapshot(session_id=session_id, user_id=user_id)
         state_record = await self._session_service.get_current_state(session_id)
-        snapshot = _build_snapshot(
-            session_id=session_id,
-            state_record=state_record,
-            audit_readiness=audit_readiness,
-            created_by_user_id=user_id,
-        )
-        # Re-storing an identical content yields the same digest (the
-        # payload store's content-addressable layout dedupes silently).
-        self._payload_store.store(snapshot.canonical_bytes)
+        if state_record is None:
+            raise CompositionNotRunnableError(
+                reason="state_missing",
+                detail="No composition state exists for this session",
+            )
+        event = self._latest_mark_ready_event(session_id=session_id, state_id=state_record.id)
+        if event is None:
+            raise CompositionNotRunnableError(
+                reason="completion_event_missing",
+                detail="mark this composition ready for review before requesting a shareable link",
+            )
         lifetime = timedelta(seconds=self._settings.shareable_link_lifetime_seconds)
-        expires_at = snapshot.created_at + lifetime
+        created_at = datetime.now(UTC)
+        expires_at = created_at + lifetime
+        payload_digest = event.payload_digest
         token = self._sign_token(
             session_id=session_id,
-            state_id=snapshot.state_id,
-            payload_digest=snapshot.payload_digest,
+            state_id=state_record.id,
+            payload_digest=payload_digest,
             created_by_user_id=user_id,
-            created_at=snapshot.created_at,
+            created_at=created_at,
             expires_at=expires_at,
         )
         return ShareableLinkResponse(
             token=token,
             share_url=_SHARE_URL_PREFIX + token,
             expires_at=expires_at,
-            state_id=str(snapshot.state_id),
-            payload_digest=snapshot.payload_digest,
+            state_id=str(state_record.id),
+            payload_digest=payload_digest,
         )
 
     async def resolve_token(self, *, token: str, requesting_user_id: str) -> SharedInspectResponse:
@@ -494,6 +509,20 @@ class ShareableReviewService:
         )
 
     # ── private helpers ─────────────────────────────────────────────
+
+    def _latest_mark_ready_event(self, *, session_id: UUID, state_id: UUID) -> Any | None:
+        """Return the latest committed mark-ready event for this exact state."""
+        with self._sessions_db_engine.begin() as conn:
+            return conn.execute(
+                select(composer_completion_events_table)
+                .where(
+                    composer_completion_events_table.c.session_id == str(session_id),
+                    composer_completion_events_table.c.composition_state_id == str(state_id),
+                    composer_completion_events_table.c.event_type == "mark_ready_for_review",
+                )
+                .order_by(desc(composer_completion_events_table.c.created_at))
+                .limit(1)
+            ).first()
 
     def _sign_token(
         self,

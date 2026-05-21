@@ -116,7 +116,13 @@ def list_rows(db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int
     from elspeth.core.landscape.schema import rows_table
 
     with db.connection() as conn:
-        query = select(rows_table).where(rows_table.c.run_id == run_id).order_by(rows_table.c.row_index).limit(limit).offset(offset)
+        query = (
+            select(rows_table)
+            .where(rows_table.c.run_id == run_id)
+            .order_by(rows_table.c.ingest_sequence, rows_table.c.row_id)
+            .limit(limit)
+            .offset(offset)
+        )
         rows = conn.execute(query).fetchall()
 
     return [
@@ -125,6 +131,8 @@ def list_rows(db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int
             "run_id": row.run_id,
             "source_node_id": row.source_node_id,
             "row_index": row.row_index,
+            "source_row_index": row.source_row_index,
+            "ingest_sequence": row.ingest_sequence,
             "source_data_hash": row.source_data_hash,
             "source_data_ref": row.source_data_ref,
             "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -243,7 +251,7 @@ def list_operations(
         db: Database connection
         factory: Recorder factory
         run_id: Run ID to query
-        operation_type: Filter by operation type
+        operation_type: Filter by type ('source_load', 'sink_write', or 'runtime_preflight')
         status: Filter by status ('open', 'completed', 'failed', 'pending')
         limit: Maximum operations to return
 

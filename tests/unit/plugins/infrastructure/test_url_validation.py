@@ -27,6 +27,7 @@ def test_credential_url_allows_explicit_http_loopback_when_opted_in(url: str) ->
         "http://example.com/v1",
         "http://127.0.0.999:8199/v1",
         "http://127.example.com/v1",
+        "http://\uff11\uff12\uff17.\uff10.\uff10.\uff11:8199/v1",
     ],
 )
 def test_credential_url_rejects_non_loopback_http_when_opted_in(url: str) -> None:

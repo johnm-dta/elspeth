@@ -54,6 +54,8 @@ from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.engine.clock import MockClock
+from elspeth.engine.coalesce_executor import CoalesceOutcome
 from elspeth.engine.dag_navigator import WorkItem
 from elspeth.engine.executors import GateOutcome
 from elspeth.engine.processor import (
@@ -141,6 +143,7 @@ def _make_processor(
     sink_names: frozenset[str] | None = None,
     scheduler: Any = None,
     scheduler_lease_owner: str | None = None,
+    clock: Any = None,
 ) -> RowProcessor:
     """Create a RowProcessor with sensible defaults."""
     coalesce_nodes = dict(coalesce_node_ids or {})
@@ -194,6 +197,7 @@ def _make_processor(
         sink_names=sink_names,
         scheduler=scheduler,
         scheduler_lease_owner=scheduler_lease_owner,
+        clock=clock,
     )
 
 
@@ -3020,6 +3024,77 @@ class TestDurableSchedulerResumeDrain:
             )
         assert statuses == ["terminal"]
 
+    def test_drain_scheduler_transitions_use_injected_clock(self) -> None:
+        """Durable scheduler state transitions must be deterministic under MockClock."""
+        db, factory = _make_factory()
+        clock = MockClock(start=1_700_000_000.0)
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-clock")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=clock.now_utc(),
+        )
+
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            clock=clock,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        success_result = TransformResult.success(
+            make_row({"value": 42, "resumed": True}),
+            success_reason={"action": "resume_drain"},
+        )
+
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
+            clock.advance(5.0)
+            return (success_result, token, None)
+
+        with patch.object(processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            processor.drain_scheduled_work(ctx)
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, updated_at = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.updated_at).where(
+                    token_work_items_table.c.token_id == "token-clock"
+                )
+            ).one()
+        assert status == "terminal"
+        assert updated_at.replace(tzinfo=UTC) == clock.now_utc()
+
     def test_recovers_expired_lease_then_drains_without_source_replay(self) -> None:
         """Expired LEASED scheduler work is recovered and advanced by a fresh processor."""
         db, factory = _make_factory()
@@ -3278,6 +3353,148 @@ class TestDurableSchedulerResumeDrain:
         assert status == "failed"
         assert run_id == "test-run"
         assert work_item_id
+
+    def test_durable_scheduler_tuple_failure_for_claimed_token_marks_work_failed(self) -> None:
+        """Tuple results must classify the claimed token, not fall through to terminal."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-failed-tuple")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        failed_result = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id=token.token_id, row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+        )
+        sibling_success = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id="sibling-token", row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="default",
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with patch.object(processor, "_process_single_token", return_value=((sibling_success, failed_result), [])):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert results == [sibling_success, failed_result]
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status = conn.execute(
+                select(token_work_items_table.c.status).where(token_work_items_table.c.token_id == "token-failed-tuple")
+            ).scalar_one()
+        assert status == "failed"
+
+    def test_durable_scheduler_tuple_failure_for_sibling_keeps_claimed_work_terminal(self) -> None:
+        """Sibling failures returned with a claimed token must not poison the claimed work item."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-claimed-success")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        claimed_success = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id=token.token_id, row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="default",
+        )
+        sibling_failure = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id="sibling-token", row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with patch.object(processor, "_process_single_token", return_value=((sibling_failure, claimed_success), [])):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert results == [sibling_failure, claimed_success]
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status = conn.execute(
+                select(token_work_items_table.c.status).where(token_work_items_table.c.token_id == "token-claimed-success")
+            ).scalar_one()
+        assert status == "terminal"
 
     def test_scheduler_failure_write_preserves_processing_exception_context(self) -> None:
         """If marking scheduler work failed also fails, diagnostics keep both causes."""
@@ -4075,10 +4292,11 @@ class TestMaybeCoalesceToken:
         """When executor already recorded FAILED outcome, processor must not record again."""
         _, factory = _make_factory()
         coalesce = Mock()
-        coalesce.accept.return_value = Mock(
+        coalesce.accept.return_value = CoalesceOutcome(
             held=False,
             merged_token=None,
             failure_reason="late_arrival_after_merge",
+            consumed_tokens=(),
             outcomes_recorded=True,
         )
         processor = _make_processor(
@@ -4117,7 +4335,7 @@ class TestMaybeCoalesceToken:
         _, factory = _make_factory()
         merged_token = make_token_info(data={"merged": True})
         coalesce = Mock()
-        coalesce.accept.return_value = Mock(held=False, merged_token=merged_token)
+        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token)
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -4150,7 +4368,7 @@ class TestMaybeCoalesceToken:
         _, factory = _make_factory()
         merged_token = make_token_info(data={"merged": True})
         coalesce = Mock()
-        coalesce.accept.return_value = Mock(held=False, merged_token=merged_token)
+        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token)
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -4179,7 +4397,7 @@ class TestMaybeCoalesceToken:
         _, factory = _make_factory()
         merged_token = make_token_info(data={"merged": True})
         coalesce = Mock()
-        coalesce.accept.return_value = Mock(held=False, merged_token=merged_token)
+        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token)
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,

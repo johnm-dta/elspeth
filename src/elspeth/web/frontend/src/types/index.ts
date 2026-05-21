@@ -160,6 +160,7 @@ export interface CompositionState {
   id: string;
   version: number;
   source: SourceSpec | null;
+  sources?: Record<string, SourceSpec>;
   nodes: NodeSpec[];
   edges: EdgeSpec[];
   outputs: OutputSpec[];

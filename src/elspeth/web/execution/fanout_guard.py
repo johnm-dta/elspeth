@@ -125,11 +125,14 @@ class ExecutionFanoutGuardRequired(Exception):
 class _Producer:
     kind: _ProducerKind
     node: NodeSpec | None = None
+    source_name: str | None = None
+    source: SourceSpec | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _FanoutTrace:
     markers: tuple[str, ...]
+    source_markers: tuple[str, ...]
     source_estimated_rows: int | None
 
 
@@ -159,7 +162,6 @@ def evaluate_execution_fanout_guard(
             input_label=node.input,
             producers=producers,
             nodes_by_id=nodes_by_id,
-            source=state.source,
             data_dir=Path(data_dir),
         )
         provider_calls_per_row = _provider_calls_per_row(node.options)
@@ -188,11 +190,7 @@ def evaluate_execution_fanout_guard(
                 credential_ref=_credential_ref(node.options),
                 estimated_provider_calls=estimated_provider_calls,
                 provider_calls_per_row=provider_calls_per_row,
-                upstream_fanout=trace.markers
-                if trace.markers
-                else (f"source:{state.source.plugin}:estimated_rows={trace.source_estimated_rows}",)
-                if state.source is not None and trace.source_estimated_rows is not None
-                else (),
+                upstream_fanout=trace.markers if trace.markers else trace.source_markers,
                 risk_level=risk_level,
                 message=_risk_message(
                     node_id=node.id,
@@ -242,8 +240,9 @@ def annotate_pipeline_yaml_with_fanout_guard(
 
 def _build_producer_index(state: CompositionState) -> dict[str, _Producer]:
     producers: dict[str, _Producer] = {}
-    if state.source is not None and state.source.on_success != "discard":
-        producers[state.source.on_success] = _Producer(kind="source")
+    for source_name, source in state.sources.items():
+        if source.on_success != "discard":
+            producers[source.on_success] = _Producer(kind="source", source_name=source_name, source=source)
 
     for node in state.nodes:
         for label in (node.on_success, node.on_error):
@@ -265,16 +264,17 @@ def _trace_upstream_fanout(
     input_label: str,
     producers: Mapping[str, _Producer],
     nodes_by_id: Mapping[str, NodeSpec],
-    source: SourceSpec | None,
     data_dir: Path,
 ) -> _FanoutTrace:
     markers: list[str] = []
+    source_markers: list[str] = []
     source_estimated_rows: int | None = None
+    unknown_source_seen = False
     visited_labels: set[str] = set()
     visited_nodes: set[str] = set()
 
     def walk(label: str) -> None:
-        nonlocal source_estimated_rows
+        nonlocal source_estimated_rows, unknown_source_seen
         if label in visited_labels:
             return
         visited_labels.add(label)
@@ -284,8 +284,20 @@ def _trace_upstream_fanout(
             return
 
         if producer.kind == "source":
-            if source is not None and source_estimated_rows is None:
-                source_estimated_rows = _estimate_source_rows(source, data_dir=data_dir)
+            if producer.source is None or producer.source_name is None:
+                raise RuntimeError("Source producer missing source reference")
+            estimated_rows = _estimate_source_rows(producer.source, data_dir=data_dir)
+            if estimated_rows is None:
+                unknown_source_seen = True
+                source_estimated_rows = None
+            elif unknown_source_seen:
+                source_estimated_rows = None
+            elif source_estimated_rows is not None:
+                source_estimated_rows += estimated_rows
+            else:
+                source_estimated_rows = estimated_rows
+            if estimated_rows is not None:
+                source_markers.append(f"source:{producer.source_name}:{producer.source.plugin}:estimated_rows={estimated_rows}")
             return
 
         node = producer.node
@@ -309,7 +321,11 @@ def _trace_upstream_fanout(
         walk(node.input)
 
     walk(input_label)
-    return _FanoutTrace(markers=tuple(dict.fromkeys(markers)), source_estimated_rows=source_estimated_rows)
+    return _FanoutTrace(
+        markers=tuple(dict.fromkeys(markers)),
+        source_markers=tuple(dict.fromkeys(source_markers)),
+        source_estimated_rows=source_estimated_rows,
+    )
 
 
 def _fanout_marker_for_node(node: NodeSpec) -> str | None:

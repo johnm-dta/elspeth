@@ -26,6 +26,7 @@ from elspeth.web.composer.state import (
 from elspeth.web.execution.schemas import (
     ValidationCheck,
     ValidationError,
+    ValidationReadiness,
     ValidationResult,
 )
 
@@ -118,6 +119,14 @@ def _state(*, source_plugin="csv", transforms=(), sinks=(("out", "csv"),)):
 # construct InterpretationEventRecord instances must pin the same value
 # so the row builder sees them.
 _TEST_COMPOSITION_STATE_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
+
+def _ready_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
+
+
+def _blocked_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[])
 
 
 def _interpretation_event_records_dispatch(events_by_source_and_state):
@@ -319,7 +328,7 @@ def _row(snap, row_id):
     return matches[0]
 
 
-_OK = ValidationResult(is_valid=True, checks=[], errors=[], semantic_contracts=[])
+_OK = ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness(), semantic_contracts=[])
 
 
 def test_validation_row_ok_when_no_errors():
@@ -386,6 +395,7 @@ def test_snapshot_preserves_raw_validation_result():
                 error_code=None,
             ),
         ],
+        readiness=_blocked_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(transforms=(("first", "passthrough"), ("second", "passthrough"))), result)
@@ -413,6 +423,7 @@ def test_validation_row_error_lists_component_ids():
                 error_code=None,
             )
         ],
+        readiness=_blocked_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(), result)
@@ -506,6 +517,7 @@ def test_provenance_warning_on_identity_advisory():
             )
         ],
         errors=[],
+        readiness=_ready_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(transforms=(("pass", "passthrough"),)), result)
@@ -542,6 +554,7 @@ def test_provenance_not_applicable_when_identity_advisory_check_was_skipped():
                 error_code=None,
             )
         ],
+        readiness=_blocked_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(), result)
@@ -579,6 +592,7 @@ def test_provenance_not_applicable_when_validation_failed_before_identity_adviso
                 error_code=None,
             )
         ],
+        readiness=_blocked_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(), result)
@@ -892,6 +906,7 @@ def test_secrets_not_applicable_when_secret_refs_check_reports_no_refs():
             )
         ],
         errors=[],
+        readiness=_ready_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(), result, inventory=())
@@ -920,6 +935,7 @@ def test_secrets_not_applicable_when_no_ref_check_has_unrelated_inventory():
             )
         ],
         errors=[],
+        readiness=_ready_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(
@@ -960,6 +976,7 @@ def test_secrets_error_on_missing_refs():
                 error_code="missing_secret_ref",  # structured discriminant
             )
         ],
+        readiness=_blocked_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(), result)
@@ -985,6 +1002,7 @@ def test_secrets_error_when_secret_refs_check_failed_without_typed_error():
             )
         ],
         errors=[],
+        readiness=_blocked_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(), result)
@@ -1022,6 +1040,7 @@ def test_secrets_error_on_fabricated_secret():
                 error_code="fabricated_secret",
             )
         ],
+        readiness=_blocked_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(), result)
@@ -1047,6 +1066,7 @@ def test_secrets_error_on_disallowed_secret_ref():
                 error_code="disallowed_secret_ref",
             )
         ],
+        readiness=_blocked_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(), result)
@@ -1087,6 +1107,7 @@ def test_secrets_not_applicable_when_secret_check_was_skipped():
                 error_code=None,
             )
         ],
+        readiness=_blocked_readiness(),
         semantic_contracts=[],
     )
     svc = _make_service(_state(), result)

@@ -38,6 +38,7 @@ from elspeth.contracts.composer_interpretation import (
 )
 from elspeth.contracts.hashing import stable_hash
 from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     composition_states_table,
@@ -117,6 +118,57 @@ def _llm_node(
                 on_success="out",
                 on_error="quarantine",
                 options={"prompt_template": prompt_template},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Test", description=""),
+        version=1,
+    )
+    return state.to_dict()["nodes"][0]
+
+
+def _structured_llm_node(
+    *,
+    node_id: str = "llm_transform_1",
+    user_term: str = "cool",
+) -> dict:
+    """Return a production-serialized LLM transform with structured pending interpretation state."""
+    state = CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id=node_id,
+                node_type="transform",
+                plugin="llm",
+                input="input",
+                on_success="out",
+                on_error="quarantine",
+                options={
+                    "prompt_template": "Rate pending interpretation this is.",
+                    PROMPT_TEMPLATE_PARTS_KEY: [
+                        {"kind": "text", "text": "Rate "},
+                        {"kind": "interpretation_ref", "requirement_id": user_term},
+                        {"kind": "text", "text": " this is."},
+                    ],
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": user_term,
+                            "user_term": user_term,
+                            "status": "pending",
+                            "draft": "A draft of cool",
+                            "event_id": None,
+                            "accepted_value": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
                 condition=None,
                 routes=None,
                 fork_to=None,
@@ -848,6 +900,28 @@ def test_14_patch_helper_succeeds_on_clean_template() -> None:
     assert "kind" not in patched
 
 
+def test_patch_helper_resolves_structured_requirement_without_legacy_placeholder() -> None:
+    state = _state_with_node(_structured_llm_node())
+
+    nodes_out = _patch_llm_transform_prompt(
+        state,
+        affected_node_id="llm_transform_1",
+        user_term="cool",
+        accepted_value="Innovative and creative",
+    )
+
+    patched = next(iter(nodes_out))
+    patched_options = patched["options"]
+    patched_template = patched_options["prompt_template"]
+    requirement = patched_options[INTERPRETATION_REQUIREMENTS_KEY][0]
+
+    assert "{{interpretation:cool}}" not in patched_template
+    assert patched_template == "Rate Innovative and creative this is."
+    assert requirement["status"] == "resolved"
+    assert requirement["accepted_value"] == "Innovative and creative"
+    assert requirement["resolved_prompt_template_hash"] == stable_hash(patched_template)
+
+
 def test_patch_helper_accepts_whitespace_tolerant_placeholder() -> None:
     """Resolve accepts the same whitespace placeholder form as staging."""
     state = _state_with_node(_llm_node(prompt_template="Rate how {{ interpretation : cool }} this is."))
@@ -1157,6 +1231,55 @@ async def test_resolve_round_trips_through_state_from_record_and_yaml(service) -
     assert f"resolved_prompt_template_hash: {resolved.resolved_prompt_template_hash}" in yaml_str
     # Negative assertion: the placeholder must not survive into the YAML.
     assert "{{interpretation:cool}}" not in yaml_str
+
+
+@pytest.mark.asyncio
+async def test_resolve_structured_requirement_round_trips_without_authoring_metadata_in_yaml(service) -> None:
+    from elspeth.web.composer.yaml_generator import generate_yaml
+    from elspeth.web.sessions.converters import state_from_record
+
+    session_id = uuid4()
+    state = await _seed_state_with_llm_node(
+        service,
+        session_id=session_id,
+        node=_structured_llm_node(),
+    )
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_structured_round_trip",
+        user_term="cool",
+        llm_draft="modern and clear",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+        runtime_model_identifier="anthropic/claude-opus-4-7",
+        runtime_model_version="2026-05-01",
+    )
+
+    cs = state_from_record(new_state)
+    node = cs.nodes[0]
+    requirement = node.options[INTERPRETATION_REQUIREMENTS_KEY][0]
+    assert node.options["prompt_template"] == "Rate modern and clear this is."
+    assert node.options["resolved_prompt_template_hash"] == resolved.resolved_prompt_template_hash
+    assert requirement["status"] == "resolved"
+    assert requirement["accepted_value"] == "modern and clear"
+    assert requirement["resolved_prompt_template_hash"] == resolved.resolved_prompt_template_hash
+
+    yaml_str = generate_yaml(cs)
+    assert "prompt_template: Rate modern and clear this is." in yaml_str
+    assert PROMPT_TEMPLATE_PARTS_KEY not in yaml_str
+    assert INTERPRETATION_REQUIREMENTS_KEY not in yaml_str
 
 
 # --------------------------------------------------------------------------- #

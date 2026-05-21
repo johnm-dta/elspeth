@@ -40,7 +40,7 @@ from elspeth.web.composer.tools import (
     get_expression_grammar,
     get_tool_definitions,
 )
-from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationResult
+from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationReadiness, ValidationResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -7370,6 +7370,7 @@ class TestPreviewPipeline:
                         error_code=None,
                     )
                 ],
+                readiness=ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[]),
             )
         )
 

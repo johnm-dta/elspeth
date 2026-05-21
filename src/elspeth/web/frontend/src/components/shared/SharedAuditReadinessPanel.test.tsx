@@ -3,6 +3,13 @@ import { render, screen } from "@testing-library/react";
 import { SharedAuditReadinessPanel } from "./SharedAuditReadinessPanel";
 import type { AuditReadinessSnapshot } from "../../types/api";
 
+const READY_READINESS = {
+  authoring_valid: true,
+  execution_ready: true,
+  completion_ready: true,
+  blockers: [],
+};
+
 const _snapshot: AuditReadinessSnapshot = {
   session_id: "00000000-0000-0000-0000-000000000001",
   composition_version: 7,
@@ -62,6 +69,7 @@ const _snapshot: AuditReadinessSnapshot = {
     checks: [],
     errors: [],
     warnings: [],
+    readiness: READY_READINESS,
     semantic_contracts: [],
   },
 };

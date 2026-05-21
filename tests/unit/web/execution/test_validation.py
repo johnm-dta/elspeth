@@ -37,6 +37,7 @@ from elspeth.web.execution.validation import (
     _infer_component_type_from_plugin_error,
     validate_pipeline,
 )
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
 
 
 def _make_source(options: dict[str, Any] | None = None) -> SourceSpec:
@@ -411,7 +412,50 @@ class TestValidatePipelineBatchTransformOptions:
 class TestValidatePipelinePendingInterpretationPlaceholders:
     """Runtime preflight must distinguish composer authoring from execution."""
 
-    def test_pending_interpretation_placeholder_is_preserved_by_default(self) -> None:
+    def test_pending_structured_interpretation_returns_typed_readiness(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="llm",
+                    options={
+                        "prompt_template": "Rate pending interpretation: {{ row.text }}",
+                        PROMPT_TEMPLATE_PARTS_KEY: [
+                            {"kind": "text", "text": "Rate "},
+                            {"kind": "interpretation_ref", "requirement_id": "coolness"},
+                            {"kind": "text", "text": ": {{ row.text }}"},
+                        ],
+                        INTERPRETATION_REQUIREMENTS_KEY: [
+                            {
+                                "id": "coolness",
+                                "user_term": "coolness",
+                                "status": "pending",
+                                "draft": "well-designed and useful",
+                                "event_id": "event-1",
+                                "accepted_value": None,
+                                "resolved_prompt_template_hash": None,
+                            }
+                        ],
+                    },
+                ),
+            )
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert len(result.errors) == 1
+        assert result.errors[0].error_code == "interpretation_review_pending"
+        assert "Invalid Jinja2 template" not in result.errors[0].message
+        assert result.readiness.authoring_valid is True
+        assert result.readiness.execution_ready is False
+        assert result.readiness.completion_ready is True
+        assert result.readiness.blockers[0].code == "interpretation_review_pending"
+        assert result.readiness.blockers[0].component_id == "test_node"
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
+    def test_legacy_pending_interpretation_placeholder_returns_typed_readiness_by_default(self) -> None:
         state = _make_state(
             nodes=(
                 _make_node(
@@ -421,20 +465,16 @@ class TestValidatePipelinePendingInterpretationPlaceholders:
             )
         )
         settings = _make_settings()
-        captured_states: list[CompositionState] = []
         mock_yaml_gen = MagicMock()
 
-        def _generate_yaml(candidate: CompositionState) -> str:
-            captured_states.append(candidate)
-            return "source:\n  plugin: csv_source"
-
-        mock_yaml_gen.generate_yaml.side_effect = _generate_yaml
-        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
-            mock_load.side_effect = ValueError("settings stop")
-            result = validate_pipeline(state, settings, mock_yaml_gen)
+        result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is False
-        assert captured_states[0].nodes[0].options["prompt_template"] == "Rate how {{ interpretation: cool }} this row is."
+        assert result.errors[0].error_code == "interpretation_review_pending"
+        assert result.readiness.authoring_valid is True
+        assert result.readiness.execution_ready is False
+        assert result.readiness.completion_ready is True
+        mock_yaml_gen.generate_yaml.assert_not_called()
 
     def test_pending_interpretation_placeholder_is_masked_for_authoring_preflight(self) -> None:
         state = _make_state(
@@ -1011,7 +1051,7 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 10
+        assert len(result.checks) == 11
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True
@@ -1020,6 +1060,10 @@ class TestValidatePipelineSuccess:
         assert _check(result, "batch_transform_options").passed is True
         assert _check(result, "value_source_compliance").passed is True
         assert _check(result, "route_target_resolution").passed is True
+        assert _check(result, "interpretation_review").passed is True
+        assert result.readiness.authoring_valid is True
+        assert result.readiness.execution_ready is True
+        assert result.readiness.completion_ready is True
         assert result.errors == []
 
         # Verify real engine functions were called

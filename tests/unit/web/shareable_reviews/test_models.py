@@ -16,7 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from elspeth.web.audit_readiness.models import AuditReadinessSnapshot, ReadinessRow
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 from elspeth.web.shareable_reviews.models import (
     MarkReadyForReviewResponse,
     ShareableLinkResponse,
@@ -63,6 +63,7 @@ def _make_audit_readiness_snapshot() -> AuditReadinessSnapshot:
         is_valid=True,
         checks=[],
         errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
         semantic_contracts=[],
     )
     return AuditReadinessSnapshot(

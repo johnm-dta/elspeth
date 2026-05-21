@@ -44,7 +44,6 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobNotFoundError, BlobQuotaExceededError, BlobServiceProtocol, BlobStateError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.composer.state import CompositionState
-from elspeth.web.composer.tools import _detect_unresolved_interpretation_placeholders_typed
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.errors import (
@@ -73,8 +72,11 @@ from elspeth.web.execution.schemas import (
     RunStatusResponse,
     ValidationCheck,
     ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
     ValidationResult,
 )
+from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -443,11 +445,9 @@ class ExecutionServiceImpl:
         # (empirical LLM gate ≥ 8/10 staging runs emit
         # {{interpretation:<term>}}) passes; this detector is the
         # runtime-safety net catching cases where the LLM under-fires.
-        unresolved_placeholders = _detect_unresolved_interpretation_placeholders_typed(
-            composition_state.nodes,
-        )
-        if unresolved_placeholders:
-            for node_id, term in unresolved_placeholders:
+        materialized_state = materialize_state_for_execution(composition_state)
+        if isinstance(materialized_state, InterpretationReviewPending):
+            for node_id, term in materialized_state.sites:
                 self._telemetry.interpretation_placeholder_unresolved_at_runtime_total.add(
                     1,
                     attributes={
@@ -456,8 +456,9 @@ class ExecutionServiceImpl:
                     },
                 )
             raise UnresolvedInterpretationPlaceholderError(
-                placeholders=tuple(unresolved_placeholders),
+                placeholders=materialized_state.sites,
             )
+        composition_state = materialized_state
 
         # Path allowlist check — defense-in-depth. The validate endpoint also
         # checks this, but /execute does not require /validate first. An
@@ -703,6 +704,19 @@ class ExecutionServiceImpl:
                         error_code=None,
                     )
                 ],
+                readiness=ValidationReadiness(
+                    authoring_valid=False,
+                    execution_ready=False,
+                    completion_ready=False,
+                    blockers=[
+                        ValidationReadinessBlocker(
+                            code="state_exists",
+                            component_id=None,
+                            component_type=None,
+                            detail="No composition state exists for this session.",
+                        )
+                    ],
+                ),
             )
 
         composition_state = state_from_record(state_record)

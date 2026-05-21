@@ -14,6 +14,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.composer.yaml_generator import generate_pipeline_dict, generate_yaml
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
 
 
 def _make_linear_pipeline() -> CompositionState:
@@ -200,6 +201,38 @@ class TestGenerateYaml:
 
         assert "blob_ref" not in pipeline_dict["source"]["options"]
         assert "blob_ref" not in yaml.safe_load(generate_yaml(state))["source"]["options"]
+
+    def test_generate_pipeline_dict_strips_interpretation_authoring_metadata_from_transforms(self) -> None:
+        state = _make_linear_pipeline().with_node(
+            NodeSpec(
+                id="transform_1",
+                node_type="transform",
+                plugin="llm",
+                input="source_out",
+                on_success="main_output",
+                on_error="discard",
+                options={
+                    "prompt_template": "Rate resolved meaning: {{ row.text }}",
+                    PROMPT_TEMPLATE_PARTS_KEY: [{"kind": "text", "text": "ignored"}],
+                    INTERPRETATION_REQUIREMENTS_KEY: [],
+                    "resolved_prompt_template_hash": "sha256-rfc8785-v1:abc123",
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+
+        pipeline_dict = generate_pipeline_dict(state)
+        options = pipeline_dict["transforms"][0]["options"]
+
+        assert PROMPT_TEMPLATE_PARTS_KEY not in options
+        assert INTERPRETATION_REQUIREMENTS_KEY not in options
+        assert options["prompt_template"] == "Rate resolved meaning: {{ row.text }}"
+        assert options["resolved_prompt_template_hash"] == "sha256-rfc8785-v1:abc123"
 
     def test_generate_pipeline_dict_rejects_unknown_node_type(self) -> None:
         """YAML export must not silently drop nodes outside the closed set."""

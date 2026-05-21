@@ -169,6 +169,63 @@ describe("subscriptions — validation result side effects", () => {
     expect(sendValidationFeedback).not.toHaveBeenCalled();
   });
 
+  it("injects review-pending status but does NOT send validation feedback for pending interpretation review", () => {
+    const injectSystemMessage = vi.fn();
+    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendValidationFeedback,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        checks: [
+          {
+            name: "interpretation_review",
+            passed: false,
+            detail: "Interpretation review is pending for rate_node:cool.",
+            affected_nodes: ["rate_node"],
+            outcome_code: null,
+          },
+        ],
+        errors: [
+          {
+            component_type: "transform",
+            component_id: "rate_node",
+            message: "Interpretation review is pending for 'cool'.",
+            suggestion: "Resolve the pending interpretation review before running.",
+            error_code: "interpretation_review_pending",
+          },
+        ],
+        warnings: [],
+        readiness: {
+          authoring_valid: true,
+          execution_ready: false,
+          completion_ready: true,
+          blockers: [
+            {
+              code: "interpretation_review_pending",
+              component_id: "rate_node",
+              component_type: "transform",
+              detail: "rate_node:cool",
+            },
+          ],
+        },
+      } as never,
+    } as never);
+
+    expect(injectSystemMessage).toHaveBeenCalled();
+    expect(sendValidationFeedback).not.toHaveBeenCalled();
+    const [message, stableId] = injectSystemMessage.mock.calls[0] as [string, string];
+    expect(message).toContain("Interpretation review pending");
+    expect(message).toContain("rate_node");
+    expect(stableId).toBe("system-validation-current");
+  });
+
   it("calls injectSystemMessage but NOT sendValidationFeedback when validation passes with warnings", () => {
     const injectSystemMessage = vi.fn();
     const sendValidationFeedback = vi.fn();

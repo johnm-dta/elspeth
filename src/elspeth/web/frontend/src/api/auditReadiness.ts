@@ -119,6 +119,27 @@ function isSemanticEdgeContract(contract: unknown): boolean {
   );
 }
 
+function isValidationReadinessBlocker(blocker: unknown): boolean {
+  return (
+    isRecord(blocker) &&
+    typeof blocker.code === "string" &&
+    (typeof blocker.component_id === "string" || blocker.component_id === null) &&
+    (typeof blocker.component_type === "string" || blocker.component_type === null) &&
+    typeof blocker.detail === "string"
+  );
+}
+
+function isValidationReadiness(readiness: unknown): boolean {
+  return (
+    isRecord(readiness) &&
+    typeof readiness.authoring_valid === "boolean" &&
+    typeof readiness.execution_ready === "boolean" &&
+    typeof readiness.completion_ready === "boolean" &&
+    Array.isArray(readiness.blockers) &&
+    readiness.blockers.every(isValidationReadinessBlocker)
+  );
+}
+
 function isValidationResult(result: unknown): result is ValidationResult {
   return (
     isRecord(result) &&
@@ -128,6 +149,7 @@ function isValidationResult(result: unknown): result is ValidationResult {
     result.checks.every(isValidationCheck) &&
     Array.isArray(result.errors) &&
     result.errors.every(isValidationEntry) &&
+    isValidationReadiness(result.readiness) &&
     (
       result.warnings === undefined ||
       (

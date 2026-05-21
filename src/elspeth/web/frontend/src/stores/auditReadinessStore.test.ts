@@ -6,6 +6,12 @@ import type { AuditReadinessSnapshot, AuditReadinessExplain } from "../types/api
 vi.mock("../api/auditReadiness");
 
 const SESSION_ID = "00000000-0000-0000-0000-000000000001";
+const READY_READINESS = {
+  authoring_valid: true,
+  execution_ready: true,
+  completion_ready: true,
+  blockers: [],
+};
 
 function snapshot(version: number): AuditReadinessSnapshot {
   return {
@@ -25,6 +31,7 @@ function snapshot(version: number): AuditReadinessSnapshot {
       checks: [],
       errors: [],
       warnings: [],
+      readiness: READY_READINESS,
       semantic_contracts: [],
     },
   };

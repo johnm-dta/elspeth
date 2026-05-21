@@ -31,7 +31,7 @@ from sqlalchemy.pool import StaticPool
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.schemas import ValidationError, ValidationResult
+from elspeth.web.execution.schemas import ValidationError, ValidationReadiness, ValidationResult
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import composer_completion_events_table
@@ -41,6 +41,14 @@ from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import _FakeCounter, build_sessions_telemetry, observed_value
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
+
+
+def _ready_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
+
+
+def _blocked_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[])
 
 
 def _make_app_with_telemetry(tmp_path: Path) -> tuple[FastAPI, SessionServiceImpl]:
@@ -137,7 +145,7 @@ async def test_export_yaml_route_emits_completion_counter(tmp_path: Path) -> Non
 
     async def _pass_preflight(state, *, settings, secret_service, user_id):  # type: ignore[no-untyped-def]
         del state, settings, secret_service, user_id
-        return ValidationResult(is_valid=True, checks=[], errors=[])
+        return ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness())
 
     # Baseline.
     assert observed_value(telemetry.session_completed_total) == 0
@@ -202,6 +210,7 @@ async def test_export_yaml_route_runtime_preflight_failure_does_not_emit(tmp_pat
                     error_code=None,
                 )
             ],
+            readiness=_blocked_readiness(),
         )
 
     with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=_fail_preflight):

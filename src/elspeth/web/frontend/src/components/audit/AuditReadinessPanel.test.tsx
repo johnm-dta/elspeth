@@ -18,6 +18,18 @@ vi.mock("../../api/auditReadiness");
 
 const SESSION_ID = "00000000-0000-0000-0000-000000000001";
 const OTHER_SESSION_ID = "00000000-0000-0000-0000-000000000002";
+const READY_READINESS = {
+  authoring_valid: true,
+  execution_ready: true,
+  completion_ready: true,
+  blockers: [],
+};
+const BLOCKED_READINESS = {
+  authoring_valid: false,
+  execution_ready: false,
+  completion_ready: false,
+  blockers: [],
+};
 
 function allGreenSnapshot(version: number): AuditReadinessSnapshot {
   return {
@@ -37,6 +49,7 @@ function allGreenSnapshot(version: number): AuditReadinessSnapshot {
       checks: [],
       errors: [],
       warnings: [],
+      readiness: READY_READINESS,
       semantic_contracts: [],
     },
   };
@@ -95,6 +108,17 @@ function snapshotWithValidationErrorAndProvenanceWarning(version: number): Audit
         },
       ],
       warnings: [],
+      readiness: {
+        ...BLOCKED_READINESS,
+        blockers: [
+          {
+            code: "settings_load",
+            component_id: "source",
+            component_type: "source",
+            detail: "source",
+          },
+        ],
+      },
       semantic_contracts: [],
     },
   };
@@ -318,6 +342,17 @@ describe("AuditReadinessPanel", () => {
         },
       ],
       warnings: [],
+      readiness: {
+        ...BLOCKED_READINESS,
+        blockers: [
+          {
+            code: "settings_load",
+            component_id: "first",
+            component_type: "transform",
+            detail: "first",
+          },
+        ],
+      },
       semantic_contracts: [],
     };
     vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
@@ -376,6 +411,7 @@ describe("AuditReadinessPanel", () => {
       checks: [],
       errors: [],
       warnings: [],
+      readiness: READY_READINESS,
       semantic_contracts: [],
     });
     vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
@@ -418,6 +454,7 @@ describe("AuditReadinessPanel", () => {
       checks: [],
       errors: [],
       warnings: [],
+      readiness: READY_READINESS,
       semantic_contracts: [],
     };
     useExecutionStore.getState().setValidationResult(previousValidation);
@@ -480,6 +517,17 @@ describe("AuditReadinessPanel", () => {
           },
         ],
         warnings: [],
+        readiness: {
+          ...BLOCKED_READINESS,
+          blockers: [
+            {
+              code: "settings_load",
+              component_id: "source",
+              component_type: "source",
+              detail: "source",
+            },
+          ],
+        },
         semantic_contracts: [],
       },
     };

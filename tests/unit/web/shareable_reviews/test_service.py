@@ -41,7 +41,7 @@ from sqlalchemy import select, text
 from elspeth.contracts.payload_store import PayloadNotFoundError
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.audit_readiness.models import AuditReadinessSnapshot, ReadinessRow
-from elspeth.web.execution.schemas import ValidationError, ValidationResult
+from elspeth.web.execution.schemas import ValidationError, ValidationReadiness, ValidationResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     composer_completion_events_table,
@@ -57,6 +57,14 @@ from elspeth.web.shareable_reviews.service import (
 from elspeth.web.shareable_reviews.signer import InvalidToken, ShareTokenSigner
 
 _VALID_SIGNING_KEY = b"k" * 32
+
+
+def _ready_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
+
+
+def _blocked_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[])
 
 
 # ── Minimal record shims ─────────────────────────────────────────────────
@@ -182,7 +190,13 @@ def session_engine_with_row(engine, session_record: _SessionRecord, state_record
 
 
 def _ok_validation() -> ValidationResult:
-    return ValidationResult(is_valid=True, checks=[], errors=[], semantic_contracts=[])
+    return ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=_ready_readiness(),
+        semantic_contracts=[],
+    )
 
 
 def _broken_validation() -> ValidationResult:
@@ -198,6 +212,7 @@ def _broken_validation() -> ValidationResult:
                 error_code=None,
             )
         ],
+        readiness=_blocked_readiness(),
         semantic_contracts=[],
     )
 

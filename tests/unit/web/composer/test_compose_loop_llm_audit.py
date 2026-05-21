@@ -22,7 +22,7 @@ from elspeth.web.composer.service import ComposerAvailability, ComposerServiceIm
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationSummary
 from elspeth.web.composer.tools import ToolResult
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 
 
 @dataclass
@@ -68,6 +68,15 @@ def _empty_state() -> CompositionState:
         outputs=(),
         metadata=PipelineMetadata(),
         version=1,
+    )
+
+
+def _passing_preflight() -> ValidationResult:
+    return ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
     )
 
 
@@ -304,9 +313,7 @@ async def test_tool_call_then_final_response_records_both_llm_calls() -> None:
     with (
         patch("elspeth.web.composer.service._litellm_acompletion", new_callable=AsyncMock, side_effect=[tool_turn, final_turn]),
         patch("elspeth.web.composer.service.execute_tool", return_value=tool_result),
-        patch.object(
-            service, "_cached_runtime_preflight", new_callable=AsyncMock, return_value=ValidationResult(is_valid=True, checks=[], errors=[])
-        ),
+        patch.object(service, "_cached_runtime_preflight", new_callable=AsyncMock, return_value=_passing_preflight()),
     ):
         result = await service.compose("Set a name", [], state)
 

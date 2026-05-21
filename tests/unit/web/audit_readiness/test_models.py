@@ -13,7 +13,7 @@ from elspeth.web.audit_readiness.models import (
     ReadinessRowId,
     ReadinessStatus,
 )
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 
 CHECKED_AT = datetime(2026, 5, 17, 3, 30, tzinfo=UTC)
 
@@ -30,7 +30,13 @@ def _row(row_id, status="ok"):
 
 
 def _validation_result():
-    return ValidationResult(is_valid=True, checks=[], errors=[], semantic_contracts=[])
+    return ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
+        semantic_contracts=[],
+    )
 
 
 def test_row_constructs_with_minimal_fields():

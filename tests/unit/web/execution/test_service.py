@@ -47,6 +47,7 @@ from elspeth.web.execution.schemas import (
     RunAccountingTokens,
 )
 from elspeth.web.execution.service import ExecutionServiceImpl
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
 from elspeth.web.sessions.protocol import (
     LEGAL_RUN_TRANSITIONS,
     CompositionStateRecord,
@@ -3538,6 +3539,60 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
             }
         ]
 
+    @staticmethod
+    def _set_structured_pending_interpretation_state(
+        mock_session_service: MagicMock,
+        *,
+        term: str = "cool",
+        node_id: str = "rate_node",
+    ) -> None:
+        state = mock_session_service.get_current_state.return_value
+        state.source = {
+            "plugin": "csv",
+            "on_success": "rate_in",
+            "options": {"path": "blobs/rows.csv"},
+            "on_validation_failure": "discard",
+        }
+        state.nodes = [
+            {
+                "id": node_id,
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rate_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "prompt_template": "Rate pending interpretation aspects.",
+                    "model": "test-model",
+                    PROMPT_TEMPLATE_PARTS_KEY: [
+                        {"kind": "text", "text": "Rate "},
+                        {"kind": "interpretation_ref", "requirement_id": term},
+                        {"kind": "text", "text": " aspects."},
+                    ],
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": term,
+                            "user_term": term,
+                            "status": "pending",
+                            "draft": "visually appealing",
+                            "event_id": "event-1",
+                            "accepted_value": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+            }
+        ]
+        state.edges = None
+        state.outputs = [
+            {
+                "name": "results",
+                "plugin": "json",
+                "options": {"path": "outputs/scored.json", "format": "json"},
+                "on_write_failure": "discard",
+            }
+        ]
+
     @pytest.mark.asyncio
     async def test_execute_rejects_unresolved_placeholder_before_creating_run(
         self,
@@ -3568,6 +3623,24 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
         assert "rate_node" in str(excinfo.value)
 
         # No Run was created (fail-fast before run record persistence).
+        mock_session_service.create_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_structured_pending_interpretation_before_creating_run(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
+
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        self._set_structured_pending_interpretation_state(mock_session_service)
+
+        with patch.object(service, "_run_pipeline"), pytest.raises(UnresolvedInterpretationPlaceholderError) as excinfo:
+            await service.execute(session_id=uuid4())
+
+        assert excinfo.value.placeholders == (("rate_node", "cool"),)
         mock_session_service.create_run.assert_not_awaited()
 
     @pytest.mark.asyncio

@@ -46,6 +46,11 @@ from elspeth.web.async_workers import run_sync_in_worker
 # the audit-primacy rule (a broken OTel exporter must not 500 a POST
 # whose audit row already wrote).
 from elspeth.web.composer.telemetry_phase8 import record_interpretation_opt_out
+from elspeth.web.interpretation_state import (
+    INTERPRETATION_REQUIREMENTS_KEY,
+    PENDING_INTERPRETATION_AUTHORING_TEXT,
+    PROMPT_TEMPLATE_PARTS_KEY,
+)
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
     audit_access_log_table,
@@ -468,6 +473,131 @@ _STRUCTURAL_DIRECTIVE_PREFIXES: tuple[str, ...] = (
 )
 
 
+def _patch_structured_interpretation_prompt(
+    *,
+    options: Mapping[str, Any],
+    affected_node_id: str,
+    user_term: str,
+    accepted_value: str,
+) -> dict[str, Any] | None:
+    """Resolve structured interpretation metadata, returning patched options.
+
+    ``None`` means the node does not carry structured interpretation state and
+    the caller should fall back to the legacy sentinel-string path.
+    """
+
+    if INTERPRETATION_REQUIREMENTS_KEY not in options:
+        return None
+    requirements_value = options[INTERPRETATION_REQUIREMENTS_KEY]
+    if not isinstance(requirements_value, (list, tuple)):
+        raise InterpretationPlaceholderConsumedError(
+            f"_patch_llm_transform_prompt: node {affected_node_id!r} options.interpretation_requirements is not a list"
+        )
+    parts_value = options[PROMPT_TEMPLATE_PARTS_KEY] if PROMPT_TEMPLATE_PARTS_KEY in options else None
+    if not isinstance(parts_value, (list, tuple)):
+        raise InterpretationPlaceholderConsumedError(
+            f"_patch_llm_transform_prompt: node {affected_node_id!r} options.prompt_template_parts is required for structured interpretation resolution"
+        )
+
+    matching_indexes: list[int] = []
+    normalized_user_term = user_term.strip()
+    requirements: list[dict[str, Any]] = []
+    requirements_by_id: dict[str, Mapping[str, Any]] = {}
+    for index, requirement_value in enumerate(requirements_value):
+        if not isinstance(requirement_value, Mapping):
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} interpretation requirement entry is not a mapping"
+            )
+        requirement = dict(requirement_value)
+        requirement_id = requirement["id"]
+        requirement_term = requirement["user_term"]
+        if not isinstance(requirement_id, str) or not requirement_id:
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} interpretation requirement id is invalid"
+            )
+        if not isinstance(requirement_term, str):
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} interpretation requirement user_term is invalid"
+            )
+        if requirement_id in requirements_by_id:
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: duplicate interpretation requirement id {requirement_id!r}"
+            )
+        requirements_by_id[requirement_id] = requirement
+        if requirement_term.strip() == normalized_user_term and requirement.get("status") == "pending":
+            matching_indexes.append(index)
+        requirements.append(requirement)
+
+    if len(matching_indexes) != 1:
+        raise InterpretationPlaceholderConsumedError(
+            f"_patch_llm_transform_prompt: node {affected_node_id!r} does not contain exactly one pending "
+            f"interpretation requirement for {user_term!r}; found {len(matching_indexes)}"
+        )
+    matching_index = matching_indexes[0]
+    matching_requirement = requirements[matching_index]
+    matching_requirement_id = matching_requirement["id"]
+
+    rendered: list[str] = []
+    for part_value in parts_value:
+        if not isinstance(part_value, Mapping):
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} prompt_template_parts entry is not a mapping"
+            )
+        kind = part_value["kind"]
+        if kind == "text":
+            text = part_value["text"]
+            if not isinstance(text, str):
+                raise InterpretationPlaceholderConsumedError(
+                    f"_patch_llm_transform_prompt: node {affected_node_id!r} text prompt part is not a string"
+                )
+            rendered.append(text)
+            continue
+        if kind != "interpretation_ref":
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} unknown prompt part kind {kind!r}"
+            )
+        requirement_id = part_value["requirement_id"]
+        if not isinstance(requirement_id, str) or requirement_id not in requirements_by_id:
+            raise InterpretationPlaceholderConsumedError(
+                f"_patch_llm_transform_prompt: node {affected_node_id!r} prompt part references unknown interpretation requirement"
+            )
+        stored_requirement = requirements_by_id[requirement_id]
+        if requirement_id == matching_requirement_id:
+            prefix_lower = "".join(rendered).rstrip().lower()
+            for directive in _STRUCTURAL_DIRECTIVE_PREFIXES:
+                if prefix_lower.endswith(directive):
+                    raise InterpretationPlaceholderConsumedError(
+                        f"_patch_llm_transform_prompt: interpretation requirement {requirement_id!r} in node "
+                        f"{affected_node_id!r} is immediately preceded by structural directive {directive!r}; "
+                        f"substituting into a directive position would produce a broken prompt"
+                    )
+            rendered.append(accepted_value)
+            continue
+        if stored_requirement.get("status") == "resolved":
+            accepted = stored_requirement.get("accepted_value")
+            if not isinstance(accepted, str):
+                raise InterpretationPlaceholderConsumedError(
+                    f"_patch_llm_transform_prompt: resolved interpretation requirement {requirement_id!r} has no accepted value"
+                )
+            rendered.append(accepted)
+            continue
+        rendered.append(PENDING_INTERPRETATION_AUTHORING_TEXT)
+
+    new_template = "".join(rendered)
+    resolved_prompt_template_hash = stable_hash(new_template)
+    updated_requirement = dict(matching_requirement)
+    updated_requirement["status"] = "resolved"
+    updated_requirement["accepted_value"] = accepted_value
+    updated_requirement["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+    requirements[matching_index] = updated_requirement
+
+    patched_options = dict(options)
+    patched_options["prompt_template"] = new_template
+    patched_options["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+    patched_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
+    return patched_options
+
+
 def _patch_llm_transform_prompt(
     state: CompositionStateRecord,
     *,
@@ -567,6 +697,19 @@ def _patch_llm_transform_prompt(
                 f"_patch_llm_transform_prompt: node {affected_node_id!r} options.prompt_template is not a string"
             )
         template = template_value
+
+        structured_options = _patch_structured_interpretation_prompt(
+            options=options,
+            affected_node_id=affected_node_id,
+            user_term=user_term,
+            accepted_value=accepted_value,
+        )
+        if structured_options is not None:
+            patched_node = dict(node)
+            patched_node["options"] = structured_options
+            patched_nodes.append(patched_node)
+            continue
+
         placeholder_matches = [match for match in INTERPRETATION_PLACEHOLDER_RE.finditer(template) if match.group(1).strip() == user_term]
         placeholder = f"{{{{interpretation:{user_term}}}}}"
         if not placeholder_matches:

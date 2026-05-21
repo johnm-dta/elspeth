@@ -577,14 +577,19 @@ class TestValidationToDictSemanticContracts:
 async def test_mcp_preview_runtime_preflight_joins_shared_session_inflight() -> None:
     from elspeth.composer_mcp.server import _mcp_preview_runtime_preflight
     from elspeth.web.execution.runtime_preflight import RuntimePreflightCoordinator
-    from elspeth.web.execution.schemas import ValidationResult
+    from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 
     coordinator = RuntimePreflightCoordinator()
     state = _valid_state_with_no_edge_contracts()
     calls = 0
     started = asyncio.Event()
     release = asyncio.Event()
-    expected = ValidationResult(is_valid=True, checks=[], errors=[])
+    expected = ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
+    )
 
     async def run_preflight(candidate: CompositionState) -> ValidationResult:
         nonlocal calls

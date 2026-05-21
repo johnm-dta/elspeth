@@ -2004,7 +2004,11 @@ def resume(
                 from elspeth.core.landscape.factory import RecorderFactory
 
                 factory = RecorderFactory(db)
-                field_resolution = factory.run_lifecycle.get_source_field_resolution(run_id)
+                try:
+                    field_resolution = factory.run_lifecycle.get_resume_field_resolution(run_id)
+                except contract_errors.AuditIntegrityError as e:
+                    typer.echo(f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). {e}", err=True)
+                    raise typer.Exit(1) from None
                 if field_resolution is None:
                     typer.echo(
                         f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). "

@@ -37,6 +37,7 @@ from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import RunLoader
 from elspeth.core.landscape.reproducibility import compute_grade
 from elspeth.core.landscape.schema import (
+    RunSourceLifecycleState,
     nodes_table,
     preflight_results_table,
     run_attributions_table,
@@ -460,7 +461,7 @@ class RunLifecycleRepository:
         source_name: str,
         plugin_name: str,
         config_hash: str,
-        lifecycle_state: str,
+        lifecycle_state: str | RunSourceLifecycleState,
         source_schema_json: str | None = None,
         schema_contract: SchemaContract | None = None,
         field_resolution_mapping: Mapping[str, str] | None = None,
@@ -485,6 +486,11 @@ class RunLifecycleRepository:
                 f"run_sources source_node_id={source_node_id!r} for run_id={run_id!r} references "
                 f"node_type={source_node.node_type!r}; expected {NodeType.SOURCE.value!r}."
             )
+        try:
+            lifecycle = RunSourceLifecycleState(lifecycle_state)
+        except ValueError as exc:
+            allowed = ", ".join(state.value for state in RunSourceLifecycleState)
+            raise AuditIntegrityError(f"Invalid run source lifecycle_state={lifecycle_state!r}; expected one of: {allowed}.") from exc
 
         schema_contract_json: str | None = None
         schema_contract_hash: str | None = None
@@ -510,7 +516,7 @@ class RunLifecycleRepository:
             "schema_contract_json": schema_contract_json,
             "schema_contract_hash": schema_contract_hash,
             "field_resolution_json": field_resolution_json,
-            "lifecycle_state": lifecycle_state,
+            "lifecycle_state": lifecycle.value,
             "recorded_at": now(),
         }
         existing = self._ops.execute_fetchone(

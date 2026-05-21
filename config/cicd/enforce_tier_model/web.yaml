@@ -3549,96 +3549,6 @@ allow_hits:
     message text already shows ``inferred_type or 'unknown'`` so the audit trail distinguishes
     'unknown' from 'str' (the runtime type).
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=0945f207a98cbbff
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``source.options``. ``blob_ref`` is schema-
-    optional — present only when set_source_from_blob (or inline_blob in set_pipeline)
-    wired a blob into the source; for path-based sources it is absent. The function
-    abstains from blob-backed proof checks when absent.
-  safety: Absent blob_ref returns the diagnostic list unchanged; no fabricated blob
-    lookups.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=78003676a01b62e7
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``source.options.schema`` during proof diagnostics.
-    Re-read here (separate from ``_source_schema_mode``) to pull the schema for the
-    fixed-mode-omits-columns blocking check.
-  safety: Absent or non-Mapping schema fails the isinstance gate at line 923; no diagnostic
-    emitted.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=2e46bb891c34ebf7
-  owner: composer-tools-generation
-  reason: 'Tier-3 narrow on the LLM-authored ``schema`` value within ``compute_proof_diagnostics``:
-    the helper only emits the ``csv_fixed_schema_omits_observed_columns`` blocking
-    diagnostic when schema is a Mapping with mode=''fixed''.'
-  safety: Non-Mapping or non-fixed-mode schema bypasses the diagnostic branch; not
-    a Tier-1 'our data crash' because the schema is LLM-authored composer state.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=f0e165ac927832cd
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping).
-    ``mode`` may be absent or non-string; ``schema.get('mode') == 'fixed'`` is the
-    discriminator for the blocking-diagnostic branch.
-  safety: Absent or wrong-typed mode causes the equality check to fail; no false-
-    positive diagnostic.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=157afff4c5b89efd
-  owner: composer-tools-generation
-  reason: 'Tier-3 walk of LLM-authored ``schema`` Mapping: ``fields`` is the declared
-    column list. ``schema.get(''fields'') or ()`` coerces an absent or falsy value
-    to an empty tuple so the downstream isinstance check at line 925 has a normalised
-    value to test.'
-  safety: Empty tuple cannot trigger the missing-columns diagnostic (no declared columns
-    ⇒ no omission); behavior is conservative.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=69025a61f1c28d9f
-  owner: composer-tools-generation
-  reason: Tier-3 narrow on the LLM-authored ``schema.fields`` value before iterating
-    it as a declared-column sequence. Non-(list|tuple) shapes (mapping, scalar) bypass
-    the diagnostic branch.
-  safety: Wrong-shape fields silently bypasses the diagnostic — no synthesized diagnostic
-    against malformed schema input.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=65bfa9c0c7279e67
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=fd05b8a30100c68c
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=0939dce5f06ef7cb
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=2d23380aa7ea7a24
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=2dadfe65b888003f
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
 - key: web/composer/tools/transforms.py:R5:_execute_upsert_node:fp=28b82b3b788af6e4
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
@@ -4098,6 +4008,88 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=0e469aee138d8441
+  owner: composer-tools-generation
+  reason: Tier-3 walk of LLM-authored ``source.options``. ``blob_ref`` is schema-
+    optional — present only when set_source_from_blob (or inline_blob in set_pipeline)
+    wired a blob into the source; for path-based sources it is absent. The function
+    abstains from blob-backed proof checks when absent.
+  safety: Absent blob_ref returns the diagnostic list unchanged; no fabricated blob
+    lookups.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=fd440d1fa2566c84
+  owner: composer-tools-generation
+  reason: 'Tier-3 narrow on the LLM-authored ``schema`` value within ``compute_proof_diagnostics``:
+    the helper only emits the ``csv_fixed_schema_omits_observed_columns`` blocking
+    diagnostic when schema is a Mapping with mode=''fixed''.'
+  safety: Non-Mapping or non-fixed-mode schema bypasses the diagnostic branch; not
+    a Tier-1 'our data crash' because the schema is LLM-authored composer state.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=a28af5817e0b4495
+  owner: composer-tools-generation
+  reason: Tier-3 walk of LLM-authored ``source.options.schema`` during proof diagnostics.
+    Re-read here (separate from ``_source_schema_mode``) to pull the schema for the
+    fixed-mode-omits-columns blocking check.
+  safety: Absent or non-Mapping schema fails the isinstance gate at line 923; no diagnostic
+    emitted.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=fbe84c1c1919289e
+  owner: composer-tools-generation
+  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping).
+    ``mode`` may be absent or non-string; ``schema.get('mode') == 'fixed'`` is the
+    discriminator for the blocking-diagnostic branch.
+  safety: Absent or wrong-typed mode causes the equality check to fail; no false-
+    positive diagnostic.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=5a4439663b7d8eec
+  owner: composer-tools-generation
+  reason: Tier-3 narrow on the LLM-authored ``schema.fields`` value before iterating
+    it as a declared-column sequence. Non-(list|tuple) shapes (mapping, scalar) bypass
+    the diagnostic branch.
+  safety: Wrong-shape fields silently bypasses the diagnostic — no synthesized diagnostic
+    against malformed schema input.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=5b8528d3a11aa32a
+  owner: composer-tools-generation
+  reason: 'Tier-3 walk of LLM-authored ``schema`` Mapping: ``fields`` is the declared
+    column list. ``schema.get(''fields'') or ()`` coerces an absent or falsy value
+    to an empty tuple so the downstream isinstance check at line 925 has a normalised
+    value to test.'
+  safety: Empty tuple cannot trigger the missing-columns diagnostic (no declared columns
+    ⇒ no omission); behavior is conservative.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=a051184af324ed56
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=2aae6a24e3f11f00
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=cd36af3ad5d36278
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=c51ec158bfab3671
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
 per_file_rules:
 - pattern: web/composer/guided/chat_solver.py
   rules:

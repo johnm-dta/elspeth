@@ -133,8 +133,26 @@ describe("InlineRunResults", () => {
     } as never);
     render(<InlineRunResults />);
     expect(
-      screen.getByRole("button", { name: /past runs/i }),
+      screen.getByRole("button", { name: /past runs \(1\)/i }),
     ).toBeInTheDocument();
+  });
+
+  it("does not count the current terminal run as a past run", () => {
+    useExecutionStore.setState({
+      activeRunId: "run-done",
+      progress: {
+        status: "completed",
+      } as never,
+      runs: [{ id: "run-done", session_id: "sess-1", status: "completed" } as never],
+    } as never);
+    render(<InlineRunResults />);
+    expect(screen.getByTestId("run-outputs-stub")).toHaveAttribute(
+      "data-run-id",
+      "run-done",
+    );
+    expect(
+      screen.queryByRole("button", { name: /past runs/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("does not count an in-flight run as a past run", () => {
@@ -230,6 +248,7 @@ describe("InlineRunResults", () => {
     useExecutionStore.setState({
       activeRunId: null,
       runs: [
+        { id: "run-latest", session_id: "sess-1", status: "completed" } as never,
         { id: "run-old-1", session_id: "sess-1", status: "completed" } as never,
       ],
     } as never);

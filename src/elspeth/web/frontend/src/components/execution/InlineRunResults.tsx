@@ -74,7 +74,6 @@ export function InlineRunResults(): JSX.Element | null {
   const visibleRuns = activeSessionId
     ? runs.filter((run) => !run.session_id || run.session_id === activeSessionId)
     : runs;
-  const historyRuns = visibleRuns.filter((run) => isTerminalRunStatus(run.status));
   const hasActiveOrPendingRun =
     visibleRuns.some((run) => run.status === "pending" || run.status === "running") ||
     (progress !== null && !isTerminalRunStatus(progress.status));
@@ -92,6 +91,9 @@ export function InlineRunResults(): JSX.Element | null {
     : null;
   const mostRecentRun = !activeRunId ? (visibleRuns[0] ?? null) : null;
   const displayRun = activeRun ?? mostRecentRun;
+  const historyRuns = visibleRuns.filter(
+    (run) => isTerminalRunStatus(run.status) && run.id !== displayRun?.id,
+  );
   const progressBelongsToActiveRun = activeRunId !== null && progress !== null;
   const displayStatus = progressBelongsToActiveRun ? progress.status : displayRun?.status ?? null;
   const showProgress = progressBelongsToActiveRun;

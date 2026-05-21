@@ -60,6 +60,15 @@ class RunSourceResumeRecord:
     schema_contract: SchemaContract
 
 
+@dataclass(frozen=True, slots=True)
+class RunSourceFieldResolutionRecord:
+    """Per-source source header resolution metadata."""
+
+    source_node_id: str
+    source_name: str
+    resolution_mapping: Mapping[str, str] | None
+
+
 # Phase 2.2 (elspeth-0de989c56d): COMPLETED_WITH_FAILURES and EMPTY join the
 # terminal set so the engine can finalize runs into the four-value taxonomy
 # without a separate "intermediate" lifecycle hop.  The same terminal-write
@@ -688,34 +697,133 @@ class RunLifecycleRepository:
         if resolution_json is None:
             return None
 
-        # Parse the stored JSON structure
-        # This is Tier 1 (our data) — crash on any anomaly
+        return self._parse_field_resolution_mapping(
+            run_id=run_id,
+            resolution_json=resolution_json,
+            location="run-level source_field_resolution_json",
+        )
+
+    def get_source_field_resolutions(self, run_id: str) -> dict[str, RunSourceFieldResolutionRecord]:
+        """Get source-scoped field resolution mappings for a run.
+
+        Multi-source runs store field resolution by ``source_node_id``. A
+        ``None`` mapping is preserved for sources that did not record one so
+        callers can distinguish "single missing mapping" from "no source
+        metadata exists".
+        """
+        run_exists = self._ops.execute_fetchone(select(runs_table.c.run_id).where(runs_table.c.run_id == run_id))
+        if run_exists is None:
+            raise AuditIntegrityError(f"Run {run_id} not found in database")
+
+        rows = self._ops.execute_fetchall(
+            select(
+                run_sources_table.c.source_node_id,
+                run_sources_table.c.source_name,
+                run_sources_table.c.field_resolution_json,
+            )
+            .where(run_sources_table.c.run_id == run_id)
+            .order_by(run_sources_table.c.source_name, run_sources_table.c.source_node_id)
+        )
+        records: dict[str, RunSourceFieldResolutionRecord] = {}
+        for row in rows:
+            mapping = None
+            if row.field_resolution_json is not None:
+                mapping = self._parse_field_resolution_mapping(
+                    run_id=run_id,
+                    resolution_json=row.field_resolution_json,
+                    location=f"run_sources field_resolution_json for source {row.source_name!r} ({row.source_node_id})",
+                )
+            records[row.source_node_id] = RunSourceFieldResolutionRecord(
+                source_node_id=row.source_node_id,
+                source_name=row.source_name,
+                resolution_mapping=mapping,
+            )
+        return records
+
+    def get_resume_field_resolution(self, run_id: str) -> dict[str, str] | None:
+        """Return the only safe field-resolution mapping for sink resume.
+
+        Current sink resume hooks accept one mapping per sink, not one mapping
+        per source token. For multi-source runs, using the legacy run-level
+        singleton can silently apply the wrong source's original headers. This
+        method fails closed unless every recorded source mapping is present and
+        identical.
+        """
+        source_records = self.get_source_field_resolutions(run_id)
+        if not source_records:
+            return self.get_source_field_resolution(run_id)
+
+        if len(source_records) == 1:
+            record = next(iter(source_records.values()))
+            if record.resolution_mapping is not None:
+                return dict(record.resolution_mapping)
+            return self.get_source_field_resolution(run_id)
+
+        missing_sources = [record.source_name for record in source_records.values() if record.resolution_mapping is None]
+        if missing_sources:
+            missing = ", ".join(sorted(missing_sources))
+            raise AuditIntegrityError(
+                f"Cannot resume headers: original for multi-source run {run_id}: "
+                f"source field-resolution mapping is missing for source(s): {missing}. "
+                "A single sink resume mapping would be ambiguous."
+            )
+
+        by_fingerprint: dict[str, dict[str, str]] = {}
+        by_fingerprint_sources: dict[str, list[str]] = {}
+        for record in source_records.values():
+            if record.resolution_mapping is None:
+                raise AssertionError("missing_sources gate should have rejected None mappings")
+            fingerprint = canonical_json(record.resolution_mapping)
+            if fingerprint not in by_fingerprint:
+                by_fingerprint[fingerprint] = dict(record.resolution_mapping)
+                by_fingerprint_sources[fingerprint] = []
+            by_fingerprint_sources[fingerprint].append(record.source_name)
+
+        if len(by_fingerprint) > 1:
+            source_groups = [f"{', '.join(sorted(source_names))}" for source_names in by_fingerprint_sources.values()]
+            raise AuditIntegrityError(
+                f"Cannot resume headers: original for multi-source run {run_id}: "
+                "recorded sources have different original-header mappings "
+                f"({'; '.join(source_groups)}). The current sink resume contract accepts "
+                "one mapping, so resume must use a source-scoped sink path or fail closed."
+            )
+
+        return next(iter(by_fingerprint.values()))
+
+    def _parse_field_resolution_mapping(
+        self,
+        *,
+        run_id: str,
+        resolution_json: str,
+        location: str,
+    ) -> dict[str, str]:
+        # Parse the stored JSON structure. This is Tier 1 (our data) — crash on any anomaly.
         try:
             resolution_data = json.loads(resolution_json)
         except json.JSONDecodeError as exc:
             raise AuditIntegrityError(
-                f"Corrupt field resolution JSON for run {run_id}: "
+                f"Corrupt field resolution JSON for run {run_id} in {location}: "
                 f"failed to parse stored JSON — database corruption (Tier 1 violation). "
                 f"Parse error: {exc}"
             ) from exc
         if not isinstance(resolution_data, dict):
             raise AuditIntegrityError(
-                f"Corrupt field resolution data for run {run_id}: expected dict, got {type(resolution_data).__name__}"
+                f"Corrupt field resolution data for run {run_id} in {location}: expected dict, got {type(resolution_data).__name__}"
             )
 
         # Tier 1: resolution_mapping MUST exist if JSON is stored
         # record_source_field_resolution() always stores this key, so missing = corruption
         if "resolution_mapping" not in resolution_data:
             raise AuditIntegrityError(
-                f"Corrupt field resolution data for run {run_id}: "
+                f"Corrupt field resolution data for run {run_id} in {location}: "
                 f"missing required key 'resolution_mapping'. "
-                f"This indicates database corruption — record_source_field_resolution() always stores this key."
+                f"This indicates database corruption — field resolution writers always store this key."
             )
 
         resolution_mapping = resolution_data["resolution_mapping"]
         if not isinstance(resolution_mapping, dict):
             raise AuditIntegrityError(
-                f"Corrupt resolution_mapping for run {run_id}: expected dict, got {type(resolution_mapping).__name__}"
+                f"Corrupt resolution_mapping for run {run_id} in {location}: expected dict, got {type(resolution_mapping).__name__}"
             )
 
         # Verify all keys and values are strings (Tier 1 — crash on corruption)
@@ -725,7 +833,7 @@ class RunLifecycleRepository:
         for key, value in resolution_mapping.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 raise AuditIntegrityError(
-                    f"Corrupt resolution_mapping entry for run {run_id}: "
+                    f"Corrupt resolution_mapping entry for run {run_id} in {location}: "
                     f"expected str->str, got {type(key).__name__}->{type(value).__name__}"
                 )
             validated_mapping[key] = value

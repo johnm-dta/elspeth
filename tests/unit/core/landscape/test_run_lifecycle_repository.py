@@ -22,6 +22,7 @@ from elspeth.contracts import (
     Determinism,
     ExportStatus,
     FieldContract,
+    NodeType,
     ReproducibilityGrade,
     RunStatus,
     SchemaContract,
@@ -38,7 +39,7 @@ from elspeth.core.landscape.run_lifecycle_repository import (
     is_valid_sha256_hex,
 )
 from elspeth.core.landscape.schema import run_attributions_table, runs_table
-from tests.fixtures.landscape import make_factory, make_landscape_db
+from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 
 def _make_repo(*, run_id: str = "run-1") -> tuple[LandscapeDB, RunLifecycleRepository]:
@@ -416,6 +417,110 @@ class TestGetSourceFieldResolution:
         _corrupt_column(db, "run-1", source_field_resolution_json="{not valid json!!!")
         with pytest.raises(AuditIntegrityError, match="Corrupt field resolution JSON"):
             repo.get_source_field_resolution("run-1")
+
+    def test_resume_resolution_uses_source_scoped_mapping_when_present(self) -> None:
+        """Multi-source resume uses run_sources, not the overwritten run-level singleton."""
+        setup = make_recorder_with_run(run_id="run-1", source_node_id="source_orders", source_plugin_name="csv")
+        register_test_node(
+            setup.data_flow,
+            setup.run_id,
+            "source_refunds",
+            node_type=NodeType.SOURCE,
+            plugin_name="csv",
+        )
+        shared_mapping = {"Order ID": "order_id", "Amount": "amount"}
+        setup.run_lifecycle.record_source_field_resolution(
+            setup.run_id,
+            {"Refund ID": "refund_id", "Amount": "amount"},
+            "v1",
+        )
+        for source_node_id, source_name in (
+            ("source_orders", "orders"),
+            ("source_refunds", "refunds"),
+        ):
+            setup.run_lifecycle.record_run_source(
+                run_id=setup.run_id,
+                source_node_id=source_node_id,
+                source_name=source_name,
+                plugin_name="csv",
+                config_hash=source_name,
+                lifecycle_state="loaded",
+                field_resolution_mapping=shared_mapping,
+                normalization_version="v1",
+            )
+
+        assert setup.run_lifecycle.get_resume_field_resolution(setup.run_id) == shared_mapping
+
+    def test_resume_resolution_rejects_distinct_multi_source_mappings(self) -> None:
+        """One sink-level mapping cannot safely represent two original header sets."""
+        setup = make_recorder_with_run(run_id="run-1", source_node_id="source_orders", source_plugin_name="csv")
+        register_test_node(
+            setup.data_flow,
+            setup.run_id,
+            "source_refunds",
+            node_type=NodeType.SOURCE,
+            plugin_name="csv",
+        )
+        setup.run_lifecycle.record_source_field_resolution(
+            setup.run_id,
+            {"Refund ID": "refund_id", "Amount": "amount"},
+            "v1",
+        )
+        setup.run_lifecycle.record_run_source(
+            run_id=setup.run_id,
+            source_node_id="source_orders",
+            source_name="orders",
+            plugin_name="csv",
+            config_hash="orders",
+            lifecycle_state="loaded",
+            field_resolution_mapping={"Order ID": "order_id", "Amount": "amount"},
+            normalization_version="v1",
+        )
+        setup.run_lifecycle.record_run_source(
+            run_id=setup.run_id,
+            source_node_id="source_refunds",
+            source_name="refunds",
+            plugin_name="csv",
+            config_hash="refunds",
+            lifecycle_state="loaded",
+            field_resolution_mapping={"Refund ID": "refund_id", "Amount": "amount"},
+            normalization_version="v1",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="different original-header mappings"):
+            setup.run_lifecycle.get_resume_field_resolution(setup.run_id)
+
+    def test_resume_resolution_rejects_missing_multi_source_mapping(self) -> None:
+        """Missing per-source mapping is ambiguous once multiple sources exist."""
+        setup = make_recorder_with_run(run_id="run-1", source_node_id="source_orders", source_plugin_name="csv")
+        register_test_node(
+            setup.data_flow,
+            setup.run_id,
+            "source_refunds",
+            node_type=NodeType.SOURCE,
+            plugin_name="csv",
+        )
+        setup.run_lifecycle.record_run_source(
+            run_id=setup.run_id,
+            source_node_id="source_orders",
+            source_name="orders",
+            plugin_name="csv",
+            config_hash="orders",
+            lifecycle_state="loaded",
+            field_resolution_mapping={"Order ID": "order_id"},
+            normalization_version="v1",
+        )
+        setup.run_lifecycle.record_run_source(
+            run_id=setup.run_id,
+            source_node_id="source_refunds",
+            source_name="refunds",
+            plugin_name="csv",
+            config_hash="refunds",
+            lifecycle_state="loaded",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="missing for source"):
+            setup.run_lifecycle.get_resume_field_resolution(setup.run_id)
 
 
 class TestRecordSourceFieldResolutionNonexistentRun:

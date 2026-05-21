@@ -56,6 +56,20 @@ describe("shareableReviewStore", () => {
     expect(state.latestResponse).toBeNull();
   });
 
+  it("openAndMark retains the failed session id for first-attempt retry", async () => {
+    vi.spyOn(api, "markReadyForReview").mockRejectedValueOnce({
+      status: 409,
+      detail: "composition validation failed; fix errors before sharing",
+    });
+
+    await useShareableReviewStore.getState().openAndMark(SESSION_A);
+
+    const state = useShareableReviewStore.getState();
+    expect(state.request).toMatchObject({ kind: "error", sessionId: SESSION_A });
+    expect(state.latestResponse).toBeNull();
+    expect(state.sessionIdForResponse).toBe(SESSION_A);
+  });
+
   it("openAndMark falls back to a generic 401 message when detail absent", async () => {
     vi.spyOn(api, "markReadyForReview").mockRejectedValueOnce({ status: 401 });
     await useShareableReviewStore.getState().openAndMark(SESSION_A);

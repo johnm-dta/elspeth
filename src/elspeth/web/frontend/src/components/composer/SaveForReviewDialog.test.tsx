@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { axe, toHaveNoViolations } from "jest-axe";
 import { SaveForReviewDialog } from "./SaveForReviewDialog";
 import { useShareableReviewStore } from "@/stores/shareableReviewStore";
+import * as api from "@/api/shareableReviews";
 
 expect.extend(toHaveNoViolations);
 
@@ -61,6 +62,27 @@ describe("SaveForReviewDialog", () => {
       "composition validation failed",
     );
     expect(screen.getByTestId("save-for-review-retry")).toBeInTheDocument();
+  });
+
+  it("retries a failed first mint attempt with the failed session id", async () => {
+    const apiSpy = vi.spyOn(api, "markReadyForReview");
+    apiSpy
+      .mockRejectedValueOnce({
+        status: 409,
+        detail: "composition validation failed",
+      })
+      .mockResolvedValueOnce(_validResponse);
+
+    await useShareableReviewStore.getState().openAndMark("sess-retry");
+    render(<SaveForReviewDialog />);
+
+    fireEvent.click(screen.getByTestId("save-for-review-retry"));
+
+    await waitFor(() => expect(apiSpy).toHaveBeenCalledTimes(2));
+    expect(apiSpy).toHaveBeenLastCalledWith("sess-retry");
+    await waitFor(() =>
+      expect(screen.getByTestId("save-for-review-success")).toBeInTheDocument(),
+    );
   });
 
   it("shows the share URL and prepends location.origin on success", () => {

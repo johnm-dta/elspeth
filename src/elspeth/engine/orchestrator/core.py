@@ -984,6 +984,7 @@ class Orchestrator:
             sink_names=frozenset(config.sinks),
             coalesce_on_success_map=coalesce_on_success_map,
             restored_aggregation_state=restored_aggregation_state,
+            restored_coalesce_state=restored_coalesce_state,
             payload_store=payload_store,
             clock=self._clock,
             max_workers=self._concurrency_config.max_workers if self._concurrency_config else None,

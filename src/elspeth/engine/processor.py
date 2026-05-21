@@ -329,6 +329,7 @@ class RowProcessor:
         sink_names: frozenset[str] | None = None,
         coalesce_on_success_map: dict[CoalesceName, str] | None = None,
         restored_aggregation_state: Mapping[NodeID, AggregationCheckpointState] | None = None,
+        restored_coalesce_state: CoalesceCheckpointState | None = None,
         payload_store: PayloadStore | None = None,
         clock: Clock | None = None,
         max_workers: int | None = None,
@@ -467,6 +468,8 @@ class RowProcessor:
                 self._aggregation_executor.restore_from_checkpoint(state)
             if self._scheduler is not None:
                 self._restore_scheduler_blocks_from_aggregation_checkpoint(unique_states)
+        if restored_coalesce_state is not None and restored_coalesce_state.has_resumable_state and self._scheduler is not None:
+            self._restore_scheduler_blocks_from_coalesce_checkpoint(restored_coalesce_state)
 
     @property
     def token_manager(self) -> TokenManager:
@@ -517,6 +520,41 @@ class RowProcessor:
                         coalesce_node_id=str(coalesce_node_id) if coalesce_node_id is not None else None,
                         coalesce_name=str(coalesce_name) if coalesce_name is not None else None,
                     )
+
+    def _restore_scheduler_blocks_from_coalesce_checkpoint(self, state: CoalesceCheckpointState) -> None:
+        """Materialize durable BLOCKED scheduler rows for restored coalesce barriers."""
+        if self._scheduler is None:
+            raise OrchestrationInvariantError("Cannot restore coalesce scheduler blocks without a scheduler repository")
+
+        restored_at = self._clock.now_utc()
+        for pending_entry in state.pending:
+            coalesce_name = CoalesceName(pending_entry.coalesce_name)
+            if coalesce_name not in self._coalesce_node_ids:
+                raise AuditIntegrityError(
+                    f"Cannot restore scheduler blocks for coalesce checkpoint {coalesce_name!r}: "
+                    f"configured coalesces are {sorted(str(name) for name in self._coalesce_node_ids)}."
+                )
+            coalesce_node_id = self._coalesce_node_ids[coalesce_name]
+            for branch_name, token_checkpoint in pending_entry.branches.items():
+                restored_contract = SchemaContract.from_checkpoint(dict(token_checkpoint.contract))
+                row_data = PipelineRow(deep_thaw(token_checkpoint.row_data), restored_contract)
+                self._scheduler.ensure_blocked_barrier_work_item(
+                    run_id=self._run_id,
+                    token_id=token_checkpoint.token_id,
+                    row_id=token_checkpoint.row_id,
+                    node_id=str(coalesce_node_id),
+                    step_index=self._scheduler_step_index(coalesce_node_id),
+                    ingest_sequence=self._data_flow.resolve_row_ingest_sequence(token_checkpoint.row_id),
+                    row_payload_json=self._scheduler.serialize_row_payload(row_data),
+                    barrier_key=str(coalesce_name),
+                    available_at=restored_at,
+                    branch_name=branch_name,
+                    fork_group_id=token_checkpoint.fork_group_id,
+                    join_group_id=token_checkpoint.join_group_id,
+                    expand_group_id=token_checkpoint.expand_group_id,
+                    coalesce_node_id=str(coalesce_node_id),
+                    coalesce_name=str(coalesce_name),
+                )
 
     @property
     def run_id(self) -> str:

@@ -149,8 +149,6 @@ def record_schema_contract(
     if schema_contract is None:
         return False
 
-    # Update run-level contract
-    factory.run_lifecycle.update_run_contract(run_id, schema_contract)
     # Update source-scoped resume metadata before row processing can fail.
     factory.run_lifecycle.update_run_source_contract(
         run_id=run_id,
@@ -159,6 +157,11 @@ def record_schema_contract(
     )
     # Update source node's output_contract (was NULL at registration)
     factory.data_flow.update_node_output_contract(run_id, source_id, schema_contract)
+    # Preserve the legacy run-level singleton for single-source consumers,
+    # but never let it block later source-scoped contracts in multi-source
+    # runs. Per-source run_sources records are authoritative for resume.
+    if factory.run_lifecycle.get_run_contract(run_id) is None:
+        factory.run_lifecycle.update_run_contract(run_id, schema_contract)
     # Make contract available to transforms via context
     ctx.contract = schema_contract
     return True

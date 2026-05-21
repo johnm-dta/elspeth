@@ -22,6 +22,7 @@ from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
 from elspeth.contracts.enums import NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
+from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import SinkName
 from elspeth.core.canonical import canonical_json
 from elspeth.core.dag import ExecutionGraph
@@ -71,6 +72,23 @@ def _make_token_outcome(
         join_group_id=join_group_id,
         expand_group_id=expand_group_id,
         error_hash=error_hash,
+    )
+
+
+def _observed_contract(field_name: str, python_type: type) -> SchemaContract:
+    """Create a locked first-row-inferred source contract for orchestrator tests."""
+    return SchemaContract(
+        mode="OBSERVED",
+        fields=(
+            FieldContract(
+                normalized_name=field_name,
+                original_name=field_name,
+                python_type=python_type,
+                required=True,
+                source="inferred",
+            ),
+        ),
+        locked=True,
     )
 
 
@@ -229,37 +247,58 @@ class TestResumeFinalizesAsFailed:
     def test_resume_loop_refuses_completion_when_scheduler_work_remains_blocked(self) -> None:
         """Blocked/future scheduler work must survive resume instead of falling back to source replay."""
         orch = _make_orchestrator(make_landscape_db())
+        source = MagicMock()
+        source.on_success = "default"
         processor = MagicMock()
         processor.run_id = "run-with-blocked-work"
         processor.has_scheduled_work.side_effect = [True, True]
         processor.active_scheduled_row_ids.return_value = frozenset({"row-should-not-replay"})
         processor.drain_scheduled_work.return_value = []
         processor.process_existing_row.side_effect = AssertionError("source row replay must not run while scheduler work remains")
+        processor.summarize_scheduled_work.return_value = ("BLOCKED count=1 node=join-results",)
         config = PipelineConfig(
-            source=MagicMock(),
+            source=source,
+            sources={"source": source},
             transforms=(),
             sinks={"default": MagicMock()},
         )
-        loop_ctx = LoopContext(
-            counters=ExecutionCounters(),
-            pending_tokens={"default": []},
+        artifacts = SimpleNamespace(
+            source_id_map={"source": NodeID("source")},
+            edge_map={},
+            sink_id_map={},
+            source_id=NodeID("source"),
+        )
+        run_ctx = SimpleNamespace(
             processor=processor,
             ctx=MagicMock(),
-            config=config,
             agg_transform_lookup={},
             coalesce_executor=None,
             coalesce_node_map={},
         )
 
-        with pytest.raises(OrchestrationInvariantError, match="left non-terminal scheduler work after end-of-source flush"):
-            orch._run_resume_processing_loop(
-                loop_ctx,
+        with (
+            patch.object(orch, "_setup_resume_context", return_value=artifacts),
+            patch.object(orch, "_initialize_run_context", return_value=run_ctx),
+            patch.object(orch, "_run_transform_runtime_preflights"),
+            patch.object(orch, "_flush_and_write_sinks") as flush_sinks,
+            pytest.raises(Exception, match="left non-terminal scheduler work after sink durability") as exc_info,
+        ):
+            orch._process_resumed_rows(
+                MagicMock(spec=RecorderFactory),
+                "run-with-blocked-work",
+                config,
+                MagicMock(),
                 unprocessed_rows=(("row-should-not-replay", 0, {"value": 1}),),
+                restored_aggregation_state={},
+                restored_coalesce_state=None,
+                payload_store=MagicMock(),
                 schema_contract=MagicMock(),
             )
 
-        processor.drain_scheduled_work.assert_called_once_with(loop_ctx.ctx)
+        assert isinstance(exc_info.value.__cause__, OrchestrationInvariantError)
+        processor.drain_scheduled_work.assert_called_once_with(run_ctx.ctx)
         processor.process_existing_row.assert_not_called()
+        flush_sinks.assert_called_once()
 
     def test_setup_resume_context_uses_all_source_roots(self) -> None:
         """Multi-source resume must build a full source map instead of calling graph.get_source()."""
@@ -429,6 +468,156 @@ class TestResumeFinalizesAsFailed:
         assert events == ["record:loading", "load", "process"]
         factory.run_lifecycle.record_run_source.assert_called_once()
 
+    def test_later_observed_source_records_own_contract_without_overwriting_run_singleton(self) -> None:
+        """Each observed source must backfill its own first-row contract."""
+
+        @contextmanager
+        def _source_operation(*args, **kwargs):
+            yield SimpleNamespace(operation=SimpleNamespace(operation_id="source-op-1"))
+
+        orders_contract = _observed_contract("order_id", int)
+        refunds_contract = _observed_contract("refund_id", str)
+        orch = _make_orchestrator(make_landscape_db())
+        ctx = MagicMock(contract=None)
+        factory = MagicMock(spec=RecorderFactory)
+        factory.run_lifecycle.get_run_contract.side_effect = [None, orders_contract]
+        processor = MagicMock()
+        seen_contracts: list[SchemaContract] = []
+        seen_source_ids: list[NodeID] = []
+
+        def _process_row(**kwargs):
+            seen_contracts.append(kwargs["ctx"].contract)
+            seen_source_ids.append(kwargs["source_node_id"])
+            return []
+
+        processor.process_row.side_effect = _process_row
+
+        def _config(source_name: str, field_name: str, contract: SchemaContract) -> PipelineConfig:
+            source = MagicMock()
+            source.name = "csv"
+            source.config = {"path": f"{source_name}.csv"}
+            source.on_success = "sink"
+            source.output_schema.model_json_schema.return_value = {
+                "type": "object",
+                "properties": {field_name: {"type": "string"}},
+            }
+            source.get_field_resolution.return_value = None
+            source.get_schema_contract.side_effect = [None, None, contract, contract]
+            return PipelineConfig(
+                source=source,
+                sources={source_name: source},
+                transforms=(),
+                sinks={"sink": MagicMock()},
+            )
+
+        def _load_source(config_arg, run_id_arg, ctx_arg):
+            contract = orders_contract if "orders" in config_arg.sources else refunds_contract
+            field_name = "order_id" if contract is orders_contract else "refund_id"
+            assert ctx_arg.node_id in {NodeID("source-orders"), NodeID("source-refunds")}
+            assert ctx_arg.operation_id == "source-op-1"
+            return iter((make_source_row({field_name: 1}, contract=contract),))
+
+        with (
+            patch("elspeth.engine.orchestrator.core.track_operation", _source_operation),
+            patch.object(orch, "_load_source_with_events", side_effect=_load_source),
+        ):
+            for source_name, field_name, contract, source_id in [
+                ("orders", "order_id", orders_contract, NodeID("source-orders")),
+                ("refunds", "refund_id", refunds_contract, NodeID("source-refunds")),
+            ]:
+                config = _config(source_name, field_name, contract)
+                loop_ctx = LoopContext(
+                    counters=ExecutionCounters(),
+                    pending_tokens={"sink": []},
+                    processor=processor,
+                    ctx=ctx,
+                    config=config,
+                    agg_transform_lookup={},
+                    coalesce_executor=None,
+                    coalesce_node_map={},
+                )
+                orch._run_main_processing_loop(
+                    loop_ctx,
+                    factory,
+                    run_id="run-1",
+                    source_id=source_id,
+                    edge_map={},
+                    flush_end_of_input=True,
+                )
+
+        assert seen_source_ids == [NodeID("source-orders"), NodeID("source-refunds")]
+        assert seen_contracts == [orders_contract, refunds_contract]
+        assert factory.run_lifecycle.update_run_source_contract.call_count == 2
+        factory.run_lifecycle.update_run_contract.assert_called_once_with("run-1", orders_contract)
+        assert factory.data_flow.update_node_output_contract.call_count == 2
+
+    def test_second_observed_source_persists_resume_contract_before_row_failure(self) -> None:
+        """A later source crash must leave source-scoped resume metadata behind."""
+
+        @contextmanager
+        def _source_operation(*args, **kwargs):
+            yield SimpleNamespace(operation=SimpleNamespace(operation_id="source-op-1"))
+
+        orders_contract = _observed_contract("order_id", int)
+        refunds_contract = _observed_contract("refund_id", str)
+        orch = _make_orchestrator(make_landscape_db())
+        source = MagicMock()
+        source.name = "csv"
+        source.config = {"path": "refunds.csv"}
+        source.on_success = "refunds_sink"
+        source.output_schema.model_json_schema.return_value = {"type": "object", "properties": {"refund_id": {"type": "string"}}}
+        source.get_field_resolution.return_value = None
+        source.get_schema_contract.side_effect = [None, None, refunds_contract]
+        config = PipelineConfig(
+            source=source,
+            sources={"refunds": source},
+            transforms=(),
+            sinks={"refunds_sink": MagicMock()},
+        )
+        factory = MagicMock(spec=RecorderFactory)
+        factory.run_lifecycle.get_run_contract.return_value = orders_contract
+        events: list[str] = []
+        factory.run_lifecycle.update_run_source_contract.side_effect = lambda **kwargs: events.append("source_contract")
+        factory.data_flow.update_node_output_contract.side_effect = lambda *args, **kwargs: events.append("node_contract")
+        processor = MagicMock()
+
+        def _process_row(**kwargs):
+            events.append("process")
+            assert kwargs["ctx"].contract is refunds_contract
+            raise RuntimeError("boom after source contract persisted")
+
+        processor.process_row.side_effect = _process_row
+        loop_ctx = LoopContext(
+            counters=ExecutionCounters(),
+            pending_tokens={"refunds_sink": []},
+            processor=processor,
+            ctx=MagicMock(contract=orders_contract),
+            config=config,
+            agg_transform_lookup={},
+            coalesce_executor=None,
+            coalesce_node_map={},
+        )
+
+        def _load_source(config_arg, run_id_arg, ctx_arg):
+            return iter((make_source_row({"refund_id": "r1"}, contract=refunds_contract),))
+
+        with (
+            patch("elspeth.engine.orchestrator.core.track_operation", _source_operation),
+            patch.object(orch, "_load_source_with_events", side_effect=_load_source),
+            pytest.raises(RuntimeError, match="boom after source contract persisted"),
+        ):
+            orch._run_main_processing_loop(
+                loop_ctx,
+                factory,
+                run_id="run-1",
+                source_id=NodeID("source-refunds"),
+                edge_map={},
+                flush_end_of_input=True,
+            )
+
+        assert events == ["source_contract", "node_contract", "process"]
+        factory.run_lifecycle.update_run_contract.assert_not_called()
+
     def test_fresh_run_refuses_success_when_scheduler_work_remains(self) -> None:
         """A fresh multi-source run must not complete with durable scheduler work still active."""
         orch = _make_orchestrator(make_landscape_db())
@@ -470,7 +659,7 @@ class TestResumeFinalizesAsFailed:
                 return_value=LoopResult(interrupted=False, start_time=0.0, phase_start=0.0, last_progress_time=0.0),
             ),
             patch.object(orch, "_flush_and_write_sinks") as flush_sinks,
-            pytest.raises(Exception, match="left non-terminal scheduler work after final source flush") as exc_info,
+            pytest.raises(Exception, match="left non-terminal scheduler work after sink durability") as exc_info,
         ):
             orch._execute_run(
                 MagicMock(spec=RecorderFactory),
@@ -481,7 +670,7 @@ class TestResumeFinalizesAsFailed:
             )
 
         assert isinstance(exc_info.value.__cause__, OrchestrationInvariantError)
-        flush_sinks.assert_not_called()
+        flush_sinks.assert_called_once()
 
     def test_reconstruct_resume_state_uses_run_sources_records_for_multi_source_rows(self) -> None:
         """Resume reconstruction must restore schema classes and contracts per source node."""

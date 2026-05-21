@@ -425,9 +425,10 @@ class ShareableReviewService:
         even though the token strings differ (the nonce in each token's
         envelope ensures the byte sequence varies).
 
-        No audit row is written here — only ``mark_ready_for_review`` and
-        ``export_yaml`` are auditable completion events in v1. Re-minting
-        an already-shared snapshot is a UI affordance, not a new decision.
+        Re-minting keeps the same content-addressed snapshot digest but writes
+        a fresh completion audit row before issuing a token with a fresh expiry.
+        Otherwise the signed token could outlive the latest audit evidence for
+        that shareable-review validity window.
         """
         state_record = await self._session_service.get_current_state(session_id)
         if state_record is None:
@@ -445,6 +446,23 @@ class ShareableReviewService:
         created_at = datetime.now(UTC)
         expires_at = created_at + lifetime
         payload_digest = event.payload_digest
+
+        with self._sessions_db_engine.begin() as conn:
+            conn.execute(
+                insert(composer_completion_events_table).values(
+                    id=str(uuid4()),
+                    session_id=str(session_id),
+                    composition_state_id=str(state_record.id),
+                    event_type="mark_ready_for_review",
+                    actor=user_id,
+                    created_at=created_at,
+                    payload_digest=payload_digest,
+                    expires_at=expires_at,
+                )
+            )
+
+        record_session_completed(self._telemetry, completion_verb="mark_ready_for_review")
+
         token = self._sign_token(
             session_id=session_id,
             state_id=state_record.id,

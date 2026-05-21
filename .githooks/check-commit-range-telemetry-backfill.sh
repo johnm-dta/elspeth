@@ -59,9 +59,26 @@ def _extract_entries(path: Path) -> list[dict[str, str]]:
     entries: list[dict[str, str]] = []
     current: dict[str, str] | None = None
     in_entries = False
+    block_key: str | None = None
+    block_indent = 0
+    block_lines: list[str] = []
+
+    def flush_block() -> None:
+        nonlocal block_key, block_indent, block_lines
+        if current is not None and block_key is not None:
+            current[block_key] = "\n".join(line.strip() for line in block_lines if line.strip()).strip()
+        block_key = None
+        block_indent = 0
+        block_lines = []
 
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         stripped = raw_line.strip()
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if block_key is not None:
+            if indent > block_indent:
+                block_lines.append(stripped)
+                continue
+            flush_block()
         if not stripped or stripped.startswith("#"):
             continue
         if stripped == "entries:":
@@ -70,6 +87,7 @@ def _extract_entries(path: Path) -> list[dict[str, str]]:
         if not in_entries:
             continue
         if stripped.startswith("- "):
+            flush_block()
             if current is not None:
                 entries.append(current)
             current = {}
@@ -79,9 +97,15 @@ def _extract_entries(path: Path) -> list[dict[str, str]]:
         key, value = stripped.split(":", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
+        if key in {"commit_sha", "cohort", "reason", "owner", "expires"} and value in {"|", ">"}:
+            block_key = key
+            block_indent = indent
+            block_lines = []
+            continue
         if key in {"commit_sha", "cohort", "reason", "owner", "expires"}:
             current[key] = value
 
+    flush_block()
     if current is not None:
         entries.append(current)
     return entries

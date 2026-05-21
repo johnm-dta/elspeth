@@ -558,6 +558,8 @@ class TestRowLineage:
             run_id="run-456",
             source_node_id="node-src",
             row_index=42,
+            source_row_index=7,
+            ingest_sequence=42,
             source_data_hash="abc123def456",
             created_at=now,
             source_data={"id": 1, "name": "test"},
@@ -581,6 +583,8 @@ class TestRowLineage:
             run_id="run-456",
             source_node_id="node-src",
             row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
             source_data_hash="abc123def456",
             created_at=datetime.now(UTC),
             source_data=None,  # Payload was purged
@@ -601,6 +605,8 @@ class TestRowLineage:
             run_id="run-456",
             source_node_id="node-src",
             row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
             source_data_hash="required_hash_value",
             created_at=datetime.now(UTC),
             source_data=None,
@@ -608,6 +614,20 @@ class TestRowLineage:
         )
 
         assert lineage.source_data_hash == "required_hash_value"
+
+    def test_row_lineage_requires_source_scoped_identity(self) -> None:
+        """RowLineage must expose persisted source-local and ingest identity."""
+        with pytest.raises(TypeError, match="source_row_index must be int"):
+            RowLineage(
+                row_id="row-123",
+                run_id="run-456",
+                source_node_id="node-src",
+                row_index=0,
+                source_data_hash="required_hash_value",
+                created_at=datetime.now(UTC),
+                source_data=None,
+                payload_available=False,
+            )
 
 
 # =============================================================================
@@ -1157,6 +1177,8 @@ class TestHashFields:
             run_id="run-1",
             source_node_id="node-1",
             row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
             source_data_hash=self.VALID_SHA256,
             created_at=datetime.now(UTC),
         )
@@ -1516,6 +1538,8 @@ class TestPropertyBasedAuditContracts:
         run_id=valid_ids,
         source_node_id=valid_ids,
         row_index=positive_ints,
+        source_row_index=positive_ints,
+        ingest_sequence=positive_ints,
         source_data_hash=sha256_hashes,
     )
     @settings(max_examples=50)
@@ -1525,6 +1549,8 @@ class TestPropertyBasedAuditContracts:
         run_id: str,
         source_node_id: str,
         row_index: int,
+        source_row_index: int,
+        ingest_sequence: int,
         source_data_hash: str,
     ) -> None:
         """Row accepts any valid combination of inputs."""
@@ -1533,6 +1559,8 @@ class TestPropertyBasedAuditContracts:
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
             source_data_hash=source_data_hash,
             created_at=datetime.now(UTC),
         )
@@ -2145,10 +2173,24 @@ class TestRequireIntValidation:
             run_id="run-1",
             source_node_id="node-1",
             row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
             source_data_hash="abc123",
             created_at=datetime.now(UTC),
         )
         assert row.row_index == 0
+
+    def test_row_requires_source_scoped_identity(self) -> None:
+        """Row identity must not be fabricated from legacy row_index."""
+        with pytest.raises(TypeError, match="source_row_index must be int"):
+            Row(
+                row_id="row-1",
+                run_id="run-1",
+                source_node_id="node-1",
+                row_index=0,
+                source_data_hash="abc123",
+                created_at=datetime.now(UTC),
+            )
 
     # --- Call: existing __post_init__, require_int added before enum validation ---
 

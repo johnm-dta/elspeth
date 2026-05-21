@@ -205,6 +205,14 @@ def main() -> int:
         entry = {"key": new_key, **metadata}
         new_entries.setdefault(ypath, []).append(entry)
 
+    if unmatched_new:
+        sys.stderr.write(
+            "Refusing to auto-allow genuinely new tier-model violation(s); review or fix explicitly:\n"
+            + "\n".join(f"  {key}" for key in unmatched_new)
+            + "\n"
+        )
+        return 1
+
     # Now rewrite each affected yaml.
     affected_paths = set(yaml_caches) | set(stale_keys_to_remove) | set(new_entries)
     for ypath in sorted(affected_paths):
@@ -222,14 +230,6 @@ def main() -> int:
             f"{before} → {after} entries "
             f"(removed {len(keys_to_remove)} stale, added {len(new_entries.get(ypath, []))})"
         )
-
-    if unmatched_new:
-        sys.stderr.write(
-            "Refusing to auto-allow genuinely new tier-model violation(s); review or fix explicitly:\n"
-            + "\n".join(f"  {key}" for key in unmatched_new)
-            + "\n"
-        )
-        return 1
 
     return 0
 

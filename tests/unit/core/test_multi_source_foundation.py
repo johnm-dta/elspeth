@@ -770,8 +770,6 @@ sinks:
             .order_by(token_work_items_table.c.ingest_sequence)
         ).all()
 
-    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
-
     assert [row.source_row_index for row in rows] == [0, 1, 0]
     assert [row.ingest_sequence for row in rows] == [0, 1, 2]
     assert rows[0].source_node_id == rows[1].source_node_id
@@ -779,11 +777,13 @@ sinks:
     assert source_records == [("orders", "loaded"), ("refunds", "loaded")]
     assert [work.status for work in scheduled_work] == ["terminal", "terminal", "terminal"]
     assert [work.ingest_sequence for work in scheduled_work] == [0, 1, 2]
-    assert [TokenSchedulerRepository.deserialize_row_payload(work.row_payload_json).to_dict()["id"] for work in scheduled_work] == [
-        "1",
-        "2",
-        "r1",
+    scrubbed_payloads = [json.loads(work.row_payload_json) for work in scheduled_work]
+    assert scrubbed_payloads == [
+        {"payload_hash": scrubbed_payloads[0]["payload_hash"], "row_payload": "purged"},
+        {"payload_hash": scrubbed_payloads[1]["payload_hash"], "row_payload": "purged"},
+        {"payload_hash": scrubbed_payloads[2]["payload_hash"], "row_payload": "purged"},
     ]
+    assert all("id" not in work.row_payload_json for work in scheduled_work)
 
 
 def test_source_validation_failure_isolated_to_one_source(tmp_path) -> None:
@@ -1348,6 +1348,8 @@ def test_scheduler_claims_ready_work_and_recovers_expired_leases() -> None:
     assert reclaimed.status is TokenWorkStatus.LEASED
     assert reclaimed.lease_owner == "worker-b"
     assert reclaimed.on_success_sink == "default"
+    assert reclaimed.attempt == item.attempt + 1
+    assert reclaimed.work_item_id != item.work_item_id
 
 
 @pytest.mark.parametrize("transition", ["waiting", "blocked", "terminal", "failed"])
@@ -1380,13 +1382,14 @@ def test_scheduler_claimed_transition_rejects_stale_lease_owner_after_reclaim(tr
     assert recovered == 1
     second_claim = repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now + timedelta(seconds=32))
     assert second_claim is not None
-    assert second_claim.work_item_id == item.work_item_id
+    assert second_claim.work_item_id != item.work_item_id
+    assert second_claim.attempt == item.attempt + 1
 
     with pytest.raises(AuditIntegrityError, match=r"expected lease_owner 'worker-a'.*actual lease_owner 'worker-b'"):
         _apply_scheduler_transition(
             repo,
             transition,
-            work_item_id=item.work_item_id,
+            work_item_id=second_claim.work_item_id,
             now=now + timedelta(seconds=33),
             expected_lease_owner="worker-a",
         )
@@ -1394,7 +1397,7 @@ def test_scheduler_claimed_transition_rejects_stale_lease_owner_after_reclaim(tr
     with engine.connect() as conn:
         row = conn.execute(
             select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
-                token_work_items_table.c.work_item_id == item.work_item_id
+                token_work_items_table.c.work_item_id == second_claim.work_item_id
             )
         ).one()
     assert row == (TokenWorkStatus.LEASED.value, "worker-b")
@@ -1760,9 +1763,8 @@ def test_scheduler_repository_allows_terminal_cursor_without_fake_node() -> None
     assert claimed.node_id is None
 
 
-def test_scheduler_repository_wraps_duplicate_enqueue_as_landscape_record_error() -> None:
+def test_scheduler_repository_idempotently_accepts_duplicate_enqueue_with_identical_cursor() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
-    from elspeth.core.landscape.errors import LandscapeRecordError
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
     engine = create_engine("sqlite:///:memory:")
@@ -1787,13 +1789,51 @@ def test_scheduler_repository_wraps_duplicate_enqueue_as_landscape_record_error(
 
     assert item.run_id == "run-1"
     assert item.token_id == "token-1"
+    duplicate = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+
+    assert duplicate == item
+
+
+def test_scheduler_repository_rejects_duplicate_enqueue_with_incompatible_cursor() -> None:
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+    from elspeth.core.landscape.errors import LandscapeRecordError
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    _insert_scheduler_owner_records(engine, token_specs=(("token-1", "row-1", 0),), node_ids=("normalize",))
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = repo.serialize_row_payload(
+        PipelineRow({"id": 1, "secret": "do-not-leak"}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
+    )
+    repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+
     with pytest.raises(LandscapeRecordError) as exc_info:
         repo.enqueue_ready(
             run_id="run-1",
             token_id="token-1",
             row_id="row-1",
             node_id="normalize",
-            step_index=1,
+            step_index=2,
             ingest_sequence=0,
             available_at=now,
             row_payload_json=payload,

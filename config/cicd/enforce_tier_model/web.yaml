@@ -3696,13 +3696,6 @@ allow_hits:
     gate ImportFroms.
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=f6eeabcecd608c77
-  owner: web-execution
-  reason: Optional keys in user-authored config — source options key may be absent.
-    Fingerprint shifted from 05fc7c19c92be15e by the F-17/F-21 pre-execute placeholder
-    gate ImportFroms.
-  safety: Returns None; validation handles absence
-  expires: null
 - key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=e52d7f64d67fd540
   owner: web-execution
   reason: Idempotent cleanup of self._shutdown_events on the BaseException path of

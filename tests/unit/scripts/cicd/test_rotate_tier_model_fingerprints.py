@@ -212,3 +212,52 @@ def test_stale_entries_preserve_metadata_per_fingerprint(monkeypatch: Any, tmp_p
             "expires": "2026-12-31",
         },
     ]
+
+
+def test_rotator_refuses_unmatched_new_without_partial_yaml_write(monkeypatch: Any, tmp_path: Path) -> None:
+    """Mixed rotations plus genuinely new findings must leave YAML untouched."""
+    _configure_tmp_repo(monkeypatch, tmp_path)
+    _write_source(tmp_path)
+    allowlist_path = _write_allowlist(
+        tmp_path,
+        [
+            {
+                "key": "pkg/mod.py:R8:Example:outer:inner:fp=aaa111",
+                "owner": "first-owner",
+                "reason": "first reason",
+                "safety": "first safety",
+                "expires": None,
+            }
+        ],
+    )
+    original = yaml.safe_load(allowlist_path.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(
+        rotator,
+        "run_tier_model",
+        lambda: [
+            {
+                "rule_id": "trust_tier.tier_model",
+                "message": "Stale tier-model allowlist entry: pkg/mod.py:R8:Example:outer:inner:fp=aaa111",
+            },
+            {
+                "file_path": "pkg/mod.py",
+                "rule_id": "R8",
+                "line": 6,
+                "fingerprint": "new1",
+                "severity": "error",
+                "message": "Broad exception caught without re-raise: except Exception:",
+            },
+            {
+                "file_path": "pkg/mod.py",
+                "rule_id": "R9",
+                "line": 1,
+                "fingerprint": "brandnew",
+                "severity": "error",
+                "message": "Unpaired violation",
+            },
+        ],
+    )
+
+    assert rotator.main() == 1
+    assert yaml.safe_load(allowlist_path.read_text(encoding="utf-8")) == original

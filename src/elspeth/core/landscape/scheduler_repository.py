@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import Engine, and_, func, select, update
 from sqlalchemy.engine import Connection, RowMapping
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
@@ -26,6 +26,8 @@ from elspeth.core.landscape.schema import nodes_table, rows_table, token_work_it
 
 class TokenSchedulerRepository:
     """Persistence boundary for token scheduler work items."""
+
+    _SCRUBBED_ROW_PAYLOAD_JSON = canonical_json({"row_payload": "purged", "payload_hash": None})
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
@@ -72,6 +74,11 @@ class TokenSchedulerRepository:
             "queue_key": queue_key,
             "barrier_key": barrier_key,
             "on_success_sink": on_success_sink,
+            "pending_sink_name": None,
+            "pending_outcome": None,
+            "pending_path": None,
+            "pending_error_hash": None,
+            "pending_error_message": None,
             "branch_name": branch_name,
             "fork_group_id": fork_group_id,
             "join_group_id": join_group_id,
@@ -95,7 +102,7 @@ class TokenSchedulerRepository:
                 node_id=node_id,
                 coalesce_node_id=coalesce_node_id,
             )
-            self._insert_work_item(conn, values=values, operation="enqueue READY scheduler work")
+            self._insert_work_item_idempotent(conn, values=values, operation="enqueue READY scheduler work")
             row = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
         return self._item_from_mapping(row)
 
@@ -141,6 +148,11 @@ class TokenSchedulerRepository:
             "queue_key": None,
             "barrier_key": barrier_key,
             "on_success_sink": on_success_sink,
+            "pending_sink_name": None,
+            "pending_outcome": None,
+            "pending_path": None,
+            "pending_error_hash": None,
+            "pending_error_message": None,
             "branch_name": branch_name,
             "fork_group_id": fork_group_id,
             "join_group_id": join_group_id,
@@ -198,6 +210,11 @@ class TokenSchedulerRepository:
             "row_payload_json": row_payload_json,
             "queue_key": None,
             "on_success_sink": on_success_sink,
+            "pending_sink_name": None,
+            "pending_outcome": None,
+            "pending_path": None,
+            "pending_error_hash": None,
+            "pending_error_message": None,
             "branch_name": branch_name,
             "fork_group_id": fork_group_id,
             "join_group_id": join_group_id,
@@ -289,6 +306,71 @@ class TokenSchedulerRepository:
         if result.rowcount != 1:
             raise LandscapeRecordError(
                 f"Scheduler {operation} affected {result.rowcount} rows for {identity}; expected exactly one audit row."
+            )
+
+    @staticmethod
+    def _insert_work_item_idempotent(conn: Connection, *, values: dict[str, object], operation: str) -> None:
+        """Insert a work item or accept an exact existing continuation.
+
+        Child continuations are persisted before their parent claim is marked
+        complete. A crash in that window can replay the parent and attempt to
+        enqueue the same child again. The deterministic work_item_id lets us
+        reconcile that replay, but only when the existing durable row carries
+        the same resume cursor and token lineage.
+        """
+        try:
+            TokenSchedulerRepository._insert_work_item(conn, values=values, operation=operation)
+            return
+        except LandscapeRecordError as exc:
+            cause = exc.__cause__
+            if type(cause) is not IntegrityError:
+                raise
+
+        existing = (
+            conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == values["work_item_id"]))
+            .mappings()
+            .one_or_none()
+        )
+        if existing is None:
+            raise LandscapeRecordError(
+                f"Scheduler {operation} failed for {TokenSchedulerRepository._work_item_identity(values)} — "
+                "database reported duplicate identity but no matching row could be read back."
+            )
+
+        comparable_fields = (
+            "work_item_id",
+            "run_id",
+            "token_id",
+            "row_id",
+            "node_id",
+            "step_index",
+            "ingest_sequence",
+            "row_payload_json",
+            "queue_key",
+            "barrier_key",
+            "on_success_sink",
+            "pending_sink_name",
+            "pending_outcome",
+            "pending_path",
+            "pending_error_hash",
+            "pending_error_message",
+            "branch_name",
+            "fork_group_id",
+            "join_group_id",
+            "expand_group_id",
+            "coalesce_node_id",
+            "coalesce_name",
+            "attempt",
+        )
+        mismatches = {
+            field_name: {"expected": values[field_name], "actual": existing[field_name]}
+            for field_name in comparable_fields
+            if existing[field_name] != values[field_name]
+        }
+        if mismatches:
+            raise LandscapeRecordError(
+                f"Scheduler {operation} found incompatible existing work item for "
+                f"{TokenSchedulerRepository._work_item_identity(values)}: {mismatches!r}"
             )
 
     @staticmethod
@@ -400,22 +482,114 @@ class TokenSchedulerRepository:
                 )
         return self._item_from_mapping(claimed)
 
-    def recover_expired_leases(self, *, run_id: str, now: datetime) -> int:
-        """Return expired LEASED work to READY for retry by another worker."""
+    def claim_pending_sink(
+        self,
+        *,
+        run_id: str,
+        lease_owner: str,
+        lease_seconds: int,
+        now: datetime,
+    ) -> TokenWorkItem | None:
+        """Claim a sink-bound token whose transform work is already durable."""
+        lease_expires_at = now + timedelta(seconds=lease_seconds)
         with self._engine.begin() as conn:
+            row = (
+                conn.execute(
+                    select(token_work_items_table)
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.PENDING_SINK.value)
+                    .order_by(
+                        token_work_items_table.c.ingest_sequence,
+                        token_work_items_table.c.step_index,
+                        token_work_items_table.c.created_at,
+                    )
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                return None
             result = conn.execute(
                 update(token_work_items_table)
-                .where(token_work_items_table.c.run_id == run_id)
-                .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
-                .where(token_work_items_table.c.lease_expires_at < now)
+                .where(
+                    and_(
+                        token_work_items_table.c.work_item_id == row["work_item_id"],
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.status == TokenWorkStatus.PENDING_SINK.value,
+                    )
+                )
                 .values(
-                    status=TokenWorkStatus.READY.value,
-                    lease_owner=None,
-                    lease_expires_at=None,
+                    status=TokenWorkStatus.LEASED.value,
+                    lease_owner=lease_owner,
+                    lease_expires_at=lease_expires_at,
                     updated_at=now,
                 )
             )
-        return result.rowcount
+            if result.rowcount != 1:
+                raise AuditIntegrityError(
+                    f"Scheduler claim_pending_sink lost race on run_id={run_id!r} work_item_id={row['work_item_id']!r}: "
+                    f"UPDATE matched {result.rowcount} rows for lease_owner={lease_owner!r}."
+                )
+            claimed = (
+                conn.execute(
+                    select(token_work_items_table)
+                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
+                    .where(token_work_items_table.c.lease_owner == lease_owner)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if claimed is None:
+                raise AuditIntegrityError(
+                    f"Scheduler pending-sink claim invariant violated for work_item_id={row['work_item_id']!r}: "
+                    "leased row was not owned by the claimant"
+                )
+        return self._item_from_mapping(claimed)
+
+    def recover_expired_leases(self, *, run_id: str, now: datetime) -> int:
+        """Return expired LEASED work to READY for retry by another worker.
+
+        Recovery advances the durable scheduler attempt so any node state
+        created before the crashed worker lost its lease is not replayed under
+        the same ``(token_id, node_id, attempt)`` audit identity.
+        """
+        with self._engine.begin() as conn:
+            expired = conn.execute(
+                select(token_work_items_table)
+                .where(token_work_items_table.c.run_id == run_id)
+                .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
+                .where(token_work_items_table.c.lease_expires_at < now)
+                .order_by(token_work_items_table.c.ingest_sequence, token_work_items_table.c.step_index)
+            ).mappings()
+            recovered = 0
+            for row in expired:
+                pending_sink_name = row["pending_sink_name"]
+                next_attempt = row["attempt"] if pending_sink_name is not None else row["attempt"] + 1
+                next_work_item_id = (
+                    row["work_item_id"]
+                    if pending_sink_name is not None
+                    else self._work_item_id(run_id, row["token_id"], row["node_id"], next_attempt)
+                )
+                recovered_status = TokenWorkStatus.PENDING_SINK.value if pending_sink_name is not None else TokenWorkStatus.READY.value
+                result = conn.execute(
+                    update(token_work_items_table)
+                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
+                    .values(
+                        work_item_id=next_work_item_id,
+                        attempt=next_attempt,
+                        status=recovered_status,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                )
+                recovered += result.rowcount
+        return recovered
 
     def mark_waiting(
         self,
@@ -484,6 +658,7 @@ class TokenSchedulerRepository:
             now=now,
             status=TokenWorkStatus.TERMINAL,
             expected_lease_owner=expected_lease_owner,
+            row_payload_json=self._scrubbed_row_payload_json(work_item_id),
             lease_owner=None,
             lease_expires_at=None,
         )
@@ -497,9 +672,72 @@ class TokenSchedulerRepository:
             status=TokenWorkStatus.FAILED,
             expected_statuses=expected_statuses,
             expected_lease_owner=expected_lease_owner,
+            row_payload_json=self._scrubbed_row_payload_json(work_item_id),
             lease_owner=None,
             lease_expires_at=None,
         )
+
+    def mark_pending_sink(
+        self,
+        *,
+        work_item_id: str,
+        row_payload_json: str,
+        sink_name: str,
+        outcome: str,
+        path: str,
+        error_hash: str | None,
+        error_message: str | None,
+        now: datetime,
+        expected_lease_owner: str,
+    ) -> TokenWorkItem:
+        """Move a claimed item to a durable sink handoff state."""
+        return self._transition(
+            work_item_id=work_item_id,
+            now=now,
+            status=TokenWorkStatus.PENDING_SINK,
+            expected_lease_owner=expected_lease_owner,
+            row_payload_json=row_payload_json,
+            pending_sink_name=sink_name,
+            pending_outcome=outcome,
+            pending_path=path,
+            pending_error_hash=error_hash,
+            pending_error_message=error_message,
+            lease_owner=None,
+            lease_expires_at=None,
+        )
+
+    def mark_pending_sink_terminal(
+        self,
+        *,
+        run_id: str,
+        token_id: str,
+        now: datetime,
+        expected_lease_owner: str | None = None,
+    ) -> int:
+        """Terminalize pending sink scheduler work after token outcome durability."""
+        predicates = [
+            token_work_items_table.c.run_id == run_id,
+            token_work_items_table.c.token_id == token_id,
+            token_work_items_table.c.status.in_((TokenWorkStatus.PENDING_SINK.value, TokenWorkStatus.LEASED.value)),
+            token_work_items_table.c.pending_sink_name.is_not(None),
+        ]
+        if expected_lease_owner is not None:
+            predicates.append(
+                (token_work_items_table.c.lease_owner.is_(None)) | (token_work_items_table.c.lease_owner == expected_lease_owner)
+            )
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                update(token_work_items_table)
+                .where(and_(*predicates))
+                .values(
+                    status=TokenWorkStatus.TERMINAL.value,
+                    row_payload_json=self._scrubbed_row_payload_json(token_id),
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    updated_at=now,
+                )
+            )
+        return int(result.rowcount or 0)
 
     def mark_blocked_barrier_terminal(
         self,
@@ -554,6 +792,7 @@ class TokenSchedulerRepository:
             result = conn.execute(
                 statement.values(
                     status=TokenWorkStatus.TERMINAL.value,
+                    row_payload_json=self._scrubbed_row_payload_json(barrier_key),
                     lease_owner=None,
                     lease_expires_at=None,
                     updated_at=now,
@@ -579,6 +818,7 @@ class TokenSchedulerRepository:
             TokenWorkStatus.LEASED.value,
             TokenWorkStatus.WAITING.value,
             TokenWorkStatus.BLOCKED.value,
+            TokenWorkStatus.PENDING_SINK.value,
         )
         with self._engine.connect() as conn:
             result = conn.execute(
@@ -596,6 +836,7 @@ class TokenSchedulerRepository:
             TokenWorkStatus.LEASED.value,
             TokenWorkStatus.WAITING.value,
             TokenWorkStatus.BLOCKED.value,
+            TokenWorkStatus.PENDING_SINK.value,
         )
         with self._engine.connect() as conn:
             rows = (
@@ -617,6 +858,7 @@ class TokenSchedulerRepository:
             TokenWorkStatus.LEASED.value,
             TokenWorkStatus.WAITING.value,
             TokenWorkStatus.BLOCKED.value,
+            TokenWorkStatus.PENDING_SINK.value,
         )
         with self._engine.connect() as conn:
             rows = (
@@ -718,6 +960,11 @@ class TokenSchedulerRepository:
             queue_key=data["queue_key"],
             barrier_key=data["barrier_key"],
             on_success_sink=data["on_success_sink"],
+            pending_sink_name=data["pending_sink_name"],
+            pending_outcome=data["pending_outcome"],
+            pending_path=data["pending_path"],
+            pending_error_hash=data["pending_error_hash"],
+            pending_error_message=data["pending_error_message"],
             branch_name=data["branch_name"],
             fork_group_id=data["fork_group_id"],
             join_group_id=data["join_group_id"],
@@ -731,3 +978,8 @@ class TokenSchedulerRepository:
             created_at=data["created_at"],
             updated_at=data["updated_at"],
         )
+
+    @staticmethod
+    def _scrubbed_row_payload_json(anchor: str) -> str:
+        """Return non-row scheduler payload retained after terminalization."""
+        return canonical_json({"row_payload": "purged", "payload_hash": hashlib.sha256(anchor.encode()).hexdigest()})

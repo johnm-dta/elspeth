@@ -950,6 +950,7 @@ class SetSourceFromBlobArgumentsModel(BaseModel):
 
     blob_id: str
     on_success: str
+    source_name: str = "source"
     plugin: str | None = None
     on_validation_failure: str | None = None
     options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)

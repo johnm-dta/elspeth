@@ -260,6 +260,25 @@ class TestConstructorErrorEdgeMap:
 
         assert processor._scheduler_lease_owner == "worker-a"
 
+    def test_lease_recovered_work_offsets_transform_attempt_identity(self) -> None:
+        """Recovered scheduler attempts must not replay node state attempt 0."""
+        _, factory = _make_factory()
+        processor = _make_processor(factory)
+        transform = _make_mock_transform()
+        token = make_token_info(row_id="row-1", token_id="token-1", data={"value": 1})
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        executor = Mock()
+        executor.execute_transform.return_value = (
+            TransformResult.success(make_pipeline_row({"value": 1}), success_reason={"action": "test"}),
+            token,
+            None,
+        )
+        processor._transform_executor = executor
+
+        processor._execute_transform_with_retry(transform, token, ctx, attempt_offset=1)
+
+        assert executor.execute_transform.call_args.kwargs["attempt"] == 1
+
     def test_extracts_error_edges_from_edge_map(self) -> None:
         """Error edges (labels like __error_0__) are extracted into error_edge_ids."""
         _, factory = _make_factory()
@@ -3022,7 +3041,167 @@ class TestDurableSchedulerResumeDrain:
             statuses = (
                 conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
             )
-        assert statuses == ["terminal"]
+        assert statuses == ["pending_sink"]
+
+    def test_sink_bound_scheduler_work_terminalizes_only_after_sink_callback(self) -> None:
+        """Sink-bound work remains durable until sink outcome recording completes."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-ready")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        success_result = TransformResult.success(
+            make_row({"value": 42, "resumed": True}),
+            success_reason={"action": "resume_drain"},
+        )
+
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
+            return (success_result, token, None)
+
+        with patch.object(processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        processor.mark_sink_bound_scheduler_terminal("token-ready")
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, row_payload_json = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.row_payload_json).where(
+                    token_work_items_table.c.token_id == "token-ready"
+                )
+            ).one()
+        assert status == "terminal"
+        assert "resumed" not in row_payload_json
+        assert "purged" in row_payload_json
+
+    def test_pending_sink_resume_does_not_rerun_transform(self) -> None:
+        """A crash after transform success resumes at sink handoff, not at the transform."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-pending")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        first_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        final_token = TokenInfo(
+            row_id=row.row_id,
+            token_id=token.token_id,
+            row_data=make_row({"value": 42, "resumed": True}),
+        )
+        sink_bound_result = RowResult(
+            token=final_token,
+            final_data=final_token.row_data,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="default",
+        )
+
+        with patch.object(first_processor, "_process_single_token", return_value=(sink_bound_result, [])):
+            first_processor.drain_scheduled_work(ctx)
+
+        resumed_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="resume-worker",
+        )
+        with patch.object(resumed_processor._transform_executor, "execute_transform", side_effect=AssertionError("transform replayed")):
+            results = resumed_processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        assert results[0].token.token_id == "token-pending"
+        assert results[0].token.row_data.to_dict() == {"value": 42, "resumed": True}
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, lease_owner = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                    token_work_items_table.c.token_id == "token-pending"
+                )
+            ).one()
+        assert status == "leased"
+        assert lease_owner == "resume-worker"
 
     def test_drain_scheduler_transitions_use_injected_clock(self) -> None:
         """Durable scheduler state transitions must be deterministic under MockClock."""
@@ -3092,7 +3271,7 @@ class TestDurableSchedulerResumeDrain:
                     token_work_items_table.c.token_id == "token-clock"
                 )
             ).one()
-        assert status == "terminal"
+        assert status == "pending_sink"
         assert updated_at.replace(tzinfo=UTC) == clock.now_utc()
 
     def test_recovers_expired_lease_then_drains_without_source_replay(self) -> None:
@@ -3170,7 +3349,7 @@ class TestDurableSchedulerResumeDrain:
             statuses = (
                 conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
             )
-        assert statuses == ["terminal"]
+        assert statuses == ["pending_sink"]
 
     def test_drain_raises_when_resultless_work_has_no_scheduler_release_key(self) -> None:
         """Durable work cannot be BLOCKED unless resume has a release key for it."""
@@ -3494,7 +3673,7 @@ class TestDurableSchedulerResumeDrain:
             status = conn.execute(
                 select(token_work_items_table.c.status).where(token_work_items_table.c.token_id == "token-claimed-success")
             ).scalar_one()
-        assert status == "terminal"
+        assert status == "pending_sink"
 
     def test_scheduler_failure_write_preserves_processing_exception_context(self) -> None:
         """If marking scheduler work failed also fails, diagnostics keep both causes."""

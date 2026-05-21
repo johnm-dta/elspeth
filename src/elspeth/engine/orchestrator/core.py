@@ -735,6 +735,7 @@ class Orchestrator:
                     aggregation_state=agg_state,
                     coalesce_state=coalesce_state if coalesce_state is not None and coalesce_state.has_resumable_state else None,
                 )
+                processor.mark_sink_bound_scheduler_terminal(token.token_id)
 
             return callback
 
@@ -2910,10 +2911,12 @@ class Orchestrator:
             source_iterator = self._load_source_with_events(config, run_id, ctx)
 
             # Deferred recording flags — field resolution after first iteration,
-            # schema contract after first VALID row. If begin_run already stored
-            # a contract (FIXED mode), skip re-recording.
+            # schema contract after first VALID row. This flag is deliberately
+            # source-local: a previous source may have populated the legacy
+            # run-level contract while this source still needs its own
+            # run_sources backfill before row processing can fail.
             field_resolution_recorded = False
-            schema_contract_recorded = factory.run_lifecycle.get_run_contract(run_id) is not None
+            schema_contract_recorded = config.source.get_schema_contract() is not None
 
             # PROCESS phase
             phase_start = time.perf_counter()
@@ -3269,14 +3272,6 @@ class Orchestrator:
                     pending_tokens=pending_tokens,
                 )
 
-            if processor.has_scheduled_work():
-                active_work = "; ".join(processor.summarize_scheduled_work()) or "<unknown>"
-                raise OrchestrationInvariantError(
-                    f"Resume for run '{processor.run_id}' left non-terminal scheduler work after end-of-source flush. "
-                    "Blocked or future WAITING scheduler state must be recovered explicitly before run completion. "
-                    f"Active scheduler work: {active_work}."
-                )
-
         return interrupted_by_shutdown
 
     def _execute_run(
@@ -3363,14 +3358,6 @@ class Orchestrator:
 
             if loop_result is None:
                 raise OrchestrationInvariantError("Pipeline has no sources to process")
-            if not loop_result.interrupted and loop_ctx.processor.has_scheduled_work():
-                active_work = "; ".join(loop_ctx.processor.summarize_scheduled_work()) or "<unknown>"
-                raise OrchestrationInvariantError(
-                    f"Run '{run_ctx.processor.run_id}' left non-terminal scheduler work after final source flush. "
-                    "Blocked, READY, or future WAITING scheduler state must be resolved before run completion. "
-                    f"Active scheduler work: {active_work}."
-                )
-
             # 4. Sink writes — outside source_load track_operation context.
             # Each sink write has its own track_operation (sink_write) in SinkExecutor.
             self._flush_and_write_sinks(
@@ -3383,6 +3370,14 @@ class Orchestrator:
                 on_token_written_factory=self._make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
                 shutdown_checkpoint_source_id=loop_ctx.last_token_source_id or artifacts.source_id,
             )
+
+            if not loop_result.interrupted and loop_ctx.processor.has_scheduled_work():
+                active_work = "; ".join(loop_ctx.processor.summarize_scheduled_work()) or "<unknown>"
+                raise OrchestrationInvariantError(
+                    f"Run '{run_ctx.processor.run_id}' left non-terminal scheduler work after sink durability. "
+                    "Blocked, READY, WAITING, or pending sink scheduler state must be resolved before run completion. "
+                    f"Active scheduler work: {active_work}."
+                )
 
             # ADR-019 Phase 4: deferred cross-table invariant sweep.
             #
@@ -3865,6 +3860,14 @@ class Orchestrator:
                 on_token_written_factory=self._make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
                 shutdown_checkpoint_source_id=loop_ctx.last_token_source_id or artifacts.source_id,
             )
+
+            if not interrupted and loop_ctx.processor.has_scheduled_work():
+                active_work = "; ".join(loop_ctx.processor.summarize_scheduled_work()) or "<unknown>"
+                raise OrchestrationInvariantError(
+                    f"Resume for run '{run_ctx.processor.run_id}' left non-terminal scheduler work after sink durability. "
+                    "Blocked, READY, WAITING, or pending sink scheduler state must be resolved before run completion. "
+                    f"Active scheduler work: {active_work}."
+                )
 
             # ADR-019 Phase 4: resumed row processing reaches stable I1a/I1b
             # postconditions only after resume sink writes finish.

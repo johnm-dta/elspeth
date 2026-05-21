@@ -14,6 +14,7 @@ class TokenWorkStatus(StrEnum):
     LEASED = "leased"
     WAITING = "waiting"
     BLOCKED = "blocked"
+    PENDING_SINK = "pending_sink"
     TERMINAL = "terminal"
     FAILED = "failed"
 
@@ -44,6 +45,11 @@ class TokenWorkItem:
     queue_key: str | None = None
     barrier_key: str | None = None
     on_success_sink: str | None = None
+    pending_sink_name: str | None = None
+    pending_outcome: str | None = None
+    pending_path: str | None = None
+    pending_error_hash: str | None = None
+    pending_error_message: str | None = None
     branch_name: str | None = None
     fork_group_id: str | None = None
     join_group_id: str | None = None

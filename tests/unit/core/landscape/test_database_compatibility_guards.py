@@ -124,6 +124,12 @@ class TestSchemaCompatibilityGuards:
         ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
         assert (
             "token_work_items",
+            ("row_id", "run_id"),
+            "rows",
+            ("row_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+        assert (
+            "token_work_items",
             ("node_id", "run_id"),
             "nodes",
             ("node_id", "run_id"),
@@ -136,7 +142,7 @@ class TestSchemaCompatibilityGuards:
         ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
 
     def test_token_work_items_resume_identity_columns_are_required_schema_contract(self) -> None:
-        """Epoch-12 scheduler resume fields must participate in stale-DB detection."""
+        """Scheduler resume fields must participate in stale-DB detection."""
         required_token_work_columns = {column for table, column in database_module._REQUIRED_COLUMNS if table == "token_work_items"}
         assert {
             "run_id",
@@ -148,6 +154,11 @@ class TestSchemaCompatibilityGuards:
             "queue_key",
             "barrier_key",
             "on_success_sink",
+            "pending_sink_name",
+            "pending_outcome",
+            "pending_path",
+            "pending_error_hash",
+            "pending_error_message",
             "branch_name",
             "fork_group_id",
             "join_group_id",

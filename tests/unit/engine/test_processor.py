@@ -29,6 +29,7 @@ import pytest
 # For node registration
 from elspeth.contracts import NodeType, RouteDestination, RowResult, SourceRow, TokenInfo, TransformProtocol, TransformResult
 from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
+from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState, CoalescePendingCheckpoint, CoalesceTokenCheckpoint
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.enums import (
     NodeStateStatus,
@@ -139,6 +140,7 @@ def _make_processor(
     first_transform_node_id: NodeID | None = None,
     node_to_plugin: dict[NodeID, Any] | None = None,
     restored_aggregation_state: dict[NodeID, AggregationCheckpointState] | None = None,
+    restored_coalesce_state: CoalesceCheckpointState | None = None,
     telemetry_manager: Any = None,
     sink_names: frozenset[str] | None = None,
     scheduler: Any = None,
@@ -193,6 +195,7 @@ def _make_processor(
         branch_to_sink={BranchName(k): SinkName(v) for k, v in (branch_to_sink or {}).items()},
         coalesce_on_success_map=coalesce_on_success_map,
         restored_aggregation_state=restored_aggregation_state,
+        restored_coalesce_state=restored_coalesce_state,
         telemetry_manager=telemetry_manager,
         sink_names=sink_names,
         scheduler=scheduler,
@@ -3807,6 +3810,179 @@ class TestDurableSchedulerResumeDrain:
                 )
             ).one()
         assert (status, barrier_key) == ("blocked", "merge")
+
+    def test_resume_materializes_scheduler_blocks_from_coalesce_checkpoint(self) -> None:
+        """Checkpoint-restored coalesce branches must have matching durable scheduler barriers."""
+        db, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="coalesce:merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            node_id=str(coalesce_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        factory.data_flow.create_token(row.row_id, token_id="token-restored-coalesce")
+        restored_state = CoalesceCheckpointState(
+            version="4.0",
+            pending=(
+                CoalescePendingCheckpoint(
+                    coalesce_name="merge",
+                    row_id=row.row_id,
+                    elapsed_age_seconds=1.0,
+                    branches={
+                        "path_a": CoalesceTokenCheckpoint(
+                            token_id="token-restored-coalesce",
+                            row_id=row.row_id,
+                            branch_name="path_a",
+                            fork_group_id="fork-restore",
+                            join_group_id=None,
+                            expand_group_id=None,
+                            row_data=source_payload.to_dict(),
+                            contract=source_payload.contract.to_checkpoint_format(),
+                            state_id="state-restored-coalesce",
+                            arrival_offset_seconds=0.0,
+                        )
+                    },
+                    lost_branches={},
+                ),
+            ),
+            completed_keys=(),
+        )
+
+        processor = _make_processor(
+            factory,
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            node_step_map={NodeID("source-0"): 0, coalesce_node: 1},
+            node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
+            coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
+            restored_coalesce_state=restored_state,
+            scheduler=factory.scheduler,
+        )
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            scheduler_row = (
+                conn.execute(
+                    select(
+                        token_work_items_table.c.status,
+                        token_work_items_table.c.node_id,
+                        token_work_items_table.c.barrier_key,
+                        token_work_items_table.c.branch_name,
+                        token_work_items_table.c.fork_group_id,
+                        token_work_items_table.c.coalesce_node_id,
+                        token_work_items_table.c.coalesce_name,
+                    ).where(token_work_items_table.c.token_id == "token-restored-coalesce")
+                )
+                .mappings()
+                .one()
+            )
+        assert dict(scheduler_row) == {
+            "status": "blocked",
+            "node_id": str(coalesce_node),
+            "barrier_key": "merge",
+            "branch_name": "path_a",
+            "fork_group_id": "fork-restore",
+            "coalesce_node_id": str(coalesce_node),
+            "coalesce_name": "merge",
+        }
+
+        assert processor.mark_blocked_barrier_terminal("merge", ("token-restored-coalesce",)) == 1
+        with db.connection() as conn:
+            status = conn.execute(
+                select(token_work_items_table.c.status).where(token_work_items_table.c.token_id == "token-restored-coalesce")
+            ).scalar_one()
+        assert status == "terminal"
+
+    def test_coalesce_checkpoint_restore_rejects_stale_scheduler_metadata(self) -> None:
+        """Checkpoint restore must fail when an existing BLOCKED row has stale cursor data."""
+        _db, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="coalesce:merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            node_id=str(coalesce_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        factory.data_flow.create_token(row.row_id, token_id="token-stale-coalesce")
+        factory.scheduler.ensure_blocked_barrier_work_item(
+            run_id="test-run",
+            token_id="token-stale-coalesce",
+            row_id=row.row_id,
+            node_id=str(coalesce_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            barrier_key="stale-merge",
+            available_at=datetime.now(UTC),
+            branch_name="path_a",
+            fork_group_id="fork-restore",
+            coalesce_node_id=str(coalesce_node),
+            coalesce_name="merge",
+        )
+        restored_state = CoalesceCheckpointState(
+            version="4.0",
+            pending=(
+                CoalescePendingCheckpoint(
+                    coalesce_name="merge",
+                    row_id=row.row_id,
+                    elapsed_age_seconds=1.0,
+                    branches={
+                        "path_a": CoalesceTokenCheckpoint(
+                            token_id="token-stale-coalesce",
+                            row_id=row.row_id,
+                            branch_name="path_a",
+                            fork_group_id="fork-restore",
+                            join_group_id=None,
+                            expand_group_id=None,
+                            row_data=source_payload.to_dict(),
+                            contract=source_payload.contract.to_checkpoint_format(),
+                            state_id="state-stale-coalesce",
+                            arrival_offset_seconds=0.0,
+                        )
+                    },
+                    lost_branches={},
+                ),
+            ),
+            completed_keys=(),
+        )
+
+        with pytest.raises(AuditIntegrityError, match="incompatible existing work_item"):
+            _make_processor(
+                factory,
+                coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+                node_step_map={NodeID("source-0"): 0, coalesce_node: 1},
+                node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
+                coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
+                restored_coalesce_state=restored_state,
+                scheduler=factory.scheduler,
+            )
 
     def test_aggregation_buffering_leaves_scheduler_work_blocked(self) -> None:
         """Buffered aggregation tokens remain active until a flush consumes them."""

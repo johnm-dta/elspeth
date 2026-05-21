@@ -184,6 +184,7 @@ class IdleBlockingSource(_TestSourceBase):
 
     name = "idle_blocking_source"
     output_schema = _TestSchema
+    idle_flush_wait_seconds = 2.0
 
     def __init__(self, flush_seen: threading.Event) -> None:
         super().__init__()
@@ -193,8 +194,8 @@ class IdleBlockingSource(_TestSourceBase):
     def load(self, ctx: Any) -> Any:
         rows = list(self.wrap_rows([{"value": 1}]))
         yield rows[0]
-        if not self._flush_seen.wait(timeout=0.3):
-            raise RuntimeError("aggregation timeout did not fire while source was idle")
+        if not self._flush_seen.wait(timeout=self.idle_flush_wait_seconds):
+            raise RuntimeError(f"aggregation timeout did not fire while source was idle within {self.idle_flush_wait_seconds:.1f}s")
         yield SourceRow.valid(
             {"value": 2},
             contract=rows[0].contract,

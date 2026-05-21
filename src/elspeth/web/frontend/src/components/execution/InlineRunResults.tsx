@@ -74,6 +74,7 @@ export function InlineRunResults(): JSX.Element | null {
   const visibleRuns = activeSessionId
     ? runs.filter((run) => !run.session_id || run.session_id === activeSessionId)
     : runs;
+  const historyRuns = visibleRuns.filter((run) => isTerminalRunStatus(run.status));
   const hasActiveOrPendingRun =
     visibleRuns.some((run) => run.status === "pending" || run.status === "running") ||
     (progress !== null && !isTerminalRunStatus(progress.status));
@@ -100,7 +101,7 @@ export function InlineRunResults(): JSX.Element | null {
       : displayRun && displayStatus && isTerminalRunStatus(displayStatus)
         ? displayRun.id
         : null;
-  const hasHistory = visibleRuns.length > 0;
+  const hasHistory = historyRuns.length > 0;
   const summaryParts = runSummaryParts(
     displayStatus,
     progressBelongsToActiveRun ? progress : null,
@@ -141,7 +142,7 @@ export function InlineRunResults(): JSX.Element | null {
               onClick={() => setShowHistory(true)}
               className="btn-compact inline-run-results-history-btn"
             >
-              Past runs ({visibleRuns.length})
+              Past runs ({historyRuns.length})
             </button>
           )}
         </div>
@@ -151,7 +152,10 @@ export function InlineRunResults(): JSX.Element | null {
       {!isCollapsed && outputRunId && <NarrativeResultsBranch runId={outputRunId} />}
 
       {showHistory && (
-        <RunsHistoryDrawer onClose={() => setShowHistory(false)} />
+        <RunsHistoryDrawer
+          onClose={() => setShowHistory(false)}
+          runsOverride={historyRuns}
+        />
       )}
     </section>
   );

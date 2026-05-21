@@ -785,7 +785,18 @@ summary:focus-visible {
   border-radius: var(--radius-lg);
   word-break: break-word;
   white-space: pre-wrap;
-  line-height: var(--line-height-normal);
+  line-height: 1.42;
+}
+
+.bubble .markdown-body {
+  line-height: inherit;
+}
+
+.bubble .markdown-body p,
+.bubble .markdown-body ul,
+.bubble .markdown-body ol {
+  margin-top: 3px;
+  margin-bottom: 3px;
 }
 
 .bubble-user {
@@ -4743,6 +4754,66 @@ summary:focus-visible {
 
 .pending-proposals-banner-actions .btn {
   min-height: var(--size-control-compact);
+}
+
+/* Inline-source fallback prompt. This sits beside the chat input rather than
+   inside the message log, so it owns its own input-aligned margins. */
+.inline-source-fallback-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin: 0 var(--space-lg) var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-left: 4px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.inline-source-fallback-prompt-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.inline-source-fallback-prompt-title,
+.inline-source-fallback-prompt-detail {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.inline-source-fallback-prompt-title {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.inline-source-fallback-prompt-detail {
+  margin-top: var(--space-2xs);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.inline-source-fallback-prompt-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.inline-source-fallback-prompt-dismiss {
+  background: transparent;
+}
+
+@media (max-width: 760px) {
+  .inline-source-fallback-prompt {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .inline-source-fallback-prompt-actions {
+    flex-wrap: wrap;
+  }
 }
 
 .pending-overlay-pill {

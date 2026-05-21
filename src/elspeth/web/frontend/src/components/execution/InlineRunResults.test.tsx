@@ -137,6 +137,41 @@ describe("InlineRunResults", () => {
     ).toBeInTheDocument();
   });
 
+  it("does not count an in-flight run as a past run", () => {
+    useExecutionStore.setState({
+      activeRunId: "run-A",
+      progress: {
+        status: "running",
+      } as never,
+      runs: [{ id: "run-A", session_id: "sess-1", status: "running" } as never],
+    } as never);
+    render(<InlineRunResults />);
+    expect(screen.getByTestId("progress-view-stub")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /past runs/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows only terminal runs in the past-runs drawer while another run is active", async () => {
+    useExecutionStore.setState({
+      activeRunId: "run-active",
+      progress: {
+        status: "running",
+      } as never,
+      runs: [
+        { id: "run-active", session_id: "sess-1", status: "running" } as never,
+        { id: "run-old-1", session_id: "sess-1", status: "completed" } as never,
+      ],
+    } as never);
+    const user = userEvent.setup();
+
+    render(<InlineRunResults />);
+    await user.click(screen.getByRole("button", { name: /past runs \(1\)/i }));
+
+    expect(screen.getByText("run-old-1")).toBeInTheDocument();
+    expect(screen.queryByText("run-active")).not.toBeInTheDocument();
+  });
+
   it("collapses run results behind a compact retained summary", async () => {
     useExecutionStore.setState({
       activeRunId: null,

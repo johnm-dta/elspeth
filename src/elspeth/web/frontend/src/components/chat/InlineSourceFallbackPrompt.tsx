@@ -61,7 +61,7 @@ export interface InlineSourceFallbackPromptProps {
    */
   candidateText: string;
   /**
-   * Invoked when the user clicks "Create source from this text". The
+   * Invoked when the user clicks "Create source". The
    * handler receives the candidate text so the chat-turn prelude can
    * embed it verbatim. F-3: the chat message dispatched downstream
    * MUST read as natural language, NOT as a tool invocation string.
@@ -89,20 +89,25 @@ export function InlineSourceFallbackPrompt({
       data-testid="inline-source-fallback-prompt"
       className="inline-source-fallback-prompt"
     >
-      <p className="inline-source-fallback-prompt-copy">
-        Your text looks like source data. Create a source from it?
-      </p>
+      <div className="inline-source-fallback-prompt-copy">
+        <p className="inline-source-fallback-prompt-title">
+          This looks like source data
+        </p>
+        <p className="inline-source-fallback-prompt-detail">
+          Create a source so ELSPETH can use this text in the pipeline.
+        </p>
+      </div>
       <div className="inline-source-fallback-prompt-actions">
         <button
           type="button"
-          className="btn btn-primary inline-source-fallback-prompt-accept"
+          className="btn btn-compact btn-primary inline-source-fallback-prompt-accept"
           onClick={() => onAccept(candidateText)}
         >
-          Create source from this text
+          Create source
         </button>
         <button
           type="button"
-          className="inline-source-fallback-prompt-dismiss"
+          className="btn-compact inline-source-fallback-prompt-dismiss"
           onClick={onDismiss}
         >
           Dismiss

@@ -10,10 +10,11 @@ import { useEffect, useRef, useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { RunOutputsPanel } from "@/components/inspector/RunOutputsPanel";
-import type { RunDiagnostics, RunDiagnosticsWorkingView } from "@/types/index";
+import type { Run, RunDiagnostics, RunDiagnosticsWorkingView } from "@/types/index";
 
 interface RunsHistoryDrawerProps {
   onClose: () => void;
+  runsOverride?: ReadonlyArray<Run>;
 }
 
 const FOCUSABLE_SELECTOR =
@@ -60,8 +61,9 @@ function buildPendingWorkingView(diagnostics: RunDiagnostics): RunDiagnosticsWor
   };
 }
 
-export function RunsHistoryDrawer({ onClose }: RunsHistoryDrawerProps): JSX.Element {
-  const runs = useExecutionStore((s) => s.runs);
+export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerProps): JSX.Element {
+  const storeRuns = useExecutionStore((s) => s.runs);
+  const runs = runsOverride ?? storeRuns;
   const diagnosticsByRunId = useExecutionStore((s) => s.diagnosticsByRunId);
   const diagnosticsLoadingByRunId = useExecutionStore((s) => s.diagnosticsLoadingByRunId);
   const diagnosticsEvaluatingByRunId = useExecutionStore((s) => s.diagnosticsEvaluatingByRunId);

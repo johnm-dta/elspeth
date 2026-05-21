@@ -644,6 +644,34 @@ class TestSetActiveState:
         assert reverted.derived_from_state_id == v1.id
 
     @pytest.mark.asyncio
+    async def test_revert_preserves_named_sources(self, service) -> None:
+        session = await service.create_session("alice", "Multi-source", "local")
+        sources = {
+            "orders": {"plugin": "csv", "on_success": "orders_rows", "on_validation_failure": "discard", "options": {"path": "orders.csv"}},
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_rows",
+                "on_validation_failure": "discard",
+                "options": {"path": "refunds.csv"},
+            },
+        }
+        v1 = await service.save_composition_state(
+            session.id,
+            CompositionStateData(source=sources["orders"], sources=sources, is_valid=True),
+            provenance="session_seed",
+        )
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(source={"plugin": "json", "on_success": "rows", "on_validation_failure": "discard", "options": {}}),
+            provenance="session_seed",
+        )
+
+        reverted = await service.set_active_state(session.id, v1.id)
+
+        assert reverted.source == sources["orders"]
+        assert reverted.sources == sources
+
+    @pytest.mark.asyncio
     async def test_revert_preserves_history(self, service) -> None:
         session = await service.create_session("alice", "Pipeline", "local")
         await service.save_composition_state(session.id, CompositionStateData(is_valid=False), provenance="session_seed")

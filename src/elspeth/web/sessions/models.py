@@ -916,6 +916,11 @@ composer_completion_events_table = Table(
         "composition_state_id IS NOT NULL",
         name="ck_composer_completion_events_composition_state_id_required",
     ),
+    ForeignKeyConstraint(
+        ["composition_state_id", "session_id"],
+        ["composition_states.id", "composition_states.session_id"],
+        name="fk_composer_completion_events_state_session",
+    ),
 )
 
 Index(

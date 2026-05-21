@@ -10402,6 +10402,36 @@ class TestPreviewProofStep:
         assert result.success is True
         assert result.data["proof_diagnostics"] == ()
 
+    def test_proof_inspects_named_sources_beyond_compatibility_source(self) -> None:
+        """A non-first named source must not bypass proof diagnostics."""
+        state = self._state_with_csv_source(schema_mode="observed").with_named_source(
+            "url_source",
+            SourceSpec(
+                plugin="text",
+                on_success="content",
+                options={
+                    "blob_ref": self.url_blob_id,
+                    "column": "url",
+                    "schema": {"mode": "fixed", "fields": ["url: str"]},
+                },
+                on_validation_failure="discard",
+            ),
+        )
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        diagnostics = result.data["proof_diagnostics"]
+        matching = [d for d in diagnostics if d["code"] == "text_source_url_without_web_scrape"]
+        assert matching
+        assert matching[0]["evidence_locator"]["source_name"] == "url_source"
+
     # -- csv_fixed_schema_omits_observed_columns ----------------------------
 
     def test_fixed_csv_omits_columns_with_discard_blocks(self) -> None:

@@ -87,6 +87,7 @@ class _StateRecord:
     edges: Any
     outputs: Any
     source: Any
+    sources: Any
     composer_meta: Any
     created_at: datetime
 
@@ -143,6 +144,7 @@ def state_record(session_id: UUID, state_id: UUID) -> _StateRecord:
         edges=(),
         outputs=(),
         source=None,
+        sources=None,
         composer_meta=None,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
@@ -174,6 +176,7 @@ def session_engine_with_row(engine, session_record: _SessionRecord, state_record
                 session_id=str(session_record.id),
                 version=state_record.version,
                 source=None,
+                sources=None,
                 nodes=[],
                 edges=[],
                 outputs=[],
@@ -274,6 +277,7 @@ def _build_service(
 
     execution_service = MagicMock()
     execution_service.validate = AsyncMock(return_value=validation)
+    execution_service.validate_state = AsyncMock(return_value=validation)
 
     readiness_service = MagicMock()
     readiness_service.compute_snapshot = AsyncMock(return_value=readiness)
@@ -479,7 +483,7 @@ async def test_get_shareable_link_requires_mark_ready_for_current_snapshot(
     with pytest.raises(CompositionNotRunnableError) as exc_info:
         await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
 
-    assert exc_info.value.reason == "not_marked_ready"
+    assert exc_info.value.reason == "completion_event_missing"
     assert store_calls == []
 
 
@@ -511,7 +515,7 @@ async def test_get_shareable_link_rejects_state_drift_even_when_digest_matches(
     with pytest.raises(CompositionNotRunnableError) as exc_info:
         await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
 
-    assert exc_info.value.reason == "not_marked_ready"
+    assert exc_info.value.reason == "completion_event_missing"
 
 
 @pytest.mark.asyncio
@@ -562,11 +566,59 @@ async def test_get_shareable_link_remints_with_stable_digest(
         validation=_ok_validation(),
         readiness=snapshot,
     )
-    await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
+    marked = await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
     r1 = await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
     r2 = await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
+    assert r1.payload_digest == marked.payload_digest
     assert r1.payload_digest == r2.payload_digest
     assert r1.token != r2.token
+
+
+@pytest.mark.asyncio
+async def test_get_shareable_link_requires_mark_ready_event(
+    session_engine_with_row,
+    payload_store,
+    signer,
+    session_record,
+    state_record,
+):
+    service, _ss, execution_service, readiness_service = _build_service(
+        engine=session_engine_with_row,
+        payload_store=payload_store,
+        signer=signer,
+        session_record=session_record,
+        state_record=state_record,
+        validation=_ok_validation(),
+        readiness=_readiness_snapshot(session_record.id),
+    )
+
+    with pytest.raises(CompositionNotRunnableError, match="mark this composition ready"):
+        await service.get_shareable_link(session_id=session_record.id, user_id=session_record.user_id)
+
+    execution_service.validate_state.assert_not_awaited()
+    readiness_service.compute_snapshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mark_ready_for_review_rejects_readiness_snapshot_drift(
+    session_engine_with_row,
+    payload_store,
+    signer,
+    session_record,
+    state_record,
+):
+    service, _ss, _es, _rs = _build_service(
+        engine=session_engine_with_row,
+        payload_store=payload_store,
+        signer=signer,
+        session_record=session_record,
+        state_record=state_record,
+        validation=_ok_validation(),
+        readiness=_readiness_snapshot(session_record.id, version=state_record.version + 1),
+    )
+
+    with pytest.raises(CompositionNotRunnableError, match="composition changed"):
+        await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
 
 
 @pytest.mark.asyncio

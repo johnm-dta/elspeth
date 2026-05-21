@@ -157,6 +157,43 @@ class TestForkSession:
         assert copied_state.nodes is None
 
     @pytest.mark.asyncio
+    async def test_fork_preserves_named_sources_at_fork_point(self, service) -> None:
+        session = await service.create_session("alice", "Original", "local")
+        sources = {
+            "orders": {"plugin": "csv", "on_success": "orders_rows", "on_validation_failure": "discard", "options": {"path": "orders.csv"}},
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_rows",
+                "on_validation_failure": "discard",
+                "options": {"path": "refunds.csv"},
+            },
+        }
+        state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(source=sources["orders"], sources=sources, is_valid=True),
+            provenance="session_seed",
+        )
+        fork_msg = await service.add_message(
+            session.id,
+            "user",
+            "Build this",
+            composition_state_id=state.id,
+            writer_principal="route_user_message",
+        )
+
+        _, _, copied_state = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=fork_msg.id,
+            new_message_content="Build that",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        assert copied_state is not None
+        assert copied_state.source == sources["orders"]
+        assert copied_state.sources == sources
+
+    @pytest.mark.asyncio
     async def test_fork_raises_audit_integrity_error_for_cross_session_fork_message_state(
         self,
         service,

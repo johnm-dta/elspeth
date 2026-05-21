@@ -21,7 +21,7 @@ from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.errors import LandscapeRecordError
-from elspeth.core.landscape.schema import nodes_table, token_work_items_table, tokens_table
+from elspeth.core.landscape.schema import nodes_table, rows_table, token_work_items_table, tokens_table
 
 
 class TokenSchedulerRepository:
@@ -91,6 +91,7 @@ class TokenSchedulerRepository:
                 run_id=run_id,
                 token_id=token_id,
                 row_id=row_id,
+                ingest_sequence=ingest_sequence,
                 node_id=node_id,
                 coalesce_node_id=coalesce_node_id,
             )
@@ -159,6 +160,7 @@ class TokenSchedulerRepository:
                 run_id=run_id,
                 token_id=token_id,
                 row_id=row_id,
+                ingest_sequence=ingest_sequence,
                 node_id=node_id,
                 coalesce_node_id=coalesce_node_id,
             )
@@ -224,6 +226,7 @@ class TokenSchedulerRepository:
         run_id: str,
         token_id: str,
         row_id: str,
+        ingest_sequence: int,
         node_id: str | None,
         coalesce_node_id: str | None,
     ) -> None:
@@ -239,6 +242,19 @@ class TokenSchedulerRepository:
             raise AuditIntegrityError(
                 f"Scheduler work item token_id={token_id!r} in run_id={run_id!r} belongs to row_id={token_row_id!r}, "
                 f"not scheduled row_id={row_id!r}."
+            )
+        row_ingest_sequence = conn.execute(
+            select(rows_table.c.ingest_sequence).where(rows_table.c.run_id == run_id, rows_table.c.row_id == row_id)
+        ).scalar_one_or_none()
+        if row_ingest_sequence is None:
+            raise AuditIntegrityError(
+                f"Scheduler work item references row_id={row_id!r} outside run_id={run_id!r}; "
+                "row cursors must be owned by the scheduled run."
+            )
+        if row_ingest_sequence != ingest_sequence:
+            raise AuditIntegrityError(
+                f"Scheduler work item row_id={row_id!r} in run_id={run_id!r} has ingest_sequence={row_ingest_sequence}, "
+                f"not scheduled ingest_sequence={ingest_sequence}."
             )
         TokenSchedulerRepository._validate_node_cursor(conn, run_id=run_id, node_id=node_id, label="node_id")
         TokenSchedulerRepository._validate_node_cursor(

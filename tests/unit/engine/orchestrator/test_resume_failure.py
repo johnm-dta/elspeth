@@ -109,6 +109,7 @@ class TestResumeFinalizesAsFailed:
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.run_lifecycle.get_source_schema.return_value = '{"mode": "observed"}'
         mock_factory.run_lifecycle.get_run_contract.return_value = MagicMock()
+        mock_factory.run_lifecycle.get_run_source_resume_records.return_value = {}
         prepare_for_run()
         mock_factory.run_lifecycle.get_runtime_val_manifest.return_value = canonical_json(build_runtime_val_manifest())
 

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse
+
+_ASCII_IPV4_LABEL_RE = re.compile(r"^[0-9]+$")
 
 
 def _is_loopback_host(hostname: str) -> bool:
@@ -12,7 +15,7 @@ def _is_loopback_host(hostname: str) -> bool:
     if normalized in {"::1", "0:0:0:0:0:0:0:1"}:
         return True
     parts = normalized.split(".")
-    if len(parts) != 4 or any(not part.isdecimal() for part in parts):
+    if len(parts) != 4 or any(_ASCII_IPV4_LABEL_RE.fullmatch(part) is None for part in parts):
         return False
     octets = tuple(int(part) for part in parts)
     return octets[0] == 127 and all(0 <= octet <= 255 for octet in octets)

@@ -501,6 +501,7 @@ class LoopContext:
     coalesce_executor: CoalesceExecutor | None
     coalesce_node_map: Mapping[CoalesceName, NodeID]
     last_token_id: str | None = None
+    last_token_source_id: NodeID | None = None
 
     def __post_init__(self) -> None:
         freeze_fields(self, "agg_transform_lookup", "coalesce_node_map")

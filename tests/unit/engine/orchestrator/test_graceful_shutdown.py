@@ -343,3 +343,44 @@ class TestCheckpointInterruptedProgress:
             assert call_kwargs.kwargs["node_id"] == str(source_id)
         finally:
             db.close()
+
+    def test_last_token_checkpoint_uses_source_that_produced_token(self) -> None:
+        """Multi-source shutdown checkpoints must not fall back to the first source."""
+        from elspeth.contracts.types import NodeID
+        from elspeth.engine.orchestrator import Orchestrator
+        from tests.fixtures.landscape import make_landscape_db
+
+        db = make_landscape_db()
+        try:
+            orchestrator = Orchestrator(db=db)
+            orchestrator._checkpoint_config = Mock()
+            orchestrator._checkpoint_config.enabled = True
+            orchestrator._checkpoint_manager = Mock()
+            orchestrator._current_graph = Mock()
+            orchestrator._sequence_number = 0
+
+            mock_processor = Mock()
+            mock_agg_state = Mock()
+            mock_agg_state.nodes = {}
+            mock_processor.get_aggregation_checkpoint_state.return_value = mock_agg_state
+            mock_processor.get_coalesce_checkpoint_state.return_value = None
+
+            loop_ctx = Mock()
+            loop_ctx.processor = mock_processor
+            loop_ctx.pending_tokens = {"default": []}
+            loop_ctx.last_token_id = "token-from-source-2"
+            loop_ctx.last_token_source_id = NodeID("source_2")
+
+            orchestrator._checkpoint_interrupted_progress(
+                run_id="run-test-source-2",
+                loop_ctx=loop_ctx,
+                sink_id_map={},
+                source_id=NodeID("source_1"),
+            )
+
+            orchestrator._checkpoint_manager.create_checkpoint.assert_called_once()
+            call_kwargs = orchestrator._checkpoint_manager.create_checkpoint.call_args
+            assert call_kwargs.kwargs["token_id"] == "token-from-source-2"
+            assert call_kwargs.kwargs["node_id"] == "source_2"
+        finally:
+            db.close()

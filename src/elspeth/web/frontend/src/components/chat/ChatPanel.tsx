@@ -282,10 +282,29 @@ export function looksLikeData(content: string): boolean {
 }
 
 /** Narrow `source.options["blob_ref"]` (which is `unknown`) to a string. */
-function readBlobRef(state: CompositionState | null): string | null {
-  if (state === null || state.source === null) return null;
-  const raw = state.source.options["blob_ref"];
+function readSourceBlobRef(source: { options: Record<string, unknown> } | null): string | null {
+  if (source === null) return null;
+  const raw = source.options["blob_ref"];
   return typeof raw === "string" && raw !== "" ? raw : null;
+}
+
+function readBlobRef(state: CompositionState | null): string | null {
+  if (state === null) return null;
+  const compatibilityRef = readSourceBlobRef(state.source);
+  if (compatibilityRef !== null) return compatibilityRef;
+  const sources = state.sources ?? {};
+  for (const sourceName of Object.keys(sources).sort()) {
+    const ref = readSourceBlobRef(sources[sourceName]);
+    if (ref !== null) return ref;
+  }
+  return null;
+}
+
+function isInlineSourceBlob(metadata: BlobMetadata): boolean {
+  return (
+    metadata.created_by === "assistant" &&
+    metadata.created_from_message_id !== null
+  );
 }
 
 /**
@@ -452,10 +471,9 @@ export function ChatPanel({
 
   // ── Inline-source projection (Phase 5a Task 3) ─────────────────────────────
   //
-  // When the active composition's `source.options["blob_ref"]` resolves to a
-  // session blob that was created from an inline-blob path (any of the four
-  // CreationModality enum values), project that blob's metadata + a bounded
-  // content preview into the inlineSourceStore. The summary is rendered
+  // When the active composition's source blob_ref resolves to an assistant-
+  // created blob with chat-message provenance, project that blob's metadata +
+  // a bounded content preview into the inlineSourceStore. The summary is rendered
   // inside the agent bubble (MessageBubble's "Sources created" disclosure
   // group) — the store is the projection layer for downstream consumers
   // (Task 4 disambiguation widget, Task 7 audit-readiness row, and the
@@ -465,13 +483,12 @@ export function ChatPanel({
   // a session-switch or composition-replace mid-fetch does not race the
   // older response into the newer summary slot.
   //
-  // The four `creation_modality` values currently in the closed enum are all
-  // inline-origin (verbatim / llm_generated / disambiguated /
-  // llm_generated_then_amended) — we do not filter by modality at the
-  // predicate, only at the Edit-button visibility inside the widget. If a
-  // future enum extension introduces a non-inline modality, the
-  // `toInlineSourceProvenance` adapter will fail to compile (exhaustive
-  // `never`) and this predicate will need re-examination.
+  // Do not use creation_modality alone as the predicate: ordinary uploaded
+  // files and assistant-created inline blobs may both be `verbatim`. The
+  // backend distinguishes chat-created inline blobs by `created_by=assistant`
+  // plus a non-null `created_from_message_id`; browser uploads and pipeline
+  // outputs do not carry that pair. Checking metadata before preview fetch
+  // keeps large uploaded sources out of the chat-created-source projection.
   const blobRef = readBlobRef(compositionState);
   const setInlineSourceSummary = useInlineSourceStore((s) => s.setSummary);
   const clearInlineSourceSummary = useInlineSourceStore((s) => s.clearSummary);
@@ -620,6 +637,7 @@ export function ChatPanel({
       try {
         const meta = await getBlobMetadata(sessionId, targetBlobId);
         if (cancelled) return;
+        if (!isInlineSourceBlob(meta)) return;
         const text = await previewBlobContent(sessionId, targetBlobId);
         if (cancelled) return;
         const summary = await projectInlineSourceSummary({

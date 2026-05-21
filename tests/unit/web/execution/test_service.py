@@ -193,21 +193,24 @@ def _composition_state_record(
     source_path: Path,
     output_path: Path,
     nodes: list[dict[str, Any]],
+    sources: dict[str, dict[str, Any]] | None = None,
 ) -> CompositionStateRecord:
+    source = {
+        "plugin": "text",
+        "on_success": "source_rows",
+        "on_validation_failure": "discard",
+        "options": {
+            "path": str(source_path),
+            "column": "body",
+            "schema": {"mode": "observed"},
+        },
+    }
     return CompositionStateRecord(
         id=uuid4(),
         session_id=session_id,
         version=1,
-        source={
-            "plugin": "text",
-            "on_success": "source_rows",
-            "on_validation_failure": "discard",
-            "options": {
-                "path": str(source_path),
-                "column": "body",
-                "schema": {"mode": "observed"},
-            },
-        },
+        source=source if sources is None else next(iter(sources.values())),
+        sources=sources,
         nodes=[_with_resolved_model_choice(node) for node in nodes],
         edges=[],
         outputs=[
@@ -535,6 +538,75 @@ class TestExecutionFanoutGuard:
         persisted_yaml = mock_session_service.create_run.await_args.kwargs["pipeline_yaml"]
         assert "elspeth_execution_fanout_guard" not in persisted_yaml
 
+    @pytest.mark.asyncio
+    async def test_non_first_named_source_to_llm_uses_its_own_cardinality(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        """Named source fanout accounting must not inspect only the compatibility source."""
+        from elspeth.web.execution.fanout_guard import ExecutionFanoutGuardRequired
+
+        data_dir = tmp_path
+        blob_dir = data_dir / "blobs"
+        output_dir = data_dir / "outputs"
+        blob_dir.mkdir()
+        output_dir.mkdir()
+        orders_path = blob_dir / "orders.txt"
+        refunds_path = blob_dir / "refunds.txt"
+        orders_path.write_text("one\n", encoding="utf-8")
+        refunds_path.write_text("\n".join(f"refund-{i}" for i in range(101)) + "\n", encoding="utf-8")
+        session_id = uuid4()
+        mock_settings.data_dir = data_dir
+        mock_session_service.get_current_state.return_value = _composition_state_record(
+            session_id=session_id,
+            source_path=orders_path,
+            output_path=output_dir / "out.jsonl",
+            sources={
+                "orders": {
+                    "plugin": "text",
+                    "on_success": "orders_rows",
+                    "on_validation_failure": "discard",
+                    "options": {"path": str(orders_path), "column": "body", "schema": {"mode": "observed"}},
+                },
+                "refunds": {
+                    "plugin": "text",
+                    "on_success": "refunds_rows",
+                    "on_validation_failure": "discard",
+                    "options": {"path": str(refunds_path), "column": "body", "schema": {"mode": "observed"}},
+                },
+            },
+            nodes=[
+                {
+                    "id": "classify_refund",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "refunds_rows",
+                    "on_success": "out",
+                    "on_error": "errors",
+                    "options": {
+                        "provider": "openrouter",
+                        "model": "openai/gpt-4o-mini",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    },
+                },
+            ],
+        )
+
+        with (
+            patch.object(service, "_run_pipeline"),
+            patch("elspeth.web.execution.service.validate_semantic_contracts", return_value=((), ())),
+            pytest.raises(ExecutionFanoutGuardRequired) as raised,
+        ):
+            await service.execute(session_id=session_id)
+
+        risk = raised.value.guard.risks[0]
+        assert risk.estimated_provider_calls == 101
+        assert risk.upstream_fanout == ("source:refunds:text:estimated_rows=101",)
+        assert mock_session_service.create_run.await_count == 0
+
 
 class TestWebRuntimeInfrastructure:
     """Regression coverage for web execution's orchestrator runtime wiring."""
@@ -766,7 +838,9 @@ class TestB2ShutdownEvent:
         mock_load.return_value = _mock_pipeline_settings()
         mock_bundle = MagicMock(spec=object)
         mock_bundle.source = MagicMock(spec=object)
+        mock_bundle.sources = {"source": mock_bundle.source}
         mock_bundle.source_settings = MagicMock(spec=object)
+        mock_bundle.source_settings_map = {"source": mock_bundle.source_settings}
         mock_bundle.transforms = ()
         mock_bundle.sinks = {"primary": MagicMock(spec=object)}
         mock_bundle.aggregations = {}
@@ -941,6 +1015,7 @@ class TestInlineBlobRuntimePreflight:
 
         mock_bundle = MagicMock(spec=object)
         mock_bundle.source = MagicMock(spec=object)
+        mock_bundle.sources = {"source": mock_bundle.source}
         mock_bundle.transforms = ()
         mock_bundle.sinks = {"primary": MagicMock(spec=object)}
         mock_bundle.aggregations = {}
@@ -4978,6 +5053,38 @@ class TestResolveYamlPaths:
 
         yaml_str = "source:\n  plugin: csv\n"
         with pytest.raises(TypeError, match="without required 'options'"):
+            _resolve_yaml_paths(yaml_str, "/srv/data")
+
+    def test_plural_source_relative_paths_rewritten(self) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        yaml_str = (
+            "sources:\n"
+            "  orders:\n"
+            "    plugin: csv\n"
+            "    options:\n"
+            "      path: data/orders.csv\n"
+            "  refunds:\n"
+            "    plugin: csv\n"
+            "    options:\n"
+            "      file: /absolute/refunds.csv\n"
+        )
+        result = _resolve_yaml_paths(yaml_str, "/srv/data")
+        assert "/srv/data/data/orders.csv" in result
+        assert "/absolute/refunds.csv" in result
+
+    @pytest.mark.parametrize(
+        ("yaml_str", "message"),
+        [
+            ("sources: []\n", "non-dict 'sources'"),
+            ("sources:\n  orders: csv\n", "non-dict source 'sources.orders'"),
+            ("sources:\n  orders:\n    plugin: csv\n    options: []\n", "non-dict 'sources.orders.options'"),
+        ],
+    )
+    def test_plural_source_malformed_shapes_fail_closed(self, yaml_str: str, message: str) -> None:
+        from elspeth.web.execution.preflight import resolve_runtime_yaml_paths as _resolve_yaml_paths
+
+        with pytest.raises(TypeError, match=message):
             _resolve_yaml_paths(yaml_str, "/srv/data")
 
 

@@ -1472,9 +1472,24 @@ class SessionServiceImpl:
                     release_state["released"] = True
                     lock.release()
 
+                def _remove_sqlite_session_lock_listener(
+                    identifier: Literal["commit", "rollback"],
+                    fn: Any,
+                ) -> None:
+                    if event.contains(conn, identifier, fn):
+                        event.remove(conn, identifier, fn)
+
+                def _release_sqlite_session_lock_on_commit(_conn: Connection) -> None:
+                    _release_sqlite_session_lock(_conn)
+                    _remove_sqlite_session_lock_listener("rollback", _release_sqlite_session_lock_on_rollback)
+
+                def _release_sqlite_session_lock_on_rollback(_conn: Connection) -> None:
+                    _release_sqlite_session_lock(_conn)
+                    _remove_sqlite_session_lock_listener("commit", _release_sqlite_session_lock_on_commit)
+
                 if conn.in_transaction():
-                    event.listen(conn, "commit", _release_sqlite_session_lock, once=True)
-                    event.listen(conn, "rollback", _release_sqlite_session_lock, once=True)
+                    event.listen(conn, "commit", _release_sqlite_session_lock_on_commit, once=True)
+                    event.listen(conn, "rollback", _release_sqlite_session_lock_on_rollback, once=True)
                 try:
                     yield
                 finally:
@@ -4424,6 +4439,7 @@ class SessionServiceImpl:
                             version=new_version,
                             # prior_row.* values are already enveloped — copy as-is
                             source=prior_row.source,
+                            sources=prior_row.sources,
                             nodes=prior_row.nodes,
                             edges=prior_row.edges,
                             outputs=prior_row.outputs,
@@ -4445,6 +4461,7 @@ class SessionServiceImpl:
             session_id=session_id,
             version=new_version,
             source=self._unwrap_envelope(prior_row.source),
+            sources=self._unwrap_envelope(prior_row.sources),
             nodes=self._unwrap_envelope(prior_row.nodes),
             edges=self._unwrap_envelope(prior_row.edges),
             outputs=self._unwrap_envelope(prior_row.outputs),
@@ -4851,6 +4868,7 @@ class SessionServiceImpl:
                             payload=StatePayload(
                                 data=CompositionStateData(
                                     source=source_state_record.source,
+                                    sources=source_state_record.sources,
                                     nodes=source_state_record.nodes,
                                     edges=source_state_record.edges,
                                     outputs=source_state_record.outputs,
@@ -4925,6 +4943,7 @@ class SessionServiceImpl:
                 session_id=new_session_id,
                 version=state_version,
                 source=source_state_record.source,
+                sources=source_state_record.sources,
                 nodes=source_state_record.nodes,
                 edges=source_state_record.edges,
                 outputs=source_state_record.outputs,

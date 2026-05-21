@@ -437,6 +437,7 @@ class TestSessionResponseHappyPath:
     def test_composition_state_response_with_populated_containers(self) -> None:
         kwargs = _valid_composition_state_kwargs()
         kwargs["source"] = {"kind": "csv"}
+        kwargs["sources"] = {"orders": {"kind": "csv"}, "refunds": {"kind": "json"}}
         kwargs["nodes"] = [{"id": "n1"}]
         kwargs["validation_errors"] = ["boom"]
         kwargs["validation_warnings"] = [
@@ -444,6 +445,7 @@ class TestSessionResponseHappyPath:
         ]
         resp = CompositionStateResponse(**kwargs)  # type: ignore[arg-type]
         assert resp.source == {"kind": "csv"}
+        assert resp.sources == {"orders": {"kind": "csv"}, "refunds": {"kind": "json"}}
         assert resp.validation_errors == ["boom"]
         assert resp.validation_warnings is not None
         assert resp.validation_warnings[0].component == "c"

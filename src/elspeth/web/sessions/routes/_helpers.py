@@ -504,15 +504,20 @@ def _state_response(
     # masked by a silent fallback — silent-failure-hunter I6 review finding,
     # 2026-05-24.
     source_data = deep_thaw(state.source)
+    sources_data = deep_thaw(state.sources)
     if source_data is not None:
         redacted = redact_source_storage_path({"source": source_data})
         source_data = redacted["source"]
+    if sources_data is not None:
+        redacted = redact_source_storage_path({"sources": sources_data})
+        sources_data = redacted["sources"]
 
     return CompositionStateResponse(
         id=str(state.id),
         session_id=str(state.session_id),
         version=state.version,
         source=source_data,
+        sources=sources_data,
         nodes=deep_thaw(state.nodes),
         edges=deep_thaw(state.edges),
         outputs=deep_thaw(state.outputs),

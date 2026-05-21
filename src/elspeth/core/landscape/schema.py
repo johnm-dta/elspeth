@@ -353,6 +353,7 @@ Index(
     token_work_items_table.c.attempt,
     unique=True,
     sqlite_where=token_work_items_table.c.node_id.is_(None),
+    postgresql_where=token_work_items_table.c.node_id.is_(None),
 )
 
 # === Token Parents (for multi-parent joins) ===

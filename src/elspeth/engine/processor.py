@@ -478,7 +478,7 @@ class RowProcessor:
         if self._scheduler is None:
             raise OrchestrationInvariantError("Cannot restore scheduler blocks without a scheduler repository")
 
-        restored_at = datetime.now(UTC)
+        restored_at = self._clock.now_utc()
         for state in states:
             for node_id_str, node_checkpoint in state.nodes.items():
                 if not node_checkpoint.tokens:
@@ -569,7 +569,7 @@ class RowProcessor:
         if self._telemetry_manager is None:
             return
 
-        from datetime import UTC, datetime
+        from datetime import datetime
 
         from elspeth.contracts import TransformCompleted
         from elspeth.contracts.enums import NodeStateStatus
@@ -616,7 +616,7 @@ class RowProcessor:
         if self._telemetry_manager is None:
             return
 
-        from datetime import UTC, datetime
+        from datetime import datetime
 
         from elspeth.contracts import GateEvaluated
 
@@ -654,7 +654,7 @@ class RowProcessor:
         if self._telemetry_manager is None:
             return
 
-        from datetime import UTC, datetime
+        from datetime import datetime
 
         from elspeth.contracts import TokenCompleted
 
@@ -2310,6 +2310,11 @@ class RowProcessor:
             return True, None
 
         if coalesce_outcome.merged_token is not None:
+            self._mark_coalesce_consumed_scheduler_work_terminal(
+                coalesce_name=coalesce_name,
+                consumed_tokens=tuple(coalesce_outcome.consumed_tokens),
+                active_token_id=current_token.token_id,
+            )
             if self._nav.resolve_next_node(coalesce_node_id) is None:
                 if coalesce_name is None:
                     raise OrchestrationInvariantError("Terminal coalesce outcome missing coalesce_name")
@@ -2332,6 +2337,11 @@ class RowProcessor:
             return True, None
 
         if coalesce_outcome.failure_reason:
+            self._mark_coalesce_consumed_scheduler_work_terminal(
+                coalesce_name=coalesce_name,
+                consumed_tokens=tuple(coalesce_outcome.consumed_tokens),
+                active_token_id=current_token.token_id,
+            )
             error_msg = coalesce_outcome.failure_reason
             error_hash = hashlib.sha256(error_msg.encode()).hexdigest()[:16]
 
@@ -2414,6 +2424,11 @@ class RowProcessor:
             return []
 
         if outcome.merged_token is not None:
+            self._mark_coalesce_consumed_scheduler_work_terminal(
+                coalesce_name=coalesce_name,
+                consumed_tokens=tuple(outcome.consumed_tokens),
+                active_token_id=current_token.token_id,
+            )
             if self._nav.resolve_next_node(coalesce_node_id) is None:
                 # Terminal coalesce — no downstream transforms.
                 # Do NOT emit TokenCompleted here: the merged token still
@@ -2436,6 +2451,11 @@ class RowProcessor:
             return []
 
         if outcome.failure_reason:
+            self._mark_coalesce_consumed_scheduler_work_terminal(
+                coalesce_name=coalesce_name,
+                consumed_tokens=tuple(outcome.consumed_tokens),
+                active_token_id=current_token.token_id,
+            )
             # Merge failed — build RowResults for held sibling tokens.
             # DB outcomes are already recorded by the executor (outcomes_recorded=True).
             # These RowResults propagate to the orchestrator for counter accounting.
@@ -2524,7 +2544,7 @@ class RowProcessor:
             run_id=self._run_id,
             barrier_key=barrier_key,
             token_ids=token_ids,
-            now=datetime.now(UTC),
+            now=self._clock.now_utc(),
         )
         if expected_count and terminalized_count != expected_count:
             raise AuditIntegrityError(
@@ -2532,6 +2552,25 @@ class RowProcessor:
                 f"live consumed {expected_count} token(s), but durable scheduler terminalized {terminalized_count}."
             )
         return terminalized_count
+
+    def _mark_coalesce_consumed_scheduler_work_terminal(
+        self,
+        *,
+        coalesce_name: CoalesceName,
+        consumed_tokens: tuple[TokenInfo, ...],
+        active_token_id: str,
+    ) -> None:
+        """Terminalize scheduler rows for coalesce siblings held before this token.
+
+        During ordinary token advancement, the token that completes the
+        coalesce is currently LEASED and will be marked TERMINAL by
+        ``_drain_scheduler_claims``. Older sibling branches are BLOCKED at the
+        coalesce barrier, so they must be reconciled here using the live
+        coalesce outcome evidence.
+        """
+        blocked_token_ids = tuple(token.token_id for token in consumed_tokens if token.token_id != active_token_id)
+        if blocked_token_ids:
+            self.mark_blocked_barrier_terminal(str(coalesce_name), blocked_token_ids)
 
     def _mark_buffered_scheduler_work_terminal(
         self,
@@ -2621,7 +2660,7 @@ class RowProcessor:
             if iterations > MAX_WORK_QUEUE_ITERATIONS:
                 raise RuntimeError(f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. Possible infinite loop in pipeline.")
 
-            now = datetime.now(UTC)
+            now = self._clock.now_utc()
             self._scheduler.release_waiting(run_id=self._run_id, now=now)
             self._scheduler.recover_expired_leases(run_id=self._run_id, now=now)
             claimed = self._scheduler.claim_ready(
@@ -2656,7 +2695,7 @@ class RowProcessor:
                 try:
                     self._scheduler.mark_failed(
                         work_item_id=claimed.work_item_id,
-                        now=datetime.now(UTC),
+                        now=self._clock.now_utc(),
                         expected_lease_owner=claimed_lease_owner,
                     )
                 except Exception as scheduler_exc:
@@ -2680,26 +2719,26 @@ class RowProcessor:
                 self._mark_claimed_scheduler_work_blocked(
                     claimed,
                     item,
-                    now=datetime.now(UTC),
+                    now=self._clock.now_utc(),
                     queue_key=None,
                     barrier_key=self._barrier_key_for_buffered_scheduler_result(result),
                 )
                 continue
 
             if result is None and not child_items:
-                self._mark_claimed_scheduler_work_blocked(claimed, item, now=datetime.now(UTC))
+                self._mark_claimed_scheduler_work_blocked(claimed, item, now=self._clock.now_utc())
                 continue
 
-            if isinstance(result, RowResult) and result.outcome is TerminalOutcome.FAILURE:
+            if self._scheduler_result_failed_claimed_token(result, claimed.token_id):
                 self._scheduler.mark_failed(
                     work_item_id=claimed.work_item_id,
-                    now=datetime.now(UTC),
+                    now=self._clock.now_utc(),
                     expected_lease_owner=claimed_lease_owner,
                 )
             else:
                 self._scheduler.mark_terminal(
                     work_item_id=claimed.work_item_id,
-                    now=datetime.now(UTC),
+                    now=self._clock.now_utc(),
                     expected_lease_owner=claimed_lease_owner,
                 )
 
@@ -2787,6 +2826,14 @@ class RowProcessor:
             return bool(result) and all(item.outcome is None and item.path is TerminalPath.BUFFERED for item in result)
         return result.outcome is None and result.path is TerminalPath.BUFFERED
 
+    @staticmethod
+    def _scheduler_result_failed_claimed_token(result: RowResult | tuple[RowResult, ...] | None, claimed_token_id: str) -> bool:
+        """Return whether the claimed scheduler token itself reached FAILURE."""
+        if result is None:
+            return False
+        result_items = result if isinstance(result, tuple) else (result,)
+        return any(item.token.token_id == claimed_token_id and item.outcome is TerminalOutcome.FAILURE for item in result_items)
+
     def _enqueue_scheduler_work_item(
         self,
         item: WorkItem,
@@ -2803,7 +2850,7 @@ class RowProcessor:
             step_index=self._scheduler_step_index(item.current_node_id),
             ingest_sequence=self._data_flow.resolve_row_ingest_sequence(item.token.row_id),
             row_payload_json=self._scheduler.serialize_row_payload(item.token.row_data),
-            available_at=datetime.now(UTC),
+            available_at=self._clock.now_utc(),
             queue_key=self._queue_key_for_blocked_item(item),
             barrier_key=self._barrier_key_for_blocked_item(item),
             on_success_sink=item.on_success_sink,

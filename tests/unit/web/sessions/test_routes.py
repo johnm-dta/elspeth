@@ -387,6 +387,7 @@ class _ProgressRouteSessionService:
             created_at=datetime.now(UTC),
             derived_from_state_id=self.current_state.id if self.current_state is not None else None,
             composer_meta=data.composer_meta,
+            sources=data.sources,
         )
         self.current_state = record
         return record
@@ -4505,6 +4506,38 @@ class TestNewStateHasNoLineage:
         assert resp.status_code == 200
         body = resp.json()
         assert body["derived_from_state_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_state_response_exposes_redacted_named_sources(self, tmp_path) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+        session = await service.create_session("alice", "Multi-source", "local")
+        sources = {
+            "orders": {
+                "plugin": "csv",
+                "on_success": "orders_rows",
+                "on_validation_failure": "discard",
+                "options": {"blob_ref": "blob-1", "path": str(tmp_path / "internal" / "orders.csv")},
+            },
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_rows",
+                "on_validation_failure": "discard",
+                "options": {"path": "refunds.csv"},
+            },
+        }
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(source=sources["orders"], sources=sources, is_valid=True),
+            provenance="session_seed",
+        )
+
+        resp = client.get(f"/api/sessions/{session.id}/state")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["sources"]["orders"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+        assert body["sources"]["refunds"]["options"]["path"] == "refunds.csv"
 
 
 class TestComposerProgressRoutes:

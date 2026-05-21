@@ -423,6 +423,11 @@ def _process_merged_coalesce_outcome(
             f"CoalesceOutcome for {coalesce_name!r} has a merged token but no coalesce node mapping. "
             f"Configured coalesce names: {configured_names}."
         ) from exc
+    _mark_barrier_tokens_terminal(
+        processor,
+        barrier_key=str(coalesce_name),
+        consumed_tokens=tuple(outcome.consumed_tokens),
+    )
     continuation_results: list[RowResult] = list(
         processor.process_token(
             token=merged_token,
@@ -431,11 +436,6 @@ def _process_merged_coalesce_outcome(
             coalesce_node_id=coalesce_node_id,
             coalesce_name=coalesce_name,
         )
-    )
-    _mark_barrier_tokens_terminal(
-        processor,
-        barrier_key=str(coalesce_name),
-        consumed_tokens=tuple(outcome.consumed_tokens),
     )
     accumulate_row_outcomes(
         continuation_results,
@@ -539,6 +539,17 @@ def flush_coalesce_pending(
                 pending_tokens,
             )
         else:
+            if outcome.consumed_tokens:
+                if outcome.coalesce_name is None:
+                    raise AuditIntegrityError(
+                        "Failed CoalesceOutcome from flush_pending() has consumed tokens but no coalesce_name; "
+                        "cannot reconcile durable scheduler barrier rows."
+                    )
+                _mark_barrier_tokens_terminal(
+                    processor,
+                    barrier_key=str(outcome.coalesce_name),
+                    consumed_tokens=tuple(outcome.consumed_tokens),
+                )
             counters.rows_coalesce_failed += 1
             counters.rows_failed += len(outcome.consumed_tokens)
             _emit_failed_coalesce_telemetry(ctx, outcome.consumed_tokens)

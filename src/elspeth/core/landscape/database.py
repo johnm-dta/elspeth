@@ -120,7 +120,15 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("rows", "source_row_index"),
     ("rows", "ingest_sequence"),
     ("token_work_items", "work_item_id"),
+    ("token_work_items", "run_id"),
+    ("token_work_items", "token_id"),
+    ("token_work_items", "row_id"),
+    ("token_work_items", "node_id"),
+    ("token_work_items", "step_index"),
+    ("token_work_items", "ingest_sequence"),
     ("token_work_items", "status"),
+    ("token_work_items", "queue_key"),
+    ("token_work_items", "barrier_key"),
     ("token_work_items", "available_at"),
     ("token_work_items", "row_payload_json"),
     ("token_work_items", "on_success_sink"),
@@ -130,6 +138,11 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("token_work_items", "expand_group_id"),
     ("token_work_items", "coalesce_node_id"),
     ("token_work_items", "coalesce_name"),
+    ("token_work_items", "attempt"),
+    ("token_work_items", "lease_owner"),
+    ("token_work_items", "lease_expires_at"),
+    ("token_work_items", "created_at"),
+    ("token_work_items", "updated_at"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).
@@ -188,6 +201,9 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("checkpoints", "ix_checkpoints_run_sequence_unique"),
     ("preflight_results", "ix_preflight_results_run"),
     ("token_outcomes", "ix_token_outcomes_terminal_unique"),
+    ("token_work_items", "ix_token_work_items_ready"),
+    ("token_work_items", "ix_token_work_items_lease"),
+    ("token_work_items", "uq_token_work_items_terminal_identity"),
     ("validation_errors", "ix_validation_errors_run_row"),
 )
 

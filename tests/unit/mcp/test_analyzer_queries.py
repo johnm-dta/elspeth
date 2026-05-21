@@ -43,7 +43,7 @@ from elspeth.core.landscape.lineage import explain
 from elspeth.core.landscape.schema import nodes_table
 from elspeth.mcp.analyzer import LandscapeAnalyzer
 from elspeth.mcp.analyzers.diagnostics import get_failure_context
-from elspeth.mcp.analyzers.queries import explain_token, list_operations, list_runs
+from elspeth.mcp.analyzers.queries import explain_token, list_operations, list_rows, list_runs
 from elspeth.mcp.analyzers.reports import get_error_analysis, get_run_summary
 from elspeth.mcp.types import ErrorResult
 from tests.fixtures.landscape import (
@@ -870,6 +870,52 @@ class TestGetRunSummary:
         assert result["errors"]["validation"] == 1
         assert result["errors"]["transform"] == 1
         assert result["errors"]["total"] == 2
+
+    def test_list_rows_exposes_source_local_and_ingest_identity(self) -> None:
+        setup = make_recorder_with_run(run_id="multi-source-rows", source_node_id="orders")
+        db = setup.db
+        factory = setup.factory
+        register_test_node(factory.data_flow, "multi-source-rows", "refunds", node_type=NodeType.SOURCE, plugin_name="csv")
+
+        factory.data_flow.create_row(
+            "multi-source-rows",
+            "refunds",
+            row_index=0,
+            data={"kind": "refund"},
+            row_id="row-refunds",
+            source_row_index=0,
+            ingest_sequence=1,
+        )
+        factory.data_flow.create_row(
+            "multi-source-rows",
+            "orders",
+            row_index=0,
+            data={"kind": "order"},
+            row_id="row-orders",
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+
+        rows = list_rows(db, factory, "multi-source-rows")
+
+        assert [row["row_id"] for row in rows] == ["row-orders", "row-refunds"]
+        assert rows[0]["source_node_id"] == "orders"
+        assert rows[0]["row_index"] == 0
+        assert rows[0]["source_row_index"] == 0
+        assert rows[0]["ingest_sequence"] == 0
+        assert rows[1]["source_node_id"] == "refunds"
+        assert rows[1]["row_index"] == 0
+        assert rows[1]["source_row_index"] == 0
+        assert rows[1]["ingest_sequence"] == 1
+
+    def test_list_operations_accepts_runtime_preflight_filter(self) -> None:
+        setup = make_recorder_with_run(run_id="preflight-ops", source_node_id="source-0")
+        operation = setup.factory.execution.begin_operation("preflight-ops", "source-0", "runtime_preflight")
+
+        rows = list_operations(setup.db, setup.factory, "preflight-ops", operation_type="runtime_preflight")
+
+        assert [row["operation_id"] for row in rows] == [operation.operation_id]
+        assert rows[0]["operation_type"] == "runtime_preflight"
 
     def test_summary_outcome_distribution(self) -> None:
         """get_run_summary returns correct outcome distribution for mixed outcomes."""

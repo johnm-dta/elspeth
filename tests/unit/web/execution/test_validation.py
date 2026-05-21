@@ -667,6 +667,31 @@ class TestValidatePipelineSinkPathAllowlist:
         path_check = next(c for c in result.checks if c.name == "path_allowlist")
         assert path_check.passed is True
 
+    def test_second_named_source_path_outside_allowed_dirs_is_blocked(self) -> None:
+        """Every named source path must pass the validation allowlist."""
+        state = CompositionState(
+            source=None,
+            sources={
+                "orders": _make_source({"path": "/tmp/test_data/blobs/orders.csv"}),
+                "refunds": _make_source({"path": "/etc/passwd"}),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock()
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        path_check = next(c for c in result.checks if c.name == "path_allowlist")
+        assert path_check.passed is False
+        assert path_check.affected_nodes == ("source:refunds",)
+        assert any("source 'refunds'" in error.message for error in result.errors)
+
     def test_sink_without_path_passes(self) -> None:
         """Sinks without path/file options (e.g. database) skip the check."""
         state = _make_state(

@@ -684,7 +684,8 @@ class Orchestrator:
         if token_id is None and loop_ctx.last_token_id is not None:
             token_id = loop_ctx.last_token_id
             if node_id is None:
-                node_id = str(source_id)
+                last_token_source_id = loop_ctx.last_token_source_id
+                node_id = str(last_token_source_id if isinstance(last_token_source_id, str) else source_id)
 
         if token_id is None or node_id is None:
             slog.warning(
@@ -2380,6 +2381,7 @@ class Orchestrator:
                         quarantine_sink = source_item.quarantine_destination
                         if quarantine_sink is not None and loop_ctx.pending_tokens[quarantine_sink]:
                             loop_ctx.last_token_id = loop_ctx.pending_tokens[quarantine_sink][-1][0].token_id
+                            loop_ctx.last_token_source_id = source_id
                         last_progress_time = self._maybe_emit_progress(
                             counters,
                             start_time,
@@ -2425,6 +2427,7 @@ class Orchestrator:
                     )
                     if results:
                         loop_ctx.last_token_id = results[-1].token.token_id
+                        loop_ctx.last_token_source_id = source_id
                     accumulate_row_outcomes(results, counters, pending_tokens)
 
                     # Check coalesce timeouts after each row
@@ -2563,6 +2566,7 @@ class Orchestrator:
                     coalesce_executor=loop_ctx.coalesce_executor,
                     coalesce_node_map=loop_ctx.coalesce_node_map,
                     last_token_id=loop_ctx.last_token_id,
+                    last_token_source_id=loop_ctx.last_token_source_id,
                 )
                 loop_result = self._run_main_processing_loop(
                     source_loop_ctx,
@@ -2574,6 +2578,7 @@ class Orchestrator:
                     flush_end_of_input=source_ordinal == len(source_items) - 1,
                 )
                 loop_ctx.last_token_id = source_loop_ctx.last_token_id
+                loop_ctx.last_token_source_id = source_loop_ctx.last_token_source_id
                 if loop_result.interrupted:
                     break
 
@@ -2597,7 +2602,7 @@ class Orchestrator:
                 artifacts.edge_map,
                 loop_result.interrupted,
                 on_token_written_factory=self._make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
-                shutdown_checkpoint_source_id=artifacts.source_id,
+                shutdown_checkpoint_source_id=loop_ctx.last_token_source_id or artifacts.source_id,
             )
 
             # ADR-019 Phase 4: deferred cross-table invariant sweep.
@@ -3185,7 +3190,7 @@ class Orchestrator:
                 artifacts.edge_map,
                 interrupted,
                 on_token_written_factory=self._make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
-                shutdown_checkpoint_source_id=artifacts.source_id,
+                shutdown_checkpoint_source_id=loop_ctx.last_token_source_id or artifacts.source_id,
             )
 
             # ADR-019 Phase 4: resumed row processing reaches stable I1a/I1b

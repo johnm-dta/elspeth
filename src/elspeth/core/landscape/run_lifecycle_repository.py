@@ -537,6 +537,77 @@ class RunLifecycleRepository:
             context="run_sources",
         )
 
+    def update_run_source_contract(
+        self,
+        *,
+        run_id: str,
+        source_node_id: str,
+        schema_contract: SchemaContract,
+    ) -> None:
+        """Persist a first-row-inferred schema contract for one source.
+
+        ``record_run_source(..., lifecycle_state="loading")`` runs before a
+        generator source has yielded its first valid row. Observed/flexible
+        sources can only lock their contract at that first row, so the
+        orchestrator must backfill the matching ``run_sources`` row before row
+        processing can fail. Missing rows or mismatched existing contracts are
+        audit corruption, not resume-time data quality issues.
+        """
+        audit_record = ContractAuditRecord.from_contract(schema_contract)
+        schema_contract_json = audit_record.to_json()
+        schema_contract_hash = schema_contract.version_hash()
+
+        with self._db.connection() as conn:
+            result = conn.execute(
+                run_sources_table.update()
+                .where(run_sources_table.c.run_id == run_id)
+                .where(run_sources_table.c.source_node_id == source_node_id)
+                .where(run_sources_table.c.schema_contract_json.is_(None))
+                .values(
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    recorded_at=now(),
+                )
+            )
+            if result.rowcount == 1:
+                return
+
+            existing = conn.execute(
+                select(
+                    run_sources_table.c.schema_contract_json,
+                    run_sources_table.c.schema_contract_hash,
+                )
+                .where(run_sources_table.c.run_id == run_id)
+                .where(run_sources_table.c.source_node_id == source_node_id)
+            ).fetchone()
+            if existing is None:
+                raise AuditIntegrityError(
+                    f"Cannot update source schema contract for run {run_id} source_node_id={source_node_id!r}: "
+                    "run_sources row does not exist."
+                )
+            if existing.schema_contract_json is None:
+                raise AuditIntegrityError(
+                    f"Cannot update source schema contract for run {run_id} source_node_id={source_node_id!r}: "
+                    "contract JSON is NULL but conditional update affected no rows."
+                )
+            if existing.schema_contract_hash is None:
+                raise AuditIntegrityError(
+                    f"Cannot update source schema contract for run {run_id} source_node_id={source_node_id!r}: "
+                    "existing contract JSON has no hash."
+                )
+            existing_contract = ContractAuditRecord.from_json(existing.schema_contract_json).to_schema_contract()
+            existing_hash = existing_contract.version_hash()
+            if existing_hash != existing.schema_contract_hash:
+                raise AuditIntegrityError(
+                    f"Existing source schema contract hash mismatch for run {run_id} source_node_id={source_node_id!r}: "
+                    f"stored={existing.schema_contract_hash}, recomputed={existing_hash}."
+                )
+            if existing.schema_contract_hash != schema_contract_hash:
+                raise AuditIntegrityError(
+                    f"Cannot overwrite source schema contract for run {run_id} source_node_id={source_node_id!r}: "
+                    f"existing={existing.schema_contract_hash}, new={schema_contract_hash}."
+                )
+
     def get_run_source_resume_records(self, run_id: str) -> dict[str, RunSourceResumeRecord]:
         """Return per-source schema and contract records for resume.
 

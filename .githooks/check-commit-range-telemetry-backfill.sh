@@ -79,7 +79,7 @@ def _extract_entries(path: Path) -> list[dict[str, str]]:
         key, value = stripped.split(":", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key in {"commit_sha", "cohort", "expires"}:
+        if key in {"commit_sha", "cohort", "reason", "owner", "expires"}:
             current[key] = value
 
     if current is not None:
@@ -92,12 +92,18 @@ for path in sorted(allowlist_dir.glob("*.yaml")):
     for index, entry in enumerate(entries):
         commit_sha = str(entry.get("commit_sha", ""))
         cohort = str(entry.get("cohort", ""))
+        reason = str(entry.get("reason", ""))
+        owner = str(entry.get("owner", ""))
         expires = entry.get("expires")
 
         if len(commit_sha) != 40:
             raise SystemExit(f"{path}: entries[{index}].commit_sha must be a 40-character SHA")
         if cohort not in valid_cohorts:
             raise SystemExit(f"{path}: entries[{index}].cohort must be one of a, b1, b2")
+        if not reason:
+            raise SystemExit(f"{path}: entries[{index}].reason is required")
+        if not owner:
+            raise SystemExit(f"{path}: entries[{index}].owner is required")
         if not expires:
             raise SystemExit(f"{path}: entries[{index}].expires is required")
 

@@ -26,10 +26,9 @@ attempt; no token is returned.
 
 Frozen-at-mark-time discipline (load-bearing):
 
-* ``get_shareable_link`` may re-mint only when the exact current
-  ``(session, state, payload_digest)`` already has a
-  ``mark_ready_for_review`` audit row and snapshot blob. It does not
-  create a new share decision.
+* ``get_shareable_link`` may re-mint only when the current
+  ``(session, state)`` already has a ``mark_ready_for_review`` audit row
+  whose snapshot blob still exists. It does not create a new share decision.
 * ``resolve_token`` reads ``audit_readiness`` directly from the blob; it
   never re-calls ``ReadinessService.compute_snapshot``. This means:
     - The reviewer sees exactly what the owner saw at mark-time, even if
@@ -57,7 +56,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol, TypedDict, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import insert, select
+from sqlalchemy import desc, insert, select
 from sqlalchemy.engine import Engine
 
 from elspeth.core.canonical import canonical_json
@@ -112,8 +111,12 @@ class CompositionNotRunnableError(Exception):
       returned a row with ``status == "error"``. Sharing a known-broken
       readiness state is share-theatre; the gate refuses.
     * ``"not_marked_ready"`` — re-minting was requested before a
-      successful ``mark_ready_for_review`` audit row exists for the
-      current state and payload digest.
+      successful ``mark_ready_for_review`` snapshot blob exists for the
+      current state.
+    * ``"readiness_state_drift"`` — validation and readiness were computed
+      against different composition versions.
+    * ``"completion_event_missing"`` — re-mint was requested before the
+      current state had passed ``mark_ready_for_review``.
     """
 
     def __init__(self, *, reason: str, detail: str = "") -> None:
@@ -138,6 +141,7 @@ class _SessionServiceLike(Protocol):
 
 class _ExecutionServiceLike(Protocol):
     async def validate(self, session_id: UUID, *, user_id: str | None = None) -> Any: ...
+    async def validate_state(self, state: Any, *, user_id: str | None = None) -> Any: ...
 
 
 class _ReadinessServiceLike(Protocol):
@@ -276,29 +280,6 @@ def _build_snapshot(
     )
 
 
-def _has_mark_ready_audit_row(*, engine: Engine, session_id: UUID, user_id: str, snapshot: _Snapshot) -> bool:
-    """Return whether the current snapshot is already marked ready.
-
-    This is the re-mint gate for ``GET /shareable-link``. The match uses
-    both ``composition_state_id`` and ``payload_digest``: state id catches
-    same-content state advancement, while digest catches same-state
-    readiness/content drift.
-    """
-    with engine.connect() as conn:
-        row = conn.execute(
-            select(composer_completion_events_table.c.id)
-            .where(
-                composer_completion_events_table.c.session_id == str(session_id),
-                composer_completion_events_table.c.composition_state_id == str(snapshot.state_id),
-                composer_completion_events_table.c.event_type == "mark_ready_for_review",
-                composer_completion_events_table.c.actor == user_id,
-                composer_completion_events_table.c.payload_digest == snapshot.payload_digest,
-            )
-            .limit(1)
-        ).first()
-    return row is not None
-
-
 # ── Service ──────────────────────────────────────────────────────────────
 
 
@@ -355,7 +336,14 @@ class ShareableReviewService:
         step (5) fails the audit row stands as honest evidence of the
         attempt; no token is returned.
         """
-        validation = await self._execution_service.validate(session_id, user_id=user_id)
+        state_record = await self._session_service.get_current_state(session_id)
+        if state_record is None:
+            raise CompositionNotRunnableError(
+                reason="state_missing",
+                detail="No composition state exists for this session",
+            )
+        composition_state = state_from_record(state_record)
+        validation = await self._execution_service.validate_state(composition_state, user_id=user_id)
         if not validation.is_valid:
             raise CompositionNotRunnableError(
                 reason="validation_failed",
@@ -368,8 +356,12 @@ class ShareableReviewService:
                 reason="readiness_error_row",
                 detail="readiness panel reports an error; resolve before sharing",
             )
+        if audit_readiness.composition_version != state_record.version:
+            raise CompositionNotRunnableError(
+                reason="readiness_state_drift",
+                detail="composition changed while preparing the review snapshot; retry against the current state",
+            )
 
-        state_record = await self._session_service.get_current_state(session_id)
         snapshot = _build_snapshot(
             session_id=session_id,
             state_record=state_record,
@@ -441,46 +433,47 @@ class ShareableReviewService:
         envelope ensures the byte sequence varies).
 
         No audit row or blob is written here: this path is only allowed
-        when a prior ``mark_ready_for_review`` row and blob already exist
-        for the exact current ``(session, state, payload_digest)``. If the
-        state or readiness snapshot drifts, the owner must mark ready
-        again so the gate and audit row run on the new share decision.
+        when a prior ``mark_ready_for_review`` row exists for the current
+        ``(session, state)`` and the row's snapshot blob still exists. If
+        the state drifts, the owner must mark ready again so the gate and
+        audit row run on the new share decision.
         """
-        audit_readiness = await self._readiness_service.compute_snapshot(session_id=session_id, user_id=user_id)
         state_record = await self._session_service.get_current_state(session_id)
-        snapshot = _build_snapshot(
-            session_id=session_id,
-            state_record=state_record,
-            audit_readiness=audit_readiness,
-            created_by_user_id=user_id,
-        )
-        if not _has_mark_ready_audit_row(
-            engine=self._sessions_db_engine,
-            session_id=session_id,
-            user_id=user_id,
-            snapshot=snapshot,
-        ) or not self._payload_store.exists(snapshot.digest_hex):
+        if state_record is None:
+            raise CompositionNotRunnableError(
+                reason="state_missing",
+                detail="No composition state exists for this session",
+            )
+        event = self._latest_mark_ready_event(session_id=session_id, state_id=state_record.id, user_id=user_id)
+        if event is None:
+            raise CompositionNotRunnableError(
+                reason="completion_event_missing",
+                detail="mark this composition ready for review before requesting a shareable link",
+            )
+        payload_digest = str(event.payload_digest)
+        digest_hex = payload_digest.removeprefix(_DIGEST_PREFIX)
+        if not self._payload_store.exists(digest_hex):
             raise CompositionNotRunnableError(
                 reason="not_marked_ready",
                 detail=_NOT_MARKED_READY_DETAIL,
             )
-
         lifetime = timedelta(seconds=self._settings.shareable_link_lifetime_seconds)
-        expires_at = snapshot.created_at + lifetime
+        created_at = datetime.now(UTC)
+        expires_at = created_at + lifetime
         token = self._sign_token(
             session_id=session_id,
-            state_id=snapshot.state_id,
-            payload_digest=snapshot.payload_digest,
+            state_id=state_record.id,
+            payload_digest=payload_digest,
             created_by_user_id=user_id,
-            created_at=snapshot.created_at,
+            created_at=created_at,
             expires_at=expires_at,
         )
         return ShareableLinkResponse(
             token=token,
             share_url=_SHARE_URL_PREFIX + token,
             expires_at=expires_at,
-            state_id=str(snapshot.state_id),
-            payload_digest=snapshot.payload_digest,
+            state_id=str(state_record.id),
+            payload_digest=payload_digest,
         )
 
     async def resolve_token(self, *, token: str, requesting_user_id: str) -> SharedInspectResponse:
@@ -531,6 +524,21 @@ class ShareableReviewService:
         )
 
     # ── private helpers ─────────────────────────────────────────────
+
+    def _latest_mark_ready_event(self, *, session_id: UUID, state_id: UUID, user_id: str) -> Any | None:
+        """Return the latest committed mark-ready event for this exact state."""
+        with self._sessions_db_engine.begin() as conn:
+            return conn.execute(
+                select(composer_completion_events_table)
+                .where(
+                    composer_completion_events_table.c.session_id == str(session_id),
+                    composer_completion_events_table.c.composition_state_id == str(state_id),
+                    composer_completion_events_table.c.event_type == "mark_ready_for_review",
+                    composer_completion_events_table.c.actor == user_id,
+                )
+                .order_by(desc(composer_completion_events_table.c.created_at))
+                .limit(1)
+            ).first()
 
     def _sign_token(
         self,

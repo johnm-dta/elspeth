@@ -12,11 +12,13 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import select
 
 from elspeth.cli_helpers import instantiate_plugins_from_config
 from elspeth.contracts import Determinism, NodeID, NodeType, PipelineRow, RoutingMode, RunStatus, SinkName, SourceRow
-from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.errors import OrchestrationInvariantError, SourceGuaranteedFieldsViolation
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.core.landscape.schema import rows_table, run_sources_table
 from elspeth.engine.orchestrator import PipelineConfig
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.types import AggregationFlushResult, ExecutionCounters, LoopContext
@@ -268,6 +270,50 @@ class TestOrchestrator:
         assert operation.error_message is not None
         assert "pre_flight_failed" in operation.error_message
         assert "provider auth exploded" in operation.error_message
+
+    def test_first_row_inferred_source_contract_persisted_before_processing_failure(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """A first-valid-row contract must reach run_sources before process_row can fail.
+
+        Regression coverage for observed sources whose contract is unavailable
+        when the source is recorded as ``loading``. The source boundary check
+        fails after the row/token have been persisted, leaving resume dependent
+        on source-scoped contract metadata rather than the legacy run singleton.
+        """
+        source = ListSource([{"value": 1}], name="late_contract_source")
+        source.declared_guaranteed_fields = frozenset({"required_field"})
+        sink = CollectSink()
+        run_id = "run-first-row-inferred-source-contract"
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={"default": as_sink(sink)},
+        )
+        graph = build_production_graph(config)
+        source_node_id = graph.get_source()
+
+        orchestrator = Orchestrator(landscape_db)
+        with pytest.raises(SourceGuaranteedFieldsViolation, match="required_field"):
+            orchestrator.run(config, graph=graph, payload_store=payload_store, run_id=run_id)
+
+        with landscape_db.engine.connect() as conn:
+            source_record = conn.execute(
+                select(
+                    run_sources_table.c.schema_contract_json,
+                    run_sources_table.c.schema_contract_hash,
+                    run_sources_table.c.lifecycle_state,
+                )
+                .where(run_sources_table.c.run_id == run_id)
+                .where(run_sources_table.c.source_node_id == str(source_node_id))
+            ).one()
+            persisted_rows = conn.execute(
+                select(rows_table.c.row_id).where(rows_table.c.run_id == run_id).where(rows_table.c.source_node_id == str(source_node_id))
+            ).all()
+
+        assert persisted_rows, "the regression must fail after source row persistence"
+        assert source_record.schema_contract_json is not None
+        assert source_record.schema_contract_hash == source.get_schema_contract().version_hash()
+        assert source_record.lifecycle_state == "loading"
 
     def test_source_validation_error_after_transform_is_attributed_to_source_node(self, landscape_db: LandscapeDB, payload_store) -> None:
         """Later generator-step validation errors must not inherit transform node_id."""

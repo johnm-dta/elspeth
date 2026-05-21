@@ -143,6 +143,8 @@ class RowExportRecord(TypedDict):
     run_id: str
     row_id: str
     row_index: int
+    source_row_index: int
+    ingest_sequence: int
     source_node_id: str
     source_data_hash: str | None
     source_data_ref: str | None

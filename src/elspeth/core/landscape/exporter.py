@@ -425,11 +425,21 @@ class LandscapeExporter:
 
         # Now iterate through rows using pre-loaded data (no more per-entity queries)
         for row in self._factory.query.get_rows(run_id):
+            if row.source_row_index is None:
+                raise AuditIntegrityError(
+                    f"Row '{row.row_id}' has no source_row_index. Run: {run_id}. This violates the multi-source row identity contract."
+                )
+            if row.ingest_sequence is None:
+                raise AuditIntegrityError(
+                    f"Row '{row.row_id}' has no ingest_sequence. Run: {run_id}. This violates the multi-source row identity contract."
+                )
             row_record: RowExportRecord = {
                 "record_type": "row",
                 "run_id": run_id,
                 "row_id": row.row_id,
                 "row_index": row.row_index,
+                "source_row_index": row.source_row_index,
+                "ingest_sequence": row.ingest_sequence,
                 "source_node_id": row.source_node_id,
                 "source_data_hash": row.source_data_hash,
                 "source_data_ref": row.source_data_ref,

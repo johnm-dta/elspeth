@@ -36,6 +36,7 @@ from elspeth.core.landscape.schema import (
     rows_table,
     run_sources_table,
     runs_table,
+    token_work_items_table,
     tokens_table,
 )
 from elspeth.core.payload_store import FilesystemPayloadStore
@@ -44,6 +45,7 @@ from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sinks.json_sink import JSONSink
 from elspeth.plugins.sources.null_source import NullSource
 from elspeth.plugins.transforms.passthrough import PassThrough
+from elspeth.testing import make_contract, make_row
 from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.landscape import make_factory
 
@@ -360,6 +362,88 @@ class TestResumeComprehensive:
         with db.engine.connect() as conn:
             checkpoints_after = conn.execute(select(checkpoints_table).where(checkpoints_table.c.run_id == run_id)).fetchall()
         assert len(checkpoints_after) == 0, "Checkpoints should be deleted after successful completion"
+
+    def test_resume_drains_real_scheduler_work_before_recovered_row_replay(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Durable scheduler work takes precedence over replaying the same recovered row."""
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
+
+        run_id = "resume-real-scheduler-work-test"
+        output_path = tmp_path / "scheduler_resume_output.csv"
+        run_id, graph = self._setup_failed_run(db, payload_store, run_id, num_rows=1, checkpoint_at=0)
+
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id="t0",
+            node_id="xform",
+            sequence_number=0,
+            graph=graph,
+        )
+        factory = make_factory(db)
+        scheduled_row = make_row(
+            {"id": 0, "value": "row-0"},
+            contract=make_contract(fields={"id": int, "value": str}, mode="FIXED"),
+        )
+        factory.scheduler.enqueue_ready(
+            run_id=run_id,
+            token_id="t0",
+            row_id="r0",
+            node_id="xform",
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(scheduled_row),
+            available_at=datetime.now(UTC),
+        )
+
+        output_path.write_text("id,value\n")
+
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        strict_schema = {"mode": "fixed", "fields": ["id: int", "value: str"]}
+        passthrough = PassThrough({"schema": strict_schema})
+        passthrough.on_error = "discard"
+        config = PipelineConfig(
+            source=_null_source("default"),
+            transforms=[passthrough],
+            sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
+        )
+        resume_graph = ExecutionGraph()
+        schema_config = {"schema": strict_schema}
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
+        resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
+        resume_graph.add_edge("src", "xform", label="continue")
+        resume_graph.add_edge("xform", "sink", label="continue")
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
+
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=resume_graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 1
+        assert result.rows_succeeded == 1
+        lines = output_path.read_text().strip().split("\n")
+        assert lines == ["id,value", "0,row-0"]
+        with db.connection() as conn:
+            work_statuses = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == run_id)).scalars().all()
+            )
+        assert work_statuses == ["terminal"]
 
     def test_reconstruct_resume_state_restores_multi_source_rows_with_source_scoped_schemas(
         self,

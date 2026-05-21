@@ -273,9 +273,10 @@ ELSPETH records what external systems return, but cannot guarantee:
 
 Aggregation timeout triggers are polled while source iteration waits, so buffered
 aggregation batches can flush during complete source idle periods without
-requiring heartbeat rows. Coalesce timeouts are still checked when token flow
-reaches coalesce points or at source completion; they are not general background
-timers.
+requiring heartbeat rows. The same idle-polling pass also checks coalesce
+timeouts in mixed aggregation/coalesce pipelines. Coalesce-only streaming
+pipelines still depend on token arrival, source completion, or heartbeat rows;
+coalesce timeouts are not general background timers.
 
 ---
 

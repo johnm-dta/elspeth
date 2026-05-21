@@ -476,7 +476,12 @@ check_timeouts(coalesce_name)
     └── best_effort → MERGE whatever arrived
 ```
 
-**Known Limitation (True Idle):** Timeout checks fire when the next token arrives at the coalesce point or when the source completes. During completely idle periods with no data flowing, timeouts cannot fire. For streaming sources, combine coalesce timeouts with source-level heartbeat rows.
+**Idle polling:** Coalesce timeout checks are not background timers. They fire
+when the next token arrives at the coalesce point, during source completion, and
+from the source-idle polling path when the pipeline also has time-sensitive
+aggregation triggers. Coalesce-only streaming pipelines without aggregation idle
+polling still need source-level heartbeat rows or explicit source completion to
+advance timeout checks during otherwise idle periods.
 
 ### Late Arrivals
 
@@ -597,7 +602,7 @@ transforms:
 | Trigger | Fires When | Combined Behavior |
 |---------|------------|-------------------|
 | `count` | N tokens accumulated | First trigger to fire wins |
-| `timeout_seconds` | Duration elapsed since batch start | Checked before each row |
+| `timeout_seconds` | Duration elapsed since batch start | Checked before each row and during source-idle polling |
 | `condition` | Row matches expression | Immediate flush |
 | End-of-source | Source exhausted | Always checked (implicit) |
 

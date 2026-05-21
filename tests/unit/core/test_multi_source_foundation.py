@@ -1476,7 +1476,10 @@ def test_scheduler_claim_ready_raises_when_selected_row_was_already_claimed() ->
     @event.listens_for(engine, "before_cursor_execute")
     def lease_selected_item_before_claim_update(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]
         nonlocal raced
-        if raced or not statement.startswith("UPDATE token_work_items SET status="):
+        compiled_statement = getattr(getattr(context, "compiled", None), "statement", None)
+        if raced or getattr(compiled_statement, "__visit_name__", None) != "update":
+            return
+        if getattr(getattr(compiled_statement, "table", None), "name", None) != token_work_items_table.name:
             return
         raced = True
         cursor.execute(

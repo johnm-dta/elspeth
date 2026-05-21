@@ -54,7 +54,7 @@ from elspeth.web.blobs.service import content_hash as _content_hash
 from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -63,6 +63,15 @@ from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SUITE = _REPO_ROOT / "evals" / "composer-rgr" / "scenarios" / "convergence-suite"
+
+
+def _passing_preflight() -> ValidationResult:
+    return ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -361,7 +370,7 @@ class TestCsvClassifierScenario:
         # Turn 4: claim completion (clean)
         turn4 = _llm_response(content="Repaired and ready.", tool_calls=None)
 
-        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        passing_preflight = _passing_preflight()
         empty = _empty_state()
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -496,7 +505,7 @@ class TestNumericGateScenario:
         # so the proof gate returns False and the loop terminates cleanly.
         turn2 = _llm_response(content="Pipeline ready.", tool_calls=None)
 
-        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        passing_preflight = _passing_preflight()
         empty = _empty_state()
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -670,7 +679,7 @@ class TestNumericGateScenario:
         # Turn 4: claim completion after repair.
         turn4 = _llm_response(content="Repaired and ready.", tool_calls=None)
 
-        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        passing_preflight = _passing_preflight()
         empty = _empty_state()
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -841,7 +850,7 @@ class TestUrlTextSmokeScenario:
         # Turn 4: claim completion (clean — proof step no longer blocks).
         turn4 = _llm_response(content="Repaired and ready.", tool_calls=None)
 
-        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        passing_preflight = _passing_preflight()
         empty = _empty_state()
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,

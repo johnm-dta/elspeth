@@ -6,6 +6,18 @@ import {
 import { useAuthStore } from "../stores/authStore";
 
 const SESSION_ID = "00000000-0000-0000-0000-000000000001";
+const READY_READINESS = {
+  authoring_valid: true,
+  execution_ready: true,
+  completion_ready: true,
+  blockers: [],
+};
+const BLOCKED_READINESS = {
+  authoring_valid: false,
+  execution_ready: false,
+  completion_ready: false,
+  blockers: [],
+};
 
 describe("auditReadiness API client", () => {
   beforeEach(() => {
@@ -42,6 +54,7 @@ describe("auditReadiness API client", () => {
           checks: [],
           errors: [],
           warnings: [],
+          readiness: READY_READINESS,
           semantic_contracts: [],
         },
       };
@@ -106,6 +119,17 @@ describe("auditReadiness API client", () => {
           },
         ],
         warnings: [],
+        readiness: {
+          ...BLOCKED_READINESS,
+          blockers: [
+            {
+              code: "settings_load",
+              component_id: "first",
+              component_type: "transform",
+              detail: "first",
+            },
+          ],
+        },
         semantic_contracts: [],
       },
     };
@@ -259,6 +283,7 @@ describe("auditReadiness API client", () => {
           checks: [],
           errors: [],
           warnings: [],
+          readiness: BLOCKED_READINESS,
           semantic_contracts: [],
         },
       }), {

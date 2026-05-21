@@ -57,6 +57,13 @@ import type {
   UserProfile,
 } from "../types/index";
 
+const READY_READINESS = {
+  authoring_valid: true,
+  execution_ready: true,
+  completion_ready: true,
+  blockers: [],
+};
+
 // ── Sub-component stubs ──────────────────────────────────────────────────────
 // We render <App /> end-to-end (so ChatPanel's projection effect, store
 // wiring, and useComposer hook all participate), but stub the heavy
@@ -296,6 +303,7 @@ function makeAuditReadinessSnapshotV2(): AuditReadinessSnapshot {
       checks: [],
       errors: [],
       warnings: [],
+      readiness: READY_READINESS,
       semantic_contracts: [],
     },
   };

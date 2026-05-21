@@ -14,6 +14,12 @@ const SUGGESTION = {
   message: "Consider increasing batch size",
   severity: "info",
 };
+const BLOCKED_READINESS = {
+  authoring_valid: false,
+  execution_ready: false,
+  completion_ready: false,
+  blockers: [],
+};
 
 describe("SideRailValidationBanner", () => {
   beforeEach(() => {
@@ -49,6 +55,17 @@ describe("SideRailValidationBanner", () => {
           },
         ],
         warnings: [],
+        readiness: {
+          ...BLOCKED_READINESS,
+          blockers: [
+            {
+              code: "validation_error",
+              component_id: "select_columns",
+              component_type: "transform",
+              detail: "select_columns",
+            },
+          ],
+        },
       },
     });
 
@@ -85,6 +102,17 @@ describe("SideRailValidationBanner", () => {
           },
         ],
         warnings: [],
+        readiness: {
+          ...BLOCKED_READINESS,
+          blockers: [
+            {
+              code: "validation_error",
+              component_id: "select_columns",
+              component_type: "transform",
+              detail: "select_columns",
+            },
+          ],
+        },
       },
     });
 

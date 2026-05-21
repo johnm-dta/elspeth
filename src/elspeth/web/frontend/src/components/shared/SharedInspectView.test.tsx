@@ -11,6 +11,13 @@ import type {
 
 expect.extend(toHaveNoViolations);
 
+const READY_READINESS = {
+  authoring_valid: true,
+  execution_ready: true,
+  completion_ready: true,
+  blockers: [],
+};
+
 const _validReadiness: AuditReadinessSnapshot = {
   session_id: "00000000-0000-0000-0000-000000000001",
   composition_version: 3,
@@ -28,6 +35,7 @@ const _validReadiness: AuditReadinessSnapshot = {
     checks: [],
     errors: [],
     warnings: [],
+    readiness: READY_READINESS,
     semantic_contracts: [],
   },
 };

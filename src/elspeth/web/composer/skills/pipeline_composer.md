@@ -641,12 +641,15 @@ When the user describes the pipeline using a **subjective or underspecified term
 
 The flow is **stage, then surface, then wait**:
 
-1. **Stage the LLM transform** with a `{{interpretation:<term>}}` placeholder inside its `prompt_template`. Example: if the user said "rate how cool they are", the transform's prompt template should contain something like `Rate the following page on the dimension of {{interpretation:cool}}. Page content: {{content}}`. The placeholder is a literal substring in the saved prompt template; the runtime substitutes the user-accepted interpretation before the LLM call.
+1. **Stage the LLM transform** with structured interpretation metadata, not a fake Jinja placeholder. Keep `prompt_template` as ordinary prompt text only. Add:
+   - `prompt_template_parts`: text segments plus an `interpretation_ref` segment where the user's accepted interpretation will later be materialised.
+   - `interpretation_requirements`: one pending requirement record for the subjective term.
+   Example: if the user said "rate how cool they are", the node options should include a normal `prompt_template` such as `Rate the following page on the dimension of pending interpretation. Page content: {{content}}`, plus `prompt_template_parts` that split the prompt around an `{ "kind": "interpretation_ref", "requirement_id": "interp_cool" }` entry, plus `interpretation_requirements` containing `{ "id": "interp_cool", "user_term": "cool", "status": "pending", "draft": "<your drafted definition>", "event_id": null, "accepted_value": null, "resolved_prompt_template_hash": null }`. Do not put `{{interpretation:cool}}` in new prompt templates; that sentinel is legacy compatibility only.
 2. **Call `request_interpretation_review`** with:
-   - `affected_node_id`: the id of the LLM transform whose prompt template carries the placeholder.
+   - `affected_node_id`: the id of the LLM transform whose options carry the pending interpretation requirement.
    - `user_term`: the exact subjective word the user used ("cool" — not "interesting", not "high-quality"; use their word).
    - `llm_draft`: your drafted definition of that term, written in plain prose that the user can read and amend (one to three sentences, no jargon). This is the interpretation you would otherwise have baked into the prompt.
-3. **Do not finalise downstream nodes that depend on the placeholder before the user resolves the review.** You may stage upstream and unrelated nodes; you may save the pipeline state as draft; you must not call `set_pipeline` with a "completed" build summary that implies the interpretation is locked in.
+3. **Do not finalise downstream nodes that depend on the pending interpretation before the user resolves the review.** You may stage upstream and unrelated nodes; you may save the pipeline state as draft; you must not call `set_pipeline` with a "completed" build summary that implies the interpretation is locked in.
 
 #### Opt-out branch
 
@@ -667,7 +670,7 @@ User says: *"create a list of 5 government web pages and use an LLM to rate how 
 
 Your sequence:
 
-1. `set_pipeline` with `source.inline_blob` containing the 5 URLs (per the inline_blob section above) and an LLM transform whose `prompt_template` is `Rate this government web page on the dimension of {{interpretation:cool}}. Respond with a single-line rating and a one-sentence rationale.\n\nPage: {{content}}`.
+1. `set_pipeline` with `source.inline_blob` containing the 5 URLs (per the inline_blob section above) and an LLM transform whose `prompt_template` is `Rate this government web page on the dimension of pending interpretation. Respond with a single-line rating and a one-sentence rationale.\n\nPage: {{content}}`, whose `prompt_template_parts` contains the same text split around an `interpretation_ref` for `interp_cool`, and whose `interpretation_requirements` contains one pending requirement for user term `cool`.
 2. `request_interpretation_review(affected_node_id="<llm_transform_id>", user_term="cool", llm_draft="A government web page is 'cool' if it is well-designed, useful to citizens, surprisingly modern, or notable for any reason that distinguishes it from a typical bureaucratic government site. Prefer pages that demonstrate clarity, accessibility, or a willingness to take design risks.")`.
 3. Narrate to the user: *"I've drafted what 'cool' means here — take a look at the interpretation card and tell me if I've read you right, or amend it."* Stop. Do not declare the build complete.
 

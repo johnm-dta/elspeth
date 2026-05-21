@@ -28,7 +28,7 @@ from sqlalchemy.exc import InvalidRequestError, OperationalError
 
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.audit_readiness.models import AuditReadinessSnapshot, ReadinessRow
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     composer_completion_events_table,
@@ -156,7 +156,13 @@ def session_engine_with_row(engine, session_record: _SessionRecord, state_record
 
 
 def _ok_validation() -> ValidationResult:
-    return ValidationResult(is_valid=True, checks=[], errors=[], semantic_contracts=[])
+    return ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
+        semantic_contracts=[],
+    )
 
 
 def _readiness_snapshot(session_id: UUID) -> AuditReadinessSnapshot:

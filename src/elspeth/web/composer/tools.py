@@ -93,6 +93,7 @@ from elspeth.web.composer.state import (
     _validate_gate_expression,
 )
 from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.interpretation_state import interpretation_sites
 from elspeth.web.paths import allowed_sink_directories, allowed_source_directories, resolve_data_path
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
@@ -6939,18 +6940,6 @@ def execute_tool(
 # ARG_ERROR paths.
 
 
-# Regex for detecting placeholders of the form ``{{interpretation:<term>}}``
-# inside a prompt_template string. Used by both the per-tool boundary check
-# (``_assert_affected_llm_node`` — confirms the LLM's draft is being staged
-# against a transform that actually has the placeholder) and the runtime
-# pre-execution detector (``_detect_unresolved_interpretation_placeholders``
-# — F-17). The capture group is the term itself, used to surface which
-# placeholder is unresolved.
-#
-# The pattern accepts whitespace inside the braces (``{{ interpretation : cool }}``)
-# because LLM drafts vary. The captured term is trimmed by the caller before
-# comparison so leading/trailing whitespace on the term does not cause a
-# false negative.
 def _assert_affected_llm_node(
     state: CompositionState,
     affected_node_id: str,
@@ -6962,19 +6951,19 @@ def _assert_affected_llm_node(
 
     * the node does not exist in ``state.nodes``;
     * the node's plugin kind is not ``llm``;
-    * the node's ``prompt_template`` does not contain a placeholder of the
-      form ``{{interpretation:<user_term>}}``.
+    * the node has neither a structured pending interpretation requirement
+      nor a legacy ``{{interpretation:<user_term>}}`` placeholder for
+      ``user_term``.
 
     Each branch raises ARG_ERROR (not a Tier-1 crash) because the LLM is
     expected to recover by calling ``upsert_node`` to add the placeholder
     and re-staging the tool call. A crash here would conflate "LLM made
     a recoverable mistake" with "we have a bug in our own code".
 
-    The placeholder check is lenient on whitespace inside the braces but
-    strict on the term value: the term inside the placeholder must equal
-    ``user_term`` after both sides are stripped. This avoids false
-    positives where the LLM staged a review for ``"important"`` but the
-    transform's placeholder is ``{{interpretation:cool}}``.
+    During the migration window this accepts structured
+    ``interpretation_requirements`` first and falls back to legacy placeholder
+    syntax. Term matching remains strict after stripping surrounding
+    whitespace.
     """
     node = next((n for n in state.nodes if n.id == affected_node_id), None)
     if node is None:
@@ -6999,15 +6988,15 @@ def _assert_affected_llm_node(
             expected=f"node {affected_node_id!r} to declare options.prompt_template (str) containing {{{{interpretation:{user_term}}}}}",
             actual_type=f"options.prompt_template is {type(prompt_template).__name__}",
         )
-    matched_terms = [match.group(1).strip() for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template)]
+    matched_terms = [term for node_id, term in interpretation_sites((node,)) if node_id == affected_node_id]
     if user_term.strip() not in matched_terms:
         raise ToolArgumentError(
             argument="affected_node_id",
             expected=(
-                f"node {affected_node_id!r} prompt_template to contain placeholder "
-                f"{{{{interpretation:{user_term}}}}} (found placeholders for: {matched_terms!r})"
+                f"node {affected_node_id!r} to contain a pending interpretation requirement or placeholder "
+                f"for {user_term!r} (found pending terms: {matched_terms!r})"
             ),
-            actual_type="missing placeholder",
+            actual_type="missing interpretation requirement or placeholder",
         )
 
 
@@ -7046,23 +7035,17 @@ def _detect_unresolved_interpretation_placeholders(nodes: Mapping[str, Any]) -> 
 def _detect_unresolved_interpretation_placeholders_typed(
     nodes: Sequence[NodeSpec],
 ) -> list[tuple[str, str]]:
-    """Return (node_id, term) tuples for every unresolved ``{{interpretation:…}}`` placeholder.
+    """Return (node_id, term) tuples for every unresolved interpretation site.
 
     F-17 runtime detector — typed sibling of
     :func:`_detect_unresolved_interpretation_placeholders` that operates
-    directly on ``CompositionState.nodes`` (a ``Sequence[NodeSpec]``).
-    The dict-shaped helper above filters on ``node.get("kind") == "llm"``
-    because it walks the runtime YAML/pipeline dict shape where transforms
-    carry a ``kind`` discriminator; ``NodeSpec`` has no ``kind`` field —
-    LLM transforms are identified by ``node.plugin == "llm"`` (mirrors the
-    per-tool boundary check in :func:`_assert_affected_llm_node`).
-    Substituting ``kind`` here would match nothing and silently fail open,
-    which is why this sibling exists rather than a single polymorphic
-    helper.
+    directly on ``CompositionState.nodes`` (a ``Sequence[NodeSpec]``). It
+    accepts both structured pending interpretation requirements and legacy
+    ``{{interpretation:…}}`` placeholders during the migration window.
 
-    Each unresolved placeholder produces exactly one tuple per
+    Each unresolved site produces exactly one tuple per
     ``(node_id, term)`` pair, deduplicated within a node by insertion
-    order so a repeated placeholder in one prompt template does not
+    order so a repeated placeholder or requirement in one node does not
     inflate telemetry / error surface area.  Cross-node duplicates ARE
     preserved (the same ``term`` on two different nodes is two distinct
     unresolved sites).
@@ -7074,7 +7057,6 @@ def _detect_unresolved_interpretation_placeholders_typed(
     because the typed call site needs the ``node_id`` for both the
     telemetry attribute and the user-actionable error message).
     """
-    unresolved: list[tuple[str, str]] = []
     for node in nodes:
         if node.plugin != "llm":
             continue
@@ -7087,14 +7069,7 @@ def _detect_unresolved_interpretation_placeholders_typed(
                 expected="a string",
                 actual_type=type(prompt_template).__name__,
             )
-        seen_in_node: dict[str, None] = {}
-        for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template):
-            term = match.group(1).strip()
-            if term in seen_in_node:
-                continue
-            seen_in_node[term] = None
-            unresolved.append((node.id, term))
-    return unresolved
+    return list(interpretation_sites(tuple(nodes)))
 
 
 # Rate-cap discriminant codes carried on ``ToolArgumentError.code`` so the

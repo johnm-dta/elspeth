@@ -127,12 +127,38 @@ class SemanticEdgeContractResponse(_StrictResponse):
     requirement_code: str
 
 
+class ValidationReadinessBlocker(_StrictResponse):
+    """Machine-readable readiness blocker.
+
+    ``code`` is the routing discriminant consumed by the frontend and composer
+    finalizer. ``detail`` is display-safe context, not raw prompt text.
+    """
+
+    code: str
+    component_id: str | None
+    component_type: str | None
+    detail: str
+
+
+class ValidationReadiness(_StrictResponse):
+    """Backend-owned readiness classification for a composition state."""
+
+    authoring_valid: bool
+    execution_ready: bool
+    completion_ready: bool
+    blockers: list[ValidationReadinessBlocker]
+
+
 class ValidationResult(_StrictResponse):
     """Result of dry-run validation against real engine code."""
 
     is_valid: bool
     checks: list[ValidationCheck]
     errors: list[ValidationError]
+    # Required: every producer must state which contract failed or passed.
+    # This prevents callers from reconstructing readiness heuristically from
+    # prose errors or parser side effects.
+    readiness: ValidationReadiness
     semantic_contracts: list[SemanticEdgeContractResponse] = []
 
 

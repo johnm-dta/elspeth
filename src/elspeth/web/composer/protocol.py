@@ -48,9 +48,10 @@ class ComposerResult:
             the verbatim LLM response.
 
     Field-pairing invariant:
-        - When ``runtime_preflight`` is non-None and not ``is_valid``,
-          ``raw_assistant_content`` MUST be set (the model's pre-synthesis
-          prose must be recoverable from the audit row).
+        - When ``runtime_preflight`` is non-None, not ``is_valid``, and
+          not a typed authoring-valid handoff, ``raw_assistant_content``
+          MUST be set (the model's pre-synthesis prose must be recoverable
+          from the audit row).
         - When ``raw_assistant_content`` is set with passing preflight,
           ``message`` MUST differ from ``raw_assistant_content``
           (otherwise raw is set spuriously — the audit row would falsely
@@ -146,7 +147,15 @@ class ComposerResult:
         #    *why* synthesis happened, only on whether it did
         #    (``message.startswith(raw)`` distinguishes augmentation
         #    from replacement structurally).
-        preflight_failed = self.runtime_preflight is not None and not self.runtime_preflight.is_valid
+        preflight_failed = (
+            self.runtime_preflight is not None
+            and not self.runtime_preflight.is_valid
+            and not (
+                self.runtime_preflight.readiness.authoring_valid
+                and self.runtime_preflight.readiness.completion_ready
+                and not self.runtime_preflight.readiness.execution_ready
+            )
+        )
         if preflight_failed and self.raw_assistant_content is None:
             raise ValueError(
                 "ComposerResult field-pairing invariant violated: "

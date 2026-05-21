@@ -382,6 +382,20 @@ export interface SemanticEdgeContract {
   requirement_code: string;
 }
 
+export interface ValidationReadinessBlocker {
+  code: string;
+  component_id: string | null;
+  component_type: string | null;
+  detail: string;
+}
+
+export interface ValidationReadiness {
+  authoring_valid: boolean;
+  execution_ready: boolean;
+  completion_ready: boolean;
+  blockers: ValidationReadinessBlocker[];
+}
+
 /**
  * Full validation result from POST /api/sessions/{id}/validate.
  * Stage 2 validation with per-component detail.
@@ -392,6 +406,7 @@ export interface ValidationResult {
   checks: ValidationCheck[];
   errors: ValidationError[];
   warnings?: ValidationWarning[];
+  readiness: ValidationReadiness;
   semantic_contracts?: SemanticEdgeContract[];
 }
 

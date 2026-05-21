@@ -44,7 +44,16 @@ from elspeth.web.composer.tools import ToolResult
 from elspeth.web.composer.tools import execute_tool as _execute_tool
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
-from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationResult
+from elspeth.web.execution.schemas import (
+    ValidationCheck,
+    ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
+)
+from elspeth.web.execution.schemas import (
+    ValidationResult as ValidationResultModel,
+)
+from elspeth.web.interpretation_state import INTERPRETATION_REVIEW_PENDING_CODE
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -56,6 +65,59 @@ from elspeth.web.sessions.telemetry import build_sessions_telemetry
 class FakeFunction:
     name: str
     arguments: str
+
+
+def _execution_ready() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
+
+
+def _not_authoring_ready(code: str = "test_blocker") -> ValidationReadiness:
+    return ValidationReadiness(
+        authoring_valid=False,
+        execution_ready=False,
+        completion_ready=False,
+        blockers=[
+            ValidationReadinessBlocker(
+                code=code,
+                component_id=None,
+                component_type=None,
+                detail=code,
+            )
+        ],
+    )
+
+
+def _pending_interpretation_readiness() -> ValidationReadiness:
+    return ValidationReadiness(
+        authoring_valid=True,
+        execution_ready=False,
+        completion_ready=True,
+        blockers=[
+            ValidationReadinessBlocker(
+                code=INTERPRETATION_REVIEW_PENDING_CODE,
+                component_id="rate_node",
+                component_type="transform",
+                detail="rate_node:cool",
+            )
+        ],
+    )
+
+
+def ValidationResult(
+    *,
+    is_valid: bool,
+    checks: list[ValidationCheck],
+    errors: list[ValidationError],
+    readiness: ValidationReadiness | None = None,
+    **kwargs: Any,
+) -> ValidationResultModel:
+    return ValidationResultModel(
+        is_valid=is_valid,
+        checks=checks,
+        errors=errors,
+        readiness=readiness or (_execution_ready() if is_valid else _not_authoring_ready()),
+        **kwargs,
+    )
 
 
 @dataclass
@@ -4301,6 +4363,61 @@ class TestComposerRuntimePreflightFinalGate:
         assert result.message != "The pipeline is complete and valid."
         assert result.raw_assistant_content == "The pipeline is complete and valid."
         assert result.runtime_preflight is failed_preflight
+        mock_preflight.assert_called_once_with(changed_state, "user-1")
+
+    @pytest.mark.asyncio
+    async def test_pending_interpretation_handoff_is_not_augmented_as_invalid_config(self) -> None:
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state().with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="rate_node",
+                options={"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            )
+        )
+        changed_state = replace(state, version=state.version + 1)
+        pending_preflight = ValidationResult(
+            is_valid=False,
+            checks=[
+                ValidationCheck(
+                    name="interpretation_review",
+                    passed=False,
+                    detail="Interpretation review is pending for rate_node:cool.",
+                    affected_nodes=("rate_node",),
+                    outcome_code=None,
+                )
+            ],
+            errors=[
+                ValidationError(
+                    component_id="rate_node",
+                    component_type="transform",
+                    message="Interpretation review is pending for 'cool'.",
+                    suggestion="Resolve the pending interpretation review before running.",
+                    error_code=INTERPRETATION_REVIEW_PENDING_CODE,
+                )
+            ],
+            readiness=_pending_interpretation_readiness(),
+        )
+        model_prose = "Review is pending for cool."
+
+        with patch.object(service, "_runtime_preflight", return_value=pending_preflight) as mock_preflight:
+            result = await service._finalize_no_tool_response(
+                content=model_prose,
+                state=changed_state,
+                initial_version=state.version,
+                user_id="user-1",
+                last_runtime_preflight=None,
+                runtime_preflight_cache=service._new_runtime_preflight_cache(),
+                session_scope="session:test",
+                mutation_success_seen=True,
+            )
+
+        assert result.message == model_prose
+        assert result.raw_assistant_content is None
+        assert result.runtime_preflight is pending_preflight
         mock_preflight.assert_called_once_with(changed_state, "user-1")
 
     @pytest.mark.asyncio

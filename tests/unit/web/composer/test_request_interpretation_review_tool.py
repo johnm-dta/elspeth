@@ -63,6 +63,7 @@ from elspeth.web.composer.tools import (
     get_tool_definitions,
     is_session_aware_tool,
 )
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.protocol import CompositionStateData
@@ -112,6 +113,47 @@ def _llm_node(
         on_success="out",
         on_error=None,
         options={"prompt_template": prompt_template},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+def _structured_llm_node(
+    *,
+    node_id: str = "rate_node",
+    term: str = "cool",
+) -> NodeSpec:
+    """Build an LLM-transform NodeSpec with structured pending interpretation state."""
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="llm",
+        input="rows",
+        on_success="out",
+        on_error=None,
+        options={
+            "prompt_template": "Rate pending interpretation: {{ row.text }}",
+            PROMPT_TEMPLATE_PARTS_KEY: [
+                {"kind": "text", "text": "Rate "},
+                {"kind": "interpretation_ref", "requirement_id": term},
+                {"kind": "text", "text": ": {{ row.text }}"},
+            ],
+            INTERPRETATION_REQUIREMENTS_KEY: [
+                {
+                    "id": term,
+                    "user_term": term,
+                    "status": "pending",
+                    "draft": "visually appealing",
+                    "event_id": None,
+                    "accepted_value": None,
+                    "resolved_prompt_template_hash": None,
+                }
+            ],
+        },
         condition=None,
         routes=None,
         fork_to=None,
@@ -274,6 +316,33 @@ async def test_02b_opted_out_session_does_not_return_pending_payload(service: Se
     assert all_rows[0].interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT
 
 
+@pytest.mark.asyncio
+async def test_02c_structured_pending_requirement_happy_path(service: SessionServiceImpl) -> None:
+    """Structured interpretation metadata is sufficient; no sentinel substring is required."""
+    session_id = uuid4()
+    state_id = await _seed_session(service, session_id)
+    state = _state_with(_structured_llm_node())
+
+    result = await _handle_request_interpretation_review(
+        arguments={"affected_node_id": "rate_node", "user_term": "cool", "llm_draft": "Visually appealing."},
+        state=state,
+        session_id=session_id,
+        composition_state_id=state_id,
+        tool_call_id="call_structured",
+        now=_now(),
+        per_term_cap=3,
+        per_session_day_cap=10,
+        create_pending_interpretation_event=service.create_pending_interpretation_event,
+        list_interpretation_events=service.list_interpretation_events,
+        **_provenance_kwargs(),
+    )
+
+    assert result.success is True
+    assert result.data["_kind"] == "interpretation_review_pending"
+    assert result.data["affected_node_id"] == "rate_node"
+    assert result.data["user_term"] == "cool"
+
+
 # --------------------------------------------------------------------------- #
 # Tests 03 / 04 / 05 — _assert_affected_llm_node boundary check
 # --------------------------------------------------------------------------- #
@@ -321,6 +390,19 @@ def test_05b_placeholder_for_different_term_still_fails() -> None:
     node = _llm_node(prompt_template="Rate how {{interpretation:important}} this row is.")
     state = _state_with(node)
     with pytest.raises(ToolArgumentError, match=r"placeholder"):
+        _assert_affected_llm_node(state, "rate_node", "cool")
+
+
+def test_05c_structured_pending_requirement_satisfies_boundary() -> None:
+    state = _state_with(_structured_llm_node())
+
+    _assert_affected_llm_node(state, "rate_node", "cool")
+
+
+def test_05d_structured_pending_requirement_for_different_term_still_fails() -> None:
+    state = _state_with(_structured_llm_node(term="important"))
+
+    with pytest.raises(ToolArgumentError, match=r"interpretation requirement|placeholder"):
         _assert_affected_llm_node(state, "rate_node", "cool")
 
 

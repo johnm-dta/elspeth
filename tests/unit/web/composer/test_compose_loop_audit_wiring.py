@@ -50,7 +50,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools import ToolResult
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 
 # ---------------------------------------------------------------------------
 # Test doubles — mirror the shapes used by tests/unit/web/composer/test_service.py
@@ -94,6 +94,15 @@ def _empty_state() -> CompositionState:
         outputs=(),
         metadata=PipelineMetadata(),
         version=1,
+    )
+
+
+def _passing_preflight() -> ValidationResult:
+    return ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
     )
 
 
@@ -446,7 +455,7 @@ async def test_compose_loop_records_success_when_canonical_json_fails() -> None:
     # here. Stub _runtime_preflight to return a passing ValidationResult
     # so result.message reflects the LLM's text-only turn unchanged —
     # matches the discipline already used in TestComposerSingleToolCall.
-    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+    passing_preflight = _passing_preflight()
 
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -704,7 +713,7 @@ async def test_compose_loop_records_arg_error_for_non_finite_object_arguments() 
         ],
     )
     turn2 = _make_llm_response(content="Recovered.")
-    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+    passing_preflight = _passing_preflight()
 
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -747,7 +756,7 @@ async def test_compose_loop_records_arg_error_for_non_finite_non_object_argument
         ],
     )
     turn2 = _make_llm_response(content="Recovered.")
-    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+    passing_preflight = _passing_preflight()
 
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -926,7 +935,7 @@ class TestComposerDiscoveryAuditPreservesResult:
         # Empty state has no source/sinks; bypass the post-loop runtime
         # preflight as in the existing B1 test (orthogonal to the audit
         # invariant we're pinning).
-        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        passing_preflight = _passing_preflight()
 
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -1006,7 +1015,7 @@ class TestComposerDiscoveryAuditPreservesResult:
         )
         turn3 = _make_llm_response(content="Cached discovery complete.")
 
-        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        passing_preflight = _passing_preflight()
 
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -1119,7 +1128,7 @@ async def test_canonicalization_sentinel_carries_payload_keys_diagnostic() -> No
     )
     turn2 = _make_llm_response(content="Done.")
 
-    passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+    passing_preflight = _passing_preflight()
 
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,

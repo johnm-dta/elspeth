@@ -94,7 +94,6 @@ from elspeth.web.composer.tools import (
     RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE,
     RuntimePreflight,
     ToolResult,
-    _detect_unresolved_interpretation_placeholders_typed,
     _sync_list_blobs,
     compute_proof_diagnostics,
     execute_tool,
@@ -112,8 +111,19 @@ from elspeth.web.execution.runtime_preflight import (
     RuntimePreflightFailure,
     RuntimePreflightKey,
 )
-from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationResult
+from elspeth.web.execution.schemas import (
+    ValidationCheck,
+    ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
+    ValidationResult,
+)
 from elspeth.web.execution.validation import validate_pipeline
+from elspeth.web.interpretation_state import (
+    INTERPRETATION_REQUIREMENTS_KEY,
+    INTERPRETATION_REVIEW_PENDING_CODE,
+    interpretation_sites,
+)
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
 
@@ -1118,13 +1128,30 @@ def _matching_interpretation_placeholder_count(
     node_id: str,
     term: str,
 ) -> int:
-    node = next((candidate for candidate in state.nodes if candidate.id == node_id), None)
-    if node is None or node.plugin != "llm":
-        return 0
-    prompt_template = node.options.get("prompt_template")
-    if not isinstance(prompt_template, str):
-        return 0
-    return sum(1 for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template) if match.group(1).strip() == term)
+    for node in state.nodes:
+        if node.id != node_id or node.plugin != "llm":
+            continue
+        requirements = node.options.get(INTERPRETATION_REQUIREMENTS_KEY)
+        if isinstance(requirements, (list, tuple)):
+            return sum(
+                1
+                for requirement in requirements
+                if isinstance(requirement, Mapping) and requirement.get("status") == "pending" and requirement.get("user_term") == term
+            )
+        prompt_template = node.options.get("prompt_template")
+        if isinstance(prompt_template, str):
+            return sum(1 for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template) if match.group(1).strip() == term)
+    return 0
+
+
+def _is_pending_interpretation_handoff(result: ValidationResult) -> bool:
+    readiness = result.readiness
+    return (
+        readiness.authoring_valid
+        and readiness.completion_ready
+        and not readiness.execution_ready
+        and any(blocker.code == INTERPRETATION_REVIEW_PENDING_CODE for blocker in readiness.blockers)
+    )
 
 
 def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
@@ -1147,6 +1174,19 @@ def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
                 error_code=None,
             )
         ],
+        readiness=ValidationReadiness(
+            authoring_valid=False,
+            execution_ready=False,
+            completion_ready=False,
+            blockers=[
+                ValidationReadinessBlocker(
+                    code="state_exists",
+                    component_id=None,
+                    component_type=None,
+                    detail=detail,
+                )
+            ],
+        ),
     )
 
 
@@ -1554,7 +1594,6 @@ class ComposerServiceImpl:
             yaml_generator,
             secret_service=self._secret_service,
             user_id=user_id,
-            allow_pending_interpretation_placeholders=True,
         )
 
     async def _missing_pending_interpretation_review_sites(
@@ -1565,7 +1604,7 @@ class ComposerServiceImpl:
     ) -> tuple[tuple[str, str], ...]:
         """Return pending interpretation handoffs that cannot be resolved."""
 
-        sites = tuple(_detect_unresolved_interpretation_placeholders_typed(state.nodes))
+        sites = interpretation_sites(state.nodes)
         if session_id is None:
             return ()
         sessions_service = self._require_sessions_service()
@@ -1929,7 +1968,7 @@ class ComposerServiceImpl:
                 llm_calls=llm_calls,
             )
 
-        if runtime_result is not None and not runtime_result.is_valid:
+        if runtime_result is not None and not runtime_result.is_valid and not _is_pending_interpretation_handoff(runtime_result):
             # Two finalize shapes for invalid preflight, dispatched on
             # state structure. Both augment — the difference is suffix
             # wording (issue elspeth-9cfbad6901 unified the policy after

@@ -34,6 +34,7 @@ from elspeth.web.execution.schemas import (
     RunDiagnosticSummary,
     RunStatusResponse,
     ValidationCheck,
+    ValidationReadiness,
     ValidationResult,
 )
 from elspeth.web.sessions.protocol import RunAlreadyActiveError
@@ -41,6 +42,14 @@ from elspeth.web.sessions.protocol import RunAlreadyActiveError
 # ── Helpers ───────────────────────────────────────────────────────────
 
 _TEST_USER_ID = "test-user-123"
+
+
+def _ready_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
+
+
+def _blocked_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[])
 
 
 def _request_for_app(app: FastAPI) -> Request:
@@ -169,6 +178,7 @@ class TestValidateEndpoint:
                     ValidationCheck(name="settings_load", passed=True, detail="OK", affected_nodes=(), outcome_code=None),
                 ],
                 errors=[],
+                readiness=_ready_readiness(),
             )
         )
         app = _create_test_app(execution_service=svc)
@@ -183,7 +193,7 @@ class TestValidateEndpoint:
     async def test_validate_delegates_to_service(self) -> None:
         """AC #16: validate route delegates to service.validate()."""
         svc = MagicMock()
-        svc.validate = AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[]))
+        svc.validate = AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness()))
         app = _create_test_app(execution_service=svc)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(f"/api/sessions/{uuid4()}/validate")
@@ -206,6 +216,7 @@ class TestValidateEndpoint:
                     ),
                 ],
                 errors=[],
+                readiness=_blocked_readiness(),
             )
         )
         app = _create_test_app(execution_service=svc)

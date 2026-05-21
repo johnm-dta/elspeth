@@ -7,6 +7,12 @@ import {
 import { useAuthStore } from "../stores/authStore";
 
 const SESSION_ID = "00000000-0000-0000-0000-000000000001";
+const READY_READINESS = {
+  authoring_valid: true,
+  execution_ready: true,
+  completion_ready: true,
+  blockers: [],
+};
 
 const _validReadinessSnapshot = {
   session_id: SESSION_ID,
@@ -25,6 +31,7 @@ const _validReadinessSnapshot = {
     checks: [],
     errors: [],
     warnings: [],
+    readiness: READY_READINESS,
     semantic_contracts: [],
   },
 };

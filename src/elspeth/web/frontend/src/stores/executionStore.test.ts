@@ -18,6 +18,19 @@ vi.mock("@/api/websocket", () => ({
   connectToRun: vi.fn(),
 }));
 
+const READY_READINESS = {
+  authoring_valid: true,
+  execution_ready: true,
+  completion_ready: true,
+  blockers: [],
+};
+const BLOCKED_READINESS = {
+  authoring_valid: false,
+  execution_ready: false,
+  completion_ready: false,
+  blockers: [],
+};
+
 describe("executionStore.validate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -35,6 +48,7 @@ describe("executionStore.validate", () => {
       checks: [],
       errors: [],
       warnings: [],
+      readiness: READY_READINESS,
     };
 
     const { validatePipeline } = await import("@/api/client");
@@ -61,6 +75,17 @@ describe("executionStore.validate", () => {
         },
       ],
       warnings: [],
+      readiness: {
+        ...BLOCKED_READINESS,
+        blockers: [
+          {
+            code: "settings_load",
+            component_id: "llm_extract",
+            component_type: "transform",
+            detail: "llm_extract",
+          },
+        ],
+      },
     };
 
     const { validatePipeline } = await import("@/api/client");
@@ -100,6 +125,7 @@ describe("executionStore.validate", () => {
       checks: [],
       errors: [],
       warnings: [],
+      readiness: READY_READINESS,
     };
     let resolveValidation: (result: ValidationResult) => void = () => {};
     const pendingValidation = new Promise<ValidationResult>((resolve) => {
@@ -132,6 +158,17 @@ describe("executionStore.validate", () => {
         },
       ],
       warnings: [],
+      readiness: {
+        ...BLOCKED_READINESS,
+        blockers: [
+          {
+            code: "settings_load",
+            component_id: "source",
+            component_type: "source",
+            detail: "source",
+          },
+        ],
+      },
     };
     let resolveValidation: (result: ValidationResult) => void = () => {};
     const pendingValidation = new Promise<ValidationResult>((resolve) => {

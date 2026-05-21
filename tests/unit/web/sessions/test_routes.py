@@ -54,7 +54,10 @@ from elspeth.web.execution.schemas import (
     RunAccountingTokens,
     ValidationCheck,
     ValidationError,
-    ValidationResult,
+    ValidationReadiness,
+)
+from elspeth.web.execution.schemas import (
+    ValidationResult as ValidationResultModel,
 )
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.sessions._guided_step_chat import StepChatResult
@@ -81,6 +84,31 @@ _EMPTY_STATE = CompositionState(
     metadata=PipelineMetadata(),
     version=1,
 )
+
+
+def _ready_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
+
+
+def _blocked_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[])
+
+
+def ValidationResult(
+    *,
+    is_valid: bool,
+    checks: list[ValidationCheck],
+    errors: list[ValidationError],
+    readiness: ValidationReadiness | None = None,
+    **kwargs: Any,
+) -> ValidationResultModel:
+    return ValidationResultModel(
+        is_valid=is_valid,
+        checks=checks,
+        errors=errors,
+        readiness=readiness or (_ready_readiness() if is_valid else _blocked_readiness()),
+        **kwargs,
+    )
 
 
 def test_summarize_guided_response_rejects_unhandled_turn_type() -> None:

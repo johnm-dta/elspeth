@@ -46,10 +46,23 @@ function isEmptyPipelineResult(result: ValidationResult): boolean {
   );
 }
 
+function isPendingInterpretationReviewResult(result: ValidationResult): boolean {
+  const readiness = result.readiness;
+  if (!readiness) return false;
+  return (
+    !result.is_valid &&
+    readiness.authoring_valid &&
+    !readiness.execution_ready &&
+    readiness.completion_ready &&
+    readiness.blockers.some((blocker) => blocker.code === "interpretation_review_pending")
+  );
+}
+
 function validationFingerprint(result: ValidationResult | null): string | null {
   if (!result) return null;
   return JSON.stringify({
     is_valid: result.is_valid,
+    readiness: result.readiness,
     errors: result.errors.map((err) => ({
       component_type: err.component_type ?? null,
       component_id: err.component_id ?? null,
@@ -186,6 +199,18 @@ export function initStoreSubscriptions(): void {
     if (isEmptyPipelineResult(result)) return;
 
     const sessionStore = useSessionStore.getState();
+
+    if (isPendingInterpretationReviewResult(result)) {
+      const lines = ["**Interpretation review pending** — execution is blocked until review is resolved:"];
+      for (const blocker of result.readiness.blockers) {
+        if (blocker.code !== "interpretation_review_pending") continue;
+        lines.push(
+          `- **[${blocker.component_type ?? "unknown"}] ${blocker.component_id ?? "unknown"}:** ${blocker.detail}`,
+        );
+      }
+      sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
+      return;
+    }
 
     if (!result.is_valid && result.errors.length > 0) {
       const lines = ["**Validation failed** — the following errors were sent to the agent:"];

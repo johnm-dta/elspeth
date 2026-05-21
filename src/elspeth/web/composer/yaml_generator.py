@@ -24,11 +24,12 @@ from typing import Any
 import yaml
 
 from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState
+from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 
 # Web-specific metadata keys that should NOT appear in engine YAML.
 # These are UI-layer concerns for provenance tracking, not plugin config.
 # Plugin configs use Pydantic with extra="forbid" — unknown keys cause errors.
-_WEB_ONLY_OPTION_KEYS = frozenset({"blob_ref"})
+_WEB_ONLY_OPTION_KEYS = frozenset({"blob_ref"}) | AUTHORING_METADATA_OPTION_KEYS
 
 
 def _strip_web_metadata(options: dict[str, Any]) -> dict[str, Any]:
@@ -99,7 +100,7 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
                 "on_error": t["on_error"],
             }
             if t["options"]:
-                entry["options"] = t["options"]
+                entry["options"] = _strip_web_metadata(dict(t["options"]))
             doc["transforms"].append(entry)
 
     # Gates — condition and routes are conditionally present (only on gates).
@@ -149,7 +150,7 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
             if "expected_output_count" in a:
                 entry["expected_output_count"] = a["expected_output_count"]
             if a["options"]:
-                entry["options"] = a["options"]
+                entry["options"] = _strip_web_metadata(dict(a["options"]))
             doc["aggregations"].append(entry)
 
     # Coalesce — branches, policy, merge are conditionally present.
@@ -177,7 +178,7 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
                 "on_write_failure": output["on_write_failure"],
             }
             if output["options"]:
-                sink_entry["options"] = output["options"]
+                sink_entry["options"] = _strip_web_metadata(dict(output["options"]))
             doc["sinks"][output["name"]] = sink_entry
 
     # landscape key is intentionally omitted -- URL comes from

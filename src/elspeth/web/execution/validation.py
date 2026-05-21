@@ -24,7 +24,7 @@ only to be rejected pre-token at /execute.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import yaml
@@ -49,7 +49,6 @@ from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.composer.state import (
     CompositionState,
-    NodeSpec,
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
     _batch_distribution_profile_value_field_entries,
@@ -76,16 +75,24 @@ from elspeth.web.execution.schemas import (
     CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
     ValidationCheck,
     ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
     ValidationResult,
 )
+from elspeth.web.interpretation_state import (
+    INTERPRETATION_REVIEW_PENDING_CODE,
+    InterpretationReviewPending,
+    materialize_state_for_authoring,
+    materialize_state_for_execution,
+)
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
-from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
 
 # ── Check names (ordered) ─────────────────────────────────────────────
 _CHECK_PATH_ALLOWLIST = "path_allowlist"
 _CHECK_SECRET_REFS = "secret_refs"
 _CHECK_SEMANTIC_CONTRACTS = "semantic_contracts"
 _CHECK_BATCH_TRANSFORM_OPTIONS = "batch_transform_options"
+_CHECK_INTERPRETATION_REVIEW = "interpretation_review"
 _CHECK_SETTINGS = "settings_load"
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_VALUE_SOURCE_COMPLIANCE = "value_source_compliance"
@@ -93,6 +100,40 @@ _CHECK_GRAPH = RUNTIME_CHECK_GRAPH_STRUCTURE
 _CHECK_ROUTE_TARGETS = "route_target_resolution"
 _CHECK_SCHEMA = RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 assert RUNTIME_GRAPH_VALIDATION_CHECKS == (_CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA)
+
+
+def _execution_ready() -> ValidationReadiness:
+    return ValidationReadiness(
+        authoring_valid=True,
+        execution_ready=True,
+        completion_ready=True,
+        blockers=[],
+    )
+
+
+def _blocked_readiness(
+    *,
+    code: str,
+    detail: str,
+    component_id: str | None = None,
+    component_type: str | None = None,
+    authoring_valid: bool = False,
+    completion_ready: bool = False,
+) -> ValidationReadiness:
+    return ValidationReadiness(
+        authoring_valid=authoring_valid,
+        execution_ready=False,
+        completion_ready=completion_ready,
+        blockers=[
+            ValidationReadinessBlocker(
+                code=code,
+                component_id=component_id,
+                component_type=component_type,
+                detail=detail,
+            )
+        ],
+    )
+
 
 # Advisory check — non-blocking, multi-entry (one ValidationCheck per
 # detected node, all sharing this name).  Deliberately NOT included in
@@ -111,6 +152,7 @@ _ALL_CHECKS = [
     _CHECK_SECRET_REFS,
     _CHECK_SEMANTIC_CONTRACTS,
     _CHECK_BATCH_TRANSFORM_OPTIONS,
+    _CHECK_INTERPRETATION_REVIEW,
     _CHECK_SETTINGS,
     _CHECK_PLUGINS,
     _CHECK_VALUE_SOURCE_COMPLIANCE,
@@ -382,6 +424,10 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
     return result
 
 
+def _format_interpretation_sites(sites: tuple[tuple[str, str], ...]) -> str:
+    return ", ".join(f"{node_id}:{term}" for node_id, term in sites)
+
+
 @dataclass(frozen=True, slots=True)
 class _IdentityFinding:
     """One detected identity-shaped passthrough between a transform and a sink.
@@ -531,46 +577,6 @@ def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> lis
     return refs
 
 
-def _mask_pending_interpretation_placeholders_for_authoring_preflight(
-    state: CompositionState,
-) -> CompositionState:
-    """Return a validation-only state where pending interpretation tokens are inert text.
-
-    ``{{interpretation:<term>}}`` is a composer authoring token consumed by
-    ``resolve_interpretation_event``. Composer runtime preflight needs to
-    exercise the engine path without treating that token as runtime Jinja, but
-    execution remains strict and rejects unresolved placeholders before this
-    validator is reached.
-    """
-
-    masked_nodes: list[NodeSpec] = []
-    changed = False
-    for node in state.nodes:
-        if node.plugin != "llm":
-            masked_nodes.append(node)
-            continue
-        options = node.options
-        if "resolved_prompt_template_hash" in options:
-            masked_nodes.append(node)
-            continue
-        prompt_template = options.get("prompt_template")
-        if not isinstance(prompt_template, str):
-            masked_nodes.append(node)
-            continue
-        masked_prompt = INTERPRETATION_PLACEHOLDER_RE.sub("pending interpretation", prompt_template)
-        if masked_prompt == prompt_template:
-            masked_nodes.append(node)
-            continue
-        masked_options = dict(options)
-        masked_options["prompt_template"] = masked_prompt
-        masked_nodes.append(replace(node, options=masked_options))
-        changed = True
-
-    if not changed:
-        return state
-    return replace(state, nodes=tuple(masked_nodes))
-
-
 def validate_pipeline(
     state: CompositionState,
     settings: ValidationSettings,
@@ -651,6 +657,10 @@ def validate_pipeline(
                     error_code="empty_pipeline",
                 ),
             ],
+            readiness=_blocked_readiness(
+                code="empty_pipeline",
+                detail="Pipeline is empty.",
+            ),
         )
 
     # Step 1: Source + sink path allowlist check (C3/S2 defense-in-depth)
@@ -691,6 +701,12 @@ def validate_pipeline(
                             error_code=None,
                         ),
                     ],
+                    readiness=_blocked_readiness(
+                        code="path_allowlist",
+                        detail=f"source {key} resolves outside allowed source directories",
+                        component_id="source",
+                        component_type="source",
+                    ),
                 )
 
     # Sink path allowlist — prevents arbitrary file writes via sink options.
@@ -722,6 +738,12 @@ def validate_pipeline(
                                 error_code=None,
                             ),
                         ],
+                        readiness=_blocked_readiness(
+                            code="path_allowlist",
+                            detail=f"sink {output.name} {key} resolves outside allowed output directories",
+                            component_id=output.name,
+                            component_type="sink",
+                        ),
                     )
 
     # B11 fix: Always record the path_allowlist check
@@ -874,7 +896,15 @@ def validate_pipeline(
                 )
             )
             checks.extend(_skipped_checks(_CHECK_SECRET_REFS))
-            return ValidationResult(is_valid=False, checks=checks, errors=errors)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=errors,
+                readiness=_blocked_readiness(
+                    code="secret_refs",
+                    detail="Secret reference validation failed.",
+                ),
+            )
         checks.append(
             ValidationCheck(
                 name=_CHECK_SECRET_REFS,
@@ -923,6 +953,10 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="semantic_contracts",
+                detail="Semantic contract check failed.",
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -977,6 +1011,10 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="batch_transform_options",
+                detail="Batch-aware transform option check failed.",
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
     checks.append(
@@ -989,11 +1027,59 @@ def validate_pipeline(
         )
     )
 
-    # Step 2: Generate YAML
-    runtime_state = (
-        _mask_pending_interpretation_placeholders_for_authoring_preflight(state) if allow_pending_interpretation_placeholders else state
+    materialized_state = (
+        materialize_state_for_authoring(state) if allow_pending_interpretation_placeholders else materialize_state_for_execution(state)
     )
-    pipeline_yaml = yaml_generator.generate_yaml(runtime_state)
+    if isinstance(materialized_state, InterpretationReviewPending):
+        site_detail = _format_interpretation_sites(materialized_state.sites)
+        affected_nodes = tuple(dict.fromkeys(node_id for node_id, _term in materialized_state.sites))
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_INTERPRETATION_REVIEW,
+                passed=False,
+                detail=f"Interpretation review is pending for {site_detail}.",
+                affected_nodes=affected_nodes,
+                outcome_code=None,
+            )
+        )
+        errors.extend(
+            ValidationError(
+                component_id=node_id,
+                component_type="transform",
+                message=f"Interpretation review is pending for '{term}'.",
+                suggestion="Resolve the pending interpretation review before running.",
+                error_code=INTERPRETATION_REVIEW_PENDING_CODE,
+            )
+            for node_id, term in materialized_state.sites
+        )
+        checks.extend(_skipped_checks(_CHECK_INTERPRETATION_REVIEW))
+        single_site = materialized_state.sites[0] if len(materialized_state.sites) == 1 else None
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=errors,
+            readiness=_blocked_readiness(
+                code=INTERPRETATION_REVIEW_PENDING_CODE,
+                detail=site_detail,
+                component_id=single_site[0] if single_site is not None else None,
+                component_type="transform" if single_site is not None else None,
+                authoring_valid=True,
+                completion_ready=True,
+            ),
+            semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+        )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_INTERPRETATION_REVIEW,
+            passed=True,
+            detail="No pending interpretation review",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    # Step 2: Generate YAML
+    pipeline_yaml = yaml_generator.generate_yaml(materialized_state)
     pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(settings.data_dir))
 
     # Step 3: Settings loading
@@ -1059,6 +1145,10 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="settings_load",
+                detail="Settings failed to load.",
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -1143,6 +1233,12 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="value_source_compliance",
+                detail="Value-source compliance failed.",
+                component_id=errors[-1].component_id if errors else None,
+                component_type=errors[-1].component_type if errors else None,
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
     except (PluginNotFoundError, PluginConfigError) as exc:
@@ -1177,6 +1273,12 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="plugin_instantiation",
+                detail="Plugin instantiation failed.",
+                component_id=plugin_error_name,
+                component_type=comp_type,
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
     except FileExistsError as exc:
@@ -1222,6 +1324,11 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="plugin_instantiation",
+                detail="Plugin filesystem target validation failed.",
+                component_type="sink",
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -1262,6 +1369,12 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="graph_structure",
+                detail="Graph validation failed.",
+                component_id=exc.component_id,
+                component_type=exc.component_type,
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -1323,6 +1436,10 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="route_target_resolution",
+                detail="Route target validation failed.",
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -1384,6 +1501,12 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="schema_compatibility",
+                detail="Schema compatibility failed.",
+                component_id=errors[-1].component_id if errors else None,
+                component_type=errors[-1].component_type if errors else None,
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -1422,5 +1545,6 @@ def validate_pipeline(
         is_valid=True,
         checks=checks,
         errors=errors,
+        readiness=_execution_ready(),
         semantic_contracts=serialize_semantic_contracts(semantic_contracts),
     )

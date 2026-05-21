@@ -28,6 +28,8 @@ from elspeth.web.execution.schemas import (
     RunStatusResponse,
     ValidationCheck,
     ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
     ValidationResult,
 )
 
@@ -94,6 +96,10 @@ def _progress_data(
     )
 
 
+def _ready_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
+
+
 def _cancelled_data(
     *,
     source_rows_processed: int = 10,
@@ -137,6 +143,43 @@ class TestDiscardSummary:
 
 
 class TestValidationResult:
+    def test_validation_result_requires_readiness(self) -> None:
+        with pytest.raises(pydantic.ValidationError):
+            ValidationResult(is_valid=True, checks=[], errors=[], semantic_contracts=[])
+
+    def test_validation_readiness_accepts_pending_interpretation_blocker(self) -> None:
+        result = ValidationResult(
+            is_valid=False,
+            checks=[],
+            errors=[
+                ValidationError(
+                    component_id="rate_coolness",
+                    component_type="transform",
+                    message="Interpretation review is pending for 'coolness'.",
+                    suggestion="Resolve the pending interpretation review before running.",
+                    error_code="interpretation_review_pending",
+                )
+            ],
+            readiness=ValidationReadiness(
+                authoring_valid=True,
+                execution_ready=False,
+                completion_ready=True,
+                blockers=[
+                    ValidationReadinessBlocker(
+                        code="interpretation_review_pending",
+                        component_id="rate_coolness",
+                        component_type="transform",
+                        detail="coolness",
+                    )
+                ],
+            ),
+            semantic_contracts=[],
+        )
+
+        assert result.readiness.authoring_valid is True
+        assert result.readiness.execution_ready is False
+        assert result.readiness.blockers[0].code == "interpretation_review_pending"
+
     def test_secret_refs_check_requires_structured_outcome_code(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="secret_refs checks must carry"):
             ValidationCheck(
@@ -201,6 +244,19 @@ class TestValidationResult:
                     error_code=None,
                 ),
             ],
+            readiness=ValidationReadiness(
+                authoring_valid=False,
+                execution_ready=False,
+                completion_ready=False,
+                blockers=[
+                    ValidationReadinessBlocker(
+                        code="graph_structure",
+                        component_id="gate_1",
+                        component_type="gate",
+                        detail="Route destination not found.",
+                    )
+                ],
+            ),
         )
         assert result.is_valid is False
         assert result.errors[0].component_id == "gate_1"
@@ -260,6 +316,19 @@ class TestValidationResult:
                     error_code=None,
                 ),
             ],
+            readiness=ValidationReadiness(
+                authoring_valid=False,
+                execution_ready=False,
+                completion_ready=False,
+                blockers=[
+                    ValidationReadinessBlocker(
+                        code="settings_load",
+                        component_id=None,
+                        component_type=None,
+                        detail="Invalid YAML syntax.",
+                    )
+                ],
+            ),
         )
         assert result.is_valid is False
         skipped = [c for c in result.checks if "Skipped" in c.detail]
@@ -627,7 +696,7 @@ class TestStrictCoercionRejected:
 
     def test_validation_result_rejects_string_bool(self) -> None:
         with pytest.raises(pydantic.ValidationError):
-            ValidationResult(is_valid="false", checks=[], errors=[])  # type: ignore[arg-type]
+            ValidationResult(is_valid="false", checks=[], errors=[], readiness=_ready_readiness())  # type: ignore[arg-type]
 
     def test_run_status_response_rejects_string_int(self) -> None:
         with pytest.raises(pydantic.ValidationError):
@@ -775,7 +844,7 @@ class TestExtraFieldsRejected:
 
     def test_validation_result_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
-            ValidationResult(is_valid=True, checks=[], errors=[], warnings=[])  # type: ignore[call-arg]
+            ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness(), warnings=[])  # type: ignore[call-arg]
 
     def test_run_status_response_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
@@ -1335,6 +1404,7 @@ def test_validation_result_accepts_semantic_contracts():
     from elspeth.web.execution.schemas import (
         SemanticEdgeContractResponse,
         ValidationCheck,
+        ValidationReadiness,
         ValidationResult,
     )
 
@@ -1352,6 +1422,7 @@ def test_validation_result_accepts_semantic_contracts():
         is_valid=False,
         checks=[ValidationCheck(name="semantic_contracts", passed=False, detail="failed", affected_nodes=(), outcome_code=None)],
         errors=[],
+        readiness=ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[]),
         semantic_contracts=[contract],
     )
     payload = result.model_dump()
@@ -1371,6 +1442,7 @@ def test_validation_result_rejects_unknown_field():
             is_valid=True,
             checks=[],
             errors=[],
+            readiness=_ready_readiness(),
             invented_extra_field="nope",  # type: ignore[call-arg]
         )
 

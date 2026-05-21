@@ -61,7 +61,7 @@ from elspeth.web.composer.tools import (
     RATE_CAP_PER_SESSION_DAY_CODE,
     RATE_CAP_PER_TERM_CODE,
 )
-from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     sessions_table,
@@ -95,6 +95,10 @@ def _fake_response_with_tool_call(
         tool_calls=[{"id": tool_call_id, "name": tool_name, "arguments": arguments}],
         response_model=response_model,
     )
+
+
+def _execution_ready() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
 
 
 def _fake_response_with_tool_calls(
@@ -335,22 +339,22 @@ def _build_composer(tmp_path: Path, sessions_service: SessionServiceImpl) -> Com
     )
 
 
-def test_composer_runtime_preflight_allows_pending_interpretation_placeholders(
+def test_composer_runtime_preflight_uses_backend_readiness_contract(
     tmp_path: Path,
     sessions_service: SessionServiceImpl,
 ) -> None:
-    """Composer authoring preflight must not force the LLM to consume pending review tokens."""
+    """Composer preflight relies on typed readiness, not placeholder masking."""
 
     composer = _build_composer(tmp_path, sessions_service)
     state = _state_with_llm_node()
-    expected = ValidationResult(is_valid=True, checks=[], errors=[])
+    expected = ValidationResult(is_valid=True, checks=[], errors=[], readiness=_execution_ready())
 
     with patch("elspeth.web.composer.service.validate_pipeline", return_value=expected) as validate:
         result = composer._runtime_preflight(state, user_id="alice")
 
     assert result is expected
     validate.assert_called_once()
-    assert validate.call_args.kwargs["allow_pending_interpretation_placeholders"] is True
+    assert "allow_pending_interpretation_placeholders" not in validate.call_args.kwargs
 
 
 # ---------------------------------------------------------------------------

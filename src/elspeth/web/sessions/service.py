@@ -2974,6 +2974,7 @@ class SessionServiceImpl:
                         payload=StatePayload(
                             data=CompositionStateData(
                                 source=final_source,
+                                sources=live_state_record.sources,
                                 nodes=final_nodes,
                                 edges=live_state_record.edges,
                                 outputs=live_state_record.outputs,
@@ -3319,6 +3320,7 @@ class SessionServiceImpl:
                     payload=StatePayload(
                         data=CompositionStateData(
                             source=final_source,
+                            sources=state_record.sources,
                             nodes=final_nodes,
                             edges=state_record.edges,
                             outputs=state_record.outputs,

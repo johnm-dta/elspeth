@@ -3401,6 +3401,44 @@ class TestBlobSourcePathReadGuard:
         assert exc_info.value.stored_path is None
         assert exc_info.value.canonical_path == canonical_path
 
+    @pytest.mark.asyncio
+    async def test_named_blob_source_path_mismatch_raises_structured_error(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        """Every named source blob_ref gets the same ownership/path guard."""
+        from elspeth.web.execution.errors import BlobSourcePathMismatchError
+
+        session_id = uuid4()
+        blob_ref = str(uuid4())
+        canonical_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_orders.csv"
+        diverging_path = f"/tmp/data/blobs/{session_id}/{blob_ref}_OTHER.csv"
+
+        blob_service = MagicMock()
+        blob_service.get_blob = AsyncMock(return_value=MagicMock(session_id=session_id, storage_path=canonical_path))
+        blob_service.link_blob_to_run = AsyncMock()
+        cast(Any, service)._blob_service = blob_service
+
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.sources = {
+            "orders": {
+                "plugin": "csv",
+                "on_success": "orders_rows",
+                "options": {"blob_ref": blob_ref, "path": diverging_path},
+                "on_validation_failure": "quarantine",
+            }
+        }
+
+        with pytest.raises(BlobSourcePathMismatchError) as exc_info:
+            await service.execute(session_id=session_id)
+
+        assert exc_info.value.stored_path == diverging_path
+        assert exc_info.value.canonical_path == canonical_path
+        mock_session_service.create_run.assert_not_called()
+        blob_service.link_blob_to_run.assert_not_called()
+
 
 # ── One Active Run (B6) ───────────────────────────────────────────────
 

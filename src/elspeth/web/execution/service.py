@@ -572,14 +572,19 @@ class ExecutionServiceImpl:
         # DB ownership record. Without this, a crafted composition state
         # could reference another session's blob path (which would pass the
         # shared-root path allowlist above).
-        parsed_blob_id: UUID | None = None
-        if composition_state.source is not None and self._blob_service is not None:
-            blob_ref = composition_state.source.options.get("blob_ref")
-            if blob_ref is not None:
+        parsed_blob_ids: list[UUID] = []
+        if composition_state.sources and self._blob_service is not None:
+            for source_name, source in composition_state.sources.items():
+                if "blob_ref" not in source.options:
+                    continue
+                blob_ref = source.options["blob_ref"]
+                if blob_ref is None:
+                    continue
                 try:
                     parsed_blob_id = UUID(blob_ref)
                 except ValueError as exc:
-                    raise MalformedBlobRefError("blob_ref must be a UUID") from exc
+                    raise MalformedBlobRefError(f"sources.{source_name}.blob_ref must be a UUID") from exc
+                parsed_blob_ids.append(parsed_blob_id)
                 # IDOR contract (mirrors the state_id branch above): the
                 # nonexistent-blob and cross-session-blob cases MUST be
                 # indistinguishable from the client's perspective.  Both
@@ -596,7 +601,7 @@ class ExecutionServiceImpl:
                 if blob_record.session_id != session_id:
                     raise BlobNotFoundError(blob_ref)
 
-                # Tier 1 read guard: composition_states.source.options.path
+                # Tier 1 read guard: composition_states source options path
                 # is our own audit data and must equal the canonical blob
                 # storage_path.  A mismatch (or absence on a blob-backed
                 # source) indicates a bug in composer persistence — crash
@@ -606,7 +611,7 @@ class ExecutionServiceImpl:
                 # indexing instead of .get() so the absence case raises
                 # the structured BlobSourcePathMismatchError rather than
                 # an opaque KeyError.  See elspeth-07089fbaa3.
-                source_options = composition_state.source.options
+                source_options = source.options
                 canonical_path = blob_record.storage_path
                 stored_path = source_options["path"] if "path" in source_options else None
                 if stored_path != canonical_path:
@@ -646,12 +651,13 @@ class ExecutionServiceImpl:
 
         try:
             # Record blob-to-run linkage for input blobs
-            if parsed_blob_id is not None and self._blob_service is not None:
-                await self._blob_service.link_blob_to_run(
-                    blob_id=parsed_blob_id,
-                    run_id=run_id,
-                    direction="input",
-                )
+            if parsed_blob_ids and self._blob_service is not None:
+                for parsed_blob_id in parsed_blob_ids:
+                    await self._blob_service.link_blob_to_run(
+                        blob_id=parsed_blob_id,
+                        run_id=run_id,
+                        direction="input",
+                    )
 
             # Submit to thread pool
             future = self._executor.submit(

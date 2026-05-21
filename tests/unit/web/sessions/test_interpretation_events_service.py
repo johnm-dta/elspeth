@@ -695,6 +695,64 @@ async def test_03_resolve_accepted_as_drafted_uses_llm_draft(service) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_interpretation_event_preserves_named_sources(service) -> None:
+    """Interpretation approval must not collapse multi-source composer state."""
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            sources={
+                "orders": {
+                    "plugin": "csv",
+                    "on_success": "orders_rows",
+                    "options": {"path": "orders.csv", "schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                },
+                "customers": {
+                    "plugin": "csv",
+                    "on_success": "customers_rows",
+                    "options": {"path": "customers.csv", "schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                },
+            },
+            nodes=[_llm_node()],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_42",
+        user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
+        llm_draft="Innovative and creative",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    _resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+        runtime_model_identifier="anthropic/claude-sonnet-4-7",
+        runtime_model_version="2026-05-02",
+    )
+
+    assert new_state.sources is not None
+    assert set(new_state.sources) == {"orders", "customers"}
+    assert new_state.sources["orders"]["on_success"] == "orders_rows"
+
+
+@pytest.mark.asyncio
 async def test_03b_resolve_recomputes_validation_for_patched_live_state(service) -> None:
     """Resolve must not carry stale unresolved-placeholder validation errors.
 

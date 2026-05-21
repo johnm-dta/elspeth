@@ -573,6 +573,20 @@ async def test_get_shareable_link_remints_with_stable_digest(
     assert r1.payload_digest == r2.payload_digest
     assert r1.token != r2.token
 
+    with session_engine_with_row.connect() as conn:
+        rows = conn.execute(
+            select(
+                composer_completion_events_table.c.payload_digest,
+                composer_completion_events_table.c.expires_at,
+            )
+            .where(composer_completion_events_table.c.session_id == str(session_record.id))
+            .where(composer_completion_events_table.c.event_type == "mark_ready_for_review")
+            .order_by(composer_completion_events_table.c.created_at)
+        ).all()
+
+    assert [row.payload_digest for row in rows] == [marked.payload_digest, r1.payload_digest, r2.payload_digest]
+    assert rows[-1].expires_at.replace(tzinfo=UTC) == r2.expires_at
+
 
 @pytest.mark.asyncio
 async def test_get_shareable_link_requires_mark_ready_event(

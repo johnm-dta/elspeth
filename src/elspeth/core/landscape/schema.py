@@ -67,7 +67,9 @@ metadata = MetaData()
 #  14 → Durable scheduler resume identity: token_work_items stores token lineage
 #        and coalesce cursor fields so resumed workers do not depend on in-memory
 #        pending_items state.
-SQLITE_SCHEMA_EPOCH = 14
+#  15 → Durable scheduler sink handoff: token_work_items can persist a
+#        pending sink outcome without replaying the transform that produced it.
+SQLITE_SCHEMA_EPOCH = 15
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -233,6 +235,7 @@ rows_table = Table(
     Column("source_data_hash", String(64), nullable=False),
     Column("source_data_ref", String(256)),
     Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("row_id", "run_id"),
     UniqueConstraint("run_id", "source_node_id", "source_row_index"),
     UniqueConstraint("run_id", "ingest_sequence"),
     # Composite FK to nodes (node_id, run_id)
@@ -325,6 +328,11 @@ token_work_items_table = Table(
     Column("queue_key", String(128)),
     Column("barrier_key", String(128)),
     Column("on_success_sink", String(128)),
+    Column("pending_sink_name", String(128)),
+    Column("pending_outcome", String(32)),
+    Column("pending_path", String(64)),
+    Column("pending_error_hash", String(64)),
+    Column("pending_error_message", Text),
     Column("branch_name", String(128)),
     Column("fork_group_id", String(128)),
     Column("join_group_id", String(128)),
@@ -339,6 +347,7 @@ token_work_items_table = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("run_id", "token_id", "node_id", "attempt"),
     ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
+    ForeignKeyConstraint(["row_id", "run_id"], ["rows.row_id", "rows.run_id"]),
     ForeignKeyConstraint(["node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
     ForeignKeyConstraint(["coalesce_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
 )

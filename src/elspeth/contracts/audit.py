@@ -176,10 +176,6 @@ class Row:
     def __post_init__(self) -> None:
         """Validate int fields - Tier 1 crash on invalid types."""
         require_int(self.row_index, "row_index", min_value=0)
-        if self.source_row_index is None:
-            object.__setattr__(self, "source_row_index", self.row_index)
-        if self.ingest_sequence is None:
-            object.__setattr__(self, "ingest_sequence", self.row_index)
         require_int(self.source_row_index, "source_row_index", min_value=0)
         require_int(self.ingest_sequence, "ingest_sequence", min_value=0)
 
@@ -568,10 +564,6 @@ class RowLineage:
 
     def __post_init__(self) -> None:
         require_int(self.row_index, "row_index", min_value=0)
-        if self.source_row_index is None:
-            object.__setattr__(self, "source_row_index", self.row_index)
-        if self.ingest_sequence is None:
-            object.__setattr__(self, "ingest_sequence", self.row_index)
         require_int(self.source_row_index, "source_row_index", min_value=0)
         require_int(self.ingest_sequence, "ingest_sequence", min_value=0)
         freeze_fields(self, "source_data")

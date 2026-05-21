@@ -73,7 +73,7 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import FailureInfo
 from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
-from elspeth.contracts.scheduler import TokenWorkItem
+from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
@@ -1654,6 +1654,8 @@ class RowProcessor:
         transform: Any,
         token: TokenInfo,
         ctx: PluginContext,
+        *,
+        attempt_offset: int = 0,
     ) -> tuple[TransformResult, TokenInfo, str | None]:
         """Execute transform with optional retry for transient failures.
 
@@ -1688,7 +1690,7 @@ class RowProcessor:
                     transform=transform,
                     token=token,
                     ctx=ctx,
-                    attempt=0,
+                    attempt=attempt_offset,
                 )
             except InterruptedError as e:
                 return self._convert_retryable_to_error_result(
@@ -1717,7 +1719,7 @@ class RowProcessor:
                 )
 
         # Track attempt number for audit
-        attempt_tracker = {"current": 0}
+        attempt_tracker = {"current": attempt_offset}
 
         def execute_attempt() -> tuple[TransformResult, TokenInfo, str | None]:
             attempt = attempt_tracker["current"]
@@ -2509,7 +2511,7 @@ class RowProcessor:
         """
         if self._scheduler is None:
             raise OrchestrationInvariantError("Cannot drain scheduled work without a scheduler repository")
-        return self._drain_scheduler_claims(ctx=ctx, pending_items={})
+        return self._drain_scheduler_claims(ctx=ctx, pending_items={}, recover_pending_sinks=True)
 
     def has_scheduled_work(self) -> bool:
         """Return whether this run has non-terminal durable scheduler work."""
@@ -2615,7 +2617,7 @@ class RowProcessor:
                 )
 
                 if result is not None:
-                    if isinstance(result, tuple):
+                    if type(result) is tuple:
                         results.extend(result)
                     else:
                         results.append(result)
@@ -2638,7 +2640,7 @@ class RowProcessor:
         self._enqueue_scheduler_work_item(initial_item, pending_items)
 
         with self._spans.row_span(initial_item.token.row_id, initial_item.token.token_id):
-            results = self._drain_scheduler_claims(ctx=ctx, pending_items=pending_items)
+            results = self._drain_scheduler_claims(ctx=ctx, pending_items=pending_items, recover_pending_sinks=False)
 
         return results
 
@@ -2647,6 +2649,7 @@ class RowProcessor:
         *,
         ctx: PluginContext,
         pending_items: dict[str, WorkItem],
+        recover_pending_sinks: bool,
     ) -> list[RowResult]:
         """Claim and advance scheduler work until no READY work remains."""
         if self._scheduler is None:
@@ -2654,6 +2657,7 @@ class RowProcessor:
 
         results: list[RowResult] = []
         iterations = 0
+        created_pending_sink_this_drain = False
 
         while True:
             iterations += 1
@@ -2675,6 +2679,16 @@ class RowProcessor:
                         f"Scheduler has {len(pending_items)} in-memory continuations for run {self._run_id!r} "
                         "but no READY work item could be claimed"
                     )
+                if recover_pending_sinks and not created_pending_sink_this_drain:
+                    pending_sink = self._scheduler.claim_pending_sink(
+                        run_id=self._run_id,
+                        lease_owner=self._scheduler_lease_owner,
+                        lease_seconds=self._scheduler_lease_seconds,
+                        now=now,
+                    )
+                    if pending_sink is not None:
+                        results.append(self._row_result_from_pending_sink(pending_sink))
+                        continue
                 break
 
             if claimed.work_item_id in pending_items:
@@ -2690,6 +2704,7 @@ class RowProcessor:
                     coalesce_node_id=item.coalesce_node_id,
                     coalesce_name=item.coalesce_name,
                     on_success_sink=item.on_success_sink,
+                    attempt_offset=max(claimed.attempt - 1, 0),
                 )
             except Exception as processing_exc:
                 try:
@@ -2707,7 +2722,7 @@ class RowProcessor:
                 raise
 
             if result is not None:
-                if isinstance(result, tuple):
+                if type(result) is tuple:
                     results.extend(result)
                 else:
                     results.append(result)
@@ -2735,6 +2750,19 @@ class RowProcessor:
                     now=self._clock.now_utc(),
                     expected_lease_owner=claimed_lease_owner,
                 )
+            elif (sink_bound_result := self._scheduler_sink_bound_result_for_claimed_token(result, claimed.token_id)) is not None:
+                self._scheduler.mark_pending_sink(
+                    work_item_id=claimed.work_item_id,
+                    row_payload_json=self._scheduler.serialize_row_payload(sink_bound_result.token.row_data),
+                    sink_name=self._require_scheduler_sink_name(sink_bound_result),
+                    outcome=self._require_scheduler_outcome(sink_bound_result).value,
+                    path=sink_bound_result.path.value,
+                    error_hash=self._scheduler_error_hash(sink_bound_result),
+                    error_message=self._scheduler_error_message(sink_bound_result),
+                    now=self._clock.now_utc(),
+                    expected_lease_owner=claimed_lease_owner,
+                )
+                created_pending_sink_this_drain = True
             else:
                 self._scheduler.mark_terminal(
                     work_item_id=claimed.work_item_id,
@@ -2743,6 +2771,43 @@ class RowProcessor:
                 )
 
         return results
+
+    def mark_sink_bound_scheduler_terminal(self, token_id: str) -> None:
+        """Terminalize scheduler work after sink outcome durability."""
+        if self._scheduler is None:
+            return
+        self._scheduler.mark_pending_sink_terminal(
+            run_id=self._run_id,
+            token_id=token_id,
+            now=self._clock.now_utc(),
+            expected_lease_owner=self._scheduler_lease_owner,
+        )
+
+    def _row_result_from_pending_sink(self, scheduled: TokenWorkItem) -> RowResult:
+        """Rebuild a sink-bound row result without re-running its producer node."""
+        if self._scheduler is None:
+            raise OrchestrationInvariantError("Cannot rehydrate pending sink work without a scheduler repository")
+        if scheduled.pending_sink_name is None or scheduled.pending_outcome is None or scheduled.pending_path is None:
+            raise AuditIntegrityError(f"Scheduler pending sink work_item_id={scheduled.work_item_id!r} is missing sink outcome metadata.")
+        token = TokenInfo(
+            row_id=scheduled.row_id,
+            token_id=scheduled.token_id,
+            row_data=self._scheduler.deserialize_row_payload(scheduled.row_payload_json),
+            branch_name=scheduled.branch_name,
+            fork_group_id=scheduled.fork_group_id,
+            join_group_id=scheduled.join_group_id,
+            expand_group_id=scheduled.expand_group_id,
+        )
+        return RowResult(
+            token=token,
+            final_data=token.row_data,
+            outcome=TerminalOutcome(scheduled.pending_outcome),
+            path=TerminalPath(scheduled.pending_path),
+            sink_name=scheduled.pending_sink_name,
+            error=FailureInfo(exception_type="ResumedPendingSink", message=scheduled.pending_error_message or "")
+            if scheduled.pending_path == TerminalPath.ON_ERROR_ROUTED.value
+            else None,
+        )
 
     def _mark_claimed_scheduler_work_blocked(
         self,
@@ -2784,7 +2849,7 @@ class RowProcessor:
 
     def _barrier_key_for_buffered_scheduler_result(self, result: RowResult | tuple[RowResult, ...]) -> str:
         """Resolve the aggregation barrier that owns a BUFFERED scheduler result."""
-        buffered_results = result if isinstance(result, tuple) else (result,)
+        buffered_results = result if type(result) is tuple else (result,)
         if not buffered_results:
             raise AuditIntegrityError("Buffered scheduler result tuple is empty; cannot persist a durable release barrier.")
 
@@ -2822,7 +2887,7 @@ class RowProcessor:
         """Return whether a scheduler result is an active aggregation buffer."""
         if result is None:
             return False
-        if isinstance(result, tuple):
+        if type(result) is tuple:
             return bool(result) and all(item.outcome is None and item.path is TerminalPath.BUFFERED for item in result)
         return result.outcome is None and result.path is TerminalPath.BUFFERED
 
@@ -2831,8 +2896,57 @@ class RowProcessor:
         """Return whether the claimed scheduler token itself reached FAILURE."""
         if result is None:
             return False
-        result_items = result if isinstance(result, tuple) else (result,)
+        result_items = result if type(result) is tuple else (result,)
         return any(item.token.token_id == claimed_token_id and item.outcome is TerminalOutcome.FAILURE for item in result_items)
+
+    @staticmethod
+    def _scheduler_sink_bound_result_for_claimed_token(
+        result: RowResult | tuple[RowResult, ...] | None,
+        claimed_token_id: str,
+    ) -> RowResult | None:
+        """Return the claimed token's sink-bound result, if any."""
+        if result is None:
+            return None
+        result_items = result if type(result) is tuple else (result,)
+        for item in result_items:
+            if item.token.token_id != claimed_token_id:
+                continue
+            if item.sink_name is not None and item.path in {
+                TerminalPath.DEFAULT_FLOW,
+                TerminalPath.GATE_ROUTED,
+                TerminalPath.ON_ERROR_ROUTED,
+                TerminalPath.COALESCED,
+            }:
+                return item
+        return None
+
+    @staticmethod
+    def _require_scheduler_sink_name(result: RowResult) -> str:
+        if result.sink_name is None:
+            raise OrchestrationInvariantError(f"Scheduler sink-bound result missing sink_name for token {result.token.token_id!r}")
+        return result.sink_name
+
+    @staticmethod
+    def _require_scheduler_outcome(result: RowResult) -> TerminalOutcome:
+        if result.outcome is None:
+            raise OrchestrationInvariantError(f"Scheduler sink-bound result missing terminal outcome for token {result.token.token_id!r}")
+        return result.outcome
+
+    @staticmethod
+    def _scheduler_error_hash(result: RowResult) -> str | None:
+        if result.path is not TerminalPath.ON_ERROR_ROUTED:
+            return None
+        if result.error is None:
+            raise OrchestrationInvariantError(f"Scheduler ON_ERROR_ROUTED result missing error for token {result.token.token_id!r}")
+        return hashlib.sha256(result.error.message.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _scheduler_error_message(result: RowResult) -> str | None:
+        if result.path is not TerminalPath.ON_ERROR_ROUTED:
+            return None
+        if result.error is None:
+            raise OrchestrationInvariantError(f"Scheduler ON_ERROR_ROUTED result missing error for token {result.token.token_id!r}")
+        return result.error.message
 
     def _enqueue_scheduler_work_item(
         self,
@@ -2861,7 +2975,8 @@ class RowProcessor:
             coalesce_node_id=str(item.coalesce_node_id) if item.coalesce_node_id is not None else None,
             coalesce_name=str(item.coalesce_name) if item.coalesce_name is not None else None,
         )
-        pending_items[scheduled.work_item_id] = item
+        if scheduled.status is TokenWorkStatus.READY:
+            pending_items[scheduled.work_item_id] = item
         return scheduled
 
     def _work_item_from_scheduler(self, scheduled: TokenWorkItem) -> WorkItem:
@@ -2928,6 +3043,7 @@ class RowProcessor:
         coalesce_node_id: NodeID | None,
         coalesce_name: CoalesceName | None,
         current_on_success_sink: str,
+        attempt_offset: int = 0,
     ) -> _TransformOutcome:
         """Handle a single transform node: execute with retry, route errors, handle multi-row.
 
@@ -2956,6 +3072,7 @@ class RowProcessor:
                 transform=transform,
                 token=current_token,
                 ctx=ctx,
+                attempt_offset=attempt_offset,
             )
             # Emit TransformCompleted telemetry AFTER Landscape recording succeeds
             # (Landscape recording happens inside _execute_transform_with_retry)
@@ -3488,6 +3605,7 @@ class RowProcessor:
         coalesce_node_id: NodeID | None = None,
         coalesce_name: CoalesceName | None = None,
         on_success_sink: str | None = None,
+        attempt_offset: int = 0,
     ) -> tuple[RowResult | tuple[RowResult, ...] | None, list[WorkItem]]:
         """Process a single token through processing nodes starting at node_id.
 
@@ -3502,6 +3620,7 @@ class RowProcessor:
             coalesce_node_id: Node ID at which fork children should coalesce
             coalesce_name: Name of the coalesce point for merging
             on_success_sink: Inherited sink from parent (e.g. terminal deagg parent's on_success)
+            attempt_offset: Starting audit attempt offset for lease-recovered work
 
         Returns:
             Tuple of (RowResult or list of RowResults or None if held for coalesce,
@@ -3592,6 +3711,7 @@ class RowProcessor:
                     coalesce_node_id,
                     coalesce_name,
                     last_on_success_sink,
+                    attempt_offset,
                 )
                 if isinstance(transform_outcome, _TransformTerminal):
                     return transform_outcome.result, child_items

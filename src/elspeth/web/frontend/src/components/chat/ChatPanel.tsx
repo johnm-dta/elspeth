@@ -637,7 +637,10 @@ export function ChatPanel({
       try {
         const meta = await getBlobMetadata(sessionId, targetBlobId);
         if (cancelled) return;
-        if (!isInlineSourceBlob(meta)) return;
+        if (!isInlineSourceBlob(meta)) {
+          clearInlineSourceSummary(sessionId);
+          return;
+        }
         const text = await previewBlobContent(sessionId, targetBlobId);
         if (cancelled) return;
         const summary = await projectInlineSourceSummary({

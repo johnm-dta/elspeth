@@ -94,6 +94,10 @@ class RowProcessorHandle(Protocol):
         """Mark durable scheduler work consumed by a barrier as terminal."""
         ...
 
+    def mark_sink_bound_scheduler_terminal(self, token_id: str) -> None:
+        """Mark scheduler sink handoff complete after sink outcome durability."""
+        ...
+
     def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
         raise NotImplementedError
 

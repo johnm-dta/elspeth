@@ -466,6 +466,35 @@ def test_get_unprocessed_rows_returns_empty_when_no_checkpoint(recovery_manager:
     assert recovery_manager.get_unprocessed_rows("missing-run") == []
 
 
+def test_get_unprocessed_rows_orders_by_ingest_sequence(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+) -> None:
+    """Resume replay order is global ingest order, not source-local row_index."""
+    run_id = "run-ingest-order"
+    graph = _create_graph(node_id="checkpoint-node")
+    with db.connection() as conn:
+        _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
+        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
+        _insert_node(conn, run_id, "checkpoint-node")
+        _insert_row(conn, run_id, "row-a", row_index=0, source_data_ref=None)
+        _insert_row(conn, run_id, "row-b", row_index=1, source_data_ref=None)
+        _insert_token(conn, run_id, "token-checkpoint", "row-a")
+        conn.execute(rows_table.update().where(rows_table.c.row_id == "row-a").values(ingest_sequence=10))
+        conn.execute(rows_table.update().where(rows_table.c.row_id == "row-b").values(ingest_sequence=5))
+
+    checkpoint_manager.create_checkpoint(
+        run_id=run_id,
+        token_id="token-checkpoint",
+        node_id="checkpoint-node",
+        sequence_number=1,
+        graph=graph,
+    )
+
+    assert recovery_manager.get_unprocessed_rows(run_id) == ["row-b", "row-a"]
+
+
 @pytest.mark.parametrize("delegation_path", [TerminalPath.FORK_PARENT, TerminalPath.EXPAND_PARENT])
 def test_get_unprocessed_rows_uses_terminal_path_delegation_set(
     db: LandscapeDB,

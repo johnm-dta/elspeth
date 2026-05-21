@@ -1013,6 +1013,7 @@ class SetSourceFromBlobArgumentsModel(BaseModel):
 
     blob_id: str
     on_success: str
+    source_name: str = "source"
     plugin: str | None = None
     on_validation_failure: str | None = None
     options: _LlmJsonObject = Field(default_factory=dict)

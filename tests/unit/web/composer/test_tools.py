@@ -3177,6 +3177,29 @@ class TestBlobTools:
         assert result.updated_state.source.plugin == "csv"
         assert result.updated_state.source.on_validation_failure == "discard"
 
+    def test_set_source_from_blob_wires_named_source(self) -> None:
+        """Blob-backed sources must be reachable as explicit named roots."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "set_source_from_blob",
+            {
+                "blob_id": self.blob_id,
+                "source_name": "orders",
+                "on_success": "orders_rows",
+                "options": {"schema": {"mode": "observed"}},
+            },
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        assert result.updated_state.sources["orders"].plugin == "csv"
+        assert result.updated_state.sources["orders"].options["blob_ref"] == self.blob_id
+        assert result.affected_nodes == ("sources.orders",)
+
     def test_set_source_from_plain_text_blob_uses_text_source(self) -> None:
         """text/plain blob should auto-resolve to the 'text' source plugin."""
         from elspeth.web.sessions.models import blobs_table

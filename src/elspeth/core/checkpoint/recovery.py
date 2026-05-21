@@ -575,9 +575,9 @@ class RecoveryManager:
             # - Case 3: Has tokens but none have terminal outcomes (delegation only)
             #
             # NOTE: PostgreSQL requires ORDER BY columns to be in SELECT when using DISTINCT.
-            # We select both row_id and row_index, then extract just row_id from results.
+            # We select both row_id and ingest_sequence, then extract just row_id from results.
             query = (
-                select(rows_table.c.row_id, rows_table.c.row_index)
+                select(rows_table.c.row_id, rows_table.c.ingest_sequence)
                 .select_from(rows_table)
                 .outerjoin(
                     tokens_table,
@@ -594,7 +594,7 @@ class RecoveryManager:
                     # Case 3: Has tokens but no terminal outcomes (fork parent only)
                     (~rows_table.c.row_id.in_(rows_with_terminal))
                 )
-                .order_by(rows_table.c.row_index)
+                .order_by(rows_table.c.ingest_sequence)
                 .distinct()
             )
 

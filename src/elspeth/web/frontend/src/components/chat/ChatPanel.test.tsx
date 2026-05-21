@@ -1293,6 +1293,45 @@ describe("ChatPanel inline-source projection", () => {
     expect(apiClient.previewBlobContent).not.toHaveBeenCalled();
   });
 
+  it("clears a stale inline-source summary when the active blob is not inline", async () => {
+    useInlineSourceStore.getState().setSummary("session-inline", {
+      blobId: "old-inline",
+      filename: "old.csv",
+      mimeType: "text/csv",
+      contentPreview: "url\nhttps://old.gov.au",
+      rowCount: 2,
+      contentHash: twoRowInlineSourceHash,
+      provenance: "llm-generated",
+    });
+    (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeBlobMetadata({
+        id: "uploaded-blob",
+        created_by: "user",
+        created_from_message_id: null,
+      }),
+    );
+    const composition = makeComposition(1, {
+      source: {
+        plugin: "csv_file",
+        options: { blob_ref: "uploaded-blob" },
+      },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(useInlineSourceStore.getState().getSummary("session-inline")).toBeNull();
+    });
+    expect(apiClient.previewBlobContent).not.toHaveBeenCalled();
+  });
+
   it("does NOT render the widget when compositionState.source is null", () => {
     const composition = makeComposition(1, { source: null });
 

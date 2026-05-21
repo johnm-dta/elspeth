@@ -493,6 +493,13 @@ class RowProcessor:
                             "Checkpoint may be corrupted."
                         )
                     row_data = PipelineRow(deep_thaw(token_checkpoint.row_data), restored_contract)
+                    coalesce_name: CoalesceName | None = None
+                    coalesce_node_id: NodeID | None = None
+                    if token_checkpoint.branch_name is not None:
+                        branch_name = BranchName(token_checkpoint.branch_name)
+                        if branch_name in self._branch_to_coalesce:
+                            coalesce_name = self._branch_to_coalesce[branch_name]
+                            coalesce_node_id = self._coalesce_node_ids[coalesce_name]
                     self._scheduler.ensure_blocked_barrier_work_item(
                         run_id=self._run_id,
                         token_id=token_checkpoint.token_id,
@@ -507,6 +514,8 @@ class RowProcessor:
                         fork_group_id=token_checkpoint.fork_group_id,
                         join_group_id=token_checkpoint.join_group_id,
                         expand_group_id=token_checkpoint.expand_group_id,
+                        coalesce_node_id=str(coalesce_node_id) if coalesce_node_id is not None else None,
+                        coalesce_name=str(coalesce_name) if coalesce_name is not None else None,
                     )
 
     @property

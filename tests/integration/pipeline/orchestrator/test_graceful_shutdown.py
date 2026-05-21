@@ -24,6 +24,7 @@ from elspeth.contracts.types import AggregationName
 from elspeth.core.canonical import canonical_json
 from elspeth.core.config import AggregationSettings, SourceSettings, TriggerConfig
 from elspeth.core.dag import ExecutionGraph
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import PipelineConfig, prepare_for_run
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
@@ -671,6 +672,49 @@ class TestInterruptAndResume:
         assert checkpoint.aggregation_state_json is not None
         assert checkpoint.coalesce_state_json is not None
 
+        RecorderFactory(landscape_db).run_lifecycle.update_run_contract(
+            run_id,
+            SchemaContract(
+                mode="FIXED",
+                fields=(
+                    FieldContract(
+                        normalized_name="value",
+                        original_name="value",
+                        python_type=int,
+                        required=True,
+                        source="declared",
+                    ),
+                ),
+                locked=True,
+            ),
+        )
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with landscape_db.connection() as conn:
+            pre_resume_work = (
+                conn.execute(
+                    select(
+                        token_work_items_table.c.status,
+                        token_work_items_table.c.branch_name,
+                        token_work_items_table.c.fork_group_id,
+                        token_work_items_table.c.barrier_key,
+                        token_work_items_table.c.coalesce_name,
+                    ).where(token_work_items_table.c.run_id == run_id)
+                )
+                .mappings()
+                .all()
+            )
+        blocked_work = [row for row in pre_resume_work if row["status"] == "blocked"]
+        assert blocked_work
+        coalesce_blocked_work = [row for row in blocked_work if row["barrier_key"] == "merge_paths"]
+        assert coalesce_blocked_work
+        assert {row["branch_name"] for row in coalesce_blocked_work} == {"direct_branch"}
+        assert {row["coalesce_name"] for row in coalesce_blocked_work} == {"merge_paths"}
+        assert all(row["fork_group_id"] is not None for row in coalesce_blocked_work)
+
         recovery = RecoveryManager(landscape_db, checkpoint_mgr)
         assert recovery.get_unprocessed_rows(run_id) == []
 
@@ -690,6 +734,19 @@ class TestInterruptAndResume:
         assert len(output_sink.results) == 1
         assert output_sink.results[0]["agg_branch"]["count"] == 1
         assert output_sink.results[0]["direct_branch"]["value"] == 10
+        with landscape_db.connection() as conn:
+            post_resume_work = (
+                conn.execute(
+                    select(token_work_items_table.c.status).where(
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.barrier_key == "merge_paths",
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert post_resume_work
+        assert set(post_resume_work) == {"terminal"}
 
     def test_buffered_only_resume_respects_pre_set_shutdown(self, landscape_db: LandscapeDB, payload_store) -> None:
         """Buffered-only resume must checkpoint again instead of flushing when shutdown is already set."""

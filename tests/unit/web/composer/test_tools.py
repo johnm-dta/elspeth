@@ -5483,10 +5483,23 @@ class TestPatchSourceOptions:
         )
         assert result.success is False
         assert "blob-backed source" in result.data["error"]
-        # Source unchanged
+
+    def test_patch_source_options_rejects_blob_ref_patch_on_plain_source(self) -> None:
+        """Manual blob identity injection is rejected even before a source is blob-backed."""
+        state = self._state_with_source({"path": "/a.csv"})
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "patch_source_options",
+            {"patch": {"blob_ref": "def456"}},
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert "Cannot patch 'blob_ref'" in result.data["error"]
         assert result.updated_state.source is not None
         opts = deep_thaw(result.updated_state.source.options)
-        assert opts["path"] == "/canon/abc123_x.csv"
+        assert "blob_ref" not in opts
+        assert opts["path"] == "/a.csv"
 
     def test_patch_source_options_rejects_blob_ref_patch_on_blob_backed_source(self) -> None:
         """Closes elspeth-07089fbaa3 (write defense, blob_ref re-bind via patch).
@@ -5505,7 +5518,7 @@ class TestPatchSourceOptions:
             catalog,
         )
         assert result.success is False
-        assert "blob-backed source" in result.data["error"]
+        assert "Cannot patch 'blob_ref'" in result.data["error"]
 
     def test_patch_source_options_allows_unrelated_keys_on_blob_backed_source(self) -> None:
         """Closes elspeth-07089fbaa3 (write defense — narrow rejection).

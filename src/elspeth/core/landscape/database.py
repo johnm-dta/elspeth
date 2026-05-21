@@ -190,6 +190,7 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("auth_events", "ck_auth_events_outcome"),
     ("auth_events", "ck_auth_events_provider"),
     ("run_attributions", "ck_run_attributions_auth_provider_type"),
+    ("run_sources", "ck_run_sources_lifecycle_state"),
     ("calls", "calls_has_parent"),
     ("preflight_results", "ck_preflight_result_type"),
 )

@@ -490,6 +490,34 @@ def test_record_run_source_rejects_non_source_node() -> None:
         )
 
 
+def test_record_run_source_rejects_unknown_lifecycle_state() -> None:
+    from elspeth.contracts.schema import SchemaConfig
+    from elspeth.core.landscape import LandscapeDB, RecorderFactory
+
+    db = LandscapeDB.in_memory()
+    factory = RecorderFactory(db)
+    run = factory.run_lifecycle.begin_run(config={}, canonical_version="test", run_id="run-invalid-source-lifecycle")
+    factory.data_flow.register_node(
+        run_id=run.run_id,
+        plugin_name="csv",
+        node_type=NodeType.SOURCE,
+        plugin_version="test",
+        config={},
+        node_id="source-node",
+        schema_config=SchemaConfig.from_dict({"mode": "observed"}),
+    )
+
+    with pytest.raises(AuditIntegrityError, match=r"Invalid run source lifecycle_state='done'"):
+        factory.run_lifecycle.record_run_source(
+            run_id=run.run_id,
+            source_node_id="source-node",
+            source_name="orders",
+            plugin_name="csv",
+            config_hash="cfg",
+            lifecycle_state="done",
+        )
+
+
 def test_run_sources_foreign_key_rejects_node_from_different_run() -> None:
     from sqlalchemy.exc import IntegrityError
 

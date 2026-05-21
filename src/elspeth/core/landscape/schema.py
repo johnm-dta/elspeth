@@ -4,6 +4,8 @@ Uses SQLAlchemy Core (not ORM) for explicit control over queries
 and compatibility with multiple database backends.
 """
 
+from enum import StrEnum
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -68,12 +70,23 @@ metadata = MetaData()
 #        and coalesce cursor fields so resumed workers do not depend on in-memory
 #        pending_items state.
 #  15 → Durable scheduler sink handoff: token_work_items can persist a
-#        pending sink outcome without replaying the transform that produced it.
+#        pending sink outcome without replaying the transform that produced it;
+#        run_sources.lifecycle_state is mechanically constrained.
 SQLITE_SCHEMA_EPOCH = 15
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
 NODE_ID_COLUMN_LENGTH = 64
+
+
+class RunSourceLifecycleState(StrEnum):
+    """Finite lifecycle states for per-source run metadata."""
+
+    READY = "ready"
+    LOADING = "loading"
+    LOADED = "loaded"
+    INTERRUPTED = "interrupted"
+
 
 # === Runs and Configuration ===
 
@@ -168,6 +181,10 @@ run_sources_table = Table(
     Column("recorded_at", DateTime(timezone=True), nullable=False),
     PrimaryKeyConstraint("run_id", "source_node_id"),
     UniqueConstraint("run_id", "source_name"),
+    CheckConstraint(
+        "lifecycle_state IN ('ready', 'loading', 'loaded', 'interrupted')",
+        name="ck_run_sources_lifecycle_state",
+    ),
     ForeignKeyConstraint(["source_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
 )
 Index("ix_run_sources_run", run_sources_table.c.run_id)

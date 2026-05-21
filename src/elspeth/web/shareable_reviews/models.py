@@ -38,6 +38,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
+from pydantic import model_validator
+
 from elspeth.web.audit_readiness.models import AuditReadinessSnapshot
 from elspeth.web.execution.schemas import _StrictResponse
 from elspeth.web.sessions.schemas import CompositionObject
@@ -179,6 +181,18 @@ class CompositionStateResponse(_StrictResponse):
     nodes: list[NodeSpecResponse]
     edges: list[EdgeSpecResponse]
     outputs: list[OutputSpecResponse]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_sources_for_legacy_snapshot(cls, data: object) -> object:
+        """Accept pre-multi-source review blobs that only carried ``source``."""
+        if type(data) is not dict:
+            return data
+        if "sources" in data:
+            return data
+        source = data["source"] if "source" in data else None
+        sources = {"source": source} if source is not None else {}
+        return {**data, "sources": sources}
 
 
 class SharedInspectResponse(_StrictResponse):

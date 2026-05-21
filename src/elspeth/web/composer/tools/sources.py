@@ -515,9 +515,11 @@ def _execute_set_source_from_blob(
         options=resolved.options,
         on_validation_failure=on_vf,
     )
-    new_state = state.with_source(source)
+    source_name = validated.source_name
+    new_state = state.with_named_source(source_name, source)
     data = _vf_destination_note(new_state, on_vf) or {}
-    return _mutation_result(new_state, ("source",), data={**data, "source_blob": resolved.payload})
+    affected = "source" if source_name == "source" else f"sources.{source_name}"
+    return _mutation_result(new_state, (affected,), data={**data, "source_blob": resolved.payload})
 
 
 _SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
@@ -533,6 +535,10 @@ _SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
         "type": "object",
         "properties": {
             "blob_id": {"type": "string", "description": "Blob ID to use as source."},
+            "source_name": {
+                "type": "string",
+                "description": "Source root name to bind. Defaults to 'source' for legacy single-source pipelines.",
+            },
             "plugin": {
                 "type": "string",
                 "description": "Source plugin override (e.g. 'csv'). Inferred from MIME type if omitted.",
@@ -754,6 +760,12 @@ def _execute_patch_source_options(
     manual_authoring_error = _reject_manual_source_authoring(patch, tool_name="patch_source_options")
     if manual_authoring_error is not None:
         return _failure_result(state, manual_authoring_error)
+    if "blob_ref" in patch:
+        return _failure_result(
+            state,
+            "Cannot patch 'blob_ref' on a source. Re-bind via set_source_from_blob "
+            "(or call clear_source first) to change the underlying blob.",
+        )
 
     # Lock the (path, blob_ref) pair on blob-backed sources.  Once
     # set_source_from_blob has bound a source to a blob, the path is the
@@ -762,7 +774,7 @@ def _execute_patch_source_options(
     # Replace the binding via a fresh set_source_from_blob (or
     # clear_source) instead of patching it.  See elspeth-07089fbaa3.
     if "blob_ref" in current_source.options:
-        forbidden_keys = {"path", "blob_ref"} & patch.keys()
+        forbidden_keys = {"path"} & patch.keys()
         if forbidden_keys:
             return _failure_result(
                 state,
@@ -856,10 +868,16 @@ def _execute_clear_source(
 ) -> ToolResult:
     """Remove the pipeline source."""
     del context  # unused; signature uniformity with the other handlers.
-    if state.source is None:
-        return _failure_result(state, "No source configured to clear.")
-    new_state = state.without_source()
-    return _mutation_result(new_state, ("source",))
+    extra_keys = set(args) - {"source_name"}
+    if extra_keys:
+        raise ToolArgumentError(f"clear_source arguments contain unexpected keys: {sorted(extra_keys)}")
+    source_name = args["source_name"] if "source_name" in args else "source"
+    if type(source_name) is not str or not source_name:
+        raise ToolArgumentError(f"clear_source source_name must be a non-empty string, got {type(source_name).__name__}")
+    new_state = state.without_named_source(source_name)
+    if new_state is None:
+        return _failure_result(state, f"No source named '{source_name}' configured to clear.")
+    return _mutation_result(new_state, (_source_component_id(source_name),))
 
 
 def _handle_clear_source(
@@ -874,8 +892,17 @@ _CLEAR_SOURCE_DECLARATION = ToolDeclaration(
     name="clear_source",
     handler=_handle_clear_source,
     kind=ToolKind.MUTATION,
-    description="Remove the source from the pipeline composition state.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    description="Remove a named source from the pipeline composition state.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "source_name": {
+                "type": "string",
+                "description": "Source root name to clear. Defaults to 'source'.",
+            },
+        },
+        "required": [],
+    },
 )
 
 

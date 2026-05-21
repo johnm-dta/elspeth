@@ -2199,11 +2199,11 @@ _REMOVE_OUTPUT_REASON = HandlesNoSensitiveDataReason(
 
 
 _CLEAR_SOURCE_REASON = HandlesNoSensitiveDataReason(
-    sensitive_data_locations=("composer state — single in-memory source slot being cleared",),
+    sensitive_data_locations=("composer state — selected in-memory source root being cleared",),
     why_arguments_safe=(
-        "clear_source accepts no arguments — the JSON schema at tools.py:1145 declares "
-        "an empty properties object with empty required, so the LLM cannot place any "
-        "value on this surface; the handler clears the source slot unconditionally."
+        "clear_source accepts only an optional source_name selector. Source names are "
+        "structural composer identifiers, not plugin options, file paths, source content, "
+        "or credentials."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary describing the "

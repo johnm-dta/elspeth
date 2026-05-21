@@ -50,6 +50,7 @@ from elspeth.web.sessions.models import (
 )
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from elspeth.web.shareable_reviews.models import CompositionStateResponse
 from elspeth.web.shareable_reviews.service import (
     CompositionNotRunnableError,
     ShareableReviewService,
@@ -65,6 +66,34 @@ def _ready_readiness() -> ValidationReadiness:
 
 def _blocked_readiness() -> ValidationReadiness:
     return ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[])
+
+
+def test_composition_snapshot_accepts_legacy_single_source_payload() -> None:
+    snapshot = CompositionStateResponse.model_validate(
+        {
+            "version": 1,
+            "metadata": {"name": "legacy", "description": ""},
+            "source": {
+                "plugin": "csv",
+                "on_success": "output",
+                "options": {"schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [
+                {
+                    "name": "output",
+                    "plugin": "json",
+                    "options": {"path": "out.jsonl"},
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+    )
+
+    assert tuple(snapshot.sources) == ("source",)
+    assert snapshot.sources["source"].plugin == "csv"
 
 
 # ── Minimal record shims ─────────────────────────────────────────────────

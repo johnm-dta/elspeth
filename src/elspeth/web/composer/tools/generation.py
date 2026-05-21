@@ -1266,6 +1266,15 @@ def compute_proof_diagnostics(
     diagnostics: list[Mapping[str, Any]] = []
 
     source = state.source
+    blob_id: Any | None = None
+    if source is not None and "blob_ref" in source.options:
+        blob_id = source.options["blob_ref"]
+    if blob_id is None:
+        for candidate_source in state.sources.values():
+            if "blob_ref" in candidate_source.options:
+                source = candidate_source
+                blob_id = candidate_source.options["blob_ref"]
+                break
     if source is None:
         return diagnostics
 
@@ -1585,6 +1594,55 @@ def compute_proof_diagnostics(
                 "evidence_locator": {"source": "blob", "blob_id": str(blob_id)},
             }
         )
+
+    inspected_blob_id = str(blob_id)
+    node_plugins = {(n.plugin or "").lower() for n in state.nodes}
+    if "web_scrape" not in node_plugins and session_engine is not None and session_id is not None:
+        for source_name, candidate_source in state.sources.items():
+            if "blob_ref" not in candidate_source.options:
+                continue
+            candidate_blob_id = str(candidate_source.options["blob_ref"])
+            if candidate_blob_id == inspected_blob_id:
+                continue
+            if candidate_source.plugin != "text":
+                continue
+            candidate_blob = _sync_get_blob(session_engine, candidate_blob_id, session_id)
+            if candidate_blob is None or candidate_blob["status"] != "ready":
+                continue
+            candidate_storage_path = Path(candidate_blob["storage_path"])
+            if not candidate_storage_path.exists():
+                continue
+            candidate_content = candidate_storage_path.read_bytes()
+            _verify_blob_content_integrity(candidate_blob, candidate_content)
+            candidate_facts = inspect_blob_content(
+                content=candidate_content,
+                filename=candidate_blob["filename"],
+                mime_type=candidate_blob["mime_type"],
+                content_hash=candidate_blob["content_hash"],
+            )
+            if candidate_facts.source_kind != "text" or not candidate_facts.url_candidates:
+                continue
+            diagnostics.append(
+                _blocking_diagnostic(
+                    code="text_source_url_without_web_scrape",
+                    message=(
+                        f"Source blob contains URL(s) {list(candidate_facts.url_candidates)} but no "
+                        "web_scrape transform is wired downstream. The URL string itself will "
+                        "flow to sinks, not the URL's content."
+                    ),
+                    suggested_repair=(
+                        "upsert_node({node_type: 'transform', plugin: 'web_scrape', "
+                        "input: <source on_success>, options: {url_field: '<column>'}}) and route "
+                        "the source on_success to it."
+                    ),
+                    evidence_locator={
+                        "source": "blob",
+                        "source_name": source_name,
+                        "blob_id": candidate_blob_id,
+                        "url_candidates": list(candidate_facts.url_candidates),
+                    },
+                )
+            )
 
     return diagnostics
 

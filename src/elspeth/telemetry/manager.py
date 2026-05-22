@@ -530,7 +530,16 @@ class TelemetryManager:
 
         for exporter in self._exporters:
             try:
-                exporter.flush()
+                result = exporter.flush()
+                if result is False:
+                    breaker = self._circuit_breakers[id(exporter)]
+                    breaker.record_failure()
+                    self._exporter_failures[exporter.name] = self._exporter_failures.get(exporter.name, 0) + 1
+                    logger.warning(
+                        "Exporter reported handled flush failure",
+                        exporter=exporter.name,
+                        circuit_state=breaker.state.name,
+                    )
             except Exception as e:
                 if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
                     raise  # Programming error — must crash

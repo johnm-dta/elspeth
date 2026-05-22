@@ -208,7 +208,7 @@ class DatadogExporter:
             agent_port=agent_port,
         )
 
-    def export(self, event: TelemetryEvent) -> None:
+    def export(self, event: TelemetryEvent) -> bool | None:
         """Export a single telemetry event as a Datadog span.
 
         Creates a span with the event class name as the operation name.
@@ -216,6 +216,8 @@ class DatadogExporter:
 
         This method MUST NOT raise exceptions - telemetry failures should
         not crash the pipeline. Errors are logged internally.
+        Handled transport failures return False so TelemetryManager can account
+        for them without crashing the pipeline.
 
         Args:
             event: The telemetry event to export
@@ -225,7 +227,7 @@ class DatadogExporter:
                 "Datadog exporter not configured, dropping event",
                 event_type=type(event).__name__,
             )
-            return
+            return False
 
         try:
             self._create_span_for_event(event)
@@ -239,6 +241,8 @@ class DatadogExporter:
                 event_type=type(event).__name__,
                 error=str(e),
             )
+            return False
+        return None
 
     def _create_span_for_event(self, event: TelemetryEvent) -> None:
         """Create a Datadog span for the given event.
@@ -343,14 +347,16 @@ class DatadogExporter:
         else:
             span.set_tag(key, value)
 
-    def flush(self) -> None:
+    def flush(self) -> bool | None:
         """Flush any buffered spans to the Datadog agent.
 
         The ddtrace tracer handles its own batching and flushing.
         This method triggers an immediate flush of any pending spans.
+        Returns False for a handled transport failure so TelemetryManager
+        can account for it.
         """
         if not self._tracer:
-            return
+            return False
 
         try:
             # ddtrace tracer has a flush method that sends pending spans
@@ -363,6 +369,8 @@ class DatadogExporter:
                 exporter=self._name,
                 error=str(e),
             )
+            return False
+        return None
 
     def close(self) -> None:
         """Release resources held by the exporter.

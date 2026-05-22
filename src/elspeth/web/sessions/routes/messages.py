@@ -66,6 +66,15 @@ from ._helpers import (
 )
 
 
+def _requests_audit_grade_messages_view(
+    *,
+    include_tool_rows: bool,
+    include_llm_audit: bool,
+    include_raw_content: bool,
+) -> bool:
+    return include_tool_rows or include_llm_audit or include_raw_content
+
+
 def register_message_routes(router: APIRouter) -> None:
 
     @router.post(
@@ -824,7 +833,11 @@ def register_message_routes(router: APIRouter) -> None:
         """
         session = await _verify_session_ownership(session_id, user, request)
         service = request.app.state.session_service
-        if include_tool_rows:
+        if _requests_audit_grade_messages_view(
+            include_tool_rows=include_tool_rows,
+            include_llm_audit=include_llm_audit,
+            include_raw_content=include_raw_content,
+        ):
             audit_query_args = {key: value for key, value in request.query_params.items() if key in AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST}
             await service.record_audit_grade_view_async(
                 session_id=str(session.id),

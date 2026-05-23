@@ -17,9 +17,9 @@ from ``elspeth.web.composer.tools._dispatch``. Their canonical home is
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any, Final, cast
+from typing import Any, Final
 
 from sqlalchemy import Engine
 
@@ -453,55 +453,41 @@ def execute_tool(
 # truth for session-aware handlers; ``_SESSION_AWARE_TOOL_NAMES`` in
 # ``discovery.py`` enumerates the same set. Drift would mean a tool is
 # dispatched without a name-set membership (or vice versa).
-assert set(_SESSION_AWARE_TOOL_HANDLERS) == _SESSION_AWARE_TOOL_NAMES, (
-    "_SESSION_AWARE_TOOL_HANDLERS keys diverge from _SESSION_AWARE_TOOL_NAMES: "
-    f"+{set(_SESSION_AWARE_TOOL_HANDLERS) - _SESSION_AWARE_TOOL_NAMES} "
-    f"-{_SESSION_AWARE_TOOL_NAMES - set(_SESSION_AWARE_TOOL_HANDLERS)}"
-)
+if set(_SESSION_AWARE_TOOL_HANDLERS) != _SESSION_AWARE_TOOL_NAMES:
+    raise RuntimeError(
+        "_SESSION_AWARE_TOOL_HANDLERS keys diverge from _SESSION_AWARE_TOOL_NAMES: "
+        f"+{set(_SESSION_AWARE_TOOL_HANDLERS) - _SESSION_AWARE_TOOL_NAMES} "
+        f"-{_SESSION_AWARE_TOOL_NAMES - set(_SESSION_AWARE_TOOL_HANDLERS)}"
+    )
 
 # No tool name may be both a declared sync handler and a session-aware
 # async handler. Detects the regression of a sync handler being given the
 # same name as an existing session-aware async one.
 _sync_declared_names: frozenset[str] = frozenset(decl.name for decl in _REGISTERED_TOOLS)
-assert not (_sync_declared_names & set(_SESSION_AWARE_TOOL_HANDLERS)), (
-    "Tool name appears in both _REGISTERED_TOOLS and _SESSION_AWARE_TOOL_HANDLERS: "
-    f"{_sync_declared_names & set(_SESSION_AWARE_TOOL_HANDLERS)}"
-)
+if _sync_declared_names & set(_SESSION_AWARE_TOOL_HANDLERS):
+    raise RuntimeError(
+        "Tool name appears in both _REGISTERED_TOOLS and _SESSION_AWARE_TOOL_HANDLERS: "
+        f"{_sync_declared_names & set(_SESSION_AWARE_TOOL_HANDLERS)}"
+    )
 
 # Every session-aware handler must be a coroutine function. A sync function
 # accidentally registered here would silently return a non-Awaitable; the
 # compose-loop ``await`` would crash with TypeError at the worst time.
 for _name, _handler in _SESSION_AWARE_TOOL_HANDLERS.items():
-    assert asyncio.iscoroutinefunction(_handler), (
-        f"_SESSION_AWARE_TOOL_HANDLERS[{_name!r}] is not async; sync handlers belong in _MUTATION_TOOLS / _DISCOVERY_TOOLS instead."
-    )
+    if not asyncio.iscoroutinefunction(_handler):
+        raise RuntimeError(
+            f"_SESSION_AWARE_TOOL_HANDLERS[{_name!r}] is not async; sync handlers belong in _MUTATION_TOOLS / _DISCOVERY_TOOLS instead."
+        )
 
 # Every declared (non-session-aware) handler must NOT be a coroutine.
 # Catches the reverse regression: an async handler dropped into a
 # ``ToolDeclaration`` with a sync kind that would return a coroutine
 # object as if it were a ToolResult.
 for _decl in _REGISTERED_TOOLS:
-    assert not asyncio.iscoroutinefunction(_decl.handler), (
-        f"ToolDeclaration({_decl.name!r}).handler is async but kind={_decl.kind.value!r} is a sync kind. "
-        "Async handlers belong in _SESSION_AWARE_TOOL_HANDLERS instead."
-    )
-
-del _decl  # keep module namespace clean
-
-# Cast the heterogeneous-handler-typed sync registries to a uniform
-# ``Mapping[str, Callable[..., Any]]`` for the async-detection sweep
-# below.  Kept for parity with the historical assertion shape even though
-# the per-declaration sweep above is the authoritative check.
-_sync_registries_for_check: tuple[tuple[str, Mapping[str, Callable[..., Any]]], ...] = (
-    ("_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _DISCOVERY_TOOLS)),
-    ("_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _MUTATION_TOOLS)),
-    ("_BLOB_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _BLOB_DISCOVERY_TOOLS)),
-    ("_BLOB_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _BLOB_MUTATION_TOOLS)),
-    ("_SECRET_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _SECRET_DISCOVERY_TOOLS)),
-    ("_SECRET_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _SECRET_MUTATION_TOOLS)),
-)
-for _sync_registry_name, _sync_registry in _sync_registries_for_check:
-    for _name, _handler in _sync_registry.items():
-        assert not asyncio.iscoroutinefunction(_handler), (
-            f"{_sync_registry_name}[{_name!r}] is async; async handlers belong in _SESSION_AWARE_TOOL_HANDLERS instead."
+    if asyncio.iscoroutinefunction(_decl.handler):
+        raise RuntimeError(
+            f"ToolDeclaration({_decl.name!r}).handler is async but kind={_decl.kind.value!r} is a sync kind. "
+            "Async handlers belong in _SESSION_AWARE_TOOL_HANDLERS instead."
         )
+
+del _decl, _name, _handler  # keep module namespace clean

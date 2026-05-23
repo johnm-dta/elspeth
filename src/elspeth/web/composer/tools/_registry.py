@@ -162,18 +162,21 @@ _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES: Final[frozenset[str]] = derive_blob_store_
 # time of the registry, not at the consumer.
 # ---------------------------------------------------------------------------
 
-assert _CACHEABLE_DISCOVERY_TOOL_NAMES <= _DISCOVERY_TOOL_NAMES, (
-    "_CACHEABLE_DISCOVERY_TOOL_NAMES contains names that are not declared "
-    "discovery tools: "
-    f"{_CACHEABLE_DISCOVERY_TOOL_NAMES - _DISCOVERY_TOOL_NAMES}"
-)
-assert not (_CACHEABLE_DISCOVERY_TOOL_NAMES & _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES), (
-    "Session-mutable discovery tools must NEVER be cacheable — caching "
-    "them would serve stale audit-trail data. Intersection: "
-    f"{_CACHEABLE_DISCOVERY_TOOL_NAMES & _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES}"
-)
-assert _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES <= _BLOB_MUTATION_TOOL_NAMES, (
-    "_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES contains names that are not "
-    "declared BLOB_MUTATION tools: "
-    f"{_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES - _BLOB_MUTATION_TOOL_NAMES}"
-)
+if not _CACHEABLE_DISCOVERY_TOOL_NAMES <= _DISCOVERY_TOOL_NAMES:
+    raise RuntimeError(
+        "_CACHEABLE_DISCOVERY_TOOL_NAMES contains names that are not declared "
+        "discovery tools: "
+        f"{_CACHEABLE_DISCOVERY_TOOL_NAMES - _DISCOVERY_TOOL_NAMES}"
+    )
+if _CACHEABLE_DISCOVERY_TOOL_NAMES & _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES:
+    raise RuntimeError(
+        "Session-mutable discovery tools must NEVER be cacheable — caching "
+        "them would serve stale audit-trail data. Intersection: "
+        f"{_CACHEABLE_DISCOVERY_TOOL_NAMES & _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES}"
+    )
+if not _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES <= _BLOB_MUTATION_TOOL_NAMES:
+    raise RuntimeError(
+        "_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES contains names that are not "
+        "declared BLOB_MUTATION tools: "
+        f"{_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES - _BLOB_MUTATION_TOOL_NAMES}"
+    )

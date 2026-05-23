@@ -421,6 +421,94 @@ class SourceRow:
   - `destination` (sink name or "discard")
   - `timestamp`
 
+#### Source row identity — no fabrication
+
+**Constraint.** Every row a source emits must carry two engine-owned
+identity fields supplied with their authentic values:
+
+- `source_row_index`: the row's position within *this source's own
+  emission stream* (0-indexed, monotone, no gaps the source did not
+  itself introduce).
+- `ingest_sequence`: a global per-run monotone ordering value the engine
+  assigns at the boundary where the source's row enters the orchestrator.
+
+The engine refuses to mint a token without both. `TokenManager` raises
+`OrchestrationInvariantError` and the `DataFlowRepository.create_row`
+write boundary raises `AuditIntegrityError`. Both error sites carry the
+institutional-memory message:
+
+> *Do not fabricate source_row_index or ingest_sequence from row_index.*
+
+**Why.** `source_row_index` and `ingest_sequence` are Tier-1 audit
+evidence (per [CLAUDE.md's three-tier trust model](../../CLAUDE.md)).
+They are the durable identity primitives that resume, replay, and
+cross-source ordering depend on. Substituting an arbitrary value (most
+commonly: `row_index` — the orchestrator's positional count, which is
+*not* the source's own row index during resume) gives the audit trail a
+confident wrong answer. An auditor running `elspeth explain` on a row
+with fabricated identity gets back a value the source never actually
+asserted; the audit story breaks and the wrong answer is
+indistinguishable from a correct one.
+
+This is the fabrication-decision-test from CLAUDE.md applied at the
+source boundary: if the source plugin does not know `source_row_index`
+— because it doesn't natively track per-source row position — then the
+correct value is **not knowable**, and the only honest action is to
+crash. The engine deliberately raises rather than defaulting.
+
+**What the audit trail looks like under correct identity.**
+
+```
+rows.source_node_id        = "customer_events"
+rows.source_row_index      = 42          # 43rd row from THIS source
+rows.ingest_sequence       = 1024        # 1025th row from ALL sources in this run
+rows.row_index             = 42          # orchestrator's view (may differ on resume)
+```
+
+`elspeth explain --row <row_id>` reconstructs the lineage by joining
+`rows.source_node_id` → `run_sources.schema_contract_json`. Resume
+replays rows ordered by `ingest_sequence`, which is the only value that
+remains stable across crash/restart.
+
+**What the audit trail looks like under fabricated identity.** If a
+source plugin computes `source_row_index = self._counter` where
+`_counter` resets on retry, or — worse — sets `source_row_index =
+row_index` because that field happened to be available, the audit DB
+ends up with rows whose identity values reflect orchestrator state, not
+source state. On resume the engine reads those rows back believing they
+are authentic source emissions; the replay order is wrong, the
+per-source `(run_id, source_node_id, source_row_index)` unique constraint
+collides on second-attempt rows, and the cross-source `ingest_sequence`
+ordering — which the durable scheduler uses as its claim-order primitive
+(ADR-026 §Decision 3) — becomes nondeterministic. The pipeline appears
+to work; the audit trail asserts facts the external system never said.
+
+**What a source plugin must do.** Track per-source row position
+explicitly inside the plugin (an instance counter, an offset field on
+the upstream record, a database cursor position — whatever the source
+genuinely knows). Pass that value as `source_row_index` on every row.
+The orchestrator assigns `ingest_sequence` at the boundary, so plugins
+do not compute it; they just must not invent it themselves. If the
+source genuinely cannot provide `source_row_index` (a streaming API
+with no notion of position, for instance), the source plugin is not
+yet engine-compatible — file a design ticket, do not paper over the
+gap in plugin code.
+
+**Cross-references.**
+
+- Engine refuse points: `src/elspeth/engine/tokens.py:71-92`
+  (`_require_source_row_identity`) and
+  `src/elspeth/core/landscape/data_flow_repository.py:441-446`.
+- Schema invariants on the persisted columns:
+  [Landscape — Per-row source identity](../architecture/landscape.md#per-row-source-identity-adr-025).
+- Why these fields exist and what they mean for cross-source ordering:
+  [ADR-025 §Decision 4](../architecture/adr/025-multi-source-ingestion.md)
+  and [ADR-026 §Decision 3](../architecture/adr/026-durable-token-scheduler.md).
+- A lint rule that detects `source_row_index = row_index` and similar
+  fabricating patterns in Source plugin code is tracked under filigree
+  `elspeth-92afea0d23`; until it lands, this contract is the
+  authoritative discoverable statement of the rule.
+
 ---
 
 ### Transform

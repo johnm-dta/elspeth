@@ -45,6 +45,67 @@ query = (
 )
 ```
 
+## Source Row Identity — No Fabrication
+
+**CRITICAL:** Every source plugin emits rows that carry two engine-owned
+identity fields: `source_row_index` (the row's position within *this
+source's* emission stream) and `ingest_sequence` (a global per-run
+monotone ordering the engine assigns at the boundary). The engine
+refuses to mint a token or persist a row without both — `TokenManager`
+raises `OrchestrationInvariantError`, `DataFlowRepository.create_row`
+raises `AuditIntegrityError`, and both carry the message:
+
+> *Do not fabricate source_row_index or ingest_sequence from row_index.*
+
+**The fabrication failure mode you will reach for instinctively but
+must not:**
+
+```python
+# WRONG — fabricates Tier-1 identity from orchestrator state
+return SourceRow.valid(row_dict, contract=contract,
+                       source_row_index=row_index,    # ← lies to the auditor
+                       ingest_sequence=row_index)      # ← also lies
+```
+
+`row_index` is the orchestrator's positional view; during resume it does
+*not* equal the source's own emission position. Passing it as
+`source_row_index` puts a confident wrong answer into the rows table,
+breaks resume replay ordering, and corrupts the cross-source
+`ingest_sequence` claim order the durable scheduler depends on
+(ADR-026 §Decision 3).
+
+**The correct shape:**
+
+```python
+# CORRECT — source tracks its own emission position
+class MySource:
+    def __init__(self):
+        self._emit_counter = 0
+
+    def rows(self):
+        for raw in self._upstream_iterator():
+            sri = self._emit_counter   # source genuinely knows this
+            self._emit_counter += 1
+            yield SourceRow.valid(
+                row_dict=self._coerce(raw),
+                contract=self._contract,
+                source_row_index=sri,
+                # ingest_sequence is assigned by the orchestrator, not by the plugin
+            )
+```
+
+If the source genuinely cannot provide `source_row_index` (streaming
+API with no notion of position), the source plugin is not yet
+engine-compatible — surface that as a design constraint, do not paper
+it over.
+
+**Engine refuse points:**
+
+- `src/elspeth/engine/tokens.py:71-92` — `TokenManager._require_source_row_identity`.
+- `src/elspeth/core/landscape/data_flow_repository.py:441-446` — write-side guard.
+
+**Full plugin-author treatment:** [Plugin Protocol — Source row identity](../../../docs/contracts/plugin-protocol.md#source-row-identity--no-fabrication).
+
 ## Schema Contracts (DAG Validation)
 
 Transforms can declare field requirements that are validated at DAG construction:

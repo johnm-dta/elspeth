@@ -67,7 +67,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final
 
-from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.freeze import freeze_fields
 
 if TYPE_CHECKING:
     from elspeth.web.composer.tools._common import ToolHandler
@@ -222,26 +222,33 @@ def derive_name_set_for(tools: Iterable[ToolDeclaration], kind: ToolKind) -> fro
 
 def derive_tool_definitions_by_name(
     tools: Iterable[ToolDeclaration],
-) -> Mapping[str, dict[str, Any]]:
-    """Return name → ``get_tool_definitions()``-shaped dict for every declaration.
+) -> Mapping[str, Mapping[str, Any]]:
+    """Return name → ``get_tool_definitions()``-shaped frozen mapping for every declaration.
 
     Each value has the legacy ``{"name", "description", "parameters"}`` shape
-    used by the LLM tool-list.  ``_dispatch.py:get_tool_definitions()`` reads
-    this map and substitutes the declaration's entry in place of the
-    corresponding hand-maintained inline schema during the migration.
+    used by the LLM tool-list. ``_dispatch.py:get_tool_definitions()`` reads
+    this map and ``deep_thaw``s each entry per call to produce fresh mutable
+    structures for the LLM-facing tool list.
 
-    The ``parameters`` value is **deep-thawed** (``MappingProxyType`` → ``dict``,
-    ``tuple`` → ``list``) so external consumers (LiteLLM, MCP clients) see the
-    same JSON-shaped structure they did pre-migration. The declaration stores
-    the schema frozen for immutability; emission unfreezes for compatibility.
+    The returned mapping is deeply immutable: the outer mapping is a
+    ``MappingProxyType``; each value is a ``MappingProxyType`` over its three
+    fields; ``parameters`` is the declaration's already-deep-frozen
+    ``json_schema``. This prevents the alias-mutation bug where
+    ``get_tool_definitions()[i]["parameters"]`` would have been the same
+    mutable dict across every call (Python-engineer H1 review finding,
+    2026-05-23). Callers that need mutable JSON-shaped structures must
+    ``deep_thaw`` the values they obtain — emission paths under
+    ``_dispatch.py:get_tool_definitions`` do this.
     """
     return MappingProxyType(
         {
-            decl.name: {
-                "name": decl.name,
-                "description": decl.description,
-                "parameters": deep_thaw(decl.json_schema),
-            }
+            decl.name: MappingProxyType(
+                {
+                    "name": decl.name,
+                    "description": decl.description,
+                    "parameters": decl.json_schema,
+                }
+            )
             for decl in tools
         }
     )

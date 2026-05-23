@@ -948,8 +948,18 @@ class TestToolDeclarationInvariants:
         # deep_freeze converts the inner list to a tuple.
         assert decl.json_schema["required"] == ("x",)  # type: ignore[index]
 
-    def test_emission_deep_thaws_back_to_json_shape(self) -> None:
-        """derive_tool_definitions_by_name unfreezes so external consumers see JSON shapes."""
+    def test_derivation_freezes_so_registry_cannot_be_aliased(self) -> None:
+        """derive_tool_definitions_by_name returns a deeply-immutable mapping.
+
+        Python-engineer H1 review finding (2026-05-23): the registry must be
+        deeply frozen so a caller of get_tool_definitions cannot mutate the
+        source-of-truth ``parameters`` dict through the returned reference.
+        Emission-side thawing (in ``get_tool_definitions``) hands callers
+        fresh isolated mutable copies — see
+        ``test_get_tool_definitions_returns_isolated_mutable_copies`` below.
+        """
+        from types import MappingProxyType
+
         from elspeth.web.composer.tools.declarations import derive_tool_definitions_by_name
 
         decl = self._make(
@@ -960,9 +970,31 @@ class TestToolDeclarationInvariants:
             }
         )
         emitted = derive_tool_definitions_by_name([decl])[decl.name]
-        # Parameters value is a plain dict; inner list is a plain list.
-        assert isinstance(emitted["parameters"], dict)
-        assert emitted["parameters"]["required"] == ["x"]  # not a tuple
+        # Outer entry is frozen.
+        assert isinstance(emitted, MappingProxyType)
+        # Parameters subtree is frozen — caller cannot append to ``required``.
+        assert isinstance(emitted["parameters"], MappingProxyType)
+        assert emitted["parameters"]["required"] == ("x",)  # tuple, not list
+
+    def test_get_tool_definitions_returns_isolated_mutable_copies(self) -> None:
+        """get_tool_definitions hands callers fresh mutable copies on every call.
+
+        Python-engineer H1 review finding (2026-05-23): two consecutive calls
+        must not share mutable state. Mutating one returned ``parameters`` dict
+        must not be visible in a later call, and must not corrupt the registry.
+        """
+        from elspeth.web.composer.tools._dispatch import get_tool_definitions
+
+        first = get_tool_definitions()
+        second = get_tool_definitions()
+        # External-facing dicts are mutable for LiteLLM / MCP compatibility.
+        assert isinstance(first[0]["parameters"], dict)
+        first[0]["parameters"]["required"] = ["sabotaged"]
+        # Second call is not contaminated by the first call's mutation.
+        assert second[0]["parameters"]["required"] != ["sabotaged"]
+        # Third call also pristine — confirms the registry itself is intact.
+        third = get_tool_definitions()
+        assert third[0]["parameters"]["required"] != ["sabotaged"]
 
 
 class TestDerivationHelpers:
@@ -980,8 +1012,13 @@ class TestDerivationHelpers:
         assert derive_name_set_for([_CREATE_BLOB_DECLARATION], ToolKind.BLOB_MUTATION) == {"create_blob"}
 
     def test_tool_definitions_by_name_round_trip(self) -> None:
+        """The frozen derivation result is value-equal to the JSON-shaped
+        expected fixture once deep_thaw is applied — i.e. the migration is
+        round-trip safe through the freeze/thaw boundary."""
+        from elspeth.contracts.freeze import deep_thaw
+
         result = derive_tool_definitions_by_name([_CREATE_BLOB_DECLARATION])
-        assert result["create_blob"] == _EXPECTED_CREATE_BLOB_DEFINITION
+        assert deep_thaw(result["create_blob"]) == _EXPECTED_CREATE_BLOB_DEFINITION
 
     def test_blob_quota_names_includes_create_blob(self) -> None:
         assert derive_blob_quota_names([_CREATE_BLOB_DECLARATION]) == {"create_blob"}

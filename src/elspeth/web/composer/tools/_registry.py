@@ -106,7 +106,7 @@ assert_unique_names(_REGISTERED_TOOLS)
 # Derived tool-definitions map (consumed by ``_dispatch.get_tool_definitions``)
 # ---------------------------------------------------------------------------
 
-_TOOL_DEFS_BY_NAME: Final[Mapping[str, dict[str, Any]]] = derive_tool_definitions_by_name(_REGISTERED_TOOLS)
+_TOOL_DEFS_BY_NAME: Final[Mapping[str, Mapping[str, Any]]] = derive_tool_definitions_by_name(_REGISTERED_TOOLS)
 
 
 # ---------------------------------------------------------------------------

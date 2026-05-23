@@ -23,6 +23,7 @@ from typing import Any, Final, cast
 
 from sqlalchemy import Engine
 
+from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.state import (
@@ -108,120 +109,124 @@ __all__ = [
 # ``test_trailing_tool_name_is_locked``) stays attached to it across deploys.
 # ---------------------------------------------------------------------------
 
-_REQUEST_ADVISOR_HINT_DEFINITION: Final[dict[str, Any]] = {
-    "name": "request_advisor_hint",
-    "description": (
-        "ESCAPE HATCH — call when one of the declared trigger criteria applies: "
-        "reactive validation-loop recovery after two or more unchanged failures, "
-        "proactive security/safety wiring review before `set_pipeline`, or "
-        "proactive red-listed plugin review before `set_pipeline`. The proactive "
-        "security trigger covers content moderation, prompt-injection defence, "
-        "secret routing, PII/regulatory sinks, and externally fetched content "
-        "flowing toward LLMs. Forwards your problem statement and context to a "
-        "frontier model and returns guidance text. The reply is ADVICE, not "
-        "configuration — you must still call the appropriate mutation tool "
-        "yourself to apply any change. Budget is finite (sized per compose "
-        "request, not per session lifetime) and exhausting it returns a "
-        "structured error rather than crashing — inspect budget_remaining "
-        "in each response. Do NOT call this tool in a loop, do NOT use it "
-        "as a substitute for reading validator output. Disabled by default; "
-        "only available when the operator has explicitly enabled it."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "trigger": {
-                "type": "string",
-                "enum": list(ADVISOR_TRIGGER_VALUES),
-                "description": (
-                    "Why this advisor call is allowed. Use reactive_validation_loop "
-                    "only after the recovery sequence and at least two unchanged "
-                    "validator failures. Use proactive_security_safety before "
-                    "set_pipeline for security/safety-sensitive flows. Use "
-                    "proactive_red_listed_plugin before set_pipeline when the plan "
-                    "uses a red-listed plugin such as llm, database, dataverse, "
-                    "Azure safety transforms, RAG retrieval, or Chroma sinks."
-                ),
+_REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = deep_freeze(
+    {
+        "name": "request_advisor_hint",
+        "description": (
+            "ESCAPE HATCH — call when one of the declared trigger criteria applies: "
+            "reactive validation-loop recovery after two or more unchanged failures, "
+            "proactive security/safety wiring review before `set_pipeline`, or "
+            "proactive red-listed plugin review before `set_pipeline`. The proactive "
+            "security trigger covers content moderation, prompt-injection defence, "
+            "secret routing, PII/regulatory sinks, and externally fetched content "
+            "flowing toward LLMs. Forwards your problem statement and context to a "
+            "frontier model and returns guidance text. The reply is ADVICE, not "
+            "configuration — you must still call the appropriate mutation tool "
+            "yourself to apply any change. Budget is finite (sized per compose "
+            "request, not per session lifetime) and exhausting it returns a "
+            "structured error rather than crashing — inspect budget_remaining "
+            "in each response. Do NOT call this tool in a loop, do NOT use it "
+            "as a substitute for reading validator output. Disabled by default; "
+            "only available when the operator has explicitly enabled it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "trigger": {
+                    "type": "string",
+                    "enum": list(ADVISOR_TRIGGER_VALUES),
+                    "description": (
+                        "Why this advisor call is allowed. Use reactive_validation_loop "
+                        "only after the recovery sequence and at least two unchanged "
+                        "validator failures. Use proactive_security_safety before "
+                        "set_pipeline for security/safety-sensitive flows. Use "
+                        "proactive_red_listed_plugin before set_pipeline when the plan "
+                        "uses a red-listed plugin such as llm, database, dataverse, "
+                        "Azure safety transforms, RAG retrieval, or Chroma sinks."
+                    ),
+                },
+                "problem_summary": {
+                    "type": "string",
+                    "description": (
+                        "Your own statement of what you are trying to do and "
+                        "why you are stuck. One or two sentences. Be specific: "
+                        "'I cannot get llm transform options to validate against "
+                        "the Azure provider schema' is useful; 'help' is not."
+                    ),
+                },
+                "recent_errors": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": ("The last validator error messages verbatim, most recent first. Include up to 5; do not paraphrase."),
+                },
+                "attempted_actions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "What you have already tried, one item per attempt. "
+                        "Include the tool name and a one-line summary of the "
+                        "argument shape. The advisor uses this to avoid "
+                        "suggesting things you have already ruled out."
+                    ),
+                },
+                "schema_excerpt": {
+                    "type": "string",
+                    "description": (
+                        "Optional — the relevant plugin schema snippet you are "
+                        "working against, as returned by `get_plugin_schema`. "
+                        "Including this lets the advisor give field-level "
+                        "guidance grounded in the exact contract."
+                    ),
+                },
             },
-            "problem_summary": {
-                "type": "string",
-                "description": (
-                    "Your own statement of what you are trying to do and "
-                    "why you are stuck. One or two sentences. Be specific: "
-                    "'I cannot get llm transform options to validate against "
-                    "the Azure provider schema' is useful; 'help' is not."
-                ),
-            },
-            "recent_errors": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": ("The last validator error messages verbatim, most recent first. Include up to 5; do not paraphrase."),
-            },
-            "attempted_actions": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": (
-                    "What you have already tried, one item per attempt. "
-                    "Include the tool name and a one-line summary of the "
-                    "argument shape. The advisor uses this to avoid "
-                    "suggesting things you have already ruled out."
-                ),
-            },
-            "schema_excerpt": {
-                "type": "string",
-                "description": (
-                    "Optional — the relevant plugin schema snippet you are "
-                    "working against, as returned by `get_plugin_schema`. "
-                    "Including this lets the advisor give field-level "
-                    "guidance grounded in the exact contract."
-                ),
-            },
+            "required": ["trigger", "problem_summary", "recent_errors", "attempted_actions"],
         },
-        "required": ["trigger", "problem_summary", "recent_errors", "attempted_actions"],
-    },
-}
+    }
+)
 
 
 # The description below is normative documentation for the LLM (mirrored
 # in the composer skill markdown) and is reviewed by the audit panel as
 # part of the request_interpretation_review event row's provenance.
-_REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[dict[str, Any]] = {
-    "name": "request_interpretation_review",
-    "description": (
-        "Ask the user to review your interpretation of a subjective or "
-        "underspecified term they used. Call this BEFORE you finalise "
-        "the prompt template for any LLM transform whose prompt depends "
-        "on the term. Surface ONE term per call. The composition state "
-        "MUST already contain the affected LLM transform (call upsert_node "
-        "first) and its prompt_template MUST contain the placeholder "
-        "{{interpretation:<term>}}. The user will see your draft and "
-        "either accept it or amend it. Do not ask the user in assistant "
-        "prose; this tool is the review surface. If no composition state "
-        "exists yet, stage the LLM transform with a placeholder first, "
-        "wait for that tool result, then call this tool. Do not call this "
-        "for concrete operators (e.g., 'rate 1-10') or for terms the "
-        "user already defined in the conversation."
-    ),
-    "parameters": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["affected_node_id", "user_term", "llm_draft"],
-        "properties": {
-            "affected_node_id": {
-                "type": "string",
-                "description": "node_id of the LLM transform whose prompt template depends on this term",
-            },
-            "user_term": {
-                "type": "string",
-                "description": "The user-provided term, verbatim (e.g., 'cool', 'important', 'risky')",
-            },
-            "llm_draft": {
-                "type": "string",
-                "description": "Your draft interpretation of the term, in your own words, suitable to embed as a phrase in the prompt template",
+_REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[Mapping[str, Any]] = deep_freeze(
+    {
+        "name": "request_interpretation_review",
+        "description": (
+            "Ask the user to review your interpretation of a subjective or "
+            "underspecified term they used. Call this BEFORE you finalise "
+            "the prompt template for any LLM transform whose prompt depends "
+            "on the term. Surface ONE term per call. The composition state "
+            "MUST already contain the affected LLM transform (call upsert_node "
+            "first) and its prompt_template MUST contain the placeholder "
+            "{{interpretation:<term>}}. The user will see your draft and "
+            "either accept it or amend it. Do not ask the user in assistant "
+            "prose; this tool is the review surface. If no composition state "
+            "exists yet, stage the LLM transform with a placeholder first, "
+            "wait for that tool result, then call this tool. Do not call this "
+            "for concrete operators (e.g., 'rate 1-10') or for terms the "
+            "user already defined in the conversation."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["affected_node_id", "user_term", "llm_draft"],
+            "properties": {
+                "affected_node_id": {
+                    "type": "string",
+                    "description": "node_id of the LLM transform whose prompt template depends on this term",
+                },
+                "user_term": {
+                    "type": "string",
+                    "description": "The user-provided term, verbatim (e.g., 'cool', 'important', 'risky')",
+                },
+                "llm_draft": {
+                    "type": "string",
+                    "description": "Your draft interpretation of the term, in your own words, suitable to embed as a phrase in the prompt template",
+                },
             },
         },
-    },
-}
+    }
+)
 
 
 def get_tool_definitions() -> list[dict[str, Any]]:
@@ -249,16 +254,19 @@ def get_tool_definitions() -> list[dict[str, Any]]:
     ``get_tool_definitions()`` was hand-maintained) was retired when
     declarations became the source of truth.
     """
-    # ``dict(defn)`` defensively copies each declaration-emitted dict so
-    # the caller cannot mutate the registry's frozen-by-convention values
-    # via the returned list. ``derive_tool_definitions_by_name`` already
-    # deep-thaws to plain dicts, so this is shallow-copy-cheap.
-    declared = [dict(defn) for name, defn in _TOOL_DEFS_BY_NAME.items() if name != "wire_secret_ref"]
+    # Every entry on every call is freshly ``deep_thaw``ed from the deeply
+    # immutable module-level registry. This guarantees mutually-isolated
+    # mutable copies — a caller modifying ``result[0]["parameters"]["required"]``
+    # cannot taint the registry's source-of-truth, nor a subsequent call's
+    # output (Python-engineer H1 review finding, 2026-05-23). The cost is
+    # one deep-walk per emission; ``get_tool_definitions`` is called once per
+    # compose turn, so the cost is negligible against correctness.
+    declared = [deep_thaw(defn) for name, defn in _TOOL_DEFS_BY_NAME.items() if name != "wire_secret_ref"]
     return [
         *declared,
-        dict(_REQUEST_ADVISOR_HINT_DEFINITION),
-        dict(_REQUEST_INTERPRETATION_REVIEW_DEFINITION),
-        dict(_TOOL_DEFS_BY_NAME["wire_secret_ref"]),
+        deep_thaw(_REQUEST_ADVISOR_HINT_DEFINITION),
+        deep_thaw(_REQUEST_INTERPRETATION_REVIEW_DEFINITION),
+        deep_thaw(_TOOL_DEFS_BY_NAME["wire_secret_ref"]),
     ]
 
 

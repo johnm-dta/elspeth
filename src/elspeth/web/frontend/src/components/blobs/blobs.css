@@ -1,5 +1,27 @@
 /* blobs.css — Blob row and blob manager.
-   Owners: .blob-row*, .blob-manager*. */
+   Owners: .blob-row*, .blob-manager*, .blob-action-btn.
+   (.blob-action-btn was previously co-located with chat bubble action buttons
+   in App.css; it is applied only in BlobRow.tsx, so it lives here now.) */
+
+.blob-action-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--font-size-xs);
+  padding: 2px 6px;
+  min-width: 44px;
+  min-height: var(--size-control);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+}
+.blob-action-btn:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
 
 /* ---------------------------------------------------------------------------
    BlobRow

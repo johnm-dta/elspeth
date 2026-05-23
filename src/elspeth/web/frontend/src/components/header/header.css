@@ -1,8 +1,10 @@
 /* header.css — App header chrome and session switcher.
    Primary: .app-root, .alert-banner*, .app-main, .app-header*, .user-menu*,
    .header-session-switcher* + .header-session-switcher-rename-form.
-   Tenants (rendered from the header session-switcher dropdown):
-     .runs-history-item-summary, .run-diagnostics*, .run-failure-detail*. */
+   Tenants (execution-domain rules, co-located here by historical source order;
+   rendered from RunsHistoryDrawer.tsx, mounted via InlineRunResults.tsx):
+     .runs-history-item-summary, .run-diagnostics*, .run-failure-detail*.
+   Cleanly extractable to execution.css as a follow-up — no specificity contests. */
 
 /* ---------------------------------------------------------------------------
    App Root & Alert Banners

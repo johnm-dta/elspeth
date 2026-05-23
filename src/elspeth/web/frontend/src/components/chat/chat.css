@@ -1,6 +1,6 @@
 /* chat.css — Chat panel, bubbles, composing indicator, and template cards.
    Owners: .bubble*, .bubble-copy-btn, .bubble-edit-btn, .scroll-to-bottom-btn,
-   .blob-action-btn, .chat-input*, .chat-panel*, .message-row*,
+   .chat-input*, .chat-panel*, .message-row*,
    .message-bubble-content*, .bubble-action-overlay*, .message-edit-*,
    .message-failed-*, .message-retry-btn, .message-pending, .message-tools*,
    .message-sources-created*, .inline-source-created-turn*,
@@ -114,28 +114,6 @@
 .chat-panel:has(.inline-run-results) .scroll-to-bottom-btn {
   bottom: calc(120px + min(260px, 32vh));
 }
-
-/* Blob manager action buttons */
-.blob-action-btn {
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-size: var(--font-size-xs);
-  padding: 2px 6px;
-  min-width: 44px;
-  min-height: var(--size-control);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--color-text-muted);
-}
-.blob-action-btn:hover {
-  background-color: var(--color-surface-hover);
-  border-color: var(--color-border-strong);
-  color: var(--color-text);
-}
-
 
 /* ---------------------------------------------------------------------------
    Chat Input

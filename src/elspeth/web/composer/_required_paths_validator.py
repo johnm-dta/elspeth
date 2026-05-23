@@ -31,11 +31,8 @@ from elspeth.web.composer.tools import get_tool_definitions
 __all__ = [
     "_ARRAY_ITEM_SEGMENT",
     "_TOOL_REQUIRED_PATHS",
-    "RequiredPath",
     "_CompiledRequiredPath",
-    "_build_tool_required_paths_index",
     "_collect_required_paths",
-    "_find_missing_path_instances",
     "_find_missing_required_paths",
     "_optional_ancestor_present",
 ]

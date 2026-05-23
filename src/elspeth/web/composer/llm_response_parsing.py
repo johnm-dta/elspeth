@@ -48,14 +48,12 @@ if TYPE_CHECKING:
     from elspeth.web.composer.audit import BufferingRecorder
 
 __all__ = [
-    "_ReasoningMetadata",
     "_apply_anthropic_cache_markers",
     "_attach_llm_calls",
     "_build_llm_call_record",
     "_first_response_message",
     "_json_safe_provider_artifact",
     "_provider_cost_from_response",
-    "_provider_details_payload",
     "_reasoning_metadata_from_response",
     "_response_field",
     "_safe_provider_request_id",

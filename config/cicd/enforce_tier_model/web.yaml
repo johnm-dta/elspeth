@@ -1984,7 +1984,7 @@ allow_hits:
     weak-ref GC window. Non-TimeoutError exceptions from inside the task propagate
     out of the finally-block.
   expires: '2026-08-23'
-- key: web/composer/tools/sources.py:R1:_resolve_source_blob:fp=981fb7ee6e925c26
+- key: web/composer/tools/sources.py:R1:_resolve_source_blob:fp=8538dd251033402f
   owner: composer-tools-sources
   reason: 'Constant-table lookup: ``_MIME_TO_SOURCE`` maps known MIME types to (plugin,
     mime_extra) pairs. ``blob[''mime_type'']`` was just read from a validated blob
@@ -1995,7 +1995,7 @@ allow_hits:
   safety: Missing MIME maps to a typed _failure_result with an actionable repair message
     (specify plugin explicitly); not a silent swallow.
   expires: '2026-08-23'
-- key: web/composer/tools/sources.py:R5:_execute_set_source_from_blob:fp=a43f37ec55a33975
+- key: web/composer/tools/sources.py:R5:_execute_set_source_from_blob:fp=3d78a383fa6e1b88
   owner: composer-tools-sources
   reason: Sum-type discrimination on ``_resolve_source_blob`` return (``_ResolvedSourceBlob
     | ToolResult``). Same pattern as the sessions.py sibling at fp=ce8c53eb04fd5d3b
@@ -2003,7 +2003,7 @@ allow_hits:
   safety: Both arms of the union are handled; the function cannot fall through with
     an unresolved value.
   expires: '2026-08-23'
-- key: web/composer/tools/sources.py:R6:_execute_inspect_source:fp=948d1b6adfb8742d
+- key: web/composer/tools/sources.py:R6:_execute_inspect_source:fp=0a4de5cc147561f6
   owner: composer-tools-sources
   reason: Tier-3 conversion of LLM-tool-call ``blob_id`` to UUID. The user (LLM) may
     have supplied a blob_id that matched a row but is not a parseable UUID (e.g. a
@@ -2157,7 +2157,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=fb1246f247476384
+- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=832c74ecb6a95f78
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Exception swallowed without re-raise or explicit
@@ -2455,28 +2455,28 @@ allow_hits:
   safety: Malformed data returns structured HTTP errors or preserves the primary exception;
     recovery catches are narrow and record class-name-only diagnostics.
   expires: '2026-08-20'
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=57d4f9b60eaf7d4d
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=96ffa4183c233f99
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if isinstance(resolved, ToolResult):'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=322099970d3fc3a4
+- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=1f9ac531d69fdc95
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: mime_entry = _MIME_TO_SOURCE.get(prepared_inline_blob.mime_type)'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=e05aa3ebc702d65a
+- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=e0c4bb79c35cd373
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: raw_outputs = args.get("outputs")'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=4d1729053636ee6c
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=eb1dae2755c86c87
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if isinstance(raw_outputs,
@@ -2484,14 +2484,14 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=ba7a226beae0aa36
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=ad3d4007f9daf713
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if isinstance(raw_entry, Mapping):'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=9e730518fb5c5fe6
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=2d11578c01f44473
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: branches = dict(n.branches)
@@ -2500,7 +2500,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_apply_pipeline_recipe:fp=03005c04311fd341
+- key: web/composer/tools/sessions.py:R5:_execute_apply_pipeline_recipe:fp=fdb903c3527f673e
   owner: composer-tools-rearchitect
   reason: 'Co-located from web/composer/tools/recipes.py by the rc5-2-review-2026-05-23
     recipes/sessions co-location refactor (elspeth-65e72442f0). Pattern preserved:
@@ -2508,7 +2508,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_is_full_state_component_alias:fp=4aff4dcba1eec725
+- key: web/composer/tools/sessions.py:R5:_is_full_state_component_alias:fp=c308fa3649dbba27
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: return isinstance(component,
@@ -2516,14 +2516,14 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_execute_get_pipeline_state:fp=e37f0879122ab4fa
+- key: web/composer/tools/sessions.py:R1:_execute_get_pipeline_state:fp=49699b47a946d43d
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: component = args.get("component")'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_assert_affected_llm_node:fp=76908fb4ba70195a
+- key: web/composer/tools/sessions.py:R1:_assert_affected_llm_node:fp=2128172252cfbf54
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: prompt_template =
@@ -2531,7 +2531,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_assert_affected_llm_node:fp=0b1127db2b407148
+- key: web/composer/tools/sessions.py:R5:_assert_affected_llm_node:fp=c9e27f431e94b121
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
@@ -2539,14 +2539,14 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=d065aaf9d2ad4559
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=da264558bc33cb6a
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(node, Mapping):'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=be83dc542ff7b74b
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=a687f78b66fc1165
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: if node.get("kind")
@@ -2554,14 +2554,14 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=7f0cabc32415bc0e
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=c0d66a4eea465c4f
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: options = node.get("options")'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=2e8017834daed886
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=c1760201cd8680c9
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: prompt_template = options.get("prompt_template")
@@ -2569,7 +2569,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=b6cf6957e470acc3
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=e03662f0a263d461
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: prompt_template =
@@ -2577,7 +2577,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=6d652097fa16c842
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=37768c6a1331087a
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
@@ -2585,7 +2585,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders_typed:fp=e22d7a147e156654
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders_typed:fp=d38b5e998c1d4c14
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
@@ -2593,7 +2593,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=7a64bf77ebb8c7da
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=00bfbde52ac6c052
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: handler = all_handlers.get(tool_name)'

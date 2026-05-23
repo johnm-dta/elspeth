@@ -70,6 +70,10 @@ from elspeth.web.composer.tools.blobs import (
     _prepare_blob_create,
     _PreparedBlobCreate,
 )
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
+)
 from elspeth.web.composer.tools.sources import (
     _MIME_TO_SOURCE,
     _header_only_inline_csv_conflict,
@@ -654,6 +658,38 @@ def _execute_apply_pipeline_recipe(
     return replace(result, data=merged_data)
 
 
+_APPLY_PIPELINE_RECIPE_DECLARATION = ToolDeclaration(
+    name="apply_pipeline_recipe",
+    handler=_execute_apply_pipeline_recipe,
+    kind=ToolKind.BLOB_MUTATION,
+    description=(
+        "Apply a registered pipeline recipe with operator-supplied slot values and replace "
+        "the current pipeline state with the resulting configuration. Slots are validated "
+        "against the recipe's declared schema before scaffolding — invalid slots are "
+        "rejected with a repair hint. Call list_recipes to discover available recipes and "
+        "their slot schemas. The resulting state is identical to a hand-authored "
+        "set_pipeline call; the model can refine via patch_*_options afterwards."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "recipe_name": {
+                "type": "string",
+                "description": "Recipe identifier (e.g., 'classify-rows-llm-jsonl')",
+            },
+            "slots": {
+                "type": "object",
+                "description": "Operator-supplied slot values; must match the recipe's slot schema",
+            },
+        },
+        "required": ["recipe_name", "slots"],
+    },
+    needs_blob_quota=True,
+    needs_blob_provenance=True,
+    blob_store_only=False,
+)
+
+
 def _handle_set_pipeline(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -1120,3 +1156,17 @@ _SESSION_AWARE_TOOL_HANDLERS: dict[str, SessionAwareToolHandler] = {
 # ``elspeth.web.composer.tools.discovery`` alongside the other classification
 # predicates so the tool-name vocabulary has one source of truth. Import it
 # from there.
+
+
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (_APPLY_PIPELINE_RECIPE_DECLARATION,)
+"""Every tool declared in this module, in stable order.
+
+``_dispatch.py`` aggregates this tuple alongside every other plane's
+TOOLS_IN_MODULE to build the registered-tool universe.
+
+Note: ``request_interpretation_review`` (the session-aware async handler) is
+dispatched outside ``execute_tool`` and is intentionally NOT migrated to the
+ToolDeclaration model in this step — its per-call kwarg surface differs from
+the synchronous handler signature ToolContext threads. Step 3 will revisit
+session-aware migration with an async-aware declaration shape if one proves
+needed."""

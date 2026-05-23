@@ -1039,6 +1039,31 @@ def _execute_update_blob(
         )
 
 
+_UPDATE_BLOB_DECLARATION = ToolDeclaration(
+    name="update_blob",
+    handler=_execute_update_blob,
+    kind=ToolKind.BLOB_MUTATION,
+    description="Update the content of an existing blob (file). Overwrites the file content while preserving metadata.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {
+                "type": "string",
+                "description": "ID of the blob to update.",
+            },
+            "content": {
+                "type": "string",
+                "description": "New file content.",
+            },
+        },
+        "required": ["blob_id", "content"],
+    },
+    needs_blob_quota=True,
+    needs_blob_provenance=False,
+    blob_store_only=True,
+)
+
+
 def _execute_delete_blob(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -1142,6 +1167,27 @@ def _execute_delete_blob(
             ) from cleanup_exc
 
     return _discovery_result(state, {"blob_id": blob_id, "deleted": True})
+
+
+_DELETE_BLOB_DECLARATION = ToolDeclaration(
+    name="delete_blob",
+    handler=_execute_delete_blob,
+    kind=ToolKind.BLOB_MUTATION,
+    description="Delete a blob (file) and its storage.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {
+                "type": "string",
+                "description": "ID of the blob to delete.",
+            },
+        },
+        "required": ["blob_id"],
+    },
+    needs_blob_quota=False,
+    needs_blob_provenance=False,
+    blob_store_only=True,
+)
 
 
 def _verify_blob_content_integrity(blob: BlobToolRecord, data: bytes) -> None:
@@ -1274,7 +1320,11 @@ def _execute_get_blob_content(
 # dispatch-time membership check to gate.
 
 
-TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (_CREATE_BLOB_DECLARATION,)
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _CREATE_BLOB_DECLARATION,
+    _UPDATE_BLOB_DECLARATION,
+    _DELETE_BLOB_DECLARATION,
+)
 """Every tool declared in this module, in stable order.
 
 ``_dispatch.py`` aggregates this tuple from every plane to build the

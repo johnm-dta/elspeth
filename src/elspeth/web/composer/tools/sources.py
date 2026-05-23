@@ -32,6 +32,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
+    _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
     ToolContext,
     ToolResult,
     _apply_merge_patch,
@@ -51,6 +52,10 @@ from elspeth.web.composer.tools.blobs import (
     _PreparedBlobCreate,
     _sync_get_blob,
     _verify_blob_content_integrity,
+)
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
 )
 from elspeth.web.sessions.models import blobs_table
 
@@ -350,6 +355,54 @@ def _execute_set_source_from_blob(
     return _mutation_result(new_state, ("source",), data={**data, "source_blob": resolved.payload})
 
 
+_SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
+    name="set_source_from_blob",
+    handler=_execute_set_source_from_blob,
+    kind=ToolKind.BLOB_MUTATION,
+    description=(
+        "Wire a blob as the pipeline source. Resolves the blob's storage path "
+        "internally and infers the source plugin from its MIME type. "
+        "Use 'options' for plugin-specific config (e.g., 'column' and 'schema' for text sources)."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {"type": "string", "description": "Blob ID to use as source."},
+            "plugin": {
+                "type": "string",
+                "description": "Source plugin override (e.g. 'csv'). Inferred from MIME type if omitted.",
+            },
+            "on_success": {
+                "type": "string",
+                "description": (
+                    "Connection-name string the source PUBLISHES. Some downstream consumer "
+                    "(node 'input' or output 'sink_name') MUST equal this value. Despite the "
+                    "field name, this is NOT a node id — connections match by string, not by "
+                    "topology."
+                ),
+                "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
+            },
+            "on_validation_failure": {
+                "type": "string",
+                "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+                "default": _DEFAULT_SOURCE_VALIDATION_FAILURE,
+            },
+            "options": {
+                "type": "object",
+                "description": (
+                    "Plugin-specific config (merged with blob path). Required fields vary by plugin: "
+                    "text sources need 'column' (output field name) and 'schema' (e.g., {mode: 'observed'})."
+                ),
+            },
+        },
+        "required": ["blob_id", "on_success"],
+    },
+    needs_blob_quota=False,
+    needs_blob_provenance=False,
+    blob_store_only=False,
+)
+
+
 def _first_nonempty_csv_row(content: str) -> tuple[str, ...] | None:
     """Return the first non-empty CSV row, if any."""
     for row in csv.reader(io.StringIO(content)):
@@ -590,3 +643,10 @@ def _handle_clear_source(
     context: ToolContext,
 ) -> ToolResult:
     return _execute_clear_source(arguments, state, context)
+
+
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (_SET_SOURCE_FROM_BLOB_DECLARATION,)
+"""Every tool declared in this module, in stable order.
+
+``_dispatch.py`` aggregates this tuple alongside every other plane's
+TOOLS_IN_MODULE to build the registered-tool universe."""

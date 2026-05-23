@@ -16,7 +16,6 @@ from elspeth.web.composer.state import (
     ValidationSummary,
 )
 from elspeth.web.composer.tools._common import (
-    _DEFAULT_SOURCE_VALIDATION_FAILURE,
     _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
     RuntimePreflight,
     ToolContext,
@@ -84,6 +83,12 @@ from elspeth.web.composer.tools.sessions import (
     _execute_get_pipeline_state,
     _handle_set_pipeline,
 )
+from elspeth.web.composer.tools.sessions import (
+    TOOLS_IN_MODULE as _SESSIONS_TOOLS_IN_MODULE,
+)
+from elspeth.web.composer.tools.sources import (
+    TOOLS_IN_MODULE as _SOURCES_TOOLS_IN_MODULE,
+)
 from elspeth.web.composer.tools.sources import (
     _execute_inspect_source,
     _execute_set_source_from_blob,
@@ -117,7 +122,11 @@ from elspeth.web.composer.tools.transforms import (
 # at dispatch.
 # ---------------------------------------------------------------------------
 
-_REGISTERED_TOOLS: Final[tuple[ToolDeclaration, ...]] = (*_BLOBS_TOOLS_IN_MODULE,)
+_REGISTERED_TOOLS: Final[tuple[ToolDeclaration, ...]] = (
+    *_BLOBS_TOOLS_IN_MODULE,
+    *_SOURCES_TOOLS_IN_MODULE,
+    *_SESSIONS_TOOLS_IN_MODULE,
+)
 assert_unique_names(_REGISTERED_TOOLS)
 _TOOL_DEFS_BY_NAME: Final[Mapping[str, dict[str, Any]]] = derive_tool_definitions_by_name(_REGISTERED_TOOLS)
 
@@ -911,72 +920,10 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "required": ["blob_id"],
             },
         },
-        {
-            "name": "set_source_from_blob",
-            "description": "Wire a blob as the pipeline source. Resolves the blob's storage path internally and infers the source plugin from its MIME type. "
-            "Use 'options' for plugin-specific config (e.g., 'column' and 'schema' for text sources).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {"type": "string", "description": "Blob ID to use as source."},
-                    "plugin": {"type": "string", "description": "Source plugin override (e.g. 'csv'). Inferred from MIME type if omitted."},
-                    "on_success": {
-                        "type": "string",
-                        "description": (
-                            "Connection-name string the source PUBLISHES. Some downstream consumer "
-                            "(node 'input' or output 'sink_name') MUST equal this value. Despite the "
-                            "field name, this is NOT a node id — connections match by string, not by "
-                            "topology."
-                        ),
-                        "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
-                    },
-                    "on_validation_failure": {
-                        "type": "string",
-                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
-                        "default": _DEFAULT_SOURCE_VALIDATION_FAILURE,
-                    },
-                    "options": {
-                        "type": "object",
-                        "description": "Plugin-specific config (merged with blob path). Required fields vary by plugin: "
-                        "text sources need 'column' (output field name) and 'schema' (e.g., {mode: 'observed'}).",
-                    },
-                },
-                "required": ["blob_id", "on_success"],
-            },
-        },
+        _TOOL_DEFS_BY_NAME["set_source_from_blob"],
         _TOOL_DEFS_BY_NAME["create_blob"],
-        {
-            "name": "update_blob",
-            "description": "Update the content of an existing blob (file). Overwrites the file content while preserving metadata.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {
-                        "type": "string",
-                        "description": "ID of the blob to update.",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "New file content.",
-                    },
-                },
-                "required": ["blob_id", "content"],
-            },
-        },
-        {
-            "name": "delete_blob",
-            "description": "Delete a blob (file) and its storage.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {
-                        "type": "string",
-                        "description": "ID of the blob to delete.",
-                    },
-                },
-                "required": ["blob_id"],
-            },
-        },
+        _TOOL_DEFS_BY_NAME["update_blob"],
+        _TOOL_DEFS_BY_NAME["delete_blob"],
         {
             "name": "get_blob_content",
             "description": "Retrieve the content of a blob (file) for inspection. Large files are truncated to 50,000 characters.",
@@ -1002,31 +949,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
-        {
-            "name": "apply_pipeline_recipe",
-            "description": (
-                "Apply a registered pipeline recipe with operator-supplied slot values and replace "
-                "the current pipeline state with the resulting configuration. Slots are validated "
-                "against the recipe's declared schema before scaffolding — invalid slots are "
-                "rejected with a repair hint. Call list_recipes to discover available recipes and "
-                "their slot schemas. The resulting state is identical to a hand-authored "
-                "set_pipeline call; the model can refine via patch_*_options afterwards."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "recipe_name": {
-                        "type": "string",
-                        "description": "Recipe identifier (e.g., 'classify-rows-llm-jsonl')",
-                    },
-                    "slots": {
-                        "type": "object",
-                        "description": "Operator-supplied slot values; must match the recipe's slot schema",
-                    },
-                },
-                "required": ["recipe_name", "slots"],
-            },
-        },
+        _TOOL_DEFS_BY_NAME["apply_pipeline_recipe"],
         {
             "name": "inspect_source",
             "description": (

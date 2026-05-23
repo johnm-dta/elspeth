@@ -18,7 +18,14 @@ from __future__ import annotations
 import pytest
 
 from elspeth.web.composer.tools._dispatch import get_tool_definitions
-from elspeth.web.composer.tools.blobs import _CREATE_BLOB_DECLARATION, _execute_create_blob
+from elspeth.web.composer.tools.blobs import (
+    _CREATE_BLOB_DECLARATION,
+    _DELETE_BLOB_DECLARATION,
+    _UPDATE_BLOB_DECLARATION,
+    _execute_create_blob,
+    _execute_delete_blob,
+    _execute_update_blob,
+)
 from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
@@ -30,6 +37,14 @@ from elspeth.web.composer.tools.declarations import (
     derive_handler_map_for,
     derive_name_set_for,
     derive_tool_definitions_by_name,
+)
+from elspeth.web.composer.tools.sessions import (
+    _APPLY_PIPELINE_RECIPE_DECLARATION,
+    _execute_apply_pipeline_recipe,
+)
+from elspeth.web.composer.tools.sources import (
+    _SET_SOURCE_FROM_BLOB_DECLARATION,
+    _execute_set_source_from_blob,
 )
 
 _EXPECTED_CREATE_BLOB_DEFINITION: dict[str, object] = {
@@ -72,6 +87,69 @@ _EXPECTED_CREATE_BLOB_DEFINITION: dict[str, object] = {
 }
 
 
+_EXPECTED_UPDATE_BLOB_DEFINITION: dict[str, object] = {
+    "name": "update_blob",
+    "description": "Update the content of an existing blob (file). Overwrites the file content while preserving metadata.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "blob_id": {
+                "type": "string",
+                "description": "ID of the blob to update.",
+            },
+            "content": {
+                "type": "string",
+                "description": "New file content.",
+            },
+        },
+        "required": ["blob_id", "content"],
+    },
+}
+
+
+_EXPECTED_DELETE_BLOB_DEFINITION: dict[str, object] = {
+    "name": "delete_blob",
+    "description": "Delete a blob (file) and its storage.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "blob_id": {
+                "type": "string",
+                "description": "ID of the blob to delete.",
+            },
+        },
+        "required": ["blob_id"],
+    },
+}
+
+
+_EXPECTED_APPLY_PIPELINE_RECIPE_DEFINITION: dict[str, object] = {
+    "name": "apply_pipeline_recipe",
+    "description": (
+        "Apply a registered pipeline recipe with operator-supplied slot values and replace "
+        "the current pipeline state with the resulting configuration. Slots are validated "
+        "against the recipe's declared schema before scaffolding — invalid slots are "
+        "rejected with a repair hint. Call list_recipes to discover available recipes and "
+        "their slot schemas. The resulting state is identical to a hand-authored "
+        "set_pipeline call; the model can refine via patch_*_options afterwards."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "recipe_name": {
+                "type": "string",
+                "description": "Recipe identifier (e.g., 'classify-rows-llm-jsonl')",
+            },
+            "slots": {
+                "type": "object",
+                "description": "Operator-supplied slot values; must match the recipe's slot schema",
+            },
+        },
+        "required": ["recipe_name", "slots"],
+    },
+}
+
+
 class TestCreateBlobMigration:
     """The migration must be byte-identity-preserving for create_blob."""
 
@@ -97,6 +175,161 @@ class TestCreateBlobMigration:
     def test_declaration_is_not_cacheable(self) -> None:
         """Mutations are forbidden from being cacheable; create_blob is no exception."""
         assert _CREATE_BLOB_DECLARATION.cacheable is False
+
+
+class TestUpdateBlobMigration:
+    """update_blob migration: byte-identity + correct kwarg shape (quota, no provenance, store-only)."""
+
+    def test_get_tool_definitions_emits_expected_update_blob_definition(self) -> None:
+        definitions = get_tool_definitions()
+        update_blob = next(d for d in definitions if d["name"] == "update_blob")
+        assert update_blob == _EXPECTED_UPDATE_BLOB_DEFINITION
+
+    def test_declaration_handler_matches(self) -> None:
+        assert _UPDATE_BLOB_DECLARATION.handler is _execute_update_blob
+
+    def test_declaration_kind_is_blob_mutation(self) -> None:
+        assert _UPDATE_BLOB_DECLARATION.kind is ToolKind.BLOB_MUTATION
+
+    def test_declaration_blob_kwarg_shape(self) -> None:
+        """update_blob consumes quota but NOT provenance, and is blob-store-only."""
+        assert _UPDATE_BLOB_DECLARATION.needs_blob_quota is True
+        assert _UPDATE_BLOB_DECLARATION.needs_blob_provenance is False
+        assert _UPDATE_BLOB_DECLARATION.blob_store_only is True
+
+
+class TestDeleteBlobMigration:
+    """delete_blob migration: byte-identity + correct kwarg shape (no quota, no provenance, store-only)."""
+
+    def test_get_tool_definitions_emits_expected_delete_blob_definition(self) -> None:
+        definitions = get_tool_definitions()
+        delete_blob = next(d for d in definitions if d["name"] == "delete_blob")
+        assert delete_blob == _EXPECTED_DELETE_BLOB_DEFINITION
+
+    def test_declaration_handler_matches(self) -> None:
+        assert _DELETE_BLOB_DECLARATION.handler is _execute_delete_blob
+
+    def test_declaration_blob_kwarg_shape(self) -> None:
+        """delete_blob removes a row; no quota or provenance kwargs, but blob-store-only."""
+        assert _DELETE_BLOB_DECLARATION.needs_blob_quota is False
+        assert _DELETE_BLOB_DECLARATION.needs_blob_provenance is False
+        assert _DELETE_BLOB_DECLARATION.blob_store_only is True
+
+
+class TestSetSourceFromBlobMigration:
+    """set_source_from_blob migration: byte-identity + correct kwarg shape (no blob-store-only)."""
+
+    def test_get_tool_definitions_emits_expected_set_source_from_blob_definition(self) -> None:
+        from elspeth.web.composer.tools._common import (
+            _DEFAULT_SOURCE_VALIDATION_FAILURE,
+            _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+        )
+
+        expected = {
+            "name": "set_source_from_blob",
+            "description": (
+                "Wire a blob as the pipeline source. Resolves the blob's storage path "
+                "internally and infers the source plugin from its MIME type. "
+                "Use 'options' for plugin-specific config (e.g., 'column' and 'schema' for text sources)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "blob_id": {"type": "string", "description": "Blob ID to use as source."},
+                    "plugin": {
+                        "type": "string",
+                        "description": "Source plugin override (e.g. 'csv'). Inferred from MIME type if omitted.",
+                    },
+                    "on_success": {
+                        "type": "string",
+                        "description": (
+                            "Connection-name string the source PUBLISHES. Some downstream consumer "
+                            "(node 'input' or output 'sink_name') MUST equal this value. Despite the "
+                            "field name, this is NOT a node id — connections match by string, not by "
+                            "topology."
+                        ),
+                        "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
+                    },
+                    "on_validation_failure": {
+                        "type": "string",
+                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+                        "default": _DEFAULT_SOURCE_VALIDATION_FAILURE,
+                    },
+                    "options": {
+                        "type": "object",
+                        "description": (
+                            "Plugin-specific config (merged with blob path). Required fields vary by plugin: "
+                            "text sources need 'column' (output field name) and 'schema' (e.g., {mode: 'observed'})."
+                        ),
+                    },
+                },
+                "required": ["blob_id", "on_success"],
+            },
+        }
+        definitions = get_tool_definitions()
+        emitted = next(d for d in definitions if d["name"] == "set_source_from_blob")
+        assert emitted == expected
+
+    def test_declaration_handler_matches(self) -> None:
+        assert _SET_SOURCE_FROM_BLOB_DECLARATION.handler is _execute_set_source_from_blob
+
+    def test_declaration_kind_is_blob_mutation(self) -> None:
+        """Despite changing CompositionState, set_source_from_blob is dispatched via the blob path
+        (its handler reads session_engine + session_id from ToolContext to resolve the blob row)."""
+        assert _SET_SOURCE_FROM_BLOB_DECLARATION.kind is ToolKind.BLOB_MUTATION
+
+    def test_declaration_blob_kwarg_shape(self) -> None:
+        """set_source_from_blob does not WRITE a blob — no quota/provenance; not store-only (it
+        advances CompositionState by setting the source)."""
+        assert _SET_SOURCE_FROM_BLOB_DECLARATION.needs_blob_quota is False
+        assert _SET_SOURCE_FROM_BLOB_DECLARATION.needs_blob_provenance is False
+        assert _SET_SOURCE_FROM_BLOB_DECLARATION.blob_store_only is False
+
+
+class TestApplyPipelineRecipeMigration:
+    """apply_pipeline_recipe migration: byte-identity + correct kwarg shape (quota+provenance,
+    NOT blob-store-only because it replaces CompositionState)."""
+
+    def test_get_tool_definitions_emits_expected_apply_pipeline_recipe_definition(self) -> None:
+        definitions = get_tool_definitions()
+        emitted = next(d for d in definitions if d["name"] == "apply_pipeline_recipe")
+        assert emitted == _EXPECTED_APPLY_PIPELINE_RECIPE_DEFINITION
+
+    def test_declaration_handler_matches(self) -> None:
+        assert _APPLY_PIPELINE_RECIPE_DECLARATION.handler is _execute_apply_pipeline_recipe
+
+    def test_declaration_kind_is_blob_mutation(self) -> None:
+        assert _APPLY_PIPELINE_RECIPE_DECLARATION.kind is ToolKind.BLOB_MUTATION
+
+    def test_declaration_blob_kwarg_shape(self) -> None:
+        """apply_pipeline_recipe may persist a recipe-scaffolded blob (needs quota+provenance) but
+        advances CompositionState (NOT blob-store-only)."""
+        assert _APPLY_PIPELINE_RECIPE_DECLARATION.needs_blob_quota is True
+        assert _APPLY_PIPELINE_RECIPE_DECLARATION.needs_blob_provenance is True
+        assert _APPLY_PIPELINE_RECIPE_DECLARATION.blob_store_only is False
+
+
+class TestStep2RegistryAggregation:
+    """All five blob-mutation declarations are aggregated into _REGISTERED_TOOLS at import time."""
+
+    def test_all_blob_mutation_tools_are_declared(self) -> None:
+        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+
+        declared = {d.name for d in _REGISTERED_TOOLS if d.kind is ToolKind.BLOB_MUTATION}
+        expected = {
+            "create_blob",
+            "update_blob",
+            "delete_blob",
+            "set_source_from_blob",
+            "apply_pipeline_recipe",
+        }
+        assert declared == expected
+
+    def test_registered_tools_count_is_five(self) -> None:
+        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+
+        # Step 2 should register exactly the five blob-mutation tools; no other tier yet.
+        assert len(_REGISTERED_TOOLS) == 5
 
 
 class TestToolDeclarationInvariants:

@@ -11,11 +11,10 @@ Hosts:
 - Blob DTOs (``BlobToolRecord`` / ``BlobCreatePayload`` / ``_PreparedBlobCreate``)
   and in-transaction signal exceptions (``_BlobQuotaExceededInTxn`` /
   ``_BlobUpdateBlockedByActiveRun``).
-- Kwarg-shape frozensets (``_BLOB_QUOTA_MUTATION_TOOLS`` /
-  ``_BLOB_PROVENANCE_MUTATION_TOOLS``) describing which extended kwargs the
-  dispatch path threads into each blob handler. Tool-classification name sets
-  and predicates live in ``elspeth.web.composer.tools.discovery``; the trailing
-  comment in this file points to that module.
+- Per-tool blob-kwarg-shape data lives on ``ToolDeclaration``
+  (``needs_blob_quota`` / ``needs_blob_provenance``). Tool-classification name
+  sets and predicates live in ``elspeth.web.composer.tools.discovery``; the
+  trailing comment in this file points to that module.
 
 Patch-target stability: tests that bind ``_BLOB_QUOTA_BYTES`` /
 ``_check_blob_quota`` / ``_sync_get_blob`` by full dotted path must target this
@@ -63,6 +62,10 @@ from elspeth.web.composer.tools._common import (
     ToolResult,
     _discovery_result,
     _failure_result,
+)
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
 )
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
 
@@ -564,6 +567,51 @@ def _execute_create_blob(
         return _failure_result(state, quota_error)
 
     return _discovery_result(state, _blob_create_payload(prepared))
+
+
+_CREATE_BLOB_DECLARATION = ToolDeclaration(
+    name="create_blob",
+    handler=_execute_create_blob,
+    kind=ToolKind.BLOB_MUTATION,
+    description=(
+        "Create a new file (blob) from inline content. "
+        "Use this to create seed input files (URLs, JSON, CSV snippets) "
+        "mid-conversation without requiring manual upload."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": "Filename for the blob (e.g. 'urls.csv', 'seed.json').",
+            },
+            "mime_type": {
+                "type": "string",
+                "enum": [
+                    "text/plain",
+                    "application/json",
+                    "text/csv",
+                    "application/x-jsonlines",
+                    "application/jsonl",
+                    "text/jsonl",
+                ],
+                "description": "MIME type of the content.",
+            },
+            "content": {
+                "type": "string",
+                "description": "The file content as a string.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional description of the file's purpose.",
+            },
+        },
+        "required": ["filename", "mime_type", "content"],
+    },
+    needs_blob_quota=True,
+    needs_blob_provenance=True,
+    blob_store_only=True,
+)
 
 
 # Per-session mutex guarding blob-file/DB consistency.
@@ -1217,25 +1265,19 @@ def _execute_get_blob_content(
     )
 
 
-_BLOB_QUOTA_MUTATION_TOOLS: frozenset[str] = frozenset(
-    {
-        "create_blob",
-        "update_blob",
-        "apply_pipeline_recipe",
-    }
-)
-
-_BLOB_PROVENANCE_MUTATION_TOOLS: frozenset[str] = frozenset(
-    {
-        "create_blob",
-        "apply_pipeline_recipe",
-    }
-)
-
 # ``_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES`` and the matching predicate
 # ``is_blob_store_only_mutation_tool`` are declared in
-# ``elspeth.web.composer.tools.discovery``. Import that module to get the
-# canonical declaration. The ``_BLOB_QUOTA_MUTATION_TOOLS`` and
-# ``_BLOB_PROVENANCE_MUTATION_TOOLS`` frozensets above are kwarg-shape
-# distinctions (which dispatch path receives which extended kwargs), not
-# tool-classification sets, so they stay here next to the blob handlers.
+# ``elspeth.web.composer.tools.discovery``. Per-tool blob-kwarg-shape data
+# (``needs_blob_quota`` / ``needs_blob_provenance``) lives on each
+# ``ToolDeclaration`` next to the handler that consumes it; the dispatcher
+# carries the full ``ToolContext`` to every handler, so there is no
+# dispatch-time membership check to gate.
+
+
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (_CREATE_BLOB_DECLARATION,)
+"""Every tool declared in this module, in stable order.
+
+``_dispatch.py`` aggregates this tuple from every plane to build the
+registered-tool universe. Tests that import this module directly see the
+same TOOLS_IN_MODULE that production sees; the aggregation logic lives at
+the consumer site, not in a module-level side effect."""

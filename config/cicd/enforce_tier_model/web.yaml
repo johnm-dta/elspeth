@@ -2128,28 +2128,28 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/blobs.py:R1:_prepare_blob_create:fp=977992ac10ad9640
+- key: web/composer/tools/blobs.py:R1:_prepare_blob_create:fp=d4374e536c80d8d4
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: description=arguments.get("description"),'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=6bb82f46d96b8250
+- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=35581e83d64d0fbc
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: lock = _SESSION_BLOB_LOCKS.get(session_id)'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=54f2a423966305da
+- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=bd49b309110177be
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: lock = _SESSION_BLOB_LOCKS.get(session_id)'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/blobs.py:R6:_execute_update_blob:fp=19ffd22ba1a1b63d
+- key: web/composer/tools/blobs.py:R6:_execute_update_blob:fp=e9aa45672604f5f2
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Exception swallowed without re-raise or explicit
@@ -2157,7 +2157,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=c6645125ea900f8f
+- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=fb1246f247476384
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Exception swallowed without re-raise or explicit
@@ -2593,7 +2593,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=7931bd4d1292eced
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=7a64bf77ebb8c7da
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: handler = all_handlers.get(tool_name)'

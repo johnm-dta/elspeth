@@ -27,6 +27,9 @@ from elspeth.web.composer.tools._common import (
     should_augment_with_plugin_schemas,
 )
 from elspeth.web.composer.tools.blobs import (
+    TOOLS_IN_MODULE as _BLOBS_TOOLS_IN_MODULE,
+)
+from elspeth.web.composer.tools.blobs import (
     _execute_create_blob,
     _execute_delete_blob,
     _execute_get_blob_content,
@@ -34,9 +37,16 @@ from elspeth.web.composer.tools.blobs import (
     _handle_get_blob_metadata,
     _handle_list_blobs,
 )
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
+    assert_unique_names,
+    derive_tool_definitions_by_name,
+)
 from elspeth.web.composer.tools.discovery import (
     _BLOB_DISCOVERY_TOOL_NAMES,
     _BLOB_MUTATION_TOOL_NAMES,
+    _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES,
     _CACHEABLE_DISCOVERY_TOOL_NAMES,
     _DISCOVERY_TOOL_NAMES,
     _MUTATION_TOOL_NAMES,
@@ -92,6 +102,24 @@ from elspeth.web.composer.tools.transforms import (
     _handle_upsert_edge,
     _handle_upsert_node,
 )
+
+# ---------------------------------------------------------------------------
+# Registered tool declarations
+#
+# This is the single aggregation site for every plane's TOOLS_IN_MODULE tuple
+# (ticket elspeth-6c9972ccbf). Aggregation lives here — not in
+# ``declarations.py`` — to break the import cycle that would otherwise let
+# a plane module observe an empty registry during partial-module-load.
+#
+# Step 1 of the migration registers only ``blobs.TOOLS_IN_MODULE``; Steps 2/3
+# extend the tuple plane-by-plane. ``assert_unique_names`` fires at import
+# time so two declarations with the same name fail the build, not silently
+# at dispatch.
+# ---------------------------------------------------------------------------
+
+_REGISTERED_TOOLS: Final[tuple[ToolDeclaration, ...]] = (*_BLOBS_TOOLS_IN_MODULE,)
+assert_unique_names(_REGISTERED_TOOLS)
+_TOOL_DEFS_BY_NAME: Final[Mapping[str, dict[str, Any]]] = derive_tool_definitions_by_name(_REGISTERED_TOOLS)
 
 
 def get_tool_definitions() -> list[dict[str, Any]]:
@@ -916,42 +944,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "required": ["blob_id", "on_success"],
             },
         },
-        {
-            "name": "create_blob",
-            "description": "Create a new file (blob) from inline content. "
-            "Use this to create seed input files (URLs, JSON, CSV snippets) "
-            "mid-conversation without requiring manual upload.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filename": {
-                        "type": "string",
-                        "description": "Filename for the blob (e.g. 'urls.csv', 'seed.json').",
-                    },
-                    "mime_type": {
-                        "type": "string",
-                        "enum": [
-                            "text/plain",
-                            "application/json",
-                            "text/csv",
-                            "application/x-jsonlines",
-                            "application/jsonl",
-                            "text/jsonl",
-                        ],
-                        "description": "MIME type of the content.",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The file content as a string.",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Optional description of the file's purpose.",
-                    },
-                },
-                "required": ["filename", "mime_type", "content"],
-            },
-        },
+        _TOOL_DEFS_BY_NAME["create_blob"],
         {
             "name": "update_blob",
             "description": "Update the content of an existing blob (file). Overwrites the file content while preserving metadata.",
@@ -1248,6 +1241,52 @@ assert set(_SESSION_AWARE_TOOL_HANDLERS) == _SESSION_AWARE_TOOL_NAMES, (
 assert set(_DISCOVERY_TOOLS) >= _CACHEABLE_DISCOVERY_TOOL_NAMES, (
     f"Cacheable tools not in discovery registry: {_CACHEABLE_DISCOVERY_TOOL_NAMES - set(_DISCOVERY_TOOLS)}"
 )
+
+
+# ---------------------------------------------------------------------------
+# Declaration ↔ hand-maintained registry parity (migration safety net)
+#
+# For every ToolDeclaration registered in this build, assert that the
+# declaration's data agrees with the still-canonical hand-maintained
+# surfaces for that tool (registry handler dict, blob-store-only set).
+# A mismatch fails the build before any dispatch runs — protecting against
+# a declaration that drifts away from the registry partway through the
+# migration. Once every tool has a declaration (Step 3/4), the assertion
+# inverts: the hand-maintained registries are decommissioned and the
+# declarations become the canonical source the dispatcher reads.
+# ---------------------------------------------------------------------------
+
+_REGISTRY_BY_KIND: Final[Mapping[ToolKind, Mapping[str, ToolHandler]]] = {
+    ToolKind.DISCOVERY: _DISCOVERY_TOOLS,
+    ToolKind.MUTATION: _MUTATION_TOOLS,
+    ToolKind.BLOB_DISCOVERY: _BLOB_DISCOVERY_TOOLS,
+    ToolKind.BLOB_MUTATION: _BLOB_MUTATION_TOOLS,
+    ToolKind.SECRET_DISCOVERY: _SECRET_DISCOVERY_TOOLS,
+    ToolKind.SECRET_MUTATION: _SECRET_MUTATION_TOOLS,
+}
+
+for _decl in _REGISTERED_TOOLS:
+    if _decl.kind is ToolKind.SESSION_AWARE:
+        # Session-aware handlers live in ``_SESSION_AWARE_TOOL_HANDLERS`` and
+        # are dispatched outside ``execute_tool``; their parity assertion
+        # belongs in a later migration step.
+        continue
+    _registry = _REGISTRY_BY_KIND[_decl.kind]
+    assert _decl.name in _registry, (
+        f"ToolDeclaration({_decl.name!r}) has no entry in the hand-maintained registry for {_decl.kind.value!r}."
+    )
+    assert _registry[_decl.name] is _decl.handler, (
+        f"ToolDeclaration({_decl.name!r}).handler diverges from the hand-maintained registry's handler for {_decl.kind.value!r}."
+    )
+    if _decl.kind is ToolKind.BLOB_MUTATION:
+        assert (_decl.name in _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES) == _decl.blob_store_only, (
+            f"ToolDeclaration({_decl.name!r}).blob_store_only "
+            f"({_decl.blob_store_only}) disagrees with "
+            f"_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES membership "
+            f"({_decl.name in _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES})."
+        )
+
+del _decl  # keep module namespace clean
 
 
 def _inject_prior_validation(

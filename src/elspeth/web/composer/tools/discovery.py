@@ -11,11 +11,11 @@ before any compose() call could see it.
 
 Layering note: ``discovery.py`` is a leaf module — it imports nothing from
 other tool-plane files. The plane files and ``_dispatch.py`` import from
-here. ``_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES`` is centralised here even
-though the kwarg-shape sets (``_BLOB_QUOTA_MUTATION_TOOLS``,
-``_BLOB_PROVENANCE_MUTATION_TOOLS``) remain in ``blobs.py`` — those describe
-*how* a blob handler is dispatched (which extended kwargs it receives), not
-*what kind* of tool it is.
+here. ``_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES`` is centralised here as a
+tool-classification set. Per-tool blob-kwarg-shape data
+(``needs_blob_quota`` / ``needs_blob_provenance``) lives on each
+``ToolDeclaration`` in ``tools/declarations.py`` next to the handler that
+consumes it.
 """
 
 from __future__ import annotations

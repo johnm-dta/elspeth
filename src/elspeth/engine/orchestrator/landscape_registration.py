@@ -27,6 +27,7 @@ from elspeth.contracts.errors import FrameworkBugError, OrchestrationInvariantEr
 from elspeth.contracts.types import NodeID
 
 if TYPE_CHECKING:
+    from elspeth.contracts import SourceProtocol
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.landscape.factory import RecorderFactory
@@ -133,8 +134,9 @@ def record_schema_contract(
     factory: RecorderFactory,
     run_id: str,
     source_id: NodeID,
-    config: PipelineConfig,
     ctx: PluginContext,
+    *,
+    active_source: SourceProtocol,
 ) -> bool:
     """Record source schema contract if available.
 
@@ -145,7 +147,7 @@ def record_schema_contract(
     Returns:
         True if schema contract was recorded, False otherwise.
     """
-    schema_contract = config.source.get_schema_contract()
+    schema_contract = active_source.get_schema_contract()
     if schema_contract is None:
         return False
 

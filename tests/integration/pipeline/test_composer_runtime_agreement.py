@@ -224,11 +224,13 @@ class TestComposerRuntimeAgreement:
             )
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin=source_plugin,
-                on_success=source_on_success,
-                options={**source_options, "on_validation_failure": "discard"},
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin=source_plugin,
+                    on_success=source_on_success,
+                    options={**source_options, "on_validation_failure": "discard"},
+                )
+            },
             transforms=transforms,
             aggregations=aggregations,
             sinks={
@@ -245,8 +247,8 @@ class TestComposerRuntimeAgreement:
         """Build a runtime graph from full settings through the production path."""
         plugins = instantiate_plugins_from_config(config)
         return ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -953,16 +955,18 @@ class TestComposerRuntimeAgreement:
         )
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="text",
-                on_success="gate_in",
-                options={
-                    "path": str(text_path),
-                    "column": "line",
-                    "schema": {"mode": "observed"},
-                    "on_validation_failure": "discard",
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="text",
+                    on_success="gate_in",
+                    options={
+                        "path": str(text_path),
+                        "column": "line",
+                        "schema": {"mode": "observed"},
+                        "on_validation_failure": "discard",
+                    },
+                )
+            },
             gates=[
                 GateSettings(
                     name="fork_gate",
@@ -1109,15 +1113,17 @@ class TestComposerRuntimeAgreement:
         assert sink_contract.satisfied is True
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="gate_in",
-                options={
-                    "path": str(csv_path),
-                    "schema": {"mode": "fixed", "fields": ["id: int", "value: int"]},
-                    "on_validation_failure": "discard",
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="gate_in",
+                    options={
+                        "path": str(csv_path),
+                        "schema": {"mode": "fixed", "fields": ["id: int", "value: int"]},
+                        "on_validation_failure": "discard",
+                    },
+                )
+            },
             transforms=[
                 TransformSettings(
                     name="pt_after_merge",
@@ -1295,15 +1301,17 @@ class TestComposerRuntimeAgreement:
         assert not any(contract.to_id == "output:main" for contract in composer_result.edge_contracts)
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="gate_in",
-                options={
-                    "path": str(csv_path),
-                    "schema": {"mode": "fixed", "fields": ["id: int", "value: int"]},
-                    "on_validation_failure": "discard",
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="gate_in",
+                    options={
+                        "path": str(csv_path),
+                        "schema": {"mode": "fixed", "fields": ["id: int", "value: int"]},
+                        "on_validation_failure": "discard",
+                    },
+                )
+            },
             transforms=[
                 TransformSettings(
                     name="branch_b",
@@ -1644,8 +1652,8 @@ class TestComposerRuntimeRouteTargetAgreement:
         Returns the str(RouteValidationError) message."""
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1655,7 +1663,7 @@ class TestComposerRuntimeRouteTargetAgreement:
         graph.validate()  # Structural DAG check — must pass for these cases
         with pytest.raises(RouteValidationError) as exc_info:
             assemble_and_validate_pipeline_config(
-                source=plugins.source,
+                sources=plugins.sources,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -1732,11 +1740,13 @@ class TestComposerRuntimeRouteTargetAgreement:
 
         # Runtime: equivalent ElspethSettings.
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="agg1",
-                options={"path": str(csv_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="agg1",
+                    options={"path": str(csv_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
+                )
+            },
             aggregations=[
                 AggregationSettings(
                     name="agg1",
@@ -1820,11 +1830,13 @@ class TestComposerRuntimeRouteTargetAgreement:
         assert "missing_error_sink" in composer_messages
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="t1",
-                options={"path": str(csv_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="t1",
+                    options={"path": str(csv_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
+                )
+            },
             transforms=[
                 TransformSettings(
                     name="t1",
@@ -1849,8 +1861,8 @@ class TestComposerRuntimeRouteTargetAgreement:
         plugins = instantiate_plugins_from_config(config)
         with pytest.raises(GraphValidationError) as runtime_exc:
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -1886,15 +1898,17 @@ class TestComposerRuntimeRouteTargetAgreement:
         composer_detail = self._composer_route_target_failure(state, tmp_path)
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="main",
-                options={
-                    "path": str(csv_path),
-                    "schema": {"mode": "observed"},
-                    "on_validation_failure": "missing_quarantine_sink",
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="main",
+                    options={
+                        "path": str(csv_path),
+                        "schema": {"mode": "observed"},
+                        "on_validation_failure": "missing_quarantine_sink",
+                    },
+                )
+            },
             sinks={
                 "main": SinkSettings(
                     plugin="csv",
@@ -1943,11 +1957,13 @@ class TestComposerRuntimeRouteTargetAgreement:
         assert "missing_failsink" in composer_messages
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="main",
-                options={"path": str(csv_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="main",
+                    options={"path": str(csv_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
+                )
+            },
             sinks={
                 "main": SinkSettings(
                     plugin="csv",
@@ -1959,8 +1975,8 @@ class TestComposerRuntimeRouteTargetAgreement:
         plugins = instantiate_plugins_from_config(config)
         with pytest.raises(GraphValidationError) as runtime_exc:
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -2029,11 +2045,13 @@ class TestComposerRuntimeRouteTargetAgreement:
         assert "missing_route_sink" in composer_messages
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="g1",
-                options={"path": str(csv_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="g1",
+                    options={"path": str(csv_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
+                )
+            },
             gates=[
                 GateSettings(
                     name="g1",
@@ -2053,8 +2071,8 @@ class TestComposerRuntimeRouteTargetAgreement:
         plugins = instantiate_plugins_from_config(config)
         with pytest.raises(GraphValidationError) as runtime_exc:
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -2123,11 +2141,13 @@ class TestComposerRuntimeRouteTargetAgreement:
 
         # Runtime: must also assemble cleanly, no RouteValidationError.
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="agg1",
-                options={"path": str(csv_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="agg1",
+                    options={"path": str(csv_path), "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
+                )
+            },
             aggregations=[
                 AggregationSettings(
                     name="agg1",
@@ -2149,8 +2169,8 @@ class TestComposerRuntimeRouteTargetAgreement:
         )
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2160,7 +2180,7 @@ class TestComposerRuntimeRouteTargetAgreement:
         graph.validate()
         # Should not raise.
         assemble_and_validate_pipeline_config(
-            source=plugins.source,
+            sources=plugins.sources,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2416,7 +2436,7 @@ class TestComposerRuntimeRunStatusAgreement:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -2441,7 +2461,7 @@ class TestComposerRuntimeRunStatusAgreement:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -2474,7 +2494,7 @@ class TestComposerRuntimeRunStatusAgreement:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -2504,7 +2524,7 @@ class TestComposerRuntimeRunStatusAgreement:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -2538,7 +2558,7 @@ class TestComposerRuntimeRunStatusAgreement:
         quarantine_sink = CollectSink(name="quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -2587,7 +2607,7 @@ class TestComposerRuntimeRunStatusAgreement:
         low_sink = CollectSink(name="low_priority")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={
                 "high_priority": as_sink(high_sink),
@@ -2803,8 +2823,8 @@ class TestComposerRuntimeRunCompletionAgreement:
         from tests.fixtures.factories import wire_transforms as _wire_transforms
 
         graph = _ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=_wire_transforms(
                 [as_transform(aggregate_transform)],
                 source_connection="source_out",
@@ -2832,7 +2852,7 @@ class TestComposerRuntimeRunCompletionAgreement:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(aggregate_transform)],
             sinks={"output": as_sink(sink)},
             aggregation_settings={NodeID(transform_node_id): agg_settings},

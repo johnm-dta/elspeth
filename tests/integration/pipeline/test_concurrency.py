@@ -36,7 +36,7 @@ def _build_traversal_from_graph() -> tuple[NodeID, str, DAGTraversalContext]:
     to avoid BUG-LINEAGE-01 manual construction.
     """
     source, _, _, graph = build_linear_pipeline([{"id": 1}])
-    source_node_id = graph.get_source()
+    source_node_id = graph.get_sources()[0]
     assert source_node_id is not None
 
     node_to_next: dict[NodeID, NodeID | None] = {}
@@ -46,7 +46,6 @@ def _build_traversal_from_graph() -> tuple[NodeID, str, DAGTraversalContext]:
     traversal = DAGTraversalContext(
         node_step_map=graph.build_step_map(),
         node_to_plugin={},
-        first_transform_node_id=graph.get_first_transform_node(),
         node_to_next=node_to_next,
         coalesce_node_map=graph.get_coalesce_id_map(),
         branch_first_node=graph.get_branch_first_nodes(),
@@ -206,8 +205,8 @@ class TestOrchestratorThreadsMaxWorkersThroughRowProcessor:
         sink = CollectSink(name="simple_sink")
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="output", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="output", options={})},
             transforms=[],
             sinks={"output": as_sink(sink)},
             aggregations={},
@@ -217,7 +216,7 @@ class TestOrchestratorThreadsMaxWorkersThroughRowProcessor:
         from elspeth.engine.orchestrator import PipelineConfig
 
         pipeline_config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"output": as_sink(sink)},
             gates=[],

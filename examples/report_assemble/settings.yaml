@@ -1,14 +1,15 @@
-source:
-  plugin: text
-  on_success: lines
-  options:
-    path: examples/report_assemble/input.txt
-    column: line
-    strip_whitespace: false
-    skip_blank_lines: false
-    schema:
-      mode: observed
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: text
+    on_success: lines
+    options:
+      path: examples/report_assemble/input.txt
+      column: line
+      strip_whitespace: false
+      skip_blank_lines: false
+      schema:
+        mode: observed
+      on_validation_failure: discard
 aggregations:
 - name: pages
   plugin: report_assemble

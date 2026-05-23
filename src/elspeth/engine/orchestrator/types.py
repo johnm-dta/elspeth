@@ -142,9 +142,14 @@ class PipelineConfig:
     The ``frozen=True`` decorator prevents field reassignment after
     construction, ensuring pipeline config is immutable during a run.
 
+    Per ADR-025 Decision §1, the pipeline source surface is plural by
+    contract and by code. Callers iterate ``sources.items()`` and pass
+    the active ``SourceProtocol`` as an explicit parameter to each
+    per-source method; PipelineConfig itself no longer exposes a
+    "current source" pseudo-attribute.
+
     Attributes:
-        source: Compatibility view of the first source plugin instance
-        sources: Source plugin instances keyed by stable source name
+        sources: Source plugin instances keyed by stable source name (non-empty).
         transforms: Transform plugin instances (processed in DAG order)
         sinks: Dict of sink_name -> sink plugin instance
         config: Additional run configuration
@@ -153,22 +158,21 @@ class PipelineConfig:
         coalesce_settings: Coalesce configurations for merging fork paths
     """
 
-    source: SourceProtocol
+    sources: Mapping[str, SourceProtocol]
     transforms: Sequence[RowPlugin]
     sinks: Mapping[str, SinkProtocol]
-    sources: Mapping[str, SourceProtocol] = field(default_factory=dict)
     config: Mapping[str, Any] = field(default_factory=dict)
     gates: Sequence[GateSettings] = field(default_factory=list)
     aggregation_settings: Mapping[str, AggregationSettings] = field(default_factory=dict)
     coalesce_settings: Sequence[CoalesceSettings] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if not self.sinks:
-            from elspeth.contracts.errors import OrchestrationInvariantError
+        from elspeth.contracts.errors import OrchestrationInvariantError
 
+        if not self.sinks:
             raise OrchestrationInvariantError("PipelineConfig requires at least one sink")
         if not self.sources:
-            object.__setattr__(self, "sources", {"source": self.source})
+            raise OrchestrationInvariantError("PipelineConfig requires at least one source")
         # Freeze mutable container fields. freeze_fields deep-freezes recursively,
         # converting nested dicts/lists to MappingProxyType/tuple throughout.
         # transforms/gates/coalesce_settings contain frozen dataclass instances

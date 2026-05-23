@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -13,7 +12,6 @@ from sqlalchemy.exc import IntegrityError
 
 from elspeth.contracts import NodeType, RoutingMode
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.canonical import canonical_json
 from elspeth.core.config import SourceSettings, load_settings_from_yaml_string
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 from elspeth.core.landscape.schema import (
@@ -61,9 +59,13 @@ transforms:
     assert settings.sources["enrichment_json"].on_success == "normalize"
 
 
-def test_legacy_source_is_normalized_into_single_named_source() -> None:
-    settings = load_settings_from_yaml_string(
-        """
+def test_legacy_singular_source_yaml_is_rejected() -> None:
+    """ADR-025 §1: a YAML config that uses 'source:' instead of 'sources:'
+    is a configuration error, not a transition shim activation. The
+    pre-pydantic top-level key check now lists ``source`` as unknown."""
+    with pytest.raises(ValueError, match=r"Unknown configuration keys.*source"):
+        load_settings_from_yaml_string(
+            """
 source:
   plugin: csv
   on_success: output
@@ -72,27 +74,69 @@ sinks:
     plugin: json
     on_write_failure: discard
 """
+        )
+
+
+def test_legacy_singular_source_pydantic_construct_is_rejected() -> None:
+    """ADR-025 §1: a raw config dict that carries the legacy ``source`` key
+    is rejected by the ``reject_legacy_source_field`` mode-before validator."""
+    from pydantic import TypeAdapter
+    from pydantic import ValidationError as PydanticValidationError
+
+    from elspeth.core.config import ElspethSettings
+
+    adapter = TypeAdapter(ElspethSettings)
+    with pytest.raises(PydanticValidationError, match="deleted singular 'source:' field"):
+        adapter.validate_python(
+            {
+                "source": {"plugin": "csv", "on_success": "output"},
+                "sinks": {"output": {"plugin": "csv", "on_write_failure": "discard"}},
+            }
+        )
+
+
+def test_settings_round_trip_plural_only() -> None:
+    """ADR-025 §1: ElspethSettings carries only the plural 'sources' field."""
+    settings = load_settings_from_yaml_string(
+        """
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+"""
+    )
+    assert list(settings.sources) == ["primary"]
+    assert not hasattr(type(settings), "source") or "source" not in type(settings).model_fields
+
+
+def test_elspeth_settings_has_no_singular_source_field() -> None:
+    """ADR-025 §1: the singular 'source' field is deleted from ElspethSettings."""
+    from elspeth.core.config import ElspethSettings
+
+    assert "source" not in ElspethSettings.model_fields, (
+        "ElspethSettings still exposes a singular 'source' field; per ADR-025 §1 this transition shim is deleted."
     )
 
-    assert list(settings.sources) == ["source"]
-    assert settings.source == settings.sources["source"]
 
-
-def test_legacy_single_source_graph_preserves_rc52_node_identity() -> None:
+def test_build_execution_graph_rejects_singular_kwargs() -> None:
+    """ADR-025 §2: build_execution_graph no longer accepts source=/source_settings=."""
     from tests.fixtures.plugins import CollectSink, ListSource
 
     source = ListSource([{"id": 1}], name="list_source", on_success="output")
-    graph = ExecutionGraph.from_plugin_instances(
-        source=source,
-        source_settings=SourceSettings(plugin="list_source", on_success="output"),
-        sinks={"output": CollectSink("output")},
-    )
-
-    source_id = graph.get_sources()[0]
-    expected_hash = hashlib.sha256(canonical_json(source.config).encode()).hexdigest()[:12]
-
-    assert str(source_id) == f"source_list_source_{expected_hash}"
-    assert "source_name" not in graph.get_node_info(source_id).config
+    settings = SourceSettings(plugin="list_source", on_success="output")
+    # Use **kwargs unpacking so a co-evolving migration script that mechanically
+    # rewrites ``source=X`` into ``sources={"primary": X}`` cannot mask the
+    # deletion-targeted assertion.
+    legacy_kwargs = {"source": source, "source_settings": settings}
+    with pytest.raises(TypeError, match="unexpected keyword argument 'source'"):
+        ExecutionGraph.from_plugin_instances(
+            sinks={"output": CollectSink("output")},
+            **legacy_kwargs,  # type: ignore[arg-type]
+        )
 
 
 def test_explicit_named_sources_keep_source_name_in_identity_and_audit_config() -> None:
@@ -171,8 +215,11 @@ sinks:
 
     assert list(bundle.sources) == ["orders", "refunds"]
     assert list(bundle.source_settings_map) == ["orders", "refunds"]
-    assert bundle.source is bundle.sources["orders"]
-    assert bundle.source_settings == bundle.source_settings_map["orders"]
+    # Per ADR-025 §1 PluginBundle exposes only the plural surfaces.
+    with pytest.raises(AttributeError):
+        bundle.source  # type: ignore[attr-defined]  # noqa: B018
+    with pytest.raises(AttributeError):
+        bundle.source_settings  # type: ignore[attr-defined]  # noqa: B018
     with pytest.raises(TypeError):
         bundle.sources["late"] = bundle.sources["orders"]  # type: ignore[index]
 
@@ -323,7 +370,6 @@ sinks:
 
     pipeline_config = assemble_and_validate_pipeline_config(
         sources=bundle.sources,
-        source=bundle.source,
         transforms=bundle.transforms,
         sinks=bundle.sinks,
         aggregations=bundle.aggregations,
@@ -332,7 +378,9 @@ sinks:
     )
 
     assert list(pipeline_config.sources) == ["orders", "refunds"]
-    assert pipeline_config.source is pipeline_config.sources["orders"]
+    # Per ADR-025 §1 PipelineConfig exposes only the plural ``sources`` field.
+    with pytest.raises(AttributeError):
+        pipeline_config.source  # type: ignore[attr-defined]  # noqa: B018
 
 
 def test_graph_allows_multiple_source_roots_when_reachable() -> None:
@@ -765,7 +813,6 @@ sinks:
         queues=settings.queues,
     )
     config = assemble_and_validate_pipeline_config(
-        source=bundle.source,
         sources=bundle.sources,
         transforms=bundle.transforms,
         sinks=bundle.sinks,
@@ -890,7 +937,6 @@ sinks:
         queues=settings.queues,
     )
     config = assemble_and_validate_pipeline_config(
-        source=bundle.source,
         sources=bundle.sources,
         transforms=bundle.transforms,
         sinks=bundle.sinks,
@@ -1001,7 +1047,6 @@ sinks:
         queues=settings.queues,
     )
     config = assemble_and_validate_pipeline_config(
-        source=bundle.source,
         sources=bundle.sources,
         transforms=bundle.transforms,
         sinks=bundle.sinks,
@@ -1094,7 +1139,6 @@ sinks:
         queues=settings.queues,
     )
     config = assemble_and_validate_pipeline_config(
-        source=bundle.source,
         sources=bundle.sources,
         transforms=bundle.transforms,
         sinks=bundle.sinks,
@@ -1189,7 +1233,6 @@ sinks:
         queues=settings.queues,
     )
     config = assemble_and_validate_pipeline_config(
-        source=bundle.source,
         sources=bundle.sources,
         transforms=bundle.transforms,
         sinks=bundle.sinks,
@@ -1283,7 +1326,6 @@ sinks:
         queues=settings.queues,
     )
     config = assemble_and_validate_pipeline_config(
-        source=bundle.source,
         sources=bundle.sources,
         transforms=bundle.transforms,
         sinks=bundle.sinks,

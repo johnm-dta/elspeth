@@ -10,7 +10,7 @@ import re
 import warnings
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -1356,13 +1356,9 @@ class ElspethSettings(BaseModel):
 
     # Required - core pipeline definition
     sources: dict[str, SourceSettings] = Field(
+        min_length=1,
         max_length=50,
         description="Named source plugin configurations (one or more per run)",
-    )
-    source: SourceSettings = Field(
-        default=cast(Any, None),
-        exclude=True,
-        description="Transition shim for legacy single-source callers; canonical configuration is sources.",
     )
     sinks: dict[str, SinkSettings] = Field(
         max_length=50,
@@ -1465,26 +1461,24 @@ class ElspethSettings(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_legacy_source(cls, data: Any) -> Any:
-        """Normalize legacy ``source`` into canonical named ``sources``."""
+    def reject_legacy_source_field(cls, data: Any) -> Any:
+        """Reject the singular ``source:`` YAML key per ADR-025 §1.
+
+        ELSPETH's source surface is plural by contract. The legacy
+        ``source: { ... }`` shape is deleted, not deprecated. A YAML
+        config that supplies ``source:`` instead of ``sources:`` is a
+        configuration error; the operator must rewrite as
+        ``sources:\\n  <name>: { ... }``.
+        """
         if type(data) is not dict:
             return data
-        raw = dict(data)
-        has_source = "source" in raw and raw["source"] is not None
-        has_sources = "sources" in raw and raw["sources"] is not None
-        if has_source and has_sources:
-            raise ValueError("Use either 'sources' or legacy 'source', not both")
-        if has_source:
-            raw["sources"] = {"source": raw["source"]}
-        return raw
-
-    @model_validator(mode="after")
-    def populate_legacy_source_view(self) -> "ElspethSettings":
-        """Populate ``source`` as a read-only compatibility view."""
-        current_source = self.__dict__["source"] if "source" in self.__dict__ else None
-        if self.sources and current_source is None:
-            object.__setattr__(self, "source", next(iter(self.sources.values())))
-        return self
+        if "source" in data and data["source"] is not None:
+            raise ValueError(
+                "Configuration uses the deleted singular 'source:' field. "
+                "Per ADR-025 the source surface is plural; rewrite as "
+                "'sources:\\n  <name>: { ... }' (e.g. 'sources: { primary: { plugin: ... } }')."
+            )
+        return data
 
     @model_validator(mode="after")
     def validate_export_sink_exists(self) -> "ElspethSettings":

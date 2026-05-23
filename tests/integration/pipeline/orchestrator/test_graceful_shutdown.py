@@ -24,7 +24,6 @@ from elspeth.contracts.types import AggregationName
 from elspeth.core.canonical import canonical_json
 from elspeth.core.config import AggregationSettings, SourceSettings, TriggerConfig
 from elspeth.core.dag import ExecutionGraph
-from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import PipelineConfig, prepare_for_run
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
@@ -209,8 +208,8 @@ def _build_interruptible_aggregation_config(
     )
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=as_source(source),
-        source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+        sources={"primary": as_source(source)},
+        source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
         transforms=[],
         sinks={"output": as_sink(output_sink)},
         aggregations={"sum_agg": (as_transform(transform), agg_settings)},
@@ -221,7 +220,7 @@ def _build_interruptible_aggregation_config(
     transform.node_id = agg_node_id
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(transform)],
         sinks={"output": as_sink(output_sink)},
         aggregation_settings={agg_node_id: agg_settings},
@@ -272,8 +271,8 @@ def _build_interruptible_coalesce_config(
     )
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=as_source(source),
-        source_settings=SourceSettings(plugin=source.name, on_success="fork_input", options={}),
+        sources={"primary": as_source(source)},
+        source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="fork_input", options={})},
         transforms=[],
         sinks={"output": as_sink(output_sink)},
         aggregations={"agg_branch_hold": (as_transform(batch_transform), agg_settings)},
@@ -285,7 +284,7 @@ def _build_interruptible_coalesce_config(
     batch_transform.node_id = agg_node_id
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(batch_transform)],
         sinks={"output": as_sink(output_sink)},
         aggregation_settings={agg_node_id: agg_settings},
@@ -293,7 +292,7 @@ def _build_interruptible_coalesce_config(
         coalesce_settings=[coalesce],
     )
     settings = ElspethSettings(
-        source={"plugin": source.name, "on_success": "fork_input", "options": {}},
+        sources={"primary": {"plugin": source.name, "on_success": "fork_input", "options": {}}},
         sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
         gates=[fork_gate],
         coalesce=[coalesce],
@@ -315,7 +314,7 @@ class TestShutdownBreaksLoop:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -340,7 +339,7 @@ class TestShutdownBreaksLoop:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -368,7 +367,7 @@ class TestShutdownBreaksLoop:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -414,7 +413,7 @@ class TestShutdownBreaksLoop:
         sink.close = track_sink_close  # type: ignore[method-assign]
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -440,7 +439,7 @@ class TestShutdownBreaksLoop:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -466,7 +465,7 @@ class TestShutdownBreaksLoop:
         quarantine_sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(CollectSink()), "quarantine": as_sink(quarantine_sink)},
         )
@@ -528,7 +527,7 @@ class TestInterruptAndResume:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -580,7 +579,7 @@ class TestInterruptAndResume:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -672,22 +671,14 @@ class TestInterruptAndResume:
         assert checkpoint.aggregation_state_json is not None
         assert checkpoint.coalesce_state_json is not None
 
-        RecorderFactory(landscape_db).run_lifecycle.update_run_contract(
-            run_id,
-            SchemaContract(
-                mode="FIXED",
-                fields=(
-                    FieldContract(
-                        normalized_name="value",
-                        original_name="value",
-                        python_type=int,
-                        required=True,
-                        source="declared",
-                    ),
-                ),
-                locked=True,
-            ),
-        )
+        # NOTE (multi-source-token-scheduler): the orchestrator now writes the
+        # schema contract to ``run_sources`` on the first valid row (ADR-025 §3
+        # Decision 5). Earlier revisions of this test fabricated the contract
+        # here because the previous engine path skipped the in-loop
+        # ``_record_schema_contract`` call when an observed source already had
+        # a contract at ``_load_source_with_events`` time — leaving resume
+        # broken. The fabrication is removed; the engine itself supplies the
+        # contract.
 
         from sqlalchemy import select
 
@@ -845,6 +836,7 @@ class TestInterruptAndResume:
             edges_table,
             nodes_table,
             rows_table,
+            run_sources_table,
             runs_table,
             tokens_table,
         )
@@ -859,7 +851,7 @@ class TestInterruptAndResume:
         _, _, _, graph = build_linear_pipeline(source_data, transforms=[as_transform(transform)])
 
         # Extract production-generated node IDs
-        source_nid = graph.get_source()
+        source_nid = graph.get_sources()[0]
         assert source_nid is not None
         transform_id_map = graph.get_transform_id_map()
         sink_id_map = graph.get_sink_id_map()
@@ -921,6 +913,26 @@ class TestInterruptAndResume:
                         registered_at=now,
                     )
                 )
+
+            # Per ADR-025 §3 Decision 5, ``verify_contract_integrity`` reads
+            # from ``run_sources.schema_contract_json`` exclusively. The
+            # fabricated failed run must populate the per-source contract row
+            # so resume can verify Tier-1 integrity.
+            conn.execute(
+                insert(run_sources_table).values(
+                    run_id=run_id,
+                    source_node_id=source_nid,
+                    source_name="primary",
+                    plugin_name="list_source",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
 
             for edge_id, from_node, to_node in [
                 ("e1", source_nid, xform_nid),
@@ -1028,7 +1040,7 @@ class TestInterruptAndResume:
         null_source.on_success = "default"
 
         resume_config = PipelineConfig(
-            source=as_source(null_source),
+            sources={"primary": as_source(null_source)},
             transforms=[as_transform(resume_transform)],
             sinks={"default": as_sink(resume_sink)},
         )
@@ -1084,6 +1096,7 @@ class TestInterruptAndResume:
             edges_table,
             nodes_table,
             rows_table,
+            run_sources_table,
             runs_table,
             tokens_table,
         )
@@ -1097,7 +1110,7 @@ class TestInterruptAndResume:
         config, graph, _output_sink = _build_interruptible_aggregation_config(threading.Event())
         run_id = "resume-buffered-checkpoint-progress"
         now = datetime.now(UTC)
-        source_id = graph.get_source()
+        source_id = graph.get_sources()[0]
         assert source_id is not None
         agg_node_id = next(iter(config.aggregation_settings))
         sink_id = graph.get_sink_id_map()["output"]
@@ -1153,6 +1166,23 @@ class TestInterruptAndResume:
                         created_at=now,
                     )
                 )
+
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                insert(run_sources_table).values(
+                    run_id=run_id,
+                    source_node_id=source_id,
+                    source_name="primary",
+                    plugin_name="list_source",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=audit_record.to_json(),
+                    schema_contract_hash=contract.version_hash(),
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
 
             for index, row in enumerate(rows):
                 ref = payload_store.store(json_mod.dumps(row).encode())
@@ -1266,7 +1296,7 @@ class TestInterruptAndResume:
         resume_source.on_success = "source_out"
 
         resume_config = PipelineConfig(
-            source=as_source(resume_source),
+            sources={"primary": as_source(resume_source)},
             transforms=[as_transform(resume_transform)],
             sinks={"output": as_sink(resume_sink)},
             aggregation_settings=dict(config.aggregation_settings),
@@ -1332,7 +1362,7 @@ class TestInterruptAndResume:
         null_source.on_success = "default"
 
         resume_config = PipelineConfig(
-            source=as_source(null_source),
+            sources={"primary": as_source(null_source)},
             transforms=[as_transform(passthrough)],
             sinks={"default": as_sink(resume_sink)},
         )

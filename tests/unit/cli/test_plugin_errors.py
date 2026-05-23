@@ -17,11 +17,12 @@ def test_unknown_source_plugin_error():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: nonexistent_source  # Unknown plugin
-  on_success: output
-  options:
-    path: test.csv
+sources:
+  primary:
+    plugin: nonexistent_source  # Unknown plugin
+    on_success: output
+    options:
+      path: test.csv
 
 sinks:
   output:
@@ -54,10 +55,12 @@ sinks:
 def test_unknown_transform_plugin_error():
     """Verify clear error for unknown transform plugin."""
     config_dict = {
-        "source": {
-            "plugin": "csv",
-            "on_success": "t0_in",
-            "options": {"path": "test.csv", "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
+        "sources": {
+            "primary": {
+                "plugin": "csv",
+                "on_success": "t0_in",
+                "options": {"path": "test.csv", "schema": {"mode": "observed"}, "on_validation_failure": "discard"},
+            }
         },
         "transforms": [
             {"plugin": "nonexistent_transform", "name": "t0", "input": "t0_in", "on_success": "out", "on_error": "discard", "options": {}}
@@ -88,12 +91,13 @@ def test_plugin_initialization_error():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: output
-  options:
-    # Missing required 'path' option
-    schema: {mode: observed}
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      # Missing required 'path' option
+      schema: {mode: observed}
 
 sinks:
   output:
@@ -134,14 +138,16 @@ sinks:
 def test_schema_extraction_from_instance():
     """Verify schemas are NOT None after instantiation."""
     config_dict = {
-        "source": {
-            "plugin": "csv",
-            "on_success": "out",
-            "options": {
-                "path": "test.csv",
-                "schema": {"mode": "fixed", "fields": ["value: float"]},
-                "on_validation_failure": "discard",
-            },
+        "sources": {
+            "primary": {
+                "plugin": "csv",
+                "on_success": "out",
+                "options": {
+                    "path": "test.csv",
+                    "schema": {"mode": "fixed", "fields": ["value: float"]},
+                    "on_validation_failure": "discard",
+                },
+            }
         },
         "sinks": {
             "out": {
@@ -158,7 +164,7 @@ def test_schema_extraction_from_instance():
     plugins = instantiate_plugins_from_config(config)
 
     # CRITICAL: Schemas must NOT be None
-    assert plugins.source.output_schema is not None, "Source schema should be populated"
+    assert next(iter(plugins.sources.values())).output_schema is not None, "Source schema should be populated"
     assert plugins.sinks["out"].input_schema is not None, "Sink schema should be populated"
 
 
@@ -170,16 +176,17 @@ def test_fork_join_validation():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: split_in
-  options:
-    path: test.csv
-    schema:
-      mode: fixed
-      fields:
-        - "value: float"
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: split_in
+    options:
+      path: test.csv
+      schema:
+        mode: fixed
+        fields:
+          - "value: float"
+      on_validation_failure: discard
 
 gates:
   - name: split
@@ -249,16 +256,17 @@ def test_fork_to_separate_sinks_without_coalesce():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: split_in
-  options:
-    path: test.csv
-    schema:
-      mode: fixed
-      fields:
-        - "value: float"
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: split_in
+    options:
+      path: test.csv
+      schema:
+        mode: fixed
+        fields:
+          - "value: float"
+      on_validation_failure: discard
 
 gates:
   - name: split
@@ -342,16 +350,17 @@ def test_coalesce_compatible_branch_schemas():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: split_in
-  options:
-    path: test.csv
-    schema:
-      mode: fixed
-      fields:
-        - "value: float"
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: split_in
+    options:
+      path: test.csv
+      schema:
+        mode: fixed
+        fields:
+          - "value: float"
+      on_validation_failure: discard
 
 gates:
   - name: split
@@ -418,13 +427,14 @@ def test_dynamic_schema_to_specific_schema_validation():
 
     # Case 1: Dynamic source → Specific sink (should PASS - validation skipped)
     config_yaml_dynamic_to_specific = """
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: test.csv
-    schema: {mode: observed}  # Dynamic schema
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: test.csv
+      schema: {mode: observed}  # Dynamic schema
+      on_validation_failure: discard
 
 sinks:
   output:
@@ -454,16 +464,17 @@ sinks:
 
     # Case 2: Specific source → Dynamic transform → Specific sink (should PASS)
     config_yaml_mixed = """
-source:
-  plugin: csv
-  on_success: t0_in
-  options:
-    path: test.csv
-    schema:
-      mode: fixed
-      fields:
-        - "value: float"  # Specific
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: t0_in
+    options:
+      path: test.csv
+      schema:
+        mode: fixed
+        fields:
+          - "value: float"  # Specific
+      on_validation_failure: discard
 
 transforms:
   - plugin: passthrough

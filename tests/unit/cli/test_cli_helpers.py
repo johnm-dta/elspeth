@@ -14,14 +14,15 @@ from elspeth.plugins.infrastructure.runtime_factory import PluginBundle, instant
 def test_instantiate_returns_plugin_bundle(tmp_path: Path):
     """instantiate_plugins_from_config returns a PluginBundle dataclass, not a dict."""
     config_yaml = """
-source:
-  plugin: csv
-  on_success: pass1
-  options:
-    path: test.csv
-    schema:
-      mode: observed
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: pass1
+    options:
+      path: test.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
 
 transforms:
   - name: pass1
@@ -58,14 +59,15 @@ sinks:
 def test_plugin_bundle_is_frozen(tmp_path: Path):
     """PluginBundle must be immutable (frozen dataclass)."""
     config_yaml = """
-source:
-  plugin: csv
-  on_success: pass1
-  options:
-    path: test.csv
-    schema:
-      mode: observed
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: pass1
+    options:
+      path: test.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
 
 transforms:
   - name: pass1
@@ -95,21 +97,24 @@ sinks:
     config = load_settings(config_file)
     bundle = instantiate_plugins_from_config(config)
 
+    # Per ADR-025 §1 the singular ``source`` field is deleted; the bundle
+    # exposes only the plural ``sources`` map, which is itself frozen.
     with pytest.raises(AttributeError, match="cannot assign to field"):
-        bundle.source = None  # type: ignore[assignment,misc]
+        bundle.sources = {}  # type: ignore[assignment,misc]
 
 
 def test_plugin_bundle_attribute_access(tmp_path: Path):
     """PluginBundle fields are accessible as typed attributes."""
     config_yaml = """
-source:
-  plugin: csv
-  on_success: pass1
-  options:
-    path: test.csv
-    schema:
-      mode: observed
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: pass1
+    options:
+      path: test.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
 
 transforms:
   - name: pass1
@@ -140,11 +145,13 @@ sinks:
     bundle = instantiate_plugins_from_config(config)
 
     # Verify typed attribute access (not dict["key"])
-    assert isinstance(bundle.source, BaseSource)
-    assert bundle.source.name == "csv"
-    assert bundle.source.config["path"] == "test.csv"
-    assert bundle.source.config["on_validation_failure"] == "discard"
-    assert bundle.source.output_schema is not None
+    assert "primary" in bundle.sources
+    primary = bundle.sources["primary"]
+    assert isinstance(primary, BaseSource)
+    assert primary.name == "csv"
+    assert primary.config["path"] == "test.csv"
+    assert primary.config["on_validation_failure"] == "discard"
+    assert primary.output_schema is not None
 
     assert len(bundle.transforms) == 1
     wired = bundle.transforms[0]
@@ -161,12 +168,9 @@ sinks:
     assert isinstance(bundle.aggregations, Mapping)
     assert len(bundle.aggregations) == 0
 
-    # source_settings remains the compatibility view of the canonical source.
-    # Plural-source normalization may copy settings objects, so assert the
-    # contract value and named-source mapping rather than object identity.
-    assert bundle.source_settings == config.source
-    assert bundle.source_settings == config.sources["source"]
-    assert bundle.source_settings is bundle.source_settings_map["source"]
+    # Per ADR-025 §1 the plural source_settings_map is canonical; the
+    # singular ``source_settings`` field has been deleted.
+    assert bundle.source_settings_map["primary"] == config.sources["primary"]
 
 
 def test_plugin_bundle_supports_dataclasses_replace(tmp_path: Path):
@@ -181,14 +185,15 @@ def test_plugin_bundle_supports_dataclasses_replace(tmp_path: Path):
     from elspeth.plugins.sources.null_source import NullSource
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: pass1
-  options:
-    path: test.csv
-    schema:
-      mode: observed
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: pass1
+    options:
+      path: test.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
 
 transforms:
   - name: pass1
@@ -218,14 +223,20 @@ sinks:
     config = load_settings(config_file)
     bundle = instantiate_plugins_from_config(config)
 
-    # Replace source (as resume path does)
-    null_source = NullSource({})
-    null_source.on_success = bundle.source.on_success
-    replaced = replace(bundle, source=null_source)
+    # Replace sources (as resume path does — per ADR-025 §2 each named
+    # source becomes its own NullSource).
+    null_sources: dict[str, BaseSource] = {}
+    for source_name, original_source in bundle.sources.items():
+        null_source = NullSource({})
+        null_source.on_success = original_source.on_success
+        null_sources[source_name] = null_source
+    replaced = replace(bundle, sources=null_sources)
 
     # Replaced field changed
     assert isinstance(replaced, PluginBundle)
-    assert replaced.source is null_source
+    assert set(replaced.sources) == set(bundle.sources)
+    for source_name in replaced.sources:
+        assert isinstance(replaced.sources[source_name], NullSource)
 
     # Unchanged fields preserved by value (deep_freeze detaches MappingProxyType
     # inputs, so identity is not preserved across __post_init__ re-freeze).
@@ -233,7 +244,7 @@ sinks:
     assert replaced.transforms is bundle.transforms
     assert replaced.sinks == bundle.sinks
     assert replaced.aggregations == bundle.aggregations
-    assert replaced.source_settings is bundle.source_settings
+    assert replaced.source_settings_map == bundle.source_settings_map
 
 
 def test_instantiate_plugins_raises_on_invalid_plugin():
@@ -244,7 +255,7 @@ def test_instantiate_plugins_raises_on_invalid_plugin():
     from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
 
     config_dict = {
-        "source": {"plugin": "nonexistent", "on_success": "out", "options": {}},
+        "sources": {"primary": {"plugin": "nonexistent", "on_success": "out", "options": {}}},
         "sinks": {"out": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": "o.csv"}}},
     }
 
@@ -264,14 +275,15 @@ def test_aggregation_rejects_non_batch_aware_transform(tmp_path: Path):
     """
     # Config with aggregation using 'passthrough' - a non-batch-aware transform
     config_yaml = """
-source:
-  plugin: csv
-  on_success: my_batch
-  options:
-    path: test.csv
-    schema:
-      mode: observed
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: my_batch
+    options:
+      path: test.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
 
 aggregations:
   - name: my_batch
@@ -319,14 +331,15 @@ def test_aggregation_accepts_batch_aware_transform(tmp_path: Path):
     that should be accepted for aggregation use.
     """
     config_yaml = """
-source:
-  plugin: csv
-  on_success: stats_batch
-  options:
-    path: test.csv
-    schema:
-      mode: observed
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: stats_batch
+    options:
+      path: test.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
 
 aggregations:
   - name: stats_batch
@@ -391,7 +404,9 @@ def test_aggregation_rejects_transform_without_is_batch_aware_attribute():
     mock_manager.get_sink_by_name.return_value = MagicMock(return_value=MagicMock())
 
     config_dict = {
-        "source": {"plugin": "csv", "on_success": "broken_agg", "options": {"path": "t.csv", "on_validation_failure": "discard"}},
+        "sources": {
+            "primary": {"plugin": "csv", "on_success": "broken_agg", "options": {"path": "t.csv", "on_validation_failure": "discard"}}
+        },
         "aggregations": [
             {
                 "name": "broken_agg",

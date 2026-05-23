@@ -1,16 +1,17 @@
-source:
-  plugin: csv
-  on_success: quality_in
-  options:
-    path: examples/statistical_batch_plugins/data_quality_rows.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'source: str'
-      - 'score_text: str'
-      - 'label: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: quality_in
+    options:
+      path: examples/statistical_batch_plugins/data_quality_rows.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'source: str'
+        - 'score_text: str'
+        - 'label: str'
+      on_validation_failure: discard
 aggregations:
 - name: data_quality_report
   plugin: batch_data_quality_report

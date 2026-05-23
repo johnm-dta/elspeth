@@ -967,14 +967,17 @@ class Orchestrator:
         branch_to_sink = graph.get_branch_to_sink_map()
         typed_aggregation_settings: dict[NodeID, AggregationSettings] = {NodeID(k): v for k, v in config.aggregation_settings.items()}
 
+        # RowProcessor still carries a run-level source view for legacy helper
+        # surfaces. Per-row processing passes the active source explicitly.
+        first_source = next(iter(config.sources.values()))
         processor = RowProcessor(
             execution=factory.execution,
             data_flow=factory.data_flow,
             span_factory=self._span_factory,
             run_id=run_id,
             source_node_id=source_id,
-            source_on_success=config.source.on_success,
-            source_plugin=config.source,
+            source_on_success=first_source.on_success,
+            source_plugin=first_source,
             edge_map=edge_map,
             route_resolution_map=route_resolution_map,
             traversal=traversal,
@@ -1029,14 +1032,16 @@ class Orchestrator:
         try:
             self._events.emit(PhaseStarted(phase=PipelinePhase.DATABASE, action=PhaseAction.CONNECTING))
 
-            # Serialize source schema for resume type restoration
+            # Legacy run-level source schema for resume type restoration.
+            # Per-source run_sources records are authoritative for RC6+.
             # This enables proper type coercion (datetime/Decimal) when resuming from JSON payloads
             # SourceProtocol requires output_schema - all sources have schemas (even dynamic ones)
-            source_schema_json = json.dumps(config.source.output_schema.model_json_schema())
+            first_source = next(iter(config.sources.values()))
+            source_schema_json = json.dumps(first_source.output_schema.model_json_schema())
 
             # Get source schema contract for resume PipelineRow wrapping
             # This enables proper contract propagation when resuming from stored payloads
-            source_contract = config.source.get_schema_contract()
+            source_contract = first_source.get_schema_contract()
 
             factory = RecorderFactory(self._db, payload_store=payload_store)
             run = factory.run_lifecycle.begin_run(
@@ -1065,7 +1070,7 @@ class Orchestrator:
                     timestamp=datetime.now(UTC),
                     run_id=run.run_id,
                     config_hash=run.config_hash,
-                    source_plugin=config.source.name,
+                    source_plugin=first_source.name,
                 )
             )
 
@@ -1749,6 +1754,8 @@ class Orchestrator:
         ingest_sequence: int,
         edge_map: Mapping[tuple[NodeID, str], str],
         loop_ctx: LoopContext,
+        *,
+        active_source: SourceProtocol,
     ) -> None:
         """Handle a quarantined source row: route directly to configured sink.
 
@@ -1778,7 +1785,7 @@ class Orchestrator:
         # Validate destination exists - crash on plugin bug
         if not quarantine_sink:
             raise RouteValidationError(
-                f"Source '{config.source.name}' yielded quarantined row "
+                f"Source '{active_source.name}' yielded quarantined row "
                 f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
                 f"with missing quarantine_destination. "
                 f"This is a plugin bug: quarantined rows MUST specify a destination. "
@@ -1786,13 +1793,13 @@ class Orchestrator:
             )
         if quarantine_sink not in config.sinks:
             raise RouteValidationError(
-                f"Source '{config.source.name}' yielded quarantined row "
+                f"Source '{active_source.name}' yielded quarantined row "
                 f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
                 f"with invalid quarantine_destination='{quarantine_sink}'. "
                 f"No sink named '{quarantine_sink}' exists. "
                 f"Available sinks: {sorted(config.sinks.keys())}. "
                 f"This is a plugin bug: quarantine_destination must match "
-                f"source._on_validation_failure='{config.source._on_validation_failure}'."
+                f"source._on_validation_failure='{active_source._on_validation_failure}'."
             )
 
         # Destination validated. Source quarantine is a FAILURE lifecycle with
@@ -1903,7 +1910,8 @@ class Orchestrator:
         self,
         factory: RecorderFactory,
         run_id: str,
-        config: PipelineConfig,
+        *,
+        active_source: SourceProtocol,
     ) -> bool:
         """Record source field resolution mapping if available.
 
@@ -1914,7 +1922,7 @@ class Orchestrator:
         Returns:
             True if field resolution was recorded, False otherwise.
         """
-        field_resolution = config.source.get_field_resolution()
+        field_resolution = active_source.get_field_resolution()
         if field_resolution is None:
             return False
 
@@ -1929,7 +1937,7 @@ class Orchestrator:
             FieldResolutionApplied(
                 timestamp=datetime.now(UTC),
                 run_id=run_id,
-                source_plugin=config.source.name,
+                source_plugin=active_source.name,
                 field_count=len(resolution_mapping),
                 normalization_version=normalization_version,
                 resolution_mapping=resolution_mapping,
@@ -2126,6 +2134,7 @@ class Orchestrator:
         *,
         interrupted_by_shutdown: bool,
         flush_end_of_input: bool,
+        active_source: SourceProtocol,
     ) -> None:
         """Post-loop work after source iteration completes or is interrupted.
 
@@ -2207,20 +2216,20 @@ class Orchestrator:
         # Record field resolution for empty sources (header-only files).
         # For sources with rows, this was recorded inside the loop on first iteration.
         if not field_resolution_recorded:
-            self._record_field_resolution(factory, run_id, config)
+            self._record_field_resolution(factory, run_id, active_source=active_source)
 
         # Record schema contract for runs with no valid source rows.
         # In-loop recording happens on first VALID row. For all-invalid
         # or empty inputs, that branch never executes.
         if not schema_contract_recorded:
-            record_schema_contract(factory, run_id, source_id, config, ctx)
+            record_schema_contract(factory, run_id, source_id, ctx, active_source=active_source)
 
     def _load_source_with_events(
         self,
-        config: PipelineConfig,
         run_id: str,
         ctx: PluginContext,
-        source: SourceProtocol | None = None,
+        *,
+        active_source: SourceProtocol,
     ) -> Iterator[SourceRow]:
         """Execute SOURCE phase: emit lifecycle events, load source, handle errors.
 
@@ -2228,7 +2237,6 @@ class Orchestrator:
         (file not found, auth failure) are emitted as PhaseError before re-raising.
         """
 
-        active_source = source or config.source
         phase_start = time.perf_counter()
         self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=active_source.name))
         self._emit_telemetry(
@@ -2263,6 +2271,8 @@ class Orchestrator:
         source_id: NodeID,
         edge_map: Mapping[tuple[NodeID, str], str],
         *,
+        active_source_name: str,
+        active_source: SourceProtocol,
         shutdown_event: threading.Event | None = None,
         flush_end_of_input: bool = True,
     ) -> LoopResult:
@@ -2296,7 +2306,7 @@ class Orchestrator:
             node_id=source_id,
             operation_type="source_load",
             ctx=ctx,
-            input_data={"source_plugin": config.source.name},
+            input_data={"source_plugin": active_source.name},
         ) as source_op_handle:
             # Generator-based sources execute on next() — restore operation_id
             # before each iteration so external calls are attributed to source_load
@@ -2307,25 +2317,25 @@ class Orchestrator:
                 source_id=source_id,
                 source_operation_id=source_operation_id,
             )
-            source_name = next(iter(config.sources))
             factory.run_lifecycle.record_run_source(
                 run_id=run_id,
                 source_node_id=source_id,
-                source_name=source_name,
-                plugin_name=config.source.name,
-                config_hash=stable_hash(config.source.config),
-                source_schema_json=json.dumps(config.source.output_schema.model_json_schema()),
-                schema_contract=config.source.get_schema_contract(),
+                source_name=active_source_name,
+                plugin_name=active_source.name,
+                config_hash=stable_hash(active_source.config),
+                source_schema_json=json.dumps(active_source.output_schema.model_json_schema()),
+                schema_contract=active_source.get_schema_contract(),
                 lifecycle_state="loading",
             )
 
-            source_iterator = self._load_source_with_events(config, run_id, ctx)
+            source_iterator = self._load_source_with_events(run_id, ctx, active_source=active_source)
 
             # Deferred recording flags — field resolution after first iteration,
-            # schema contract after first VALID row. If begin_run already stored
-            # a contract (FIXED mode), skip re-recording.
+            # schema contract after first VALID row. Always start false so
+            # source-scoped run_sources contracts are backfilled even when the
+            # legacy run-level singleton already exists.
             field_resolution_recorded = False
-            schema_contract_recorded = factory.run_lifecycle.get_run_contract(run_id) is not None
+            schema_contract_recorded = False
 
             # PROCESS phase
             phase_start = time.perf_counter()
@@ -2367,7 +2377,7 @@ class Orchestrator:
                     # Record field resolution on first iteration (generators execute body on first next())
                     if not field_resolution_recorded:
                         field_resolution_recorded = True
-                        self._record_field_resolution(factory, run_id, config)
+                        self._record_field_resolution(factory, run_id, active_source=active_source)
 
                     # Quarantine path — route directly to sink, skip normal processing
                     if source_item.is_quarantined:
@@ -2380,6 +2390,7 @@ class Orchestrator:
                             ingest_sequence,
                             edge_map,
                             loop_ctx,
+                            active_source=active_source,
                         )
                         quarantine_sink = source_item.quarantine_destination
                         if quarantine_sink is not None and loop_ctx.pending_tokens[quarantine_sink]:
@@ -2401,7 +2412,13 @@ class Orchestrator:
                         continue
 
                     # Record schema contract on first VALID row (quarantined rows don't populate contract)
-                    if not schema_contract_recorded and record_schema_contract(factory, run_id, source_id, config, ctx):
+                    if not schema_contract_recorded and record_schema_contract(
+                        factory,
+                        run_id,
+                        source_id,
+                        ctx,
+                        active_source=active_source,
+                    ):
                         schema_contract_recorded = True
 
                     # Clear operation_id — source item is fetched, transforms set their own state_id
@@ -2423,8 +2440,8 @@ class Orchestrator:
                         transforms=config.transforms,
                         ctx=ctx,
                         source_node_id=source_id,
-                        source_plugin=config.source,
-                        source_on_success=config.source.on_success,
+                        source_plugin=active_source,
+                        source_on_success=active_source.on_success,
                         source_row_index=current_source_row_index,
                         ingest_sequence=ingest_sequence,
                     )
@@ -2473,8 +2490,9 @@ class Orchestrator:
                     schema_contract_recorded,
                     interrupted_by_shutdown=interrupted_by_shutdown,
                     flush_end_of_input=flush_end_of_input,
+                    active_source=active_source,
                 )
-                field_resolution = config.source.get_field_resolution()
+                field_resolution = active_source.get_field_resolution()
                 resolution_mapping: Mapping[str, str] | None = None
                 normalization_version: str | None = None
                 if field_resolution is not None:
@@ -2482,18 +2500,18 @@ class Orchestrator:
                 factory.run_lifecycle.record_run_source(
                     run_id=run_id,
                     source_node_id=source_id,
-                    source_name=source_name,
-                    plugin_name=config.source.name,
-                    config_hash=stable_hash(config.source.config),
-                    source_schema_json=json.dumps(config.source.output_schema.model_json_schema()),
-                    schema_contract=config.source.get_schema_contract(),
+                    source_name=active_source_name,
+                    plugin_name=active_source.name,
+                    config_hash=stable_hash(active_source.config),
+                    source_schema_json=json.dumps(active_source.output_schema.model_json_schema()),
+                    schema_contract=active_source.get_schema_contract(),
                     field_resolution_mapping=resolution_mapping,
                     normalization_version=normalization_version,
                     lifecycle_state="interrupted" if interrupted_by_shutdown else "loaded",
                 )
 
             except Exception as e:
-                self._emit_phase_error(PipelinePhase.PROCESS, e, target=config.source.name)
+                self._emit_phase_error(PipelinePhase.PROCESS, e, target=active_source.name)
                 raise
 
         return LoopResult(
@@ -2554,17 +2572,13 @@ class Orchestrator:
             loop_result: LoopResult | None = None
             source_items = tuple(artifacts.source_id_map.items())
             for source_ordinal, (source_name, source_id) in enumerate(source_items):
-                source_config = replace(
-                    config,
-                    source=config.sources[source_name],
-                    sources={source_name: config.sources[source_name]},
-                )
+                active_source = config.sources[source_name]
                 source_loop_ctx = LoopContext(
                     counters=loop_ctx.counters,
                     pending_tokens=loop_ctx.pending_tokens,
                     processor=loop_ctx.processor,
                     ctx=loop_ctx.ctx,
-                    config=source_config,
+                    config=config,
                     agg_transform_lookup=loop_ctx.agg_transform_lookup,
                     coalesce_executor=loop_ctx.coalesce_executor,
                     coalesce_node_map=loop_ctx.coalesce_node_map,
@@ -2577,6 +2591,8 @@ class Orchestrator:
                     run_id,
                     source_id,
                     artifacts.edge_map,
+                    active_source_name=source_name,
+                    active_source=active_source,
                     shutdown_event=shutdown_event,
                     flush_end_of_input=source_ordinal == len(source_items) - 1,
                 )

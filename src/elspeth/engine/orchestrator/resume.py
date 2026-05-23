@@ -113,12 +113,13 @@ def setup_resume_context(
         available_sinks=set(config.sinks.keys()),
     )
 
-    # Validate source quarantine destination
+    # Validate source quarantine destinations
     # Call module function directly (no wrapper method)
-    validate_source_quarantine_destination(
-        source=config.source,
-        available_sinks=set(config.sinks.keys()),
-    )
+    for source in config.sources.values():
+        validate_source_quarantine_destination(
+            source=source,
+            available_sinks=set(config.sinks.keys()),
+        )
 
     # Validate sink failsink destinations
     sink_validation_stubs = {name: SimpleNamespace(on_write_failure=sink._on_write_failure) for name, sink in config.sinks.items()}

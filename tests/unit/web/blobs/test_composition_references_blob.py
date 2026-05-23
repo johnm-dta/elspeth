@@ -10,7 +10,7 @@ from elspeth.web.blobs.service import _composition_references_blob
 
 def test_composition_references_blob_finds_transform_inline_content_ref() -> None:
     composition_state = {
-        "source": {"plugin": "csv", "options": {"path": "data.csv"}},
+        "sources": {"primary": {"plugin": "csv", "options": {"path": "data.csv"}}},
         "transforms": [
             {
                 "name": "classify",
@@ -32,7 +32,7 @@ def test_composition_references_blob_finds_transform_inline_content_ref() -> Non
 
 def test_composition_references_blob_preserves_legacy_path_match() -> None:
     composition_state = {
-        "source": {"plugin": "csv", "options": {"path": "/blob/storage.csv"}},
+        "sources": {"primary": {"plugin": "csv", "options": {"path": "/blob/storage.csv"}}},
     }
 
     assert _composition_references_blob(composition_state, "other-blob", "/blob/storage.csv")
@@ -40,7 +40,7 @@ def test_composition_references_blob_preserves_legacy_path_match() -> None:
 
 def test_composition_references_blob_crashes_on_corrupt_source_options() -> None:
     composition_state = {
-        "source": {"plugin": "csv", "options": ["not", "a", "dict"]},
+        "sources": {"primary": {"plugin": "csv", "options": ["not", "a", "dict"]}},
     }
 
     with pytest.raises(AuditIntegrityError, match=r"source\.options"):

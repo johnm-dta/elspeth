@@ -390,7 +390,6 @@ class TestFromTraversalContext:
         traversal = DAGTraversalContext(
             node_step_map={NodeID("source-0"): 0, NodeID("transform-1"): 1, coalesce_node: 2},
             node_to_plugin={NodeID("transform-1"): transform},
-            first_transform_node_id=NodeID("transform-1"),
             node_to_next={
                 NodeID("source-0"): NodeID("transform-1"),
                 NodeID("transform-1"): coalesce_node,
@@ -411,7 +410,6 @@ class TestFromTraversalContext:
         traversal = DAGTraversalContext(
             node_step_map={NodeID("source-0"): 0, coalesce_node: 1},
             node_to_plugin={},
-            first_transform_node_id=None,
             node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
             coalesce_node_map={CoalesceName("merge"): coalesce_node},
         )
@@ -429,7 +427,6 @@ class TestFromTraversalContext:
         traversal = DAGTraversalContext(
             node_step_map={NodeID("source-0"): 0},
             node_to_plugin={},
-            first_transform_node_id=None,
             node_to_next={NodeID("source-0"): None},
             coalesce_node_map={},
         )

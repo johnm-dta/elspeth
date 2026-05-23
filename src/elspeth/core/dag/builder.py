@@ -115,34 +115,26 @@ def _parse_contract_schema_config(
 
 def build_execution_graph(
     cls: type[ExecutionGraph],
-    source: SourceProtocol | None = None,
-    source_settings: SourceSettings | None = None,
+    *,
+    sources: Mapping[str, SourceProtocol],
+    source_settings_map: Mapping[str, SourceSettings],
     transforms: Sequence[WiredTransform] = (),
     sinks: Mapping[str, SinkProtocol] | None = None,
     aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]] | None = None,
     gates: Sequence[GateSettings] = (),
     coalesce_settings: Sequence[CoalesceSettings] | None = None,
-    *,
-    sources: Mapping[str, SourceProtocol] | None = None,
-    source_settings_map: Mapping[str, SourceSettings] | None = None,
     queues: Mapping[str, QueueSettings] | None = None,
 ) -> ExecutionGraph:
     """Build an ExecutionGraph from plugin instances.
 
     Called by ExecutionGraph.from_plugin_instances() facade. See that method
     for full documentation of parameters and semantics.
-    """
-    legacy_single_source_invocation = sources is None
-    if legacy_single_source_invocation:
-        if source is None or source_settings is None:
-            raise GraphValidationError("ExecutionGraph requires at least one source")
-        sources = {"source": source}
-        source_settings_map = {"source": source_settings}
-    elif source_settings_map is None:
-        raise GraphValidationError("source_settings_map is required when sources is provided")
 
-    if source_settings_map is None:
-        raise GraphValidationError("ExecutionGraph requires source settings")
+    Per ADR-025 §2 the source surface is plural-only — callers pass
+    ``sources`` and ``source_settings_map`` keyed by source name. The
+    pre-ADR singular ``source=`` / ``source_settings=`` keyword shim
+    and its ``legacy_single_source_invocation`` branch are deleted.
+    """
     if not sources:
         raise GraphValidationError("ExecutionGraph requires at least one source")
     if sinks is None:
@@ -228,10 +220,11 @@ def build_execution_graph(
     def _sink_name_set() -> set[str]:
         return {str(name) for name in sink_ids}
 
-    # Add sources. Explicit plural sources include the configured source name
-    # in node identity so two instances of the same plugin remain distinct DAG
-    # roots and audit records. The legacy single-source facade keeps the RC5.2
-    # plugin-name/raw-config identity for checkpoint compatibility.
+    # Add sources. Per ADR-025 §2 source node identity always includes the
+    # configured source name in the config hash so two instances of the same
+    # plugin remain distinct DAG roots and audit records. There is no
+    # singular checkpoint-identity reservation; the prior "source" literal
+    # name shortcut is gone with the legacy facade.
     source_ids: dict[str, NodeID] = {}
     for source_name, source_instance in sources.items():
         source_config = source_instance.config
@@ -241,13 +234,9 @@ def build_execution_graph(
             component_id=source_name,
             component_type="source",
         )
-        if legacy_single_source_invocation:
-            source_node_config = source_config
-            source_id = node_id("source", source_instance.name, source_node_config)
-        else:
-            source_node_config = dict(source_config)
-            source_node_config["source_name"] = source_name
-            source_id = node_id("source", source_name, source_node_config)
+        source_node_config = dict(source_config)
+        source_node_config["source_name"] = source_name
+        source_id = node_id("source", source_name, source_node_config)
         source_ids[source_name] = source_id
         graph.add_node(
             source_id,

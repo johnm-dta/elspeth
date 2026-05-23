@@ -133,8 +133,6 @@ def instantiate_runtime_plugins(settings: Any, *, preflight_mode: bool = False) 
 def build_runtime_graph(settings: Any, bundle: PluginBundle) -> ExecutionGraph:
     """Build an ExecutionGraph through the production graph factory."""
     return ExecutionGraph.from_plugin_instances(
-        source=bundle.source,
-        source_settings=bundle.source_settings,
         sources=bundle.sources,
         source_settings_map=bundle.source_settings_map,
         transforms=bundle.transforms,

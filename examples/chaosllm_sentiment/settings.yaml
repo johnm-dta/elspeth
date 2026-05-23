@@ -1,14 +1,15 @@
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: examples/chaosllm_sentiment/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'text: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: examples/chaosllm_sentiment/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'text: str'
+      on_validation_failure: discard
 transforms:
 - name: llm_0
   plugin: llm

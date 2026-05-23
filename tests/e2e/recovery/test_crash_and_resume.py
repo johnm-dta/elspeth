@@ -121,7 +121,7 @@ def _build_linear_graph(config: PipelineConfig) -> ExecutionGraph:
     graph.add_node(
         "source",
         node_type=NodeType.SOURCE,
-        plugin_name=config.source.name,
+        plugin_name=config.sources["primary"].name,
         config=schema_config,
     )
 
@@ -257,7 +257,7 @@ class TestResumeIdempotence:
         sink_a = _ResumeSink()
 
         config_a = PipelineConfig(
-            source=as_source(source_a),
+            sources={"primary": as_source(source_a)},
             transforms=[transform_a],  # type: ignore[list-item]
             sinks={"default": as_sink(sink_a)},
         )
@@ -470,7 +470,7 @@ class TestResumeIdempotence:
         sink_b = _ResumeSink()
 
         config_b = PipelineConfig(
-            source=as_source(source_b),
+            sources={"primary": as_source(source_b)},
             transforms=[transform_b],  # type: ignore[list-item]
             sinks={"default": as_sink(sink_b)},
         )
@@ -570,7 +570,7 @@ class TestRetryBehavior:
         _ResumeSink.results = []
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[transform],  # type: ignore[list-item]
             sinks={"default": as_sink(sink)},
         )

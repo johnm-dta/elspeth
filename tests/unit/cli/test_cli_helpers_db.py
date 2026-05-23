@@ -44,12 +44,13 @@ class TestResolveDatabaseUrl:
         settings_file.write_text("""
 landscape:
   url: sqlite:///./ignored-settings.db
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   output:
     plugin: csv
@@ -80,12 +81,13 @@ sinks:
         settings_file.write_text("""
 landscape:
   url: sqlite:///./state/audit.db
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   output:
     plugin: csv
@@ -105,12 +107,13 @@ sinks:
         settings_file = tmp_path / "settings.yaml"
         # Valid config without explicit landscape - should use default
         settings_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   output:
     plugin: csv
@@ -134,12 +137,13 @@ sinks:
         settings_file.write_text("""
 landscape:
   url: sqlite:///./state/audit.db
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   output:
     plugin: csv
@@ -170,12 +174,13 @@ sinks:
         settings_file.write_text("""
 landscape:
   url: sqlite:///./state/audit.db
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   output:
     plugin: csv

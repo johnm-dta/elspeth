@@ -174,7 +174,7 @@ class TestTopologicalOrderProperties:
     def test_topological_order_source_first(self, graph: ExecutionGraph) -> None:
         """Property: Source node appears first in topological order."""
         topo_order = graph.topological_order()
-        source = graph.get_source()
+        source = graph.get_sources()[0]
 
         assert source is not None, "Graph should have a source"
         assert topo_order[0] == source, f"Source {source} is not first, got {topo_order[0]}"
@@ -247,7 +247,7 @@ class TestValidationProperties:
     def test_validate_implies_one_source(self, graph: ExecutionGraph) -> None:
         """Property: After validate() succeeds, exactly one source exists."""
         graph.validate()
-        source = graph.get_source()
+        source = graph.get_sources()[0]
         assert source is not None, "Graph passed validation but has no source"
 
     @given(graph=linear_pipelines())
@@ -421,7 +421,7 @@ class TestGraphConsistencyProperties:
     @settings(max_examples=100)
     def test_all_nodes_reachable_from_source(self, graph: ExecutionGraph) -> None:
         """Property: All nodes are reachable from source."""
-        source = graph.get_source()
+        source = graph.get_sources()[0]
         assert source is not None
 
         nx_graph = graph.get_nx_graph()
@@ -446,7 +446,7 @@ class TestGraphConsistencyProperties:
     @settings(max_examples=100)
     def test_source_has_no_incoming_edges(self, graph: ExecutionGraph) -> None:
         """Property: Source node has no incoming edges."""
-        source = graph.get_source()
+        source = graph.get_sources()[0]
         assert source is not None
 
         nx_graph = graph.get_nx_graph()

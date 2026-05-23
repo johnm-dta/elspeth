@@ -143,8 +143,6 @@ class TestShippedExamples:
         settings = load_settings(settings_path)
         bundle = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=bundle.source,
-            source_settings=bundle.source_settings,
             sources=bundle.sources,
             source_settings_map=bundle.source_settings_map,
             transforms=bundle.transforms,
@@ -155,7 +153,6 @@ class TestShippedExamples:
             queues=settings.queues,
         )
         config = assemble_and_validate_pipeline_config(
-            source=bundle.source,
             sources=bundle.sources,
             transforms=bundle.transforms,
             sinks=bundle.sinks,

@@ -48,15 +48,17 @@ def test_schema_validation_end_to_end(tmp_path: Path, plugin_manager: PluginMana
     # Build config with compatible plugins
     # All plugins use dynamic schemas (mode: observed)
     config = ElspethSettings(
-        source=SourceSettings(
-            plugin="csv",
-            on_success="source_out",
-            options={
-                "path": str(csv_path),
-                "on_validation_failure": "discard",
-                "schema": {"mode": "observed"},
-            },
-        ),
+        sources={
+            "primary": SourceSettings(
+                plugin="csv",
+                on_success="source_out",
+                options={
+                    "path": str(csv_path),
+                    "on_validation_failure": "discard",
+                    "schema": {"mode": "observed"},
+                },
+            )
+        },
         transforms=[
             TransformSettings(
                 name="passthrough_0",
@@ -87,8 +89,8 @@ def test_schema_validation_end_to_end(tmp_path: Path, plugin_manager: PluginMana
     plugins = instantiate_plugins_from_config(config)
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=plugins.source,
-        source_settings=plugins.source_settings,
+        sources=plugins.sources,
+        source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
         sinks=plugins.sinks,
         aggregations=plugins.aggregations,
@@ -209,8 +211,8 @@ def test_static_schema_validation(plugin_manager: PluginManager) -> None:
     wired = wire_transforms([as_transform(transform)], source_connection="source_out", final_sink="output")
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=as_source(source),
-        source_settings=source_settings,
+        sources={"primary": as_source(source)},
+        source_settings_map={"primary": source_settings},
         transforms=wired,
         sinks={"output": as_sink(sink)},
         aggregations={},

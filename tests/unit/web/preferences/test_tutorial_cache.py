@@ -17,10 +17,11 @@ from elspeth.web.preferences.tutorial_cache import (
 )
 
 _CANONICAL_PIPELINE_YAML = """\
-source:
-  type: inline_blob
-  rows:
-    - url: ato.gov.au
+sources:
+  primary:
+    type: inline_blob
+    rows:
+      - url: ato.gov.au
 transforms:
   - type: web_scrape
   - type: llm_rate

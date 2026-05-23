@@ -9,14 +9,15 @@
 # This pattern is common when processing data from sources that don't preserve
 # type information (CSV, JSON from external APIs, etc.).
 
-source:
-  plugin: csv
-  on_success: normalize_types
-  options:
-    path: examples/transform_pipeline/input.csv
-    on_validation_failure: quarantine
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: normalize_types
+    options:
+      path: examples/transform_pipeline/input.csv
+      on_validation_failure: quarantine
+      schema:
+        mode: observed
 
 transforms:
   # Step 1: Normalize types from string representations

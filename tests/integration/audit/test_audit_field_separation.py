@@ -201,8 +201,8 @@ class TestAuditFieldSeparationSingleQuery:
             sink = CSVSink({"path": str(output_csv), "schema": {"mode": "observed"}})
 
             graph = ExecutionGraph.from_plugin_instances(
-                source=source,  # type: ignore[arg-type]  # test fixture
-                source_settings=source_settings,
+                sources={"primary": source},  # type: ignore[arg-type]  # test fixture
+                source_settings_map={"primary": source_settings},
                 transforms=wired,
                 sinks={"default": sink},
                 aggregations={},
@@ -214,7 +214,7 @@ class TestAuditFieldSeparationSingleQuery:
             payload_store = FilesystemPayloadStore(tmp_path / "payloads")
             orchestrator = Orchestrator(db)
             config = PipelineConfig(
-                source=as_source(source),
+                sources={"primary": as_source(source)},
                 transforms=[as_transform(transform)],
                 sinks={"default": as_sink(sink)},
             )
@@ -263,8 +263,8 @@ class TestAuditFieldSeparationSingleQuery:
             sink = CSVSink({"path": str(output_csv), "schema": {"mode": "observed"}})
 
             graph = ExecutionGraph.from_plugin_instances(
-                source=source,  # type: ignore[arg-type]  # test fixture
-                source_settings=source_settings,
+                sources={"primary": source},  # type: ignore[arg-type]  # test fixture
+                source_settings_map={"primary": source_settings},
                 transforms=wired,
                 sinks={"default": sink},
                 aggregations={},
@@ -275,7 +275,7 @@ class TestAuditFieldSeparationSingleQuery:
             payload_store = FilesystemPayloadStore(tmp_path / "payloads")
             orchestrator = Orchestrator(db)
             config = PipelineConfig(
-                source=as_source(source),
+                sources={"primary": as_source(source)},
                 transforms=[as_transform(transform)],
                 sinks={"default": as_sink(sink)},
             )
@@ -346,8 +346,8 @@ class TestAuditFieldSeparationMultiQuery:
             sink = JSONSink({"path": str(output_json), "schema": {"mode": "observed"}})
 
             graph = ExecutionGraph.from_plugin_instances(
-                source=source,  # type: ignore[arg-type]  # test fixture
-                source_settings=source_settings,
+                sources={"primary": source},  # type: ignore[arg-type]  # test fixture
+                source_settings_map={"primary": source_settings},
                 transforms=wired,
                 sinks={"default": sink},
                 aggregations={},
@@ -358,7 +358,7 @@ class TestAuditFieldSeparationMultiQuery:
             payload_store = FilesystemPayloadStore(tmp_path / "payloads")
             orchestrator = Orchestrator(db)
             config = PipelineConfig(
-                source=as_source(source),
+                sources={"primary": as_source(source)},
                 transforms=[as_transform(transform)],
                 sinks={"default": as_sink(sink)},
             )
@@ -422,8 +422,8 @@ class TestAuditFieldSeparationMultiQuery:
             sink = JSONSink({"path": str(output_json), "schema": {"mode": "observed"}})
 
             graph = ExecutionGraph.from_plugin_instances(
-                source=source,  # type: ignore[arg-type]  # test fixture
-                source_settings=source_settings,
+                sources={"primary": source},  # type: ignore[arg-type]  # test fixture
+                source_settings_map={"primary": source_settings},
                 transforms=wired,
                 sinks={"default": sink},
                 aggregations={},
@@ -434,7 +434,7 @@ class TestAuditFieldSeparationMultiQuery:
             payload_store = FilesystemPayloadStore(tmp_path / "payloads")
             orchestrator = Orchestrator(db)
             config = PipelineConfig(
-                source=as_source(source),
+                sources={"primary": as_source(source)},
                 transforms=[as_transform(transform)],
                 sinks={"default": as_sink(sink)},
             )

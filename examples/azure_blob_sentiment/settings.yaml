@@ -1,22 +1,23 @@
-source:
-  plugin: azure_blob
-  on_success: source_out
-  options:
-    sas_token: ${AZURE_STORAGE_SAS_TOKEN}
-    account_url: ${AZURE_STORAGE_ACCOUNT_URL}
-    container: ${AZURE_STORAGE_CONTAINER}
-    blob_path: input/sentiment_data.csv
-    format: csv
-    csv_options:
-      delimiter: ','
-      has_header: true
-      encoding: utf-8
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'text: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: azure_blob
+    on_success: source_out
+    options:
+      sas_token: ${AZURE_STORAGE_SAS_TOKEN}
+      account_url: ${AZURE_STORAGE_ACCOUNT_URL}
+      container: ${AZURE_STORAGE_CONTAINER}
+      blob_path: input/sentiment_data.csv
+      format: csv
+      csv_options:
+        delimiter: ','
+        has_header: true
+        encoding: utf-8
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'text: str'
+      on_validation_failure: discard
 transforms:
 - name: keyword_filter_0
   plugin: keyword_filter

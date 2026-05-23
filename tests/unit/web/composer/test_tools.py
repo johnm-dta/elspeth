@@ -5865,11 +5865,13 @@ class TestPatchOutputPathSecurity:
 def _valid_pipeline_args() -> dict[str, Any]:
     """Return a minimal valid set_pipeline args dict."""
     return {
-        "source": {
-            "plugin": "csv",
-            "on_success": "source_out",
-            "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
-            "on_validation_failure": "quarantine",
+        "sources": {
+            "primary": {
+                "plugin": "csv",
+                "on_success": "source_out",
+                "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            }
         },
         "nodes": [
             {
@@ -6912,20 +6914,22 @@ class TestSetPipeline:
         engine, session_id = _session_engine_with_session()
         output_path = tmp_path / "outputs" / "append.csv"
         args = {
-            "source": {
-                "plugin": "text",
-                "on_success": "source_out",
-                "options": {
-                    "column": "text",
-                    "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
-                },
-                "inline_blob": {
-                    "filename": "input.txt",
-                    "mime_type": "text/plain",
-                    "content": "hello",
-                    "description": "literal input from the user prompt",
-                },
-                "on_validation_failure": "discard",
+            "sources": {
+                "primary": {
+                    "plugin": "text",
+                    "on_success": "source_out",
+                    "options": {
+                        "column": "text",
+                        "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                    },
+                    "inline_blob": {
+                        "filename": "input.txt",
+                        "mime_type": "text/plain",
+                        "content": "hello",
+                        "description": "literal input from the user prompt",
+                    },
+                    "on_validation_failure": "discard",
+                }
             },
             "nodes": [
                 {

@@ -434,7 +434,7 @@ class TestPipelineConfigNestedMutationRejected:
         from elspeth.engine.orchestrator.types import PipelineConfig
 
         config = PipelineConfig(
-            source=MagicMock(),
+            sources={"primary": MagicMock()},
             transforms=[],
             sinks={"out": MagicMock()},
             config={"nested": {"key": "val"}},

@@ -347,7 +347,7 @@ class TestSessionStrictCoercionRejected:
     def test_run_response_rejects_string_int_accounting(self) -> None:
         kwargs = _valid_run_response_kwargs()
         kwargs["accounting"] = {
-            "source": {"rows_processed": "10"},
+            "sources": {"primary": {"rows_processed": "10"}},
             "tokens": {
                 "emitted": 10,
                 "terminal": 10,

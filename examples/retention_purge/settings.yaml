@@ -9,18 +9,19 @@
 # After a run, `elspeth purge` removes old payloads while preserving
 # the audit trail (hashes and metadata survive deletion).
 
-source:
-  plugin: csv
-  on_success: validated
-  options:
-    path: examples/retention_purge/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'document: str'
-      - 'classification: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: validated
+    options:
+      path: examples/retention_purge/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'document: str'
+        - 'classification: str'
+      on_validation_failure: discard
 
 transforms:
 - name: process

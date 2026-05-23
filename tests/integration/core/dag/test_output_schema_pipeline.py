@@ -130,8 +130,8 @@ class TestRealTransformPropagation:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]  # test fixture
-            source_settings=source_settings,
+            sources={"primary": source},  # type: ignore[arg-type]  # test fixture
+            source_settings_map={"primary": source_settings},
             transforms=wired_transforms,
             sinks={sink_name: sink},
             aggregations={},
@@ -186,8 +186,8 @@ def _build_producer_consumer_graph(
         ),
     )
     return ExecutionGraph.from_plugin_instances(
-        source=source,  # type: ignore[arg-type]  # test fixture
-        source_settings=source_settings,
+        sources={"primary": source},  # type: ignore[arg-type]  # test fixture
+        source_settings_map={"primary": source_settings},
         transforms=[producer_wired, consumer_wired],
         sinks={"output": CollectSink("output")},
         aggregations={},
@@ -264,8 +264,8 @@ class TestEdgeValidationWithOutputSchemaContract:
 
         with pytest.raises(FrameworkBugError, match="declares output fields"):
             ExecutionGraph.from_plugin_instances(
-                source=source,  # type: ignore[arg-type]  # test fixture
-                source_settings=SourceSettings(plugin="mock_source", on_success="source_out", options={}),
+                sources={"primary": source},  # type: ignore[arg-type]  # test fixture
+                source_settings_map={"primary": SourceSettings(plugin="mock_source", on_success="source_out", options={})},
                 transforms=[wired],
                 sinks={"output": CollectSink("output")},
                 aggregations={},

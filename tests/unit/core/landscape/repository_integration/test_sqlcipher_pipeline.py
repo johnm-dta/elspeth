@@ -35,7 +35,7 @@ class TestPipelineWithSQLCipherLandscape:
 
             # Begin a run
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "csv"}},
+                config={"sources": {"primary": {"plugin": "csv"}}},
                 canonical_version="1.0.0",
             )
             run_id = run.run_id

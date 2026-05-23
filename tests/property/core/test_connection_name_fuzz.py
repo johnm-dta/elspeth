@@ -201,15 +201,17 @@ class TestConnectionNameRejection:
         """Dangerous names must be rejected when used as sink name keys."""
         with pytest.raises((ValueError, ValidationError)):
             ElspethSettings(
-                source=SourceSettings(
-                    plugin="csv",
-                    on_success="safe_out",
-                    options={
-                        "path": "test.csv",
-                        "on_validation_failure": "discard",
-                        "schema": {"mode": "observed"},
-                    },
-                ),
+                sources={
+                    "primary": SourceSettings(
+                        plugin="csv",
+                        on_success="safe_out",
+                        options={
+                            "path": "test.csv",
+                            "on_validation_failure": "discard",
+                            "schema": {"mode": "observed"},
+                        },
+                    )
+                },
                 sinks={
                     name: SinkSettings(
                         plugin="json",
@@ -313,15 +315,17 @@ class TestConnectionNameRoundtrip:
         from elspeth.cli_helpers import instantiate_plugins_from_config
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success=name,
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success=name,
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -343,8 +347,8 @@ class TestConnectionNameRoundtrip:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -368,15 +372,17 @@ class TestConnectionNameRoundtrip:
         from elspeth.cli_helpers import instantiate_plugins_from_config
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success=name,
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success=name,
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -398,8 +404,8 @@ class TestConnectionNameRoundtrip:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,

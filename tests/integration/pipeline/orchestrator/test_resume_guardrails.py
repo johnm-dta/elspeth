@@ -87,7 +87,7 @@ def _build_pipeline() -> tuple[PipelineConfig, Any]:
     source = ListSource([{"id": 1, "value": "alpha"}], on_success="default")
     sink = CollectSink("default")
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[],
         sinks={"default": as_sink(sink)},
     )

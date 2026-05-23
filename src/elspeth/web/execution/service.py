@@ -1110,7 +1110,6 @@ class ExecutionServiceImpl:
             # errors before any rows flow, with a cleaner error surface, and
             # closes the composer/runtime parity gap (issue elspeth-127de6865a).
             pipeline_config = assemble_and_validate_pipeline_config(
-                source=bundle.source,
                 sources=bundle.sources,
                 transforms=bundle.transforms,
                 sinks=bundle.sinks,

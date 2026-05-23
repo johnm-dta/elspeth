@@ -17,20 +17,21 @@
 #   - Fan-out: enrich the same row via multiple external APIs
 #   - Safety: require all paths before emitting (no partial results)
 
-source:
-  plugin: csv
-  on_success: raw
-  options:
-    path: examples/fork_coalesce/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'product: str'
-      - 'price: int'
-      - 'category: str'
-      - 'description: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: raw
+    options:
+      path: examples/fork_coalesce/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'product: str'
+        - 'price: int'
+        - 'category: str'
+        - 'description: str'
+      on_validation_failure: discard
 
 transforms:
 # Pre-fork transform — shared processing before the split

@@ -103,15 +103,17 @@ class TestAmbiguousContinueFallthrough:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             gates=[
                 GateSettings(
                     name="router",
@@ -149,8 +151,8 @@ class TestAmbiguousContinueFallthrough:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -176,15 +178,17 @@ class TestAmbiguousContinueFallthrough:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             gates=[
                 GateSettings(
                     name="drop_nonmatches",
@@ -204,8 +208,8 @@ class TestAmbiguousContinueFallthrough:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -231,15 +235,17 @@ class TestAmbiguousContinueFallthrough:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             gates=[
                 GateSettings(
                     name="router",
@@ -264,8 +270,8 @@ class TestAmbiguousContinueFallthrough:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -291,15 +297,17 @@ class TestAmbiguousContinueFallthrough:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             gates=[
                 GateSettings(
                     name="router",
@@ -329,8 +337,8 @@ class TestAmbiguousContinueFallthrough:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -369,15 +377,17 @@ class TestCoalesceOnSuccessRejectsConnection:
         # "source_out" is produced by the source and consumed by the gate,
         # so it is a valid consumer connection — but not a sink.
         settings = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             gates=[
                 GateSettings(
                     name="forker",
@@ -408,8 +418,8 @@ class TestCoalesceOnSuccessRejectsConnection:
         plugins = instantiate_plugins_from_config(settings)
         with pytest.raises(GraphValidationError, match="must point to a sink"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,

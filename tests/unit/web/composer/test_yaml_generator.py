@@ -228,8 +228,13 @@ class TestGenerateYaml:
 
         pipeline_dict = generate_pipeline_dict(state)
 
-        assert "blob_ref" not in pipeline_dict["source"]["options"]
-        assert "blob_ref" not in yaml.safe_load(generate_yaml(state))["source"]["options"]
+        # ``with_source(...)`` stores the singular source under the legacy
+        # composer key ``"source"`` (see ``CompositionState.with_source``);
+        # the YAML generator emits whatever key the ``sources`` map carries.
+        # ``with_named_source`` callers can produce ``"primary"`` instead;
+        # both shapes round-trip through ``load_settings_from_yaml_string``.
+        assert "blob_ref" not in pipeline_dict["sources"]["source"]["options"]
+        assert "blob_ref" not in yaml.safe_load(generate_yaml(state))["sources"]["source"]["options"]
 
     def test_generate_pipeline_dict_strips_source_authoring_metadata(self) -> None:
         state = _make_linear_pipeline().with_source(
@@ -332,10 +337,10 @@ class TestGenerateYaml:
         parsed = yaml.safe_load(yaml_str)
 
         # Source
-        assert parsed["source"]["plugin"] == "csv"
-        assert parsed["source"]["on_success"] == "transform_1"
-        assert parsed["source"]["options"]["path"] == "/data/input.csv"
-        assert parsed["source"]["options"]["on_validation_failure"] == "quarantine"
+        assert parsed["sources"]["primary"]["plugin"] == "csv"
+        assert parsed["sources"]["primary"]["on_success"] == "transform_1"
+        assert parsed["sources"]["primary"]["options"]["path"] == "/data/input.csv"
+        assert parsed["sources"]["primary"]["options"]["on_validation_failure"] == "quarantine"
 
         # Transform
         assert len(parsed["transforms"]) == 1
@@ -467,10 +472,10 @@ class TestGenerateYaml:
         parsed = yaml.safe_load(yaml_str)
 
         # blob_ref must not appear in the YAML
-        assert "blob_ref" not in parsed["source"]["options"]
+        assert "blob_ref" not in parsed["sources"]["primary"]["options"]
         # Other options should still be present
-        assert parsed["source"]["options"]["path"] == "/data/input.txt"
-        assert parsed["source"]["options"]["column"] == "line"
+        assert parsed["sources"]["primary"]["options"]["path"] == "/data/input.txt"
+        assert parsed["sources"]["primary"]["options"]["column"] == "line"
 
     def test_bind_source_mode_stripped_with_blob_ref(self) -> None:
         """A blob-bound source carries a ``mode: bind_source`` marker alongside
@@ -757,9 +762,9 @@ class TestGenerateYaml:
         # State has been through freeze_fields() -- options are MappingProxyType
         yaml_str = generate_yaml(state)
         parsed = yaml.safe_load(yaml_str)
-        assert parsed["source"]["plugin"] == "csv"
+        assert parsed["sources"]["primary"]["plugin"] == "csv"
         # Nested frozen options must serialize correctly
-        assert parsed["source"]["options"]["schema"]["fields"] == ["name", "age"]
+        assert parsed["sources"]["primary"]["options"]["schema"]["fields"] == ["name", "age"]
 
     def test_empty_state_minimal_yaml(self) -> None:
         """Empty state produces minimal valid YAML (no source, no sinks)."""

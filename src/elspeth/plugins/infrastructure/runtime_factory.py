@@ -24,10 +24,12 @@ class PluginBundle:
     """Pre-instantiated plugin instances from configuration.
 
     Typed fields enable mypy checking and IDE autocomplete on all access sites.
+
+    Per ADR-025 §1, the source surface is plural by contract. Callers iterate
+    ``sources`` / ``source_settings_map`` keyed by source name; PluginBundle no
+    longer exposes a singular ``source`` shim.
     """
 
-    source: SourceProtocol
-    source_settings: SourceSettings
     sources: Mapping[str, SourceProtocol]
     source_settings_map: Mapping[str, SourceSettings]
     transforms: Sequence[WiredTransform]
@@ -35,6 +37,15 @@ class PluginBundle:
     aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]]
 
     def __post_init__(self) -> None:
+        from elspeth.contracts.errors import OrchestrationInvariantError
+
+        if not self.sources:
+            raise OrchestrationInvariantError("PluginBundle requires at least one source")
+        if set(self.sources) != set(self.source_settings_map):
+            raise OrchestrationInvariantError(
+                f"PluginBundle sources and source_settings_map keys must match. "
+                f"sources={sorted(self.sources)}, source_settings_map={sorted(self.source_settings_map)}"
+            )
         freeze_fields(self, "sources", "source_settings_map", "transforms", "sinks", "aggregations")
 
 
@@ -60,20 +71,13 @@ def instantiate_plugins_from_config(
 
     with plugin_preflight_mode(preflight_mode):
         source_settings_by_name = config.sources
-        if len(config.sources) == 1:
-            first_config_name = next(iter(config.sources))
-            if config.source != config.sources[first_config_name]:
-                source_settings_by_name = {first_config_name: config.source}
 
-        # Instantiate sources. ``source`` remains a compatibility view of the
-        # first named source while ``sources`` is the canonical runtime shape.
         sources = {}
         for source_name, source_config in source_settings_by_name.items():
             source_cls = manager.get_source_by_name(source_config.plugin)
             source_instance = source_cls(dict(source_config.options))
             source_instance.on_success = source_config.on_success
             sources[source_name] = source_instance
-        first_source_name = next(iter(sources))
 
         transforms: list[WiredTransform] = []
         for plugin_config in config.transforms:
@@ -110,8 +114,6 @@ def instantiate_plugins_from_config(
             sinks[sink_name]._on_write_failure = sink_config.on_write_failure
 
         bundle = PluginBundle(
-            source=sources[first_source_name],
-            source_settings=source_settings_by_name[first_source_name],
             sources=sources,
             source_settings_map=source_settings_by_name,
             transforms=transforms,

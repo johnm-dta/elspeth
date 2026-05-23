@@ -44,14 +44,16 @@ class TestLandscapeExport:
         db_path = tmp_path / "audit.db"
 
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(input_csv),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(input_csv),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -167,14 +169,16 @@ class TestLandscapeExport:
         db_path = tmp_path / "audit.db"
 
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(input_csv),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(input_csv),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -319,14 +323,16 @@ class TestSignedExportDeterminism:
         db_path = tmp_path / "audit.db"
 
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(input_csv),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(input_csv),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -394,14 +400,16 @@ class TestSignedExportDeterminism:
             db_path = tmp_path / f"audit_{i}.db"
 
             config = {
-                "source": {
-                    "plugin": "csv",
-                    "on_success": "output",
-                    "options": {
-                        "path": str(input_csv),
-                        "on_validation_failure": "discard",
-                        "schema": {"mode": "observed"},
-                    },
+                "sources": {
+                    "primary": {
+                        "plugin": "csv",
+                        "on_success": "output",
+                        "options": {
+                            "path": str(input_csv),
+                            "on_validation_failure": "discard",
+                            "schema": {"mode": "observed"},
+                        },
+                    }
                 },
                 "sinks": {
                     "output": {

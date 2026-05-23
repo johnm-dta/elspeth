@@ -1290,11 +1290,12 @@ class TestValidatePipelinePluginFailure:
     def test_real_text_source_config_error_returns_validation_result(self) -> None:
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: text
-  on_success: transform_in
-  options:
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: text
+    on_success: transform_in
+    options:
+      on_validation_failure: discard
 transforms:
 - name: append_world
   plugin: value_transform
@@ -1505,7 +1506,7 @@ class TestCollectSecretRefs:
         assert _collect_secret_refs({"secret_ref": "API_KEY"}) == ["API_KEY"]
 
     def test_nested_secret_ref(self) -> None:
-        data = {"source": {"options": {"api_key": {"secret_ref": "MY_KEY"}}}}
+        data = {"sources": {"primary": {"options": {"api_key": {"secret_ref": "MY_KEY"}}}}}
         assert _collect_secret_refs(data) == ["MY_KEY"]
 
     def test_multiple_refs(self) -> None:
@@ -2399,12 +2400,13 @@ class TestValidatePipelineRuntimePathResolution:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: csv
-  on_success: main
-  options:
-    path: blobs/session/input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: main
+    options:
+      path: blobs/session/input.csv
+      on_validation_failure: discard
 sinks:
   main:
     plugin: csv
@@ -2418,7 +2420,7 @@ sinks:
 
         loaded_yaml = self._loaded_yaml_from_settings_loader(mock_load)
         parsed = yaml.safe_load(loaded_yaml)
-        assert parsed["source"]["options"]["path"] == "/tmp/test_data/blobs/session/input.csv"
+        assert parsed["sources"]["primary"]["options"]["path"] == "/tmp/test_data/blobs/session/input.csv"
         assert parsed["sinks"]["main"]["options"]["path"] == "/tmp/test_data/outputs/out.csv"
 
     def test_validate_pipeline_preserves_absolute_paths_before_settings_load(self) -> None:
@@ -2445,12 +2447,13 @@ sinks:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: csv
-  on_success: main
-  options:
-    path: /tmp/test_data/blobs/input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: main
+    options:
+      path: /tmp/test_data/blobs/input.csv
+      on_validation_failure: discard
 sinks:
   main:
     plugin: csv
@@ -2464,7 +2467,7 @@ sinks:
 
         loaded_yaml = self._loaded_yaml_from_settings_loader(mock_load)
         parsed = yaml.safe_load(loaded_yaml)
-        assert parsed["source"]["options"]["path"] == "/tmp/test_data/blobs/input.csv"
+        assert parsed["sources"]["primary"]["options"]["path"] == "/tmp/test_data/blobs/input.csv"
         assert parsed["sinks"]["main"]["options"]["path"] == "/tmp/test_data/outputs/out.csv"
 
 
@@ -2493,12 +2496,13 @@ class TestValidatePipelineRuntimeCheckBoundaries:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: csv
-  on_success: primary
-  options:
-    path: /tmp/test_data/blobs/input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: primary
+    options:
+      path: /tmp/test_data/blobs/input.csv
+      on_validation_failure: discard
 sinks:
   primary:
     plugin: csv
@@ -2537,12 +2541,13 @@ sinks:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: csv
-  on_success: primary
-  options:
-    path: /tmp/test_data/blobs/input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: primary
+    options:
+      path: /tmp/test_data/blobs/input.csv
+      on_validation_failure: discard
 sinks:
   primary:
     plugin: csv
@@ -2581,12 +2586,13 @@ sinks:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: csv
-  on_success: primary
-  options:
-    path: /tmp/test_data/blobs/input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: primary
+    options:
+      path: /tmp/test_data/blobs/input.csv
+      on_validation_failure: discard
 sinks:
   primary:
     plugin: csv

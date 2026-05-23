@@ -280,7 +280,7 @@ class TestForkCoalesceFlow:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -288,8 +288,8 @@ class TestForkCoalesceFlow:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=wire_transforms([as_transform(transform)], source_connection="source_out", final_sink="to_gate"),
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -298,7 +298,7 @@ class TestForkCoalesceFlow:
         )
 
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "default", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "default", "options": {}}},
             sinks={"default": {"plugin": "test", "on_write_failure": "discard"}},
             gates=[gate],
             coalesce=[coalesce],
@@ -375,7 +375,7 @@ class TestForkCoalesceFlow:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -383,8 +383,8 @@ class TestForkCoalesceFlow:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=wire_transforms([as_transform(transform)], source_connection="source_out", final_sink="to_gate"),
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -393,7 +393,7 @@ class TestForkCoalesceFlow:
         )
 
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "default", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "default", "options": {}}},
             sinks={"default": {"plugin": "test", "on_write_failure": "discard"}},
             gates=[gate],
             coalesce=[coalesce],
@@ -445,7 +445,7 @@ class TestForkCoalesceFlow:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -453,8 +453,8 @@ class TestForkCoalesceFlow:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=wire_transforms([as_transform(transform)], source_connection="source_out", final_sink="to_gate"),
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -463,7 +463,7 @@ class TestForkCoalesceFlow:
         )
 
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "default", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "default", "options": {}}},
             sinks={"default": {"plugin": "test", "on_write_failure": "discard"}},
             gates=[gate],
             coalesce=[coalesce],
@@ -512,7 +512,7 @@ class TestForkCoalesceEdgeCases:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -520,8 +520,8 @@ class TestForkCoalesceEdgeCases:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=wire_transforms([as_transform(transform)], source_connection="source_out", final_sink="to_gate"),
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -530,7 +530,7 @@ class TestForkCoalesceEdgeCases:
         )
 
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "default", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "default", "options": {}}},
             sinks={"default": {"plugin": "test", "on_write_failure": "discard"}},
             gates=[gate],
             coalesce=[coalesce],
@@ -573,7 +573,7 @@ class TestForkCoalesceEdgeCases:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -581,8 +581,8 @@ class TestForkCoalesceEdgeCases:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=wire_transforms([as_transform(transform)], source_connection="source_out", final_sink="to_gate"),
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -591,7 +591,7 @@ class TestForkCoalesceEdgeCases:
         )
 
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "default", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "default", "options": {}}},
             sinks={"default": {"plugin": "test", "on_write_failure": "discard"}},
             gates=[gate],
             coalesce=[coalesce],

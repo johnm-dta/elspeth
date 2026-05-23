@@ -702,12 +702,14 @@ class TestRegisterNodeDirect:
             },
         }
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,
-            source_settings=SourceSettings(
-                plugin=source.name,
-                on_success="output",
-                options={},
-            ),
+            sources={"primary": source},
+            source_settings_map={
+                "primary": SourceSettings(
+                    plugin=source.name,
+                    on_success="output",
+                    options={},
+                ),
+            },
             transforms=[],
             sinks={"output": sink},
             aggregations={},

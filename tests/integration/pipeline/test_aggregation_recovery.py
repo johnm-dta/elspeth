@@ -434,7 +434,8 @@ class TestAggregationRecoveryIntegration:
             run_id: Run to register nodes for
             extra_nodes: Optional list of (node_id, plugin_name, node_type) tuples
         """
-        from elspeth.core.landscape.schema import nodes_table
+        from elspeth.contracts.contract_records import ContractAuditRecord
+        from elspeth.core.landscape.schema import nodes_table, run_sources_table
 
         now = datetime.now(UTC)
 
@@ -451,6 +452,26 @@ class TestAggregationRecoveryIntegration:
                     config_hash="test",
                     config_json="{}",
                     registered_at=now,
+                )
+            )
+
+            # ADR-025 §3 Decision 5: verify_contract_integrity reads from
+            # run_sources, so each test source must carry its contract there.
+            contract = _create_test_schema_contract()
+            audit_record = ContractAuditRecord.from_contract(contract)
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="source",
+                    source_name="source",
+                    plugin_name="test_source",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json="{}",
+                    schema_contract_json=audit_record.to_json(),
+                    schema_contract_hash=contract.version_hash(),
+                    field_resolution_json=None,
+                    recorded_at=now,
                 )
             )
 

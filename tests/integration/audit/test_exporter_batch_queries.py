@@ -68,7 +68,7 @@ def _run_linear_on_db(
     source, tx_list, sinks, graph = build_linear_pipeline(source_data, transforms=[PassTransform()])
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in tx_list],
         sinks={"default": as_sink(sinks["default"])},
     )
@@ -113,7 +113,7 @@ def _run_fork_on_db(
     )
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in tx_list],
         sinks={name: as_sink(s) for name, s in all_sinks.items()},
         gates=[gate],

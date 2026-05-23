@@ -173,6 +173,6 @@ class TestConnectionNameValidation:
 
         with pytest.raises(ValidationError, match="reserved"):
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "source_out"},
+                sources={"primary": {"plugin": "csv", "on_success": "source_out"}},
                 sinks={"on_success": {"plugin": "json", "on_write_failure": "discard"}},
             )

@@ -627,17 +627,18 @@ class TestWebRuntimeInfrastructure:
         mock_settings.get_payload_store_path.return_value = tmp_path / "payloads"
 
         pipeline_yaml = f"""
-source:
-  plugin: text
-  on_success: output
-  options:
-    path: {source_path}
-    column: value
-    on_validation_failure: discard
-    schema:
-      mode: fixed
-      fields:
-      - "value: str"
+sources:
+  primary:
+    plugin: text
+    on_success: output
+    options:
+      path: {source_path}
+      column: value
+      on_validation_failure: discard
+      schema:
+        mode: fixed
+        fields:
+        - "value: str"
 sinks:
   output:
     plugin: json
@@ -742,17 +743,18 @@ sinks:
         monkeypatch.setattr(WebScrapeTransform, "_fetch_url", fake_fetch_url)
 
         pipeline_yaml = f"""
-source:
-  plugin: text
-  on_success: scrape_in
-  options:
-    path: {source_path}
-    column: url
-    on_validation_failure: discard
-    schema:
-      mode: fixed
-      fields:
-      - "url: str"
+sources:
+  primary:
+    plugin: text
+    on_success: scrape_in
+    options:
+      path: {source_path}
+      column: url
+      on_validation_failure: discard
+      schema:
+        mode: fixed
+        fields:
+        - "url: str"
 transforms:
 - name: scrape_page
   plugin: web_scrape

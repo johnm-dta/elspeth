@@ -1,15 +1,16 @@
-source:
-  plugin: csv
-  on_success: classifier_in
-  options:
-    path: examples/statistical_batch_plugins/classifier_labels.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'actual_label: str'
-      - 'predicted_label: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: classifier_in
+    options:
+      path: examples/statistical_batch_plugins/classifier_labels.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'actual_label: str'
+        - 'predicted_label: str'
+      on_validation_failure: discard
 aggregations:
 - name: classification_summary
   plugin: batch_classifier_metrics

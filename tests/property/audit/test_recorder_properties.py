@@ -669,7 +669,7 @@ class TestTokenOutcomeProperties:
         db = make_landscape_db()
         factory = make_factory(db)
 
-        run = factory.run_lifecycle.begin_run(config={"source": {"plugin": "test"}}, canonical_version="1.0")
+        run = factory.run_lifecycle.begin_run(config={"sources": {"primary": {"plugin": "test"}}}, canonical_version="1.0")
         source_node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
@@ -736,7 +736,7 @@ class TestTokenOutcomeProperties:
         db = make_landscape_db()
         factory = make_factory(db)
 
-        run = factory.run_lifecycle.begin_run(config={"source": {"plugin": "test"}}, canonical_version="1.0")
+        run = factory.run_lifecycle.begin_run(config={"sources": {"primary": {"plugin": "test"}}}, canonical_version="1.0")
         source_node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
@@ -1057,7 +1057,7 @@ class TestHashDeterminism:
         db = make_landscape_db()
         factory = make_factory(db)
 
-        run = factory.run_lifecycle.begin_run(config={"source": {"plugin": "test"}}, canonical_version="1.0")
+        run = factory.run_lifecycle.begin_run(config={"sources": {"primary": {"plugin": "test"}}}, canonical_version="1.0")
         source_node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
@@ -1096,7 +1096,7 @@ class TestHashDeterminism:
         db = make_landscape_db()
         factory = make_factory(db)
 
-        run = factory.run_lifecycle.begin_run(config={"source": {"plugin": "test"}}, canonical_version="1.0")
+        run = factory.run_lifecycle.begin_run(config={"sources": {"primary": {"plugin": "test"}}}, canonical_version="1.0")
         source_node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",

@@ -412,7 +412,7 @@ def _run_mixed_move_and_divert_pipeline(
         "error_sink": CollectSink(name="error_sink"),
     }
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(transform)],
         sinks={name: as_sink(sink) for name, sink in sinks.items()},
         gates=[gate],

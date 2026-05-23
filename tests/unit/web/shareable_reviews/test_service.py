@@ -73,11 +73,13 @@ def test_composition_snapshot_accepts_legacy_single_source_payload() -> None:
         {
             "version": 1,
             "metadata": {"name": "legacy", "description": ""},
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {"schema": {"mode": "observed"}},
-                "on_validation_failure": "discard",
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {"schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                }
             },
             "nodes": [],
             "edges": [],

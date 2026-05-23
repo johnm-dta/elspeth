@@ -87,14 +87,21 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
             raise ValueError(f"Unknown node_type '{node_type}' for node '{node['id']}'.")
 
     sources = state_dict["sources"]
-    if len(sources) > 1 or (len(sources) == 1 and "source" not in sources):
+    if sources:
+        # ADR-025 §1: the runtime YAML loader rejects the singular ``source:``
+        # key. Always emit ``sources:`` regardless of cardinality. The composer
+        # state model still carries a singular ``source`` field (G9 retains it
+        # as a UI-layer compatibility view) but the wire-format YAML must use
+        # the plural shape to round-trip through ``load_settings_from_yaml_string``.
         doc["sources"] = {name: _source_entry(source) for name, source in sources.items()}
     else:
-        # Legacy single-source YAML remains canonical for one source so existing
-        # runtime configs and generated sessions keep their pre-multi-source shape.
-        source = state_dict["source"]
-        if source is not None:
-            doc["source"] = _source_entry(source)
+        # Composer state may carry a singular ``source`` set but no entry in
+        # the plural ``sources`` map (legacy in-flight state — G9 retains
+        # the singular field as a UI compatibility view). Project it as a
+        # ``"primary"`` named source so the emitted YAML is plural.
+        singular_source = state_dict["source"] if "source" in state_dict else None
+        if singular_source is not None:
+            doc["sources"] = {"primary": _source_entry(singular_source)}
 
     # Transforms — filter nodes by type, access always-present fields directly.
     transforms = [n for n in state_dict["nodes"] if n["node_type"] == "transform"]

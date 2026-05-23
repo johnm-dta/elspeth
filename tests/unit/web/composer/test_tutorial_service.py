@@ -609,7 +609,7 @@ def test_parser_handles_list_form_transforms_from_production_composer_yaml() -> 
     Tier-1 topology corruption in a different shape than C1.
     """
     doc = {
-        "source": {"plugin": "inline_blob", "options": {"rows": [{"url": "ato.gov.au"}]}},
+        "sources": {"primary": {"plugin": "inline_blob", "options": {"rows": [{"url": "ato.gov.au"}]}}},
         "transforms": [
             {"name": "scrape", "plugin": "web_scrape", "input": "source", "on_success": "rate", "on_error": "abort"},
             {"name": "rate", "plugin": "llm_rate", "input": "scrape", "on_success": "out", "on_error": "abort"},
@@ -632,7 +632,7 @@ def test_parser_handles_list_form_aggregations() -> None:
     name and version and must appear in the synthesised audit topology.
     """
     doc = {
-        "source": {"plugin": "csv"},
+        "sources": {"primary": {"plugin": "csv"}},
         "transforms": [{"name": "norm", "plugin": "passthrough", "input": "source", "on_success": "batch", "on_error": "abort"}],
         "aggregations": [
             {"name": "batch", "plugin": "batch_stats", "input": "norm", "on_success": "out", "on_error": "abort"},
@@ -657,7 +657,7 @@ def test_parser_rejects_gates_in_synthesised_replay_yaml() -> None:
     synthesise a half-truth audit row rather than silently dropping it.
     """
     doc = {
-        "source": {"plugin": "csv"},
+        "sources": {"primary": {"plugin": "csv"}},
         "transforms": [],
         "gates": [{"name": "branch", "input": "source", "condition": "row.x > 0", "routes": []}],
         "sinks": {"out": {"plugin": "jsonl"}},
@@ -668,7 +668,7 @@ def test_parser_rejects_gates_in_synthesised_replay_yaml() -> None:
 
 def test_parser_rejects_coalesce_in_synthesised_replay_yaml() -> None:
     doc = {
-        "source": {"plugin": "csv"},
+        "sources": {"primary": {"plugin": "csv"}},
         "coalesce": [{"name": "merge", "branches": ["a", "b"], "policy": "all", "merge": "concat"}],
         "sinks": {"out": {"plugin": "jsonl"}},
     }
@@ -685,7 +685,7 @@ def test_parser_rejects_dict_form_transforms_no_legacy_compat() -> None:
     rather than partially honouring a non-production format.
     """
     doc = {
-        "source": {"plugin": "csv"},
+        "sources": {"primary": {"plugin": "csv"}},
         "transforms": {"keep": {"plugin": "passthrough"}},
         "sinks": {"out": {"plugin": "jsonl"}},
     }

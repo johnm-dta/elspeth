@@ -31,14 +31,16 @@ class TestCLIIntegration:
         all completed rows to the "default" sink via output_sink.
         """
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "default",
-                "options": {
-                    "path": str(sample_csv),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "default",
+                    "options": {
+                        "path": str(sample_csv),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 # "default" is required - Orchestrator routes completed rows here
@@ -146,17 +148,19 @@ class TestSourceQuarantineRouting:
     def quarantine_pipeline_config(self, tmp_path: Path, csv_with_invalid_rows: Path) -> Path:
         """Create pipeline with quarantine sink for invalid rows."""
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "default",
-                "options": {
-                    "path": str(csv_with_invalid_rows),
-                    "on_validation_failure": "quarantine",  # Route to quarantine sink
-                    "schema": {
-                        "mode": "fixed",
-                        "fields": ["id: int", "name: str", "score: int"],
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "default",
+                    "options": {
+                        "path": str(csv_with_invalid_rows),
+                        "on_validation_failure": "quarantine",  # Route to quarantine sink
+                        "schema": {
+                            "mode": "fixed",
+                            "fields": ["id: int", "name: str", "score: int"],
+                        },
                     },
-                },
+                }
             },
             "sinks": {
                 "default": {
@@ -217,17 +221,19 @@ class TestSourceQuarantineRouting:
     def test_discard_does_not_write_to_sink(self, tmp_path: Path, csv_with_invalid_rows: Path) -> None:
         """When on_validation_failure='discard', invalid rows are not written."""
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "default",
-                "options": {
-                    "path": str(csv_with_invalid_rows),
-                    "on_validation_failure": "discard",  # Intentionally drop
-                    "schema": {
-                        "mode": "fixed",
-                        "fields": ["id: int", "name: str", "score: int"],
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "default",
+                    "options": {
+                        "path": str(csv_with_invalid_rows),
+                        "on_validation_failure": "discard",  # Intentionally drop
+                        "schema": {
+                            "mode": "fixed",
+                            "fields": ["id: int", "name: str", "score: int"],
+                        },
                     },
-                },
+                }
             },
             "sinks": {
                 "default": {
@@ -268,14 +274,16 @@ class TestTransformErrorSinkRouting:
         input_csv.write_text("id,value\n1,good\n2,bad\n3,ok\n")
 
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "passthrough_input",
-                "options": {
-                    "path": str(input_csv),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "passthrough_input",
+                    "options": {
+                        "path": str(input_csv),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "transforms": [
                 {

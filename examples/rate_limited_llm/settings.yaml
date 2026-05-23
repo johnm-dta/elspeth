@@ -11,17 +11,18 @@
 # Prerequisites: Start ChaosLLM server first:
 #   chaosllm serve --port 8199 --preset=realistic
 
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: examples/rate_limited_llm/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'text: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: examples/rate_limited_llm/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'text: str'
+      on_validation_failure: discard
 
 transforms:
 - name: sentiment

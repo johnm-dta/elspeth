@@ -56,7 +56,7 @@ def test_diverted_sink_rows_do_not_remain_counted_as_success(payload_store, land
     source = ListSource([{"value": 1}, {"value": 2}], on_success="default")
     sink = DivertSecondRowSink("default")
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[],
         sinks={"default": as_sink(sink)},
     )

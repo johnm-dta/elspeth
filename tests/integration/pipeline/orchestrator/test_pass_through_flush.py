@@ -182,8 +182,8 @@ def _build_aggregation_pipeline(
     )
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=as_source(source),
-        source_settings=SourceSettings(plugin=source.name, on_success="agg_in", options={}),
+        sources={"primary": as_source(source)},
+        source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="agg_in", options={})},
         transforms=[],
         sinks={"output": as_sink(output_sink)},
         aggregations={"dropper_agg": (as_transform(transform), agg_settings)},
@@ -197,7 +197,7 @@ def _build_aggregation_pipeline(
     transform.node_id = agg_node_id
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(transform)],
         sinks={"output": as_sink(output_sink)},
         aggregation_settings={agg_node_id: agg_settings},

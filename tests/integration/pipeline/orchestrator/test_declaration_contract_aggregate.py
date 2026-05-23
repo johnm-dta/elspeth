@@ -84,7 +84,7 @@ def test_aggregate_declaration_contract_violation_reaches_orchestrator(payload_s
         transforms=[transform],
     )
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in transforms],
         sinks={"default": as_sink(sinks["default"])},
     )

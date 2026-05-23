@@ -118,7 +118,6 @@ class DAGTraversalContext:
 
     node_step_map: Mapping[NodeID, int]
     node_to_plugin: Mapping[NodeID, RowPlugin | GateSettings]
-    first_transform_node_id: NodeID | None
     node_to_next: Mapping[NodeID, NodeID | None]
     coalesce_node_map: Mapping[CoalesceName, NodeID]
     branch_first_node: Mapping[str, NodeID] = MappingProxyType({})
@@ -385,7 +384,6 @@ class RowProcessor:
         # Traversal metadata intentionally excludes the source node. Callers
         # that want source-boundary checks must pass the concrete source plugin.
         self._source_plugin: SourceProtocol | None = source_plugin
-        self._first_transform_node_id: NodeID | None = traversal.first_transform_node_id
         self._node_to_next: Mapping[NodeID, NodeID | None] = traversal.node_to_next
         self._retry_manager = retry_manager
         self._coalesce_executor = coalesce_executor
@@ -1968,10 +1966,15 @@ class RowProcessor:
             source_node_id=effective_source_node_id,
         )
 
-        if effective_source_node_id in self._node_to_next:
-            initial_node_id = self._node_to_next[effective_source_node_id]
-        else:
-            initial_node_id = self._first_transform_node_id or effective_source_node_id
+        # Per ADR-025 §2 the DAG builder always populates node_to_next for
+        # every source node — missing entries are a construction bug, not a
+        # state we silently work around with a "first transform" fallback.
+        if effective_source_node_id not in self._node_to_next:
+            raise OrchestrationInvariantError(
+                f"Traversal context is missing source continuation for {effective_source_node_id!r}. "
+                "This is a graph construction bug — every source node must have a node_to_next entry."
+            )
+        initial_node_id = self._node_to_next[effective_source_node_id]
         if transforms and initial_node_id == effective_source_node_id:
             raise OrchestrationInvariantError("Traversal context is missing a source continuation for non-empty transform pipeline")
         effective_source_on_success = source_on_success if source_on_success is not None else self._source_on_success

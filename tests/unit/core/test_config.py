@@ -65,17 +65,17 @@ class TestElspethSettings:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
         )
-        assert settings.source.plugin == "csv"
+        assert settings.sources["primary"].plugin == "csv"
         assert settings.retry.max_attempts == 3  # default
 
     def test_nested_config(self) -> None:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             retry={"max_attempts": 5},
         )
@@ -90,11 +90,12 @@ class TestLoadSettings:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: "csv"
-  on_success: output
-  options:
-    path: "input.csv"
+sources:
+  primary:
+    plugin: "csv"
+    on_success: output
+    options:
+      path: "input.csv"
 sinks:
   output:
     plugin: "csv"
@@ -106,8 +107,8 @@ retry:
   max_attempts: 5
 """)
         settings = load_settings(config_file)
-        assert settings.source.plugin == "csv"
-        assert settings.source.options == {"path": "input.csv"}
+        assert settings.sources["primary"].plugin == "csv"
+        assert settings.sources["primary"].options == {"path": "input.csv"}
         assert settings.retry.max_attempts == 5
 
     def test_load_with_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,9 +116,10 @@ retry:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: "csv"
-  on_success: output
+sources:
+  primary:
+    plugin: "csv"
+    on_success: output
 sinks:
   output:
     plugin: "csv"
@@ -128,7 +130,7 @@ sinks:
         monkeypatch.setenv("ELSPETH_SOURCE__PLUGIN", "json")
 
         settings = load_settings(config_file)
-        assert settings.source.plugin == "json"
+        assert settings.sources["primary"].plugin == "json"
 
     def test_load_sink_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides for sink settings should work.
@@ -144,9 +146,10 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 sinks:
   output:
     plugin: csv
@@ -170,9 +173,10 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 
 """)
         # Define entire sink via env vars
@@ -188,9 +192,10 @@ source:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: "csv"
-  on_success: output
+sources:
+  primary:
+    plugin: "csv"
+    on_success: output
 sinks:
   output:
     plugin: "csv"
@@ -484,11 +489,12 @@ class TestLoadSettingsArchitecture:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv_local
-  on_success: results
-  options:
-    path: data/submissions.csv
+sources:
+  primary:
+    plugin: csv_local
+    on_success: results
+    options:
+      path: data/submissions.csv
 
 sinks:
   results:
@@ -520,8 +526,8 @@ landscape:
 
         settings = load_settings(config_file)
 
-        assert settings.source.plugin == "csv_local"
-        assert settings.source.options["path"] == "data/submissions.csv"
+        assert settings.sources["primary"].plugin == "csv_local"
+        assert settings.sources["primary"].options["path"] == "data/submissions.csv"
         assert len(settings.sinks) == 2
         assert len(settings.gates) == 1
         assert settings.gates[0].name == "safety_check"
@@ -533,9 +539,10 @@ landscape:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 
 sinks:
   output:
@@ -547,7 +554,7 @@ sinks:
 
         settings = load_settings(config_file)
 
-        assert settings.source.plugin == "csv"
+        assert settings.sources["primary"].plugin == "csv"
         assert settings.landscape.enabled is True  # Default
         assert settings.concurrency.max_workers == 4  # Default
 
@@ -557,9 +564,10 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: results
+sources:
+  primary:
+    plugin: csv
+    on_success: results
 
 sinks:
   results:
@@ -585,7 +593,7 @@ class TestExportSinkValidation:
 
         with pytest.raises(ValidationError) as exc_info:
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}},
+                sources={"primary": {"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": "out.csv"}}},
                 landscape={
                     "export": {
@@ -603,7 +611,7 @@ class TestExportSinkValidation:
 
         # Should not raise
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}},
+            sources={"primary": {"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": "out.csv"}}},
             landscape={
                 "export": {"enabled": False}  # No sink required
@@ -617,7 +625,7 @@ class TestExportSinkValidation:
 
         with pytest.raises(ValidationError) as exc_info:
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}},
+                sources={"primary": {"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": "out.csv"}}},
                 landscape={
                     "export": {
@@ -635,7 +643,7 @@ class TestExportSinkValidation:
 
         # Should not raise
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}},
+            sources={"primary": {"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}}},
             sinks={
                 "output": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": "out.csv"}},
                 "audit_archive": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": "audit.csv"}},
@@ -736,11 +744,11 @@ class TestElspethSettingsArchitecture:
         )
 
         settings = ElspethSettings(
-            source=SourceSettings(plugin="csv", on_success="results", options={"path": "in.csv"}),
+            sources={"primary": SourceSettings(plugin="csv", on_success="results", options={"path": "in.csv"})},
             sinks={"results": SinkSettings(plugin="csv", on_write_failure="discard", options={"path": "out.csv"})},
         )
 
-        assert settings.source.plugin == "csv"
+        assert settings.sources["primary"].plugin == "csv"
         assert "results" in settings.sinks
         # Defaults applied
         assert settings.transforms == []
@@ -761,7 +769,7 @@ class TestElspethSettingsArchitecture:
 
         with pytest.raises(ValidationError) as exc_info:
             ElspethSettings(
-                source=SourceSettings(plugin="csv", on_success="results"),
+                sources={"primary": SourceSettings(plugin="csv", on_success="results")},
                 sinks={"results": SinkSettings(plugin="csv", on_write_failure="discard")},
                 **{"default_sink": "results"},  # testing rejected field
             )
@@ -774,7 +782,7 @@ class TestElspethSettingsArchitecture:
 
         with pytest.raises(ValidationError) as exc_info:
             ElspethSettings(
-                source=SourceSettings(plugin="csv", on_success="output"),
+                sources={"primary": SourceSettings(plugin="csv", on_success="output")},
                 sinks={},  # Empty!
             )
 
@@ -865,7 +873,7 @@ class TestResolveConfig:
         from elspeth.core.config import ElspethSettings, resolve_config
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}},
+            sources={"primary": {"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": "output.csv"}}},
         )
 
@@ -873,14 +881,14 @@ class TestResolveConfig:
 
         assert isinstance(resolved, dict)
         assert "sources" in resolved
-        assert resolved["sources"]["source"]["plugin"] == "csv"
+        assert resolved["sources"]["primary"]["plugin"] == "csv"
 
     def test_resolve_config_includes_defaults(self) -> None:
         """resolve_config includes default values for audit completeness."""
         from elspeth.core.config import ElspethSettings, resolve_config
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
         )
 
@@ -901,7 +909,7 @@ class TestResolveConfig:
         from elspeth.core.config import ElspethSettings, resolve_config
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}},
+            sources={"primary": {"plugin": "csv", "on_success": "output", "options": {"path": "input.csv"}}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard", "options": {"path": "output.csv"}}},
         )
 
@@ -917,7 +925,7 @@ class TestResolveConfig:
         from elspeth.core.config import ElspethSettings, resolve_config
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             transforms=[
                 {
@@ -1279,7 +1287,7 @@ class TestElspethSettingsWithGates:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
         )
         assert settings.gates == []
@@ -1289,7 +1297,7 @@ class TestElspethSettingsWithGates:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}, "review": {"plugin": "csv", "on_write_failure": "discard"}},
             gates=[
                 {
@@ -1308,7 +1316,7 @@ class TestElspethSettingsWithGates:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             gates=[
                 {
@@ -1337,7 +1345,7 @@ class TestElspethSettingsWithGates:
 
         with pytest.raises(ValidationError, match=r"Node name 'my_gate' is used by both"):
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output"},
+                sources={"primary": {"plugin": "csv", "on_success": "output"}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
                 gates=[
                     {
@@ -1363,7 +1371,7 @@ class TestElspethSettingsWithGates:
 
         with pytest.raises(ValidationError, match=r"Node name 'gate_a' is used by both"):
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output"},
+                sources={"primary": {"plugin": "csv", "on_success": "output"}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
                 gates=[
                     {"name": "gate_a", "input": "source_out", "condition": "True", "routes": {"true": "next_a", "false": "output"}},
@@ -1379,7 +1387,7 @@ class TestElspethSettingsWithGates:
         from elspeth.core.config import ElspethSettings, resolve_config
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             gates=[
                 {
@@ -1408,9 +1416,10 @@ class TestLoadSettingsWithGates:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 
 sinks:
   output:
@@ -1443,9 +1452,10 @@ gates:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 
 sinks:
   output:
@@ -1483,9 +1493,10 @@ gates:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 
 sinks:
   output:
@@ -1959,7 +1970,7 @@ class TestElspethSettingsWithCoalesce:
         )
 
         settings = ElspethSettings(
-            source=SourceSettings(plugin="csv_local", on_success="default", options={"path": "test.csv"}),
+            sources={"primary": SourceSettings(plugin="csv_local", on_success="default", options={"path": "test.csv"})},
             sinks={"default": SinkSettings(plugin="csv", on_write_failure="discard", options={"path": "out.csv"})},
             coalesce=[
                 CoalesceSettings(
@@ -1979,7 +1990,7 @@ class TestElspethSettingsWithCoalesce:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
         )
         assert settings.coalesce == []
@@ -1989,7 +2000,7 @@ class TestElspethSettingsWithCoalesce:
         from elspeth.core.config import ElspethSettings, resolve_config
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             coalesce=[
                 {
@@ -2015,7 +2026,7 @@ class TestElspethSettingsWithCoalesce:
 
         with pytest.raises(ValidationError, match=r"Node name 'my_coalesce' is used by both"):
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output"},
+                sources={"primary": {"plugin": "csv", "on_success": "output"}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
                 coalesce=[
                     {
@@ -2041,7 +2052,7 @@ class TestElspethSettingsWithCoalesce:
 
         with pytest.raises(ValidationError, match=r"Node name 'coal_a' is used by both"):
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output"},
+                sources={"primary": {"plugin": "csv", "on_success": "output"}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
                 coalesce=[
                     {"name": "coal_a", "branches": ["x", "y"], "policy": "require_all", "merge": "union"},
@@ -2069,12 +2080,13 @@ class TestSecretFieldFingerprinting:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: http_source
-  on_success: output
-  options:
-    api_key: sk-secret-key-12345
-    url: https://api.example.com
+sources:
+  primary:
+    plugin: http_source
+    on_success: output
+    options:
+      api_key: sk-secret-key-12345
+      url: https://api.example.com
 sinks:
   output:
     plugin: csv_sink
@@ -2087,8 +2099,8 @@ sinks:
         settings = load_settings(config_file)
 
         # API key should be preserved for runtime (transforms need it!)
-        assert "api_key" in settings.source.options
-        assert settings.source.options["api_key"] == "sk-secret-key-12345"
+        assert "api_key" in settings.sources["primary"].options
+        assert settings.sources["primary"].options["api_key"] == "sk-secret-key-12345"
 
     def test_api_key_is_fingerprinted_in_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """API keys should be fingerprinted when creating audit copy."""
@@ -2098,12 +2110,13 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: http_source
-  on_success: output
-  options:
-    api_key: sk-secret-key-12345
-    url: https://api.example.com
+sources:
+  primary:
+    plugin: http_source
+    on_success: output
+    options:
+      api_key: sk-secret-key-12345
+      url: https://api.example.com
 sinks:
   output:
     plugin: csv_sink
@@ -2117,9 +2130,9 @@ sinks:
         audit_config = resolve_config(settings)
 
         # API key should be removed in audit copy
-        assert "api_key" not in audit_config["sources"]["source"]["options"]
+        assert "api_key" not in audit_config["sources"]["primary"]["options"]
         # Should have a 64-char hex fingerprint
-        fingerprint = audit_config["sources"]["source"]["options"].get("api_key_fingerprint")
+        fingerprint = audit_config["sources"]["primary"]["options"].get("api_key_fingerprint")
         assert fingerprint is not None
         assert len(fingerprint) == 64
         assert all(c in "0123456789abcdef" for c in fingerprint)
@@ -2172,11 +2185,12 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: webhook_source
-  on_success: output
-  options:
-    token: bearer-token-xyz
+sources:
+  primary:
+    plugin: webhook_source
+    on_success: output
+    options:
+      token: bearer-token-xyz
 sinks:
   output:
     plugin: csv_sink
@@ -2186,8 +2200,8 @@ sinks:
 
         settings = load_settings(config_file)
 
-        assert "token" in settings.source.options
-        assert settings.source.options["token"] == "bearer-token-xyz"
+        assert "token" in settings.sources["primary"].options
+        assert settings.sources["primary"].options["token"] == "bearer-token-xyz"
 
     def test_token_is_fingerprinted_in_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Token fields should be fingerprinted in audit copy."""
@@ -2197,11 +2211,12 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: webhook_source
-  on_success: output
-  options:
-    token: bearer-token-xyz
+sources:
+  primary:
+    plugin: webhook_source
+    on_success: output
+    options:
+      token: bearer-token-xyz
 sinks:
   output:
     plugin: csv_sink
@@ -2212,8 +2227,8 @@ sinks:
         settings = load_settings(config_file)
         audit_config = resolve_config(settings)
 
-        assert "token" not in audit_config["sources"]["source"]["options"]
-        assert "token_fingerprint" in audit_config["sources"]["source"]["options"]
+        assert "token" not in audit_config["sources"]["primary"]["options"]
+        assert "token_fingerprint" in audit_config["sources"]["primary"]["options"]
 
     def test_secret_suffix_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fields ending in _secret should be preserved for runtime."""
@@ -2223,11 +2238,12 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: custom_source
-  on_success: output
-  options:
-    database_secret: my-db-password
+sources:
+  primary:
+    plugin: custom_source
+    on_success: output
+    options:
+      database_secret: my-db-password
 sinks:
   output:
     plugin: csv_sink
@@ -2237,8 +2253,8 @@ sinks:
 
         settings = load_settings(config_file)
 
-        assert "database_secret" in settings.source.options
-        assert settings.source.options["database_secret"] == "my-db-password"
+        assert "database_secret" in settings.sources["primary"].options
+        assert settings.sources["primary"].options["database_secret"] == "my-db-password"
 
     def test_secret_suffix_is_fingerprinted_in_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fields ending in _secret should be fingerprinted in audit copy."""
@@ -2248,11 +2264,12 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: custom_source
-  on_success: output
-  options:
-    database_secret: my-db-password
+sources:
+  primary:
+    plugin: custom_source
+    on_success: output
+    options:
+      database_secret: my-db-password
 sinks:
   output:
     plugin: csv_sink
@@ -2263,8 +2280,8 @@ sinks:
         settings = load_settings(config_file)
         audit_config = resolve_config(settings)
 
-        assert "database_secret" not in audit_config["sources"]["source"]["options"]
-        assert "database_secret_fingerprint" in audit_config["sources"]["source"]["options"]
+        assert "database_secret" not in audit_config["sources"]["primary"]["options"]
+        assert "database_secret_fingerprint" in audit_config["sources"]["primary"]["options"]
 
     def test_sink_options_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Secret fields in sink options should be preserved for runtime."""
@@ -2274,9 +2291,10 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv_source
-  on_success: output
+sources:
+  primary:
+    plugin: csv_source
+    on_success: output
 sinks:
   output:
     plugin: database_sink
@@ -2299,9 +2317,10 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv_source
-  on_success: output
+sources:
+  primary:
+    plugin: csv_source
+    on_success: output
 sinks:
   output:
     plugin: database_sink
@@ -2325,12 +2344,13 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv_source
-  on_success: output
-  options:
-    path: input.csv
-    delimiter: ","
+sources:
+  primary:
+    plugin: csv_source
+    on_success: output
+    options:
+      path: input.csv
+      delimiter: ","
 sinks:
   output:
     plugin: csv_sink
@@ -2343,8 +2363,8 @@ sinks:
         settings = load_settings(config_file)
 
         # Regular fields should be preserved
-        assert settings.source.options["path"] == "input.csv"
-        assert settings.source.options["delimiter"] == ","
+        assert settings.sources["primary"].options["path"] == "input.csv"
+        assert settings.sources["primary"].options["delimiter"] == ","
 
     def test_options_with_sinks_key_preserved(self, tmp_path: Path) -> None:
         """Options containing a 'sinks' key should be preserved exactly.
@@ -2356,13 +2376,14 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv_source
-  on_success: output
-  options:
-    sinks:
-      MySink: some_value
-    CaseSensitive: preserved
+sources:
+  primary:
+    plugin: csv_source
+    on_success: output
+    options:
+      sinks:
+        MySink: some_value
+      CaseSensitive: preserved
 sinks:
   output:
     plugin: csv_sink
@@ -2373,10 +2394,10 @@ sinks:
         settings = load_settings(config_file)
 
         # Keys inside options must be preserved exactly (case-sensitive)
-        assert "sinks" in settings.source.options
-        assert "MySink" in settings.source.options["sinks"]
-        assert settings.source.options["sinks"]["MySink"] == "some_value"
-        assert "CaseSensitive" in settings.source.options
+        assert "sinks" in settings.sources["primary"].options
+        assert "MySink" in settings.sources["primary"].options["sinks"]
+        assert settings.sources["primary"].options["sinks"]["MySink"] == "some_value"
+        assert "CaseSensitive" in settings.sources["primary"].options
 
     def test_row_plugin_options_preserved_at_load_time(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Secret fields in row_plugins options should be preserved for runtime."""
@@ -2386,9 +2407,10 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv_source
-  on_success: output
+sources:
+  primary:
+    plugin: csv_source
+    on_success: output
 sinks:
   output:
     plugin: csv_sink
@@ -2421,9 +2443,10 @@ transforms:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv_source
-  on_success: output
+sources:
+  primary:
+    plugin: csv_source
+    on_success: output
 sinks:
   output:
     plugin: csv_sink
@@ -2456,9 +2479,10 @@ transforms:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv_source
-  on_success: output
+sources:
+  primary:
+    plugin: csv_source
+    on_success: output
 sinks:
   output:
     plugin: csv_sink
@@ -2600,11 +2624,12 @@ telemetry:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: http_source
-  on_success: output
-  options:
-    api_key: sk-secret-key
+sources:
+  primary:
+    plugin: http_source
+    on_success: output
+    options:
+      api_key: sk-secret-key
 sinks:
   output:
     plugin: csv_sink
@@ -2614,7 +2639,7 @@ sinks:
 
         # load_settings succeeds even without fingerprint key
         settings = load_settings(config_file)
-        assert settings.source.options["api_key"] == "sk-secret-key"
+        assert settings.sources["primary"].options["api_key"] == "sk-secret-key"
 
     def test_missing_key_raises_error_on_resolve_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """resolve_config should raise SecretFingerprintError when key missing."""
@@ -2629,11 +2654,12 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: http_source
-  on_success: output
-  options:
-    api_key: sk-secret-key
+sources:
+  primary:
+    plugin: http_source
+    on_success: output
+    options:
+      api_key: sk-secret-key
 sinks:
   output:
     plugin: csv_sink
@@ -2672,11 +2698,12 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: http_source
-  on_success: output
-  options:
-    api_key: sk-secret-key
+sources:
+  primary:
+    plugin: http_source
+    on_success: output
+    options:
+      api_key: sk-secret-key
 sinks:
   output:
     plugin: csv_sink
@@ -2687,8 +2714,8 @@ sinks:
         settings = load_settings(config_file)
 
         # In dev mode, secrets are kept unchanged so plugins can use them
-        assert settings.source.options.get("api_key") == "sk-secret-key"
-        assert "api_key_redacted" not in settings.source.options
+        assert settings.sources["primary"].options.get("api_key") == "sk-secret-key"
+        assert "api_key_redacted" not in settings.sources["primary"].options
 
     # === Tests for fingerprint key collision ===
 
@@ -2826,7 +2853,7 @@ sinks:
 
         config_dict = {
             "landscape": {"url": "postgresql://user:mysecret@host/db"},  # secret-scan: allow-this-line
-            "source": {"plugin": "csv", "options": {}},
+            "sources": {"primary": {"plugin": "csv", "options": {}}},
             "sinks": {"output": {"plugin": "csv_sink"}},
         }
 
@@ -2846,7 +2873,7 @@ sinks:
 
         config_dict = {
             "landscape": {"url": "postgresql://user:mysecret@host/db"},  # secret-scan: allow-this-line
-            "source": {"plugin": "csv", "options": {}},
+            "sources": {"primary": {"plugin": "csv", "options": {}}},
             "sinks": {"output": {"plugin": "csv_sink"}},
         }
 
@@ -2952,7 +2979,7 @@ class TestRunModeSettings:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
         )
 
@@ -2965,7 +2992,7 @@ class TestRunModeSettings:
 
         # Test live mode
         settings_live = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             run_mode=RunMode.LIVE,
         )
@@ -2973,7 +3000,7 @@ class TestRunModeSettings:
 
         # Test replay mode (with required source run ID)
         settings_replay = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             run_mode=RunMode.REPLAY,
             replay_from="run-abc123",
@@ -2982,7 +3009,7 @@ class TestRunModeSettings:
 
         # Test verify mode (with required source run ID)
         settings_verify = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             run_mode=RunMode.VERIFY,
             replay_from="run-abc123",
@@ -2996,7 +3023,7 @@ class TestRunModeSettings:
 
         with pytest.raises(ValidationError) as exc_info:
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output"},
+                sources={"primary": {"plugin": "csv", "on_success": "output"}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
                 run_mode=RunMode.REPLAY,
                 # Missing replay_from
@@ -3012,7 +3039,7 @@ class TestRunModeSettings:
 
         with pytest.raises(ValidationError) as exc_info:
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output"},
+                sources={"primary": {"plugin": "csv", "on_success": "output"}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
                 run_mode=RunMode.VERIFY,
                 # Missing replay_from
@@ -3028,7 +3055,7 @@ class TestRunModeSettings:
 
         # Should not raise - live mode doesn't require source run ID
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             run_mode=RunMode.LIVE,
             # No replay_from
@@ -3044,7 +3071,7 @@ class TestRunModeSettings:
 
         # Should not raise - live mode ignores source run ID
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             run_mode=RunMode.LIVE,
             replay_from="run-abc123",  # Provided but not required
@@ -3059,7 +3086,7 @@ class TestRunModeSettings:
 
         with pytest.raises(ValidationError):
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output"},
+                sources={"primary": {"plugin": "csv", "on_success": "output"}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
                 run_mode="invalid_mode",
             )
@@ -3070,7 +3097,7 @@ class TestRunModeSettings:
         from elspeth.core.config import ElspethSettings, resolve_config
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
             run_mode=RunMode.REPLAY,
             replay_from="run-abc123",
@@ -3391,9 +3418,10 @@ class TestLoadSettingsWithRunMode:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 
 sinks:
   output:
@@ -3415,9 +3443,10 @@ run_mode: live
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 
 sinks:
   output:
@@ -3440,9 +3469,10 @@ replay_from: run-abc123
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 
 sinks:
   output:
@@ -3464,9 +3494,10 @@ replay_from: run-xyz789
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 
 sinks:
   output:
@@ -3498,11 +3529,12 @@ class TestLoadSettingsTemplateFileExpansion:
         # Create settings file
         settings_file = tmp_path / "settings.yaml"
         settings_file.write_text("""
-source:
-  plugin: csv_local
-  on_success: output
-  options:
-    path: test.csv
+sources:
+  primary:
+    plugin: csv_local
+    on_success: output
+    options:
+      path: test.csv
 
 sinks:
   output:
@@ -3644,7 +3676,7 @@ class TestSinkNameCasing:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output"},
+            sources={"primary": {"plugin": "csv", "on_success": "output"}},
             sinks={
                 "output": {"plugin": "csv", "on_write_failure": "discard"},
                 "error_sink": {"plugin": "csv", "on_write_failure": "discard"},
@@ -3659,7 +3691,7 @@ class TestSinkNameCasing:
 
         with pytest.raises(ValidationError) as exc_info:
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output"},
+                sources={"primary": {"plugin": "csv", "on_success": "output"}},
                 sinks={"MyOutput": {"plugin": "csv", "on_write_failure": "discard"}},
             )
         # Should get a clear error about lowercase requirement
@@ -3672,7 +3704,7 @@ class TestSinkNameCasing:
 
         with pytest.raises(ValidationError) as exc_info:
             ElspethSettings(
-                source={"plugin": "csv", "on_success": "output"},
+                sources={"primary": {"plugin": "csv", "on_success": "output"}},
                 sinks={"OUTPUT": {"plugin": "csv", "on_write_failure": "discard"}},
             )
         assert "lowercase" in str(exc_info.value).lower()
@@ -3682,7 +3714,7 @@ class TestSinkNameCasing:
         from elspeth.core.config import ElspethSettings
 
         settings = ElspethSettings(
-            source={"plugin": "csv", "on_success": "output_v2"},
+            sources={"primary": {"plugin": "csv", "on_success": "output_v2"}},
             sinks={
                 "output_v2": {"plugin": "csv", "on_write_failure": "discard"},
                 "sink_123": {"plugin": "csv", "on_write_failure": "discard"},
@@ -3697,7 +3729,7 @@ class TestSinkNameCasing:
 
         with pytest.raises(ValidationError) as exc_info:
             ElspethSettings(
-                source={"plugin": "csv"},
+                sources={"primary": {"plugin": "csv"}},
                 sinks={"output": {"plugin": "csv", "on_write_failure": "discard"}},
                 **{"default_sink": "nonexistent"},  # testing rejected field
             )
@@ -3709,8 +3741,9 @@ class TestSinkNameCasing:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
+sources:
+  primary:
+    plugin: csv
 sinks:
   MyOutput:
     plugin: csv
@@ -3789,9 +3822,10 @@ class TestUnknownKeyRejection:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 sinks:
   output:
     plugin: csv
@@ -3814,9 +3848,10 @@ trnasforms:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 sinks:
   output:
     plugin: csv
@@ -3836,11 +3871,12 @@ retrry:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
 sinks:
   output:
     plugin: csv
@@ -3857,7 +3893,7 @@ retry:
   max_attempts: 5
 """)
         settings = load_settings(config_file)
-        assert settings.source.plugin == "csv"
+        assert settings.sources["primary"].plugin == "csv"
         assert settings.retry.max_attempts == 5
         assert len(settings.transforms) == 1
 
@@ -3872,9 +3908,10 @@ retry:
         # A minimal valid config — Dynaconf will inject LOAD_DOTENV automatically
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 sinks:
   output:
     plugin: csv
@@ -3882,7 +3919,7 @@ sinks:
 """)
         # Should load without error (Dynaconf injects LOAD_DOTENV internally)
         settings = load_settings(config_file)
-        assert settings.source.plugin == "csv"
+        assert settings.sources["primary"].plugin == "csv"
 
     def test_env_var_injected_keys_not_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """ELSPETH_* env vars injected by Dynaconf must not trigger unknown key error.
@@ -3899,9 +3936,10 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 sinks:
   output:
     plugin: csv
@@ -3909,7 +3947,7 @@ sinks:
 """)
         # Must NOT raise ValueError about "log_level" or "custom_thing"
         settings = load_settings(config_file)
-        assert settings.source.plugin == "csv"
+        assert settings.sources["primary"].plugin == "csv"
 
     def test_yaml_typo_still_rejected_with_env_vars_present(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """YAML typos must still be rejected even when env vars are present.
@@ -3924,9 +3962,10 @@ sinks:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 sinks:
   output:
     plugin: csv
@@ -3947,9 +3986,10 @@ trnasforms:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
+sources:
+  primary:
+    plugin: csv
+    on_success: output
 sinks:
   output:
     plugin: csv
@@ -3958,7 +3998,7 @@ secrets:
   source: env
 """)
         settings = load_settings(config_file)
-        assert settings.source.plugin == "csv"
+        assert settings.sources["primary"].plugin == "csv"
 
 
 class TestLowercaseSchemaKeysBranchPreservation:
@@ -4007,9 +4047,10 @@ class TestLowercaseSchemaKeysBranchPreservation:
 
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: quality_gate
+sources:
+  primary:
+    plugin: csv
+    on_success: quality_gate
 sinks:
   output:
     plugin: csv

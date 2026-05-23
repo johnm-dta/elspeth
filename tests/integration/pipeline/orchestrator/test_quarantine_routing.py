@@ -178,7 +178,7 @@ class TestQuarantineRouteValidation:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -203,7 +203,7 @@ class TestQuarantineRouteValidation:
         default_sink = CollectSink("default")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink)},
         )
@@ -247,7 +247,7 @@ class TestQuarantineRouteValidation:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -274,7 +274,7 @@ class TestQuarantineRouteValidation:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -308,7 +308,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -348,7 +348,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -395,7 +395,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -443,7 +443,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -520,7 +520,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -557,7 +557,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -598,7 +598,7 @@ class TestQuarantineNonCanonicalData:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -628,7 +628,7 @@ class TestQuarantineNonCanonicalData:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -662,7 +662,7 @@ class TestQuarantineNonCanonicalData:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )

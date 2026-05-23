@@ -98,7 +98,7 @@ def _run_pipeline_with_event_capture(
     sink = sinks["default"]
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in tx_list],
         sinks={"default": as_sink(sink)},
     )
@@ -273,7 +273,7 @@ class TestExecutionLoopPhaseEvents:
         source = PreYieldFailureSource()
         sink = CollectSink(name="default")
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )
@@ -344,12 +344,14 @@ class TestExecutionLoopRowProcessing:
             output_mode=OutputMode.TRANSFORM,
         )
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(
-                plugin=source.name,
-                on_success="agg_in",
-                options={},
-            ),
+            sources={"primary": as_source(source)},
+            source_settings_map={
+                "primary": SourceSettings(
+                    plugin=source.name,
+                    on_success="agg_in",
+                    options={},
+                ),
+            },
             transforms=[],
             sinks={"output": as_sink(sink)},
             aggregations={"idle_flush": (as_transform(transform), agg_settings)},
@@ -359,7 +361,7 @@ class TestExecutionLoopRowProcessing:
         transform.node_id = agg_node_id
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"output": as_sink(sink)},
             aggregation_settings={agg_node_id: agg_settings},
@@ -386,7 +388,7 @@ class TestDatabaseInitialization:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(ListSource([])),
+            sources={"primary": as_source(ListSource([]))},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )
@@ -403,7 +405,7 @@ class TestDatabaseInitialization:
         sink = sinks["default"]
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )
@@ -421,7 +423,7 @@ class TestDatabaseInitialization:
         sink = sinks["default"]
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(t) for t in tx_list],
             sinks={"default": as_sink(sink)},
         )
@@ -475,7 +477,7 @@ class TestRunSummaryEmission:
         source, _tx, sinks, graph = build_linear_pipeline([{"value": 1}, {"value": 2}], transforms=[transform])
         sink = sinks["default"]
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -523,7 +525,7 @@ class TestGracefulShutdownIntegration:
         sink = sinks["default"]
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(t) for t in [transform]],
             sinks={"default": as_sink(sink)},
         )

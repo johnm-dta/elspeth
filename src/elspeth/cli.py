@@ -434,8 +434,6 @@ def run(
 
     try:
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
             sources=plugins.sources,
             source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
@@ -461,7 +459,7 @@ def run(
 
         if dry_run:
             typer.echo("Dry run mode - would execute:")
-            typer.echo(f"  Source: {config.source.plugin}")
+            typer.echo(f"  Sources: {', '.join(f'{name}={s.plugin}' for name, s in config.sources.items())}")
             typer.echo(f"  Transforms: {len(config.transforms)}")
             typer.echo(f"  Sinks: {', '.join(config.sinks.keys())}")
             return
@@ -469,7 +467,7 @@ def run(
         # Safety check: require explicit --execute flag
         if not execute:
             typer.echo("Pipeline configuration valid.")
-            typer.echo(f"  Source: {config.source.plugin}")
+            typer.echo(f"  Sources: {', '.join(f'{name}={s.plugin}' for name, s in config.sources.items())}")
             typer.echo("")
             typer.echo("To execute, add --execute (or -x) flag:", err=True)
             typer.echo(f"  elspeth run -s {settings} --execute", err=True)
@@ -880,7 +878,6 @@ def _orchestrator_context(
     from elspeth.telemetry import create_telemetry_manager
 
     # Unpack pre-instantiated plugins
-    source: SourceProtocol = plugins.source
     sinks: Mapping[str, SinkProtocol] = plugins.sinks
 
     # Build transforms list: row_plugins + aggregations (with node_id)
@@ -897,7 +894,6 @@ def _orchestrator_context(
 
     # Build PipelineConfig
     pipeline_config = _PipelineConfig(
-        source=source,
         sources=plugins.sources,
         transforms=transforms,
         sinks=sinks,
@@ -1078,8 +1074,8 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
     execution_sinks = _execution_sinks_for_graph(config, plugins.sinks)
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=plugins.source,
-        source_settings=plugins.source_settings,
+        sources=plugins.sources,
+        source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
         sinks=execution_sinks,
         aggregations=plugins.aggregations,
@@ -1315,8 +1311,6 @@ def validate(
     execution_sinks = _execution_sinks_for_graph(config, plugins.sinks)
     try:
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
             sources=plugins.sources,
             source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
@@ -1344,7 +1338,7 @@ def validate(
         raise typer.Exit(1) from None
 
     typer.echo("✅ Pipeline configuration valid!")
-    typer.echo(f"  Source: {config.source.plugin}")
+    typer.echo(f"  Sources: {', '.join(f'{name}={s.plugin}' for name, s in config.sources.items())}")
     typer.echo(f"  Transforms: {len(config.transforms)}")
     typer.echo(f"  Aggregations: {len(config.aggregations)}")
     typer.echo(f"  Sinks: {', '.join(config.sinks.keys())}")
@@ -1695,11 +1689,9 @@ def _build_resume_graphs(
     gate_settings = list(settings_config.gates)
     coalesce_settings = list(settings_config.coalesce) if settings_config.coalesce else None
 
-    # Validation graph uses the ORIGINAL source to match the topology hash
-    # computed during the original run
+    # Validation graph uses the ORIGINAL sources to match the topology hash
+    # computed during the original run.
     validation_graph = ExecutionGraph.from_plugin_instances(
-        source=plugins.source,
-        source_settings=plugins.source_settings,
         sources=plugins.sources,
         source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
@@ -1711,16 +1703,22 @@ def _build_resume_graphs(
     )
     validation_graph.validate()
 
-    # Execution graph uses NullSource — resume data comes from stored payloads.
-    # NullSource inherits the original source's on_success (which may be a connection
-    # name or sink name — the DAG builder validates it during graph construction).
-    null_source_on_success = plugins.source.on_success
-    null_source = NullSource({})
-    null_source.on_success = null_source_on_success
-    null_source_settings = SourceSettings(plugin="null", on_success=null_source_on_success)
+    # Execution graph uses NullSource per original source name — resume data
+    # comes from stored payloads. Each NullSource inherits the original
+    # source's on_success (which may be a connection name or sink name — the
+    # DAG builder validates it during graph construction). Per ADR-025 §2,
+    # source identity always keys on source_name, so the resume execution
+    # graph must mirror the original source-name set.
+    null_sources: dict[str, SourceProtocol] = {}
+    null_source_settings_map: dict[str, SourceSettings] = {}
+    for source_name, original_source in plugins.sources.items():
+        null_source = NullSource({})
+        null_source.on_success = original_source.on_success
+        null_sources[source_name] = null_source
+        null_source_settings_map[source_name] = SourceSettings(plugin="null", on_success=original_source.on_success)
     execution_graph = ExecutionGraph.from_plugin_instances(
-        source=null_source,
-        source_settings=null_source_settings,
+        sources=null_sources,
+        source_settings_map=null_source_settings_map,
         transforms=plugins.transforms,
         sinks=plugins.sinks,
         aggregations=plugins.aggregations,
@@ -2048,15 +2046,24 @@ def resume(
 
             resume_sinks[sink_name] = sink
 
-        # Override source with NullSource for resume (data comes from payloads)
+        # Override sources with NullSource for resume (data comes from payloads).
+        # Per ADR-025 §2 each named source becomes its own NullSource so the
+        # execution graph mirrors the original source-name set.
         from dataclasses import replace
 
-        null_source_on_success = plugins.source.on_success
-        null_source = NullSource({})
-        null_source.on_success = null_source_on_success
+        from elspeth.core.config import SourceSettings as _SourceSettings
+
+        null_resume_sources: dict[str, SourceProtocol] = {}
+        null_resume_settings: dict[str, SourceSettings] = {}
+        for source_name, original_source in plugins.sources.items():
+            null_source = NullSource({})
+            null_source.on_success = original_source.on_success
+            null_resume_sources[source_name] = null_source
+            null_resume_settings[source_name] = _SourceSettings(plugin="null", on_success=original_source.on_success)
         resume_plugins = replace(
             plugins,
-            source=null_source,
+            sources=null_resume_sources,
+            source_settings_map=null_resume_settings,
             sinks=resume_sinks,  # Use append-mode sinks
         )
 

@@ -169,7 +169,7 @@ class TestT18CharacterizationExecuteRun:
         error_sink = as_sink(error_collect)
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": output_sink, "errors": error_sink},
         )
@@ -367,7 +367,7 @@ class TestT18CharacterizationExecuteRun:
         sink = as_sink(CollectSink("output"))
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": sink},
         )
@@ -437,7 +437,7 @@ class TestT18CharacterizationResumePath:
         output_sink = as_sink(CollectSink("output"))
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": output_sink},
         )
@@ -562,7 +562,7 @@ class TestT18CharacterizationResumePath:
         output_sink = as_sink(CollectSink("output"))
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": output_sink},
         )
@@ -693,8 +693,8 @@ def _build_aggregation_pipeline() -> tuple[SourceProtocol, TransformProtocol, An
 
     # Build graph via production path
     graph = ExecutionGraph.from_plugin_instances(
-        source=source,
-        source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+        sources={"primary": source},
+        source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
         transforms=wire_transforms([transform], source_connection="source_out", final_sink="output"),
         sinks={"output": output_sink},
         aggregations={},
@@ -717,7 +717,7 @@ def _build_aggregation_pipeline() -> tuple[SourceProtocol, TransformProtocol, An
     )
 
     config = PipelineConfig(
-        source=source,
+        sources={"primary": source},
         transforms=[transform],
         sinks={"output": output_sink},
         aggregation_settings={transform_node_id: agg_settings},

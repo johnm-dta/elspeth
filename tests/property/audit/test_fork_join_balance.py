@@ -247,8 +247,8 @@ def _build_production_graph(config: PipelineConfig) -> ExecutionGraph:
     )
 
     return ExecutionGraph.from_plugin_instances(
-        source=config.source,
-        source_settings=SourceSettings(plugin=config.source.name, on_success=source_on_success, options={}),
+        sources={"primary": config.sources["primary"]},
+        source_settings_map={"primary": SourceSettings(plugin=config.sources["primary"].name, on_success=source_on_success, options={})},
         transforms=wired_transforms,
         sinks=config.sinks,
         aggregations={},
@@ -290,8 +290,8 @@ class TestDagForkBranchValidation:
         # This should fail at graph construction
         with pytest.raises(GraphValidationError, match="unknown_branch"):
             ExecutionGraph.from_plugin_instances(
-                source=as_source(source),
-                source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+                sources={"primary": as_source(source)},
+                source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
                 transforms=[],
                 sinks={"default": as_sink(sink)},  # No "unknown_branch" sink
                 gates=[gate],
@@ -315,8 +315,8 @@ class TestDagForkBranchValidation:
 
         # This should succeed - branches match sink names
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -359,8 +359,8 @@ class TestDagForkBranchValidation:
 
         # This should succeed - branches match coalesce branches
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -400,8 +400,8 @@ class TestDagForkBranchValidation:
         # RoutingAction.fork_to_paths() validates uniqueness
         with pytest.raises((GraphValidationError, ValueError), match=r"[Dd]uplicate"):
             ExecutionGraph.from_plugin_instances(
-                source=as_source(source),
-                source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+                sources={"primary": as_source(source)},
+                source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
                 transforms=[],
                 sinks={"default": as_sink(sink)},
                 gates=[gate],
@@ -430,8 +430,8 @@ class TestDagForkBranchValidation:
 
         with pytest.raises(GraphValidationError, match="branch_b"):
             ExecutionGraph.from_plugin_instances(
-                source=as_source(source),
-                source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+                sources={"primary": as_source(source)},
+                source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
                 transforms=[],
                 sinks={"default": as_sink(sink)},
                 gates=[gate],
@@ -475,15 +475,15 @@ class TestForkJoinRuntimeBalance:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -493,7 +493,7 @@ class TestForkJoinRuntimeBalance:
 
         # Settings needed for fork execution
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -567,7 +567,7 @@ class TestForkJoinEdgeCases:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -597,15 +597,15 @@ class TestForkJoinEdgeCases:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -616,7 +616,7 @@ class TestForkJoinEdgeCases:
         from elspeth.core.config import ElspethSettings
 
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -675,15 +675,15 @@ class TestForkRecoveryInvariant:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -692,7 +692,7 @@ class TestForkRecoveryInvariant:
         )
 
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},

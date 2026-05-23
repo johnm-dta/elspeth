@@ -289,6 +289,7 @@ class TestCheckpointRecoveryIntegration:
         from elspeth.core.landscape.schema import (
             nodes_table,
             rows_table,
+            run_sources_table,
             runs_table,
             token_outcomes_table,
             tokens_table,
@@ -297,6 +298,7 @@ class TestCheckpointRecoveryIntegration:
         run_id = f"test-run-{run_suffix}"
         now = datetime.now(UTC)
         node_id = f"node-{run_suffix}"
+        source_node_id = f"source-{run_suffix}"
 
         # Add node to graph if it doesn't exist
         if not graph.has_node(node_id):
@@ -333,6 +335,38 @@ class TestCheckpointRecoveryIntegration:
                     config_hash="x",
                     config_json="{}",
                     registered_at=now,
+                )
+            )
+
+            # Add a SOURCE node so the run_sources FK (which requires node_type=SOURCE)
+            # is satisfied. Per ADR-025 §3 Decision 5 ``verify_contract_integrity``
+            # reads the contract from ``run_sources`` exclusively.
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id=source_node_id,
+                    run_id=run_id,
+                    plugin_name="test_source",
+                    node_type=NodeType.SOURCE,
+                    plugin_version="1.0",
+                    determinism=Determinism.DETERMINISTIC,
+                    config_hash="src_x",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id=source_node_id,
+                    source_name="primary",
+                    plugin_name="test_source",
+                    lifecycle_state="loaded",
+                    config_hash="src_x",
+                    schema_json="{}",
+                    schema_contract_json=contract_json,
+                    schema_contract_hash=contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
                 )
             )
 

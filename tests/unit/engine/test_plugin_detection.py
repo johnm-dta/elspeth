@@ -22,7 +22,6 @@ def _single_node_traversal(node_id: NodeID, plugin: Any) -> DAGTraversalContext:
     return DAGTraversalContext(
         node_step_map={node_id: 1},
         node_to_plugin={node_id: plugin},
-        first_transform_node_id=node_id,
         node_to_next={node_id: None},
         coalesce_node_map={},
     )

@@ -54,14 +54,15 @@ def _build_yaml_with_model(model: str, csv_path: Path, sink_path: Path) -> str:
         f"""
         landscape:
           url: "sqlite:///audit.db"
-        source:
-          plugin: csv
-          on_success: enrich
-          options:
-            path: "{csv_path}"
-            on_validation_failure: discard
-            schema:
-              mode: observed
+        sources:
+          primary:
+            plugin: csv
+            on_success: enrich
+            options:
+              path: "{csv_path}"
+              on_validation_failure: discard
+              schema:
+                mode: observed
         transforms:
           - name: enrich
             plugin: llm

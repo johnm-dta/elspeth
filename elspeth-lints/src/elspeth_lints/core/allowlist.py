@@ -326,11 +326,11 @@ def _parse_allow_hits(data: dict[str, Any], *, source_file: str) -> list[Allowli
             ast_path=_optional_string(entry, "ast_path", context=ctx),
             pattern=_optional_string(entry, "pattern", context=ctx),
             source_file=source_file,
-            judge_verdict=_optional_judge_verdict(entry, "judge_verdict", context=ctx),
+            judge_verdict=_optional_judge_verdict(entry, "judge_verdict", context=ctx, allow_blocked=False),
             judge_recorded_at=_optional_datetime(entry, "judge_recorded_at", context=ctx),
             judge_model=_optional_string(entry, "judge_model", context=ctx),
             judge_rationale=_optional_string(entry, "judge_rationale", context=ctx),
-            judge_model_verdict=_optional_judge_verdict(entry, "judge_model_verdict", context=ctx),
+            judge_model_verdict=_optional_judge_verdict(entry, "judge_model_verdict", context=ctx, allow_blocked=True),
         )
         _validate_judge_metadata_atomic(allowlist_entry, context=ctx)
         entries.append(allowlist_entry)
@@ -357,7 +357,7 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
     CLAUDE.md Tier-1 doctrine: "wrong type = crash, NULL where
     unexpected = crash, invalid enum value = crash."
 
-    The four invariants enforced:
+    The six invariants enforced:
 
     1. ``judge_verdict == OVERRIDDEN_BY_OPERATOR`` implies
        ``judge_model_verdict is not None`` — an override entry must
@@ -377,7 +377,50 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
        is also None — a pre-judge-era entry MUST NOT carry stray model
        metadata; that would be evidence of partial revert / merge
        corruption.
+    5. ``judge_verdict`` and ``judge_model_verdict`` must never be
+       ``BLOCKED``. ``BLOCKED`` is the in-memory runtime verdict the
+       cicd-judge gate uses to reject a candidate suppression; by
+       contract, a ``BLOCKED`` verdict means the entry was NOT written.
+       Defense-in-depth against ``_optional_judge_verdict``: even if the
+       loader were ever loosened, the atomic validator must still catch
+       the corrupt shape.
+    6. ``judge_verdict is not None`` implies ``judge_rationale`` is
+       non-empty after whitespace strip. The rationale is the "why" of
+       the audit record; an empty or whitespace-only rationale is an
+       audit-broken verdict. Defense-in-depth against ``_optional_string``:
+       even if that helper were loosened to accept empty strings, the
+       atomic validator must still catch the corrupt shape.
+
+    The judge-quartet-to-code binding (the C8-3 transplant defence
+    originally scoped to T5) is NOT enforced here. The ``file_fingerprint``
+    and ``ast_path`` fields exist as optional schema (per docs/elspeth-
+    lints/protocols.md) but no production writer (``justify``, ``rotate``)
+    emits them, and no matcher uses them. Enforcing the binding at this
+    loader gate would invalidate every justify-written entry without
+    closing the transplant attack — that needs a coordinated writer +
+    loader + matcher epic. Filed as a follow-up.
     """
+    # Invariant 5 (defense-in-depth vs _optional_judge_verdict): neither
+    # judge_verdict nor judge_model_verdict may be BLOCKED on a persisted
+    # entry. BLOCKED is an in-memory runtime verdict; persisted BLOCKED
+    # is corruption.
+    if entry.judge_verdict is JudgeVerdict.BLOCKED:
+        raise ValueError(
+            f"{context}: judge_verdict is BLOCKED; BLOCKED is an in-memory runtime "
+            "verdict that means the entry was rejected and NOT written. A persisted "
+            "BLOCKED entry is corruption (botched hand-edit, partial revert, tampering)."
+        )
+    if entry.judge_model_verdict is JudgeVerdict.BLOCKED and entry.judge_verdict is not JudgeVerdict.OVERRIDDEN_BY_OPERATOR:
+        # An override entry legitimately carries judge_model_verdict=BLOCKED
+        # to record what the model originally said before the operator
+        # overrode. Outside that one shape, a BLOCKED in this field is corrupt.
+        raise ValueError(
+            f"{context}: judge_model_verdict is BLOCKED but judge_verdict is "
+            f"{entry.judge_verdict.value if entry.judge_verdict is not None else 'None'!r}; "
+            "BLOCKED on judge_model_verdict is only valid when the entry is "
+            "OVERRIDDEN_BY_OPERATOR (recording what the model said pre-override)."
+        )
+
     # Invariant 4: pre-judge entries are fully empty in the judge cluster.
     if entry.judge_verdict is None:
         stray: list[str] = []
@@ -411,6 +454,18 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
             f"required companion fields are missing ({', '.join(missing)}); the judge-"
             "metadata quartet (judge_verdict + judge_recorded_at + judge_model + "
             "judge_rationale) is atomic. A partial write is corruption."
+        )
+
+    # Invariant 7: rationale must be non-empty after whitespace strip.
+    # _optional_string already rejects empty strings at parse-time, but a
+    # whitespace-only rationale ("   " or "\n\n") would slip past it. An
+    # empty/whitespace rationale destroys the "why" of the audit record.
+    # ``entry.judge_rationale`` is non-None here per invariant 3 above.
+    if entry.judge_rationale is None or not entry.judge_rationale.strip():
+        raise ValueError(
+            f"{context}: judge_verdict is set ({entry.judge_verdict.value!r}) but "
+            "judge_rationale is empty or whitespace-only; a judge verdict without a "
+            "rationale is audit-broken (the 'why' is missing)."
         )
 
     # Invariants 1 and 2: judge_model_verdict's presence is gated by
@@ -559,8 +614,8 @@ def _bool_value(data: dict[str, Any], key: str, *, default: bool) -> bool:
     return value
 
 
-def _optional_judge_verdict(data: dict[str, Any], key: str, *, context: str) -> JudgeVerdict | None:
-    """Parse an optional ``judge_verdict`` field.
+def _optional_judge_verdict(data: dict[str, Any], key: str, *, context: str, allow_blocked: bool) -> JudgeVerdict | None:
+    """Parse an optional judge-verdict field.
 
     Absent / null both yield ``None`` (the "pre-judge era" representation).
     Any other value MUST be one of the enum members, exact string match.
@@ -568,6 +623,24 @@ def _optional_judge_verdict(data: dict[str, Any], key: str, *, context: str) -> 
     verdicts bounded to the schema; a YAML carrying a garbage verdict is
     a corruption signal that should crash on load, not silently round-
     trip.
+
+    ``allow_blocked`` toggles whether the ``BLOCKED`` enum value is a
+    legal disk-side representation. ``JudgeVerdict.BLOCKED`` is an
+    in-memory runtime verdict the cicd-judge gate produces to reject a
+    candidate suppression; by contract, a ``BLOCKED`` *entry* verdict
+    means the entry was NOT written, so ``judge_verdict: BLOCKED`` on
+    disk is corruption (botched hand-edit, partial revert, tampering)
+    and must be rejected (``allow_blocked=False``). The same value on
+    ``judge_model_verdict`` is legitimate on an OVERRIDDEN entry — it
+    records what the model said before the operator overrode it — so
+    that field's loader passes ``allow_blocked=True`` and the
+    cross-field validity is checked in ``_validate_judge_metadata_atomic``.
+
+    Per CLAUDE.md Tier-1 doctrine ("invalid enum value = crash"), reject
+    loudly so corruption is visible. The mechanical enforcement here is
+    what makes the docstring on :class:`JudgeVerdict.BLOCKED` ("Reserved
+    for in-memory representation only") load-bearing rather than
+    aspirational for the ``judge_verdict`` field.
     """
     if key not in data or data[key] is None:
         return None
@@ -575,11 +648,17 @@ def _optional_judge_verdict(data: dict[str, Any], key: str, *, context: str) -> 
     if not isinstance(value, str):
         raise ValueError(f"{context}.{key} must be a string, null, or absent")
     try:
-        return JudgeVerdict(value)
+        verdict = JudgeVerdict(value)
     except ValueError as exc:
+        raise ValueError(f"{context}.{key} must be one of {[m.value for m in JudgeVerdict]}; got {value!r}") from exc
+    if verdict is JudgeVerdict.BLOCKED and not allow_blocked:
         raise ValueError(
-            f"{context}.{key} must be one of {[m.value for m in JudgeVerdict]}; got {value!r}"
-        ) from exc
+            f"{context}.{key} is BLOCKED; BLOCKED is an in-memory runtime verdict that "
+            "means the entry was rejected and NOT written. A BLOCKED value on disk for "
+            "this field is corruption (botched hand-edit, partial revert, or tampering) "
+            "and must not silently propagate into the gate's decision."
+        )
+    return verdict
 
 
 def _optional_datetime(data: dict[str, Any], key: str, *, context: str) -> datetime | None:

@@ -82,10 +82,12 @@ def test_non_override_entry_with_judge_model_verdict_crashes(tmp_path: Path) -> 
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
             judge_rationale: judge agrees
-            judge_model_verdict: BLOCKED  # fabricated divergence on a non-override entry
+            judge_model_verdict: ACCEPTED  # fabricated divergence on a non-override entry
     """).strip()
     path = tmp_path / "al.yaml"
     path.write_text(yaml)
+    # ACCEPTED (not BLOCKED) so this hits invariant 2 specifically rather
+    # than the BLOCKED-asymmetry guard (invariant 5).
     with pytest.raises(ValueError, match=r"allow_hits\[0\].*non-override.*judge_model_verdict"):
         load_allowlist(path, valid_rule_ids=set())
 
@@ -144,9 +146,7 @@ def test_partial_post_judge_entry_crashes(tmp_path: Path, missing_field: str) ->
         ("judge_model_verdict", "ACCEPTED"),
     ],
 )
-def test_pre_judge_entry_with_stray_field_crashes(
-    tmp_path: Path, stray_field: str, stray_value: str
-) -> None:
+def test_pre_judge_entry_with_stray_field_crashes(tmp_path: Path, stray_field: str, stray_value: str) -> None:
     """A pre-judge entry has ``judge_verdict=None`` and no other judge fields.
 
     A stray ``judge_recorded_at`` (or any other ``judge_*``) without
@@ -257,3 +257,135 @@ def test_fully_populated_non_override_entry_round_trips(tmp_path: Path) -> None:
     entry = al.entries[0]
     assert entry.judge_verdict is JudgeVerdict.ACCEPTED
     assert entry.judge_model_verdict is None  # absence is the signal: no divergence
+
+
+# ---------------------------------------------------------------------------
+# C8-1: BLOCKED never persists. It is the in-memory runtime verdict the
+# gate uses to reject a candidate suppression; a BLOCKED value on disk is
+# corruption (botched hand-edit, partial revert, tampering). Two gates
+# catch it: ``_optional_judge_verdict`` rejects on parse, and
+# ``_validate_judge_metadata_atomic`` reaffirms (defense-in-depth).
+# ---------------------------------------------------------------------------
+
+
+def test_judge_verdict_blocked_on_disk_crashes(tmp_path: Path) -> None:
+    """A persisted ``judge_verdict: BLOCKED`` is corruption.
+
+    The CLI declines to write BLOCKED entries (``JudgeVerdict.BLOCKED`` is
+    documented "Reserved for in-memory representation only"). Mechanical
+    enforcement here makes that docstring load-bearing.
+    """
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: agent
+            reason: tier-3 boundary
+            safety: low
+            judge_verdict: BLOCKED
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: claude-opus-4-7
+            judge_rationale: judge said BLOCKED but somebody wrote the entry anyway
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+    with pytest.raises(ValueError, match=r"allow_hits\[0\].*judge_verdict.*BLOCKED.*in-memory"):
+        load_allowlist(path, valid_rule_ids=set())
+
+
+def test_judge_model_verdict_blocked_on_non_override_entry_crashes(tmp_path: Path) -> None:
+    """``judge_model_verdict: BLOCKED`` is only legal on OVERRIDDEN entries.
+
+    On a non-override entry, ``judge_model_verdict`` should be absent
+    (per invariant 2). If it is set to BLOCKED outside an OVERRIDDEN
+    entry, that is corruption regardless of which sibling invariant
+    catches it first.
+    """
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: agent
+            reason: tier-3 boundary
+            safety: low
+            judge_verdict: ACCEPTED
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: claude-opus-4-7
+            judge_rationale: judge agrees
+            judge_model_verdict: BLOCKED
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+    # Two invariants could catch this; either is acceptable. Invariant 5
+    # fires first (BLOCKED rejection); if it didn't, invariant 2 would
+    # (non-override entry carrying judge_model_verdict). The shared
+    # context for both is "allow_hits[0]" and "judge_model_verdict".
+    with pytest.raises(ValueError) as exc_info:
+        load_allowlist(path, valid_rule_ids=set())
+    message = str(exc_info.value)
+    assert "allow_hits[0]" in message
+    assert "judge_model_verdict" in message
+
+
+def test_override_with_judge_model_verdict_blocked_round_trips(tmp_path: Path) -> None:
+    """OVERRIDDEN entries with ``judge_model_verdict: BLOCKED`` are the override shape.
+
+    This is the *only* legal place a BLOCKED value lives on disk: the
+    operator overrode the model's BLOCKED verdict and we record what the
+    model said for the override-rate meta-metric.
+    """
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: operator-jdoe
+            reason: shipping under deadline
+            safety: medium
+            judge_verdict: OVERRIDDEN_BY_OPERATOR
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: claude-opus-4-7
+            judge_rationale: model said BLOCKED; operator proceeds anyway
+            judge_model_verdict: BLOCKED
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+    al = load_allowlist(path, valid_rule_ids=set())
+    assert len(al.entries) == 1
+    entry = al.entries[0]
+    assert entry.judge_verdict is JudgeVerdict.OVERRIDDEN_BY_OPERATOR
+    assert entry.judge_model_verdict is JudgeVerdict.BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# C8-4: a judge verdict with empty/whitespace-only rationale is audit-
+# broken. _optional_string rejects empty strings at parse-time, but a
+# whitespace-only rationale ("   ") slips past it; the atomic validator
+# catches it as defense-in-depth.
+# ---------------------------------------------------------------------------
+
+
+def test_whitespace_only_rationale_on_post_judge_entry_crashes(tmp_path: Path) -> None:
+    """A whitespace-only judge_rationale on a judge-gated entry is audit-broken.
+
+    The rationale is the "why" of the audit record. An auditor asking
+    "why did the judge accept this?" must get a substantive answer, not
+    a blank string. ``_optional_string`` accepts only non-empty strings,
+    so a literal ``""`` would crash there; a whitespace-only value
+    (a quoted ``"   "``) passes the string-shape check but is still
+    empty after strip. The atomic validator catches it.
+    """
+    # Quoted scalar preserves the whitespace; PyYAML returns the literal
+    # three spaces as the string value, which is truthy (passes
+    # _optional_string) but strips to empty (caught by invariant 7).
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: agent
+            reason: tier-3 boundary
+            safety: low
+            judge_verdict: ACCEPTED
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: claude-opus-4-7
+            judge_rationale: "   "
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+    with pytest.raises(ValueError, match=r"allow_hits\[0\].*judge_rationale.*empty"):
+        load_allowlist(path, valid_rule_ids=set())

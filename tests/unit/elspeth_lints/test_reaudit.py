@@ -82,9 +82,7 @@ def _mock_openrouter_completion(*, verdict: str, rationale: str) -> MagicMock:
     the judge reads it offensively for cache-hit telemetry).
     """
     message = MagicMock()
-    message.content = json.dumps(
-        {"verdict": verdict, "rationale": rationale, "should_use_decorator": None}
-    )
+    message.content = json.dumps({"verdict": verdict, "rationale": rationale, "should_use_decorator": None})
     choice = MagicMock()
     choice.message = message
     completion = MagicMock()
@@ -242,30 +240,6 @@ def test_was_accepted_now_blocked(tmp_path: Path) -> None:
         )
 
     assert report.outcomes[0].divergence is ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED
-
-
-def test_was_blocked_now_accepted(tmp_path: Path) -> None:
-    root, _target = _build_source_tree(tmp_path)
-    allowlist_dir = _build_allowlist_dir(tmp_path)
-    fp = _live_fingerprint_for_widget(root)
-    _write_widget_lookup_entry(
-        allowlist_dir,
-        fingerprint=fp,
-        judge_verdict="BLOCKED",
-        judge_recorded_at="2024-01-01T00:00:00+00:00",
-    )
-
-    with _mock_judge_call(verdict="ACCEPTED", rationale="reconsidered; this is fine"):
-        report = reaudit_entries(
-            root=root.resolve(),
-            allowlist_dir=allowlist_dir,
-            rule_filter="trust_tier.tier_model",
-            since=None,
-            limit=None,
-            include_pre_judge=False,
-        )
-
-    assert report.outcomes[0].divergence is ReauditDivergence.WAS_BLOCKED_NOW_ACCEPTED
 
 
 def test_override_no_longer_needed(tmp_path: Path) -> None:
@@ -754,9 +728,12 @@ def test_cli_reaudit_text_output(tmp_path: Path, capsys: pytest.CaptureFixture[s
 
     argv = [
         "reaudit",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--format", "text",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--format",
+        "text",
     ]
     with _mock_judge_call(verdict="ACCEPTED", rationale="still good"):
         exit_code = main(argv)
@@ -780,10 +757,14 @@ def test_cli_reaudit_writes_output_file(tmp_path: Path) -> None:
     out_path = tmp_path / "report.md"
     argv = [
         "reaudit",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--format", "markdown",
-        "--output", str(out_path),
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--format",
+        "markdown",
+        "--output",
+        str(out_path),
     ]
     with _mock_judge_call(verdict="ACCEPTED", rationale="still good"):
         exit_code = main(argv)
@@ -807,8 +788,10 @@ def test_cli_reaudit_missing_api_key_exits_2(tmp_path: Path, capsys: pytest.Capt
 
     argv = [
         "reaudit",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
     ]
     env_without_key = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
     with patch.dict(os.environ, env_without_key, clear=True):
@@ -825,9 +808,12 @@ def test_cli_reaudit_invalid_since_exits_2(tmp_path: Path, capsys: pytest.Captur
 
     argv = [
         "reaudit",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--since", "not-a-date",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--since",
+        "not-a-date",
     ]
     exit_code = main(argv)
     assert exit_code == 2
@@ -841,9 +827,12 @@ def test_cli_reaudit_unsupported_rule_exits_2(tmp_path: Path, capsys: pytest.Cap
 
     argv = [
         "reaudit",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--rule", "some.other.rule",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--rule",
+        "some.other.rule",
     ]
     exit_code = main(argv)
     assert exit_code == 2

@@ -68,8 +68,6 @@ class ReauditDivergence(StrEnum):
     * (None, _,                BLOCKED)  → PRE_JUDGE_FRESH_BLOCK
     * (ACCEPTED, None,         ACCEPTED) → STILL_AGREES
     * (ACCEPTED, None,         BLOCKED)  → WAS_ACCEPTED_NOW_BLOCKED
-    * (BLOCKED, None,          ACCEPTED) → WAS_BLOCKED_NOW_ACCEPTED
-    * (BLOCKED, None,          BLOCKED)  → STILL_AGREES
     * (OVERRIDDEN, BLOCKED,    ACCEPTED) → OVERRIDE_NO_LONGER_NEEDED
     * (OVERRIDDEN, BLOCKED,    BLOCKED)  → OVERRIDE_STILL_NEEDED
     * (OVERRIDDEN, ACCEPTED,   ACCEPTED) → STILL_AGREES
@@ -77,6 +75,13 @@ class ReauditDivergence(StrEnum):
       (the entry's effective verdict is the override-of-an-ACCEPTED,
       which behaves identically to a plain ACCEPTED for divergence
       classification purposes)
+
+    ``JudgeVerdict.BLOCKED`` never appears on the *prior* side: it is an
+    in-memory runtime verdict that means the entry was rejected at write
+    time and never persisted. The allowlist loader rejects BLOCKED on
+    load (see ``_optional_judge_verdict`` / ``_validate_judge_metadata_
+    atomic``), so reaudit can rely on prior verdicts being one of
+    ``None``, ``ACCEPTED``, or ``OVERRIDDEN_BY_OPERATOR``.
 
     ``ENTRY_OBSOLETE`` is the off-tree path: the entry's underlying
     finding no longer exists in the source. The judge is *not* called
@@ -87,7 +92,6 @@ class ReauditDivergence(StrEnum):
     OVERRIDE_NO_LONGER_NEEDED = "OVERRIDE_NO_LONGER_NEEDED"
     OVERRIDE_STILL_NEEDED = "OVERRIDE_STILL_NEEDED"
     WAS_ACCEPTED_NOW_BLOCKED = "WAS_ACCEPTED_NOW_BLOCKED"
-    WAS_BLOCKED_NOW_ACCEPTED = "WAS_BLOCKED_NOW_ACCEPTED"
     PRE_JUDGE_FRESH_BLOCK = "PRE_JUDGE_FRESH_BLOCK"
     PRE_JUDGE_FRESH_ACCEPT = "PRE_JUDGE_FRESH_ACCEPT"
     ENTRY_OBSOLETE = "ENTRY_OBSOLETE"
@@ -101,9 +105,8 @@ _DIVERGENCE_ORDER: dict[ReauditDivergence, int] = {
     ReauditDivergence.OVERRIDE_NO_LONGER_NEEDED: 2,
     ReauditDivergence.ENTRY_OBSOLETE: 3,
     ReauditDivergence.OVERRIDE_STILL_NEEDED: 4,
-    ReauditDivergence.WAS_BLOCKED_NOW_ACCEPTED: 5,
-    ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT: 6,
-    ReauditDivergence.STILL_AGREES: 7,
+    ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT: 5,
+    ReauditDivergence.STILL_AGREES: 6,
 }
 
 
@@ -443,11 +446,14 @@ def _classify_divergence(
         raise ReauditError(f"unexpected fresh verdict {fresh_verdict!r} after stored ACCEPTED")
 
     if entry_verdict is JudgeVerdict.BLOCKED:
-        if fresh_verdict is JudgeVerdict.ACCEPTED:
-            return ReauditDivergence.WAS_BLOCKED_NOW_ACCEPTED
-        if fresh_verdict is JudgeVerdict.BLOCKED:
-            return ReauditDivergence.STILL_AGREES
-        raise ReauditError(f"unexpected fresh verdict {fresh_verdict!r} after stored BLOCKED")
+        # Defense-in-depth: the loader rejects BLOCKED on persisted
+        # entries, so reaudit should never observe one. If it does, the
+        # loader was bypassed — crash rather than guess.
+        raise ReauditError(
+            "entry_verdict is BLOCKED; BLOCKED is an in-memory runtime verdict and "
+            "must never appear on a persisted entry. The allowlist loader should have "
+            "rejected this on load — registry corruption or a loader bypass."
+        )
 
     if entry_verdict is JudgeVerdict.OVERRIDDEN_BY_OPERATOR:
         # The override sits on top of an underlying model verdict

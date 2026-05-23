@@ -20,6 +20,7 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
@@ -47,7 +48,7 @@ def _empty_state() -> CompositionState:
 
 
 def _mock_catalog() -> MagicMock:
-    return MagicMock()
+    return MagicMock(spec=CatalogService)
 
 
 def _session_engine_with_session() -> tuple[Any, str]:

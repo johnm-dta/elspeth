@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginSchemaInfo,
@@ -73,7 +74,7 @@ def _mock_catalog() -> MagicMock:
     AC #16: Tests must use real PluginSummary and PluginSchemaInfo instances,
     not plain dicts. Mock return types must match the CatalogService protocol.
     """
-    catalog = MagicMock()
+    catalog = MagicMock(spec=CatalogService)
     catalog.list_sources.return_value = [
         PluginSummary(
             name="csv",
@@ -10274,7 +10275,7 @@ class TestToolContextSecretServiceTyping:
             def resolve(self, user_id: str, name: str) -> None:
                 return None
 
-        ctx = ToolContext(catalog=MagicMock(), secret_service=_ResolverStub())  # type: ignore[arg-type]
+        ctx = ToolContext(catalog=MagicMock(spec=CatalogService), secret_service=_ResolverStub())
         # Field is reachable, typed, and forwards the structural surface.
         assert ctx.secret_service is not None
         assert ctx.secret_service.has_ref("u1", "missing") is False
@@ -10284,5 +10285,5 @@ class TestToolContextSecretServiceTyping:
         """Non-secret-aware callers (legacy direct tests) construct with None."""
         from elspeth.web.composer.tools._common import ToolContext
 
-        ctx = ToolContext(catalog=MagicMock())
+        ctx = ToolContext(catalog=MagicMock(spec=CatalogService))
         assert ctx.secret_service is None

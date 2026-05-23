@@ -20,6 +20,49 @@ would change call-sites in ~30 tests across both surfaces; keeping the two
 surfaces separate (a) preserves the conftest's auto-magic fixture injection
 for the phase-3 tests and (b) keeps these helpers as plain callables that
 ``from ... import`` users can read at the call site.
+
+Test-dispatch convention (I7 — test-analyst review remediation)
+---------------------------------------------------------------
+Two distinct invocation paths exist for composer tools, and new tests must
+pick the right one deliberately:
+
+1. **Through-dispatch** (``execute_tool(name, args, state, catalog)``) —
+   exercises the production dispatch wrapper, which runs
+   ``_inject_prior_validation`` and ``_augment_with_plugin_schemas`` around
+   the handler.  This is the path the compose loop takes at runtime.
+   Canonical examples: ``test_tools.py``, ``test_failure_schema_augmentation.py``.
+
+2. **Handler-direct** (``_execute_<tool>(args, state, ctx)`` with a
+   hand-built ``ToolContext``) — calls the handler in isolation, bypassing
+   the dispatch wrapper.  The ``test_promote_*.py`` family deliberately
+   uses this path because it is targeting the
+   ``ValidationError`` → ``ToolArgumentError`` re-raise contract inside
+   each promoted handler (rev-2 BLOCKER_A — a bare ``ValidationError``
+   escaping the handler routes to ``ComposerPluginCrashError`` /
+   HTTP 500 instead of ARG_ERROR).  Going through ``execute_tool`` would
+   couple the contract test to dispatch-wrapper behaviour and obscure the
+   exception-class invariant under test.
+
+If you are writing a new test and want catalog augmentation or
+prior-validation injection covered, use path 1.  If you are pinning a
+handler-level invariant (argument validation, exception chaining,
+post-mutation state shape), use path 2 — but be aware that
+``_inject_prior_validation`` / ``_augment_with_plugin_schemas`` will NOT
+run, so any assertion that depends on their effects must use path 1.
+Don't copy the handler-direct pattern from a ``test_promote_*.py`` file
+without first checking that your assertion does not depend on dispatch.
+
+Catalog mock convention
+-----------------------
+Every ``MagicMock`` standing in for ``CatalogService`` MUST be constructed
+with ``spec=CatalogService`` (see ``_mock_catalog`` below).  Unspecced
+catalog mocks happily respond to any attribute access, so a rename or
+removal of a real ``CatalogService`` method silently passes through tests
+while production crashes.  ``spec=CatalogService`` causes ``AttributeError``
+the instant a test tries to set a return value on a method that no longer
+exists — i.e. the test breaks at the boundary where the schema drift
+actually happened, not in some distant assertion (I8 — test-analyst
+review remediation).
 """
 
 from __future__ import annotations

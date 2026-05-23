@@ -28,6 +28,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
@@ -53,7 +54,7 @@ def _empty_state() -> CompositionState:
 
 
 def _mock_catalog() -> MagicMock:
-    return MagicMock()
+    return MagicMock(spec=CatalogService)
 
 
 # ---------------------------------------------------------------------------

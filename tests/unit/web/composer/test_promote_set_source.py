@@ -20,6 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginSummary,
@@ -45,7 +46,7 @@ def _mock_catalog() -> MagicMock:
     """Minimal CatalogService mock — only ``list_sources`` is reached by
     the path under test, and only the ``csv`` plugin name is referenced.
     """
-    catalog = MagicMock()
+    catalog = MagicMock(spec=CatalogService)
     catalog.list_sources.return_value = [
         PluginSummary(
             name="csv",

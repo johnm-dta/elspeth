@@ -23,6 +23,7 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
@@ -53,7 +54,7 @@ def _empty_state() -> CompositionState:
 def _mock_catalog() -> MagicMock:
     """A minimal catalog whose ``get_schema`` accepts ``text`` (the plugin
     set_source_from_blob defaults to for ``text/plain`` MIME)."""
-    catalog = MagicMock()
+    catalog = MagicMock(spec=CatalogService)
     catalog.get_schema.return_value = {"properties": {}}
     return catalog
 

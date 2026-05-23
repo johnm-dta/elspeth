@@ -39,6 +39,7 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
@@ -70,7 +71,7 @@ def _mock_catalog() -> MagicMock:
     """Minimal catalog accepting the ``text`` source plugin used by the
     functional smoke test below.  A bare ``MagicMock`` is sufficient — the
     paths exercised here do not consult the catalog's schema registry."""
-    catalog = MagicMock()
+    catalog = MagicMock(spec=CatalogService)
     catalog.get_schema.return_value = {"properties": {}}
     return catalog
 

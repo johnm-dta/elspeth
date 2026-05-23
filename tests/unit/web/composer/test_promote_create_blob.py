@@ -31,6 +31,7 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
@@ -59,11 +60,12 @@ def _empty_state() -> CompositionState:
 
 
 def _mock_catalog() -> MagicMock:
-    # _execute_create_blob does not read from the catalog; a bare MagicMock
+    # _execute_create_blob does not read from the catalog; a spec'd MagicMock
     # is sufficient.  This mirrors test_promote_set_source.py's discipline:
     # don't instantiate the real CatalogService here unless the path under
-    # test actually consults it.
-    return MagicMock()
+    # test actually consults it.  spec=CatalogService keeps the mock honest
+    # against future protocol changes (I8 — test-analyst review remediation).
+    return MagicMock(spec=CatalogService)
 
 
 def _session_engine_with_session() -> tuple[Any, str]:

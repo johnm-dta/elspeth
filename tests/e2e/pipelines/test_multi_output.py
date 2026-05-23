@@ -44,7 +44,7 @@ class TestMultiOutput:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[category_gate],
@@ -97,7 +97,7 @@ class TestMultiOutput:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[category_gate],

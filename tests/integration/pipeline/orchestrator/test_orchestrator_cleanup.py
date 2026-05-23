@@ -79,7 +79,7 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform_1), as_transform(transform_2)],
             sinks={"default": as_sink(sink)},
         )
@@ -103,7 +103,7 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform_1), as_transform(transform_2)],
             sinks={"default": as_sink(sink)},
         )
@@ -138,7 +138,7 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -159,7 +159,7 @@ class TestOrchestratorCleanup:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform_1), as_transform(transform_2)],
             sinks={"default": as_sink(sink)},
         )

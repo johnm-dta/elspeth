@@ -2,18 +2,19 @@ landscape:
   url: sqlite:///examples/landscape_journal/runs/audit.db
   dump_to_jsonl: true
   dump_to_jsonl_path: examples/landscape_journal/runs/audit.journal.jsonl
-source:
-  plugin: json
-  on_success: source_out
-  options:
-    path: examples/landscape_journal/input.jsonl
-    format: jsonl
-    on_validation_failure: discard
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'message: str'
+sources:
+  primary:
+    plugin: json
+    on_success: source_out
+    options:
+      path: examples/landscape_journal/input.jsonl
+      format: jsonl
+      on_validation_failure: discard
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'message: str'
 transforms:
 - name: passthrough_0
   plugin: passthrough

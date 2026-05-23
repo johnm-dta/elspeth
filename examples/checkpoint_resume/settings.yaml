@@ -8,19 +8,20 @@
 # With checkpoint enabled, the pipeline can be interrupted (Ctrl-C) and
 # resumed later without reprocessing completed rows.
 
-source:
-  plugin: csv
-  on_success: validated
-  options:
-    path: examples/checkpoint_resume/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'customer: str'
-      - 'amount: int'
-      - 'status: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: validated
+    options:
+      path: examples/checkpoint_resume/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'customer: str'
+        - 'amount: int'
+        - 'status: str'
+      on_validation_failure: discard
 
 transforms:
 - name: process

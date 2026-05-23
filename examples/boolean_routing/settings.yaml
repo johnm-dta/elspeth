@@ -1,15 +1,16 @@
-source:
-  plugin: csv
-  on_success: gate_in
-  options:
-    path: examples/boolean_routing/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'message: str'
-      - 'approved: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: gate_in
+    options:
+      path: examples/boolean_routing/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'message: str'
+        - 'approved: str'
+      on_validation_failure: discard
 gates:
 - name: approval_check
   input: gate_in

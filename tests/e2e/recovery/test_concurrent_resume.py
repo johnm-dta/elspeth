@@ -84,7 +84,7 @@ class TestConcurrentResume:
         sink = CollectSink("default")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )

@@ -134,7 +134,7 @@ class TestOnSuccessConfigAlignment:
         sink = CollectSink(name="target_sink")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"target_sink": as_sink(sink)},
         )
@@ -155,7 +155,7 @@ class TestOnSuccessConfigAlignment:
         sink = CollectSink(name="direct_sink")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"direct_sink": as_sink(sink)},
         )
@@ -232,8 +232,8 @@ class TestOnSuccessConfigAlignment:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=cast(SourceProtocol, source),
-            source_settings=source_settings,
+            sources={"primary": cast(SourceProtocol, source)},
+            source_settings_map={"primary": source_settings},
             transforms=wired,
             sinks=cast("dict[str, SinkProtocol]", {"sink_a": sink_a, "sink_b": sink_b}),
             aggregations={},
@@ -241,7 +241,7 @@ class TestOnSuccessConfigAlignment:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
         )

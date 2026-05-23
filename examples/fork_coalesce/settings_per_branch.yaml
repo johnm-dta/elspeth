@@ -18,20 +18,21 @@
 # the 'nested' strategy — output contains data from both branches under
 # separate keys.
 
-source:
-  plugin: csv
-  on_success: raw
-  options:
-    path: examples/fork_coalesce/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'product: str'
-      - 'price: int'
-      - 'category: str'
-      - 'description: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: raw
+    options:
+      path: examples/fork_coalesce/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'product: str'
+        - 'price: int'
+        - 'category: str'
+        - 'description: str'
+      on_validation_failure: discard
 
 gates:
 # Fork every row into two parallel paths

@@ -307,14 +307,16 @@ class TestCsvClassifierScenario:
                     "id": "call_set",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {
-                            "plugin": "csv",
-                            "blob_id": blob_id,
-                            "on_success": "rows",
-                            "options": {
-                                "schema": {"mode": "fixed", "fields": ["ticket_id: str"]},
-                            },
-                            "on_validation_failure": "discard",
+                        "sources": {
+                            "primary": {
+                                "plugin": "csv",
+                                "blob_id": blob_id,
+                                "on_success": "rows",
+                                "options": {
+                                    "schema": {"mode": "fixed", "fields": ["ticket_id: str"]},
+                                },
+                                "on_validation_failure": "discard",
+                            }
                         },
                         "nodes": [
                             {
@@ -444,12 +446,14 @@ class TestNumericGateScenario:
                     "id": "call_set",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {
-                            "plugin": "csv",
-                            "blob_id": blob_id,
-                            "on_success": "rows",
-                            "options": {"schema": {"mode": "observed"}},
-                            "on_validation_failure": "discard",
+                        "sources": {
+                            "primary": {
+                                "plugin": "csv",
+                                "blob_id": blob_id,
+                                "on_success": "rows",
+                                "options": {"schema": {"mode": "observed"}},
+                                "on_validation_failure": "discard",
+                            }
                         },
                         "nodes": [
                             {
@@ -565,12 +569,14 @@ class TestNumericGateScenario:
                     "id": "call_set",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {
-                            "plugin": "csv",
-                            "blob_id": blob_id,
-                            "on_success": "rows",
-                            "options": {"schema": {"mode": "observed"}},
-                            "on_validation_failure": "discard",
+                        "sources": {
+                            "primary": {
+                                "plugin": "csv",
+                                "blob_id": blob_id,
+                                "on_success": "rows",
+                                "options": {"schema": {"mode": "observed"}},
+                                "on_validation_failure": "discard",
+                            }
                         },
                         "nodes": [
                             {
@@ -623,12 +629,14 @@ class TestNumericGateScenario:
                     "id": "call_repair",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {
-                            "plugin": "csv",
-                            "blob_id": blob_id,
-                            "on_success": "rows",
-                            "options": {"schema": {"mode": "observed"}},
-                            "on_validation_failure": "discard",
+                        "sources": {
+                            "primary": {
+                                "plugin": "csv",
+                                "blob_id": blob_id,
+                                "on_success": "rows",
+                                "options": {"schema": {"mode": "observed"}},
+                                "on_validation_failure": "discard",
+                            }
                         },
                         "nodes": [
                             {
@@ -761,15 +769,17 @@ class TestUrlTextSmokeScenario:
                     "id": "call_set",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {
-                            "plugin": "text",
-                            "blob_id": blob_id,
-                            "on_success": "url_rows",
-                            "options": {
-                                "column": "url",
-                                "schema": {"mode": "fixed", "fields": ["url: str"]},
-                            },
-                            "on_validation_failure": "discard",
+                        "sources": {
+                            "primary": {
+                                "plugin": "text",
+                                "blob_id": blob_id,
+                                "on_success": "url_rows",
+                                "options": {
+                                    "column": "url",
+                                    "schema": {"mode": "fixed", "fields": ["url: str"]},
+                                },
+                                "on_validation_failure": "discard",
+                            }
                         },
                         "nodes": [],
                         "edges": [],
@@ -803,15 +813,17 @@ class TestUrlTextSmokeScenario:
                     "id": "call_repair",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {
-                            "plugin": "text",
-                            "blob_id": blob_id,
-                            "on_success": "raw_urls",
-                            "options": {
-                                "column": "url",
-                                "schema": {"mode": "fixed", "fields": ["url: str"]},
-                            },
-                            "on_validation_failure": "discard",
+                        "sources": {
+                            "primary": {
+                                "plugin": "text",
+                                "blob_id": blob_id,
+                                "on_success": "raw_urls",
+                                "options": {
+                                    "column": "url",
+                                    "schema": {"mode": "fixed", "fields": ["url: str"]},
+                                },
+                                "on_validation_failure": "discard",
+                            }
                         },
                         "nodes": [
                             {

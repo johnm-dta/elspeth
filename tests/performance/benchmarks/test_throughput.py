@@ -43,7 +43,7 @@ def _run_pipeline(
         transforms[-1].on_success = sink_name
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in transforms],
         sinks=sinks,
     )
@@ -148,7 +148,7 @@ def test_throughput_fork_pipeline() -> None:
 
     source = ListSource(rows, on_success="gate_in")
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[],
         sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
         gates=[threshold_gate],

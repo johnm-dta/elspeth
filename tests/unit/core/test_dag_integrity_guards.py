@@ -73,15 +73,17 @@ class TestForkBranchIntegrity:
         from elspeth.core.config import ElspethSettings, GateSettings, SinkSettings, SourceSettings
 
         settings = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -111,8 +113,8 @@ class TestForkBranchIntegrity:
         plugins = instantiate_plugins_from_config(settings)
         with pytest.raises(GraphValidationError, match=r"globally unique across all gates"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,

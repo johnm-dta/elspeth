@@ -378,7 +378,7 @@ class TestSchemaContractRoundTripProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -422,7 +422,7 @@ class TestSchemaContractRoundTripProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -440,7 +440,7 @@ class TestSchemaContractRoundTripProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             assert factory.run_lifecycle.get_run_contract(run.run_id) is None
@@ -461,7 +461,7 @@ class TestReferentialIntegrityProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -502,7 +502,7 @@ class TestReferentialIntegrityProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -542,7 +542,7 @@ class TestReferentialIntegrityProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -580,7 +580,7 @@ class TestReferentialIntegrityProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -615,7 +615,7 @@ class TestReferentialIntegrityProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -671,7 +671,7 @@ class TestFieldResolutionProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -689,7 +689,7 @@ class TestFieldResolutionProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             assert factory.run_lifecycle.get_source_field_resolution(run.run_id) is None
@@ -710,7 +710,7 @@ class TestRowHashProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -751,7 +751,7 @@ class TestRowHashProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(

@@ -79,7 +79,7 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -121,7 +121,7 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -154,7 +154,7 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -195,7 +195,7 @@ class TestOrchestratorCheckpointing:
         bad_sink = FailingSink(name="bad_sink", error_message="Bad sink failure")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"good": as_sink(good_sink), "bad": as_sink(bad_sink)},
             gates=[gate_config],
@@ -249,7 +249,7 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -279,7 +279,7 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )

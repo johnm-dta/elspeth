@@ -103,15 +103,16 @@ def track_operation(
         - If original operation succeeded but audit fails: DB error is raised
 
     Usage:
+        active_source = config.sources[source_name]
         with track_operation(
             recorder=recorder,
             run_id=run_id,
             node_id=source_id,
             operation_type="source_load",
             ctx=ctx,
-            input_data={"source_plugin": config.source.name},
+            input_data={"source_plugin": active_source.name},
         ) as handle:
-            source_iterator = config.source.load(ctx)
+            source_iterator = active_source.load(ctx)
             for row_index, source_item in enumerate(source_iterator):
                 # ... process rows ...
             # No finally needed - context manager handles everything

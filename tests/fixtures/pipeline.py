@@ -89,8 +89,13 @@ def run_audit_pipeline(
     source, tx_list, sinks, graph = build_linear_pipeline(source_data, transforms=transforms)
     sink = sinks["default"]
 
+    # Source-name alignment per ADR-025 §2: the PipelineConfig sources dict
+    # must use the same key as the graph (``build_linear_pipeline`` defaults
+    # to ``"primary"``). The orchestrator looks up
+    # ``config.sources[source_name]`` keyed by the source_name embedded in
+    # each source node's config — they must match.
     config = _PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in tx_list],
         sinks={"default": as_sink(sink)},
     )
@@ -117,12 +122,17 @@ def build_linear_pipeline(
     transforms: list[Any] | None = None,
     sink: CollectSink | None = None,
     *,
-    source_name: str = "list_source",
+    source_name: str = "primary",
     sink_name: str = "default",
 ) -> tuple[ListSource, list[Any], dict[str, CollectSink], ExecutionGraph]:
     """Build a linear pipeline: source -> transforms -> sink.
 
     Uses ExecutionGraph.from_plugin_instances() for production-path fidelity.
+
+    Per ADR-025 §2 the source surface is plural-only and source identity
+    keys on the configured ``source_name``. The default is ``"primary"``
+    so PipelineConfig consumers that build alongside this helper can use
+    ``sources={"primary": as_source(source)}`` without further wiring.
 
     Returns:
         (source, transforms, sinks_dict, graph)
@@ -130,7 +140,7 @@ def build_linear_pipeline(
     transforms = transforms or []
     source_connection = f"{source_name}_out"
     source_on_success = source_connection if transforms else sink_name
-    source = ListSource(source_data, name=source_name, on_success=source_on_success)
+    source = ListSource(source_data, on_success=source_on_success)
     source_settings = SourceSettings(plugin=source.name, on_success=source_on_success, options={})
     wired_transforms = wire_transforms(
         transforms,
@@ -143,8 +153,8 @@ def build_linear_pipeline(
     sinks = {sink_name: sink}
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=cast(SourceProtocol, source),
-        source_settings=source_settings,
+        sources={source_name: cast(SourceProtocol, source)},
+        source_settings_map={source_name: source_settings},
         transforms=wired_transforms,
         sinks=cast("dict[str, SinkProtocol]", sinks),
         aggregations={},
@@ -159,16 +169,18 @@ def build_fork_pipeline(
     branch_transforms: dict[str, list[Any]],
     sinks: dict[str, CollectSink] | None = None,
     *,
-    source_name: str = "list_source",
+    source_name: str = "primary",
     sink_name: str = "default",
     coalesce_settings: list[Any] | None = None,
 ) -> tuple[ListSource, list[Any], dict[str, CollectSink], ExecutionGraph]:
     """Build a fork/join pipeline with gate routing.
 
     Uses ExecutionGraph.from_plugin_instances() for production-path fidelity.
+    Per ADR-025 §2 the source-name default is ``"primary"`` so PipelineConfig
+    consumers can use ``sources={"primary": as_source(source)}``.
     """
     source_connection = f"{source_name}_out"
-    source = ListSource(source_data, name=source_name, on_success=source_connection)
+    source = ListSource(source_data, on_success=source_connection)
     source_settings = SourceSettings(plugin=source.name, on_success=source_connection, options={})
 
     all_transforms: list[Any] = []
@@ -191,8 +203,8 @@ def build_fork_pipeline(
         sinks = {sink_name: CollectSink(sink_name)}
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=cast(SourceProtocol, source),
-        source_settings=source_settings,
+        sources={source_name: cast(SourceProtocol, source)},
+        source_settings_map={source_name: source_settings},
         transforms=all_wired_transforms,
         sinks=cast("dict[str, SinkProtocol]", sinks),
         aggregations={},
@@ -208,16 +220,18 @@ def build_aggregation_pipeline(
     aggregation_settings: Any,
     sink: CollectSink | None = None,
     *,
-    source_name: str = "list_source",
+    source_name: str = "primary",
     sink_name: str = "default",
     agg_name: str = "batch",
 ) -> tuple[ListSource, dict[str, tuple[Any, Any]], dict[str, CollectSink], ExecutionGraph]:
     """Build an aggregation pipeline.
 
     Uses ExecutionGraph.from_plugin_instances() for production-path fidelity.
+    Per ADR-025 §2 the source-name default is ``"primary"`` so PipelineConfig
+    consumers can use ``sources={"primary": as_source(source)}``.
     """
     source_connection = aggregation_settings.input
-    source = ListSource(source_data, name=source_name, on_success=source_connection)
+    source = ListSource(source_data, on_success=source_connection)
     source_settings = SourceSettings(plugin=source.name, on_success=source_connection, options={})
 
     if aggregation_settings.on_success is None:
@@ -230,8 +244,8 @@ def build_aggregation_pipeline(
     aggregations = {agg_name: (aggregation_transform, aggregation_settings)}
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=cast(SourceProtocol, source),
-        source_settings=source_settings,
+        sources={source_name: cast(SourceProtocol, source)},
+        source_settings_map={source_name: source_settings},
         transforms=[],
         sinks=cast("dict[str, SinkProtocol]", sinks),
         aggregations=aggregations,
@@ -277,8 +291,8 @@ def build_production_graph(
         if not row_transforms:
             source_on_success = first_aggregation_input
 
-    config.source.on_success = source_on_success
-    source_settings = SourceSettings(plugin=config.source.name, on_success=source_on_success, options={})
+    config.sources["primary"].on_success = source_on_success
+    source_settings = SourceSettings(plugin=config.sources["primary"].name, on_success=source_on_success, options={})
     wired_row_transforms = wire_transforms(
         row_transforms,
         source_connection=source_on_success,
@@ -302,9 +316,10 @@ def build_production_graph(
         _set_transform_routing(agg_transform, on_success=agg_settings.on_success)
         aggregations[agg_name] = (agg_transform, agg_settings)
 
+    primary_name = next(iter(config.sources))
     return ExecutionGraph.from_plugin_instances(
-        source=config.source,
-        source_settings=source_settings,
+        sources={primary_name: config.sources[primary_name]},
+        source_settings_map={primary_name: source_settings},
         transforms=wired_row_transforms,
         sinks=config.sinks,
         aggregations=aggregations,

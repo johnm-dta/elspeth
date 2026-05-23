@@ -82,7 +82,6 @@ def test_recorder_failure_mid_loop_raises_audit_integrity_error() -> None:
     traversal = DAGTraversalContext(
         node_step_map={NodeID("source-0"): 0, NodeID("agg-node"): 1},
         node_to_plugin={},
-        first_transform_node_id=None,
         node_to_next={NodeID("source-0"): None, NodeID("agg-node"): None},
         coalesce_node_map={},
     )
@@ -151,7 +150,6 @@ def test_non_landscape_recorder_bug_mid_loop_propagates_plainly() -> None:
     traversal = DAGTraversalContext(
         node_step_map={NodeID("source-0"): 0, NodeID("agg-node"): 1},
         node_to_plugin={},
-        first_transform_node_id=None,
         node_to_next={NodeID("source-0"): None, NodeID("agg-node"): None},
         coalesce_node_map={},
     )

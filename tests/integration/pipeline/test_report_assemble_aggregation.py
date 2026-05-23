@@ -43,17 +43,19 @@ class TestReportAssembleAggregationPipeline:
     def pipeline_config_count_trigger(self, tmp_path: Path, input_data: Path, output_dir: Path) -> Path:
         """Settings YAML with a ``count: 2`` aggregation trigger."""
         config = {
-            "source": {
-                "plugin": "text",
-                "on_success": "lines",
-                "options": {
-                    "path": str(input_data),
-                    "column": "line",
-                    "strip_whitespace": False,
-                    "skip_blank_lines": False,
-                    "schema": {"mode": "observed"},
-                    "on_validation_failure": "discard",
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "text",
+                    "on_success": "lines",
+                    "options": {
+                        "path": str(input_data),
+                        "column": "line",
+                        "strip_whitespace": False,
+                        "skip_blank_lines": False,
+                        "schema": {"mode": "observed"},
+                        "on_validation_failure": "discard",
+                    },
+                }
             },
             "aggregations": [
                 {
@@ -90,17 +92,19 @@ class TestReportAssembleAggregationPipeline:
     def pipeline_config_no_trigger(self, tmp_path: Path, input_data: Path, output_dir: Path) -> Path:
         """Settings YAML with no aggregation trigger (end-of-source only)."""
         config = {
-            "source": {
-                "plugin": "text",
-                "on_success": "lines",
-                "options": {
-                    "path": str(input_data),
-                    "column": "line",
-                    "strip_whitespace": False,
-                    "skip_blank_lines": False,
-                    "schema": {"mode": "observed"},
-                    "on_validation_failure": "discard",
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "text",
+                    "on_success": "lines",
+                    "options": {
+                        "path": str(input_data),
+                        "column": "line",
+                        "strip_whitespace": False,
+                        "skip_blank_lines": False,
+                        "schema": {"mode": "observed"},
+                        "on_validation_failure": "discard",
+                    },
+                }
             },
             "aggregations": [
                 {

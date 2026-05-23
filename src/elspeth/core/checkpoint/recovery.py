@@ -663,52 +663,75 @@ class RecoveryManager:
     def verify_contract_integrity(self, run_id: str) -> SchemaContract:
         """Verify schema contract integrity for a run.
 
-        Retrieves the stored schema contract and verifies its integrity
-        via hash comparison. This is a Tier 1 check - missing or corrupt
-        contracts indicate audit trail tampering or database corruption.
+        Per ADR-025 §3 Decision 5, ``run_sources.schema_contract_json`` is the
+        single authoritative writer/reader for per-source schema contracts;
+        ``runs.schema_contract_json`` is no longer consulted. Every declared
+        source in a run must have a recorded contract before any row from
+        that source enters the pipeline (Fix 2 in the multi-source-token-
+        scheduler change set), so missing rows here mean the audit trail
+        was never populated — Tier-1 corruption.
+
+        Verifies hash integrity on every source's contract. Returns the
+        contract of the lowest-ordered ``source_node_id`` (deterministic)
+        for the legacy single-source consumer surface — multi-source
+        callers must reach into ``RunLifecycleRepository.get_run_source_resume_records``
+        for per-source contracts.
 
         Args:
             run_id: Run to verify
 
         Returns:
-            SchemaContract - always returns a valid contract
+            SchemaContract - the first source's contract, ordered by ``source_node_id``.
 
         Raises:
-            CheckpointCorruptionError: If contract is missing OR hash mismatch detected.
+            CheckpointCorruptionError: If no ``run_sources`` rows exist, if any
+                stored contract is missing, malformed, or has mismatched hash,
+                or if the run itself doesn't exist.
                 Per CLAUDE.md Tier-1 trust model: "Bad data in the audit trail = crash immediately"
-                Missing contract is treated as corruption - NO backward compatibility.
         """
         factory = RecorderFactory(self._db)
 
+        # Verify the run exists (Tier-1: missing run = corruption surfaced to caller).
+        if factory.run_lifecycle.get_run(run_id) is None:
+            raise CheckpointCorruptionError(f"Run '{run_id}' not found in audit trail. Resume cannot proceed against an unrecorded run.")
+
         try:
-            contract = factory.run_lifecycle.get_run_contract(run_id)
+            source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
         except AuditIntegrityError as e:
-            # get_run_contract raises AuditIntegrityError for hash verification failures
-            # and run-not-found. Convert to CheckpointCorruptionError for checkpoint-specific context.
+            # get_run_source_resume_records raises AuditIntegrityError on every per-source
+            # corruption mode: missing schema JSON, missing contract JSON, missing or
+            # mismatched contract hash. Convert to CheckpointCorruptionError so the
+            # checkpoint-resume call surface stays a single exception type.
             raise CheckpointCorruptionError(
                 f"Contract integrity verification failed for run '{run_id}': {e}. "
-                f"Resume aborted - audit trail may be corrupted or tampered with."
+                f"Resume aborted - per-source contract metadata is corrupt or missing."
             ) from e
         except (ValueError, KeyError) as e:
             # ContractAuditRecord.from_json() raises json.JSONDecodeError (subclass of
             # ValueError) for malformed JSON, or KeyError for missing required fields.
-            # Both indicate Tier 1 data corruption — stored contract JSON is garbage.
+            # Both indicate Tier-1 data corruption — stored contract JSON is garbage.
             raise CheckpointCorruptionError(
                 f"Contract integrity verification failed for run '{run_id}': {e}. "
-                f"Resume aborted - stored contract JSON is malformed (database corruption)."
+                f"Resume aborted - stored per-source contract JSON is malformed (database corruption)."
             ) from e
 
-        if contract is None:
-            # TIER-1 AUDIT INTEGRITY: Missing contract = audit trail corruption
-            # Per CLAUDE.md: "Bad data in the audit trail = crash immediately"
-            # Per NO LEGACY CODE POLICY: No backward compatibility for pre-contract runs
+        if not source_records:
+            # TIER-1 AUDIT INTEGRITY: A run with no ``run_sources`` rows cannot
+            # be resumed safely. After ADR-025 §3 Decision 5 every declared
+            # source is recorded as a ``run_sources`` row before any of its
+            # rows enter the pipeline, so absence here is corruption.
             raise CheckpointCorruptionError(
                 f"Schema contract is missing from audit trail for run '{run_id}'. "
                 f"This indicates either:\n"
-                f"  1. The audit database is corrupt or incomplete\n"
-                f"  2. The run was started with a version that didn't record contracts\n"
+                f"  1. The audit database is corrupt or incomplete (no run_sources rows)\n"
+                f"  2. The run was started with a version that didn't record per-source contracts\n"
                 f"Resume cannot proceed safely without the schema contract. "
                 f"The audit trail must be complete and trustworthy."
             )
 
-        return contract
+        # Deterministic single-source return for the legacy caller surface.
+        # Multi-source callers should reach into ``get_run_source_resume_records``
+        # for per-source contracts; this method only confirms integrity and
+        # exposes the canonical first-source view for the unit-test contract.
+        first_source_node_id = sorted(source_records)[0]
+        return source_records[first_source_node_id].schema_contract

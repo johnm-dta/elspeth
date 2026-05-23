@@ -53,8 +53,8 @@ def _build_production_graph(config: PipelineConfig) -> ExecutionGraph:
     if not row_transforms and config.gates:
         source_on_success = config.gates[0].input
 
-    config.source.on_success = source_on_success
-    source_settings = SourceSettings(plugin=config.source.name, on_success=source_on_success, options={})
+    config.sources["primary"].on_success = source_on_success
+    source_settings = SourceSettings(plugin=config.sources["primary"].name, on_success=source_on_success, options={})
     wired_transforms = wire_transforms(
         row_transforms,
         source_connection=source_on_success,
@@ -62,8 +62,8 @@ def _build_production_graph(config: PipelineConfig) -> ExecutionGraph:
     )
 
     return ExecutionGraph.from_plugin_instances(
-        source=config.source,
-        source_settings=source_settings,
+        sources={"primary": config.sources["primary"]},
+        source_settings_map={"primary": source_settings},
         transforms=wired_transforms,
         sinks=config.sinks,
         aggregations={},
@@ -112,7 +112,7 @@ class TestSinkRoutingInvariant:
             configured_sinks = {"default": as_sink(sink)}
 
             config = PipelineConfig(
-                source=as_source(source),
+                sources={"primary": as_source(source)},
                 transforms=[as_transform(transform)],
                 sinks=configured_sinks,
             )
@@ -169,15 +169,15 @@ class TestSinkRoutingInvariant:
             )
 
             config = PipelineConfig(
-                source=as_source(source),
+                sources={"primary": as_source(source)},
                 transforms=[],
                 sinks=configured_sinks,
                 gates=[gate],
             )
 
             graph = ExecutionGraph.from_plugin_instances(
-                source=as_source(source),
-                source_settings=SourceSettings(plugin=source.name, on_success="route_in", options={}),
+                sources={"primary": as_source(source)},
+                source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="route_in", options={})},
                 transforms=[],
                 sinks=configured_sinks,
                 gates=[gate],
@@ -186,7 +186,7 @@ class TestSinkRoutingInvariant:
             )
 
             elspeth_settings = ElspethSettings(
-                source={"plugin": "test", "on_success": "route_in", "options": {}},
+                sources={"primary": {"plugin": "test", "on_success": "route_in", "options": {}}},
                 sinks={
                     "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                     "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -227,7 +227,7 @@ class TestSinkRoutingInvariant:
             configured_sinks = {"default": as_sink(sink)}
 
             config = PipelineConfig(
-                source=as_source(source),
+                sources={"primary": as_source(source)},
                 transforms=[as_transform(t) for t in transforms],
                 sinks=configured_sinks,
             )

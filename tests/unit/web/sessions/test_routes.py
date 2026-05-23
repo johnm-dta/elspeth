@@ -571,8 +571,8 @@ def test_send_message_response_includes_pending_proposals_created_during_compose
             summary="Replace the pipeline.",
             rationale="Requested by the current composer turn.",
             affects=("graph", "yaml"),
-            arguments_json={"source": {"plugin": "csv", "options": {}}},
-            arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+            arguments_json={"sources": {"primary": {"plugin": "csv", "options": {}}}},
+            arguments_redacted_json={"sources": {"primary": {"plugin": "csv", "options": {}}}},
             base_state_id=None,
             actor="composer-web:alice",
         )
@@ -645,11 +645,13 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
             rationale="Requested by the current composer turn.",
             affects=("graph", "validation", "yaml"),
             arguments_json={
-                "source": {
-                    "plugin": "csv",
-                    "on_success": "source_out",
-                    "options": {"path": str(input_path), "schema": {"mode": "observed"}},
-                    "on_validation_failure": "quarantine",
+                "sources": {
+                    "primary": {
+                        "plugin": "csv",
+                        "on_success": "source_out",
+                        "options": {"path": str(input_path), "schema": {"mode": "observed"}},
+                        "on_validation_failure": "quarantine",
+                    }
                 },
                 "nodes": [
                     {
@@ -848,15 +850,17 @@ def test_accept_inline_blob_proposal_without_composer_provenance_fails_closed(tm
             rationale="Legacy proposal missing composer provenance.",
             affects=("graph", "blob"),
             arguments_json={
-                "source": {
-                    "plugin": "csv",
-                    "on_success": "rows",
-                    "options": {"schema": {"mode": "observed"}},
-                    "inline_blob": {
-                        "filename": "ada.csv",
-                        "mime_type": "text/csv",
-                        "content": "name,score\nada,42\n",
-                    },
+                "sources": {
+                    "primary": {
+                        "plugin": "csv",
+                        "on_success": "rows",
+                        "options": {"schema": {"mode": "observed"}},
+                        "inline_blob": {
+                            "filename": "ada.csv",
+                            "mime_type": "text/csv",
+                            "content": "name,score\nada,42\n",
+                        },
+                    }
                 },
                 "nodes": [],
                 "edges": [],

@@ -1,15 +1,16 @@
-source:
-  plugin: csv
-  on_success: experiment_in
-  options:
-    path: examples/statistical_batch_plugins/experiment_scores.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'prompt_variant: str'
-      - 'score: float'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: experiment_in
+    options:
+      path: examples/statistical_batch_plugins/experiment_scores.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'prompt_variant: str'
+        - 'score: float'
+      on_validation_failure: discard
 aggregations:
 - name: prompt_experiment
   plugin: batch_experiment_compare

@@ -21,9 +21,11 @@ def test_assemble_pipeline_config_preserves_resolved_audit_config() -> None:
         coalesce=[],
         model_dump=MagicMock(
             return_value={
-                "source": {
-                    "plugin": "text",
-                    "options": {"path": "/tmp/input.txt", "column": "value"},
+                "sources": {
+                    "primary": {
+                        "plugin": "text",
+                        "options": {"path": "/tmp/input.txt", "column": "value"},
+                    }
                 },
                 "transforms": [],
                 "sinks": {
@@ -42,7 +44,7 @@ def test_assemble_pipeline_config_preserves_resolved_audit_config() -> None:
     graph.get_config_gate_id_map.return_value = {}
 
     pipeline_config = assemble_and_validate_pipeline_config(
-        source=source,
+        sources={"primary": source},
         transforms=[],
         sinks={"output": sink},
         aggregations={},
@@ -50,5 +52,7 @@ def test_assemble_pipeline_config_preserves_resolved_audit_config() -> None:
         graph=graph,
     )
 
-    assert pipeline_config.config["source"]["plugin"] == "text"
+    # The runtime config is computed via resolve_config(settings) which still
+    # exposes ``sources.primary.plugin`` on the underlying ElspethSettings.
+    assert pipeline_config.config["sources"]["primary"]["plugin"] == "text"
     assert pipeline_config.config["sinks"]["output"]["plugin"] == "json"

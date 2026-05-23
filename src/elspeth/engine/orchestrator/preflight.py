@@ -61,8 +61,7 @@ if TYPE_CHECKING:
 
 def assemble_and_validate_pipeline_config(
     *,
-    source: SourceProtocol,
-    sources: Mapping[str, SourceProtocol] | None = None,
+    sources: Mapping[str, SourceProtocol],
     transforms: Sequence[WiredTransform],
     sinks: Mapping[str, SinkProtocol],
     aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]],
@@ -77,8 +76,7 @@ def assemble_and_validate_pipeline_config(
     ``src/elspeth/engine/orchestrator/core.py``.
 
     Args:
-        source: Instantiated source plugin compatibility view.
-        sources: Named source plugin instances.
+        sources: Named source plugin instances (one or more) per ADR-025 §1.
         transforms: Wired transforms from ``PluginBundle.transforms``.
         sinks: Sink instances keyed by name from ``PluginBundle.sinks``.
         aggregations: Aggregation transforms + settings keyed by aggregation
@@ -114,8 +112,7 @@ def assemble_and_validate_pipeline_config(
         all_transforms.append(transform)
 
     pipeline_config = PipelineConfig(
-        source=source,
-        sources=sources or {"source": source},
+        sources=sources,
         transforms=all_transforms,
         sinks=sinks,
         config=resolve_config(settings),

@@ -54,7 +54,6 @@ def _make_processor(
     traversal = DAGTraversalContext(
         node_step_map=node_step_map,
         node_to_plugin={},
-        first_transform_node_id=node_ids[0],
         node_to_next=node_to_next,
         coalesce_node_map={coalesce_name: coalesce_node_id} if coalesce_name is not None and coalesce_node_id is not None else {},
     )

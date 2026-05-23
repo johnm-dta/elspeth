@@ -61,12 +61,13 @@ class TestTildeExpansion:
 
         # Create a settings file
         settings_content = """
-source:
-  plugin: csv
-  options:
-    path: input.csv
-    on_validation_failure: discard
-    on_success: default
+sources:
+  primary:
+    plugin: csv
+    options:
+      path: input.csv
+      on_validation_failure: discard
+      on_success: default
 sinks:
   default:
     plugin: json
@@ -96,12 +97,13 @@ sinks:
         from elspeth.cli import app
 
         settings_content = """
-source:
-  plugin: csv
-  options:
-    path: input.csv
-    on_validation_failure: discard
-    on_success: default
+sources:
+  primary:
+    plugin: csv
+    options:
+      path: input.csv
+      on_validation_failure: discard
+      on_success: default
 sinks:
   default:
     plugin: json
@@ -140,12 +142,13 @@ class TestResumeDbValidation:
         # Create a settings file whose landscape.url points to a non-existent DB
         nonexistent_db = tmp_path / "does_not_exist.db"
         settings_content = f"""
-source:
-  plugin: csv
-  on_success: default
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: default
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   default:
     plugin: json
@@ -183,12 +186,13 @@ landscape:
         conn.close()
 
         settings_content = f"""
-source:
-  plugin: csv
-  on_success: default
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: default
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   default:
     plugin: json
@@ -365,15 +369,17 @@ class TestBuildResumeGraphs:
         )
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             transforms=[
                 TransformSettings(
                     name="processor",
@@ -407,15 +413,17 @@ class TestBuildResumeGraphs:
         from elspeth.core.config import ElspethSettings, SinkSettings, SourceSettings
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="output",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="output",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -1000,14 +1008,15 @@ class TestResumeErrorPaths:
         db.close()
 
         settings_content = f"""
-source:
-  plugin: csv
-  on_success: default
-  options:
-    path: input.csv
-    on_validation_failure: discard
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: default
+    options:
+      path: input.csv
+      on_validation_failure: discard
+      schema:
+        mode: observed
 sinks:
   default:
     plugin: json
@@ -1083,12 +1092,13 @@ payload_store:
 
         # Create settings with invalid config (missing required field)
         settings_content = """
-source:
-  plugin: csv
-  # Missing on_success
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    # Missing on_success
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   default:
     plugin: json
@@ -1183,14 +1193,15 @@ sinks:
         # Create settings with unsupported backend
         db_path = tmp_path / "audit.db"
         settings_content = f"""
-source:
-  plugin: csv
-  on_success: default
-  options:
-    path: input.csv
-    on_validation_failure: discard
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: default
+    options:
+      path: input.csv
+      on_validation_failure: discard
+      schema:
+        mode: observed
 sinks:
   default:
     plugin: json

@@ -71,7 +71,7 @@ class TestOrchestratorWiresTelemetryToContext:
         sink = CollectSink()
 
         pipeline_config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(PassTransform())],
             sinks={"output": as_sink(sink)},
         )
@@ -131,7 +131,7 @@ class TestOrchestratorWiresTelemetryToContext:
         sink = CollectSink()
 
         pipeline_config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(CallbackCapturingTransform())],
             sinks={"output": as_sink(sink)},
         )
@@ -174,7 +174,7 @@ class TestOrchestratorWiresTelemetryToContext:
         sink = CollectSink()
 
         pipeline_config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(PassTransform())],
             sinks={"output": as_sink(sink)},
         )
@@ -205,7 +205,7 @@ class TestNoTelemetryWithoutManager:
         sink = CollectSink()
 
         pipeline_config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(PassTransform())],
             sinks={"output": as_sink(sink)},
         )
@@ -242,7 +242,7 @@ class TestNoTelemetryWithoutManager:
         sink = CollectSink()
 
         pipeline_config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(CallbackCapturingTransform())],
             sinks={"output": as_sink(sink)},
         )

@@ -175,7 +175,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
 
         # Begin a run
         self.run = self.factory.run_lifecycle.begin_run(
-            config={"source": {"plugin": "test"}, "sinks": {"default": {"plugin": "test"}}},
+            config={"sources": {"primary": {"plugin": "test"}}, "sinks": {"default": {"plugin": "test"}}},
             canonical_version="1.0",
         )
 
@@ -596,7 +596,7 @@ class TestTokenLifecycleInvariants:
             factory = make_factory(db)
 
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -633,7 +633,7 @@ class TestTokenLifecycleInvariants:
             factory = make_factory(db)
 
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -693,7 +693,7 @@ class TestTokenLifecycleInvariants:
             factory = make_factory(db)
 
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -755,7 +755,7 @@ class TestTokenLifecycleInvariants:
             factory = make_factory(db)
 
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -806,7 +806,7 @@ class TestTokenLifecycleInvariants:
             factory = make_factory(db)
 
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 

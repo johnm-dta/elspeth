@@ -1109,8 +1109,8 @@ class TestBuilderBranchExclusiveFieldDowngrade:
         )
 
         return ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired_a, wired_b],
             sinks={"output": _BuilderMockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -1258,8 +1258,8 @@ class TestBuilderBranchExclusiveFieldDowngrade:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired_a, wired_b],
             sinks={"output": _BuilderMockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -1348,8 +1348,8 @@ class TestBuilderBranchExclusiveFieldDowngrade:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired_a, wired_b],
             sinks={"output": _BuilderMockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -1464,8 +1464,8 @@ class TestBuilderBranchExclusiveFieldDowngrade:
         # Build must succeed — under require_all, the sink requirement is
         # actually satisfied because branch A always arrives with the field.
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired_a, wired_b],
             sinks={"output": sink_class()},
             aggregations={},
@@ -1496,8 +1496,8 @@ class TestBuilderBranchExclusiveFieldDowngrade:
 
         with pytest.raises(GraphValidationError, match=r"exclusive_to_a"):
             ExecutionGraph.from_plugin_instances(
-                source=source,
-                source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+                sources={"primary": source},
+                source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
                 transforms=[wired_a, wired_b],
                 sinks={"output": sink_class()},
                 aggregations={},

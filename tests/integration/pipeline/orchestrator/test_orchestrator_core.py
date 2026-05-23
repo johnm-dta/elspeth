@@ -174,7 +174,7 @@ def test_idle_timeout_polling_does_not_mutate_source_context_during_next(monkeyp
         fake_check_aggregation_timeouts,
     )
     config = PipelineConfig(
-        source=MagicMock(),
+        sources={"primary": MagicMock()},
         transforms=(),
         sinks={"default": MagicMock()},
     )
@@ -220,7 +220,7 @@ class TestOrchestrator:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -244,7 +244,7 @@ class TestOrchestrator:
         run_id = "run-runtime-preflight-fails-before-load"
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -285,12 +285,12 @@ class TestOrchestrator:
         run_id = "run-first-row-inferred-source-contract"
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )
         graph = build_production_graph(config)
-        source_node_id = graph.get_source()
+        source_node_id = graph.get_sources()[0]
 
         orchestrator = Orchestrator(landscape_db)
         with pytest.raises(SourceGuaranteedFieldsViolation, match="required_field"):
@@ -326,7 +326,7 @@ class TestOrchestrator:
         quarantine_sink = CollectSink(name="quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={
                 "default": as_sink(default_sink),
@@ -370,7 +370,7 @@ class TestOrchestrator:
         high_sink = CollectSink(name="high")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
             gates=[threshold_gate],
@@ -426,7 +426,7 @@ class TestOrchestrator:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={
                 "output": as_sink(output_sink),
@@ -437,7 +437,7 @@ class TestOrchestrator:
         )
 
         settings = ElspethSettings(
-            source={"plugin": "test", "on_success": "source_out", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "source_out", "options": {}}},
             sinks={
                 "output": {"plugin": "test", "on_write_failure": "discard"},
                 "source_sink": {"plugin": "test", "on_write_failure": "discard"},
@@ -495,7 +495,7 @@ class TestOrchestrator:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={
                 "output": as_sink(output_sink),
@@ -506,7 +506,7 @@ class TestOrchestrator:
         )
         graph = build_production_graph(config)
 
-        source_id = graph.get_source()
+        source_id = graph.get_sources()[0]
         assert source_id is not None
 
         orchestrator = Orchestrator(landscape_db)
@@ -548,7 +548,7 @@ class TestOrchestratorMultipleTransforms:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform1), as_transform(transform2)],
             sinks={"default": as_sink(sink)},
         )
@@ -573,7 +573,7 @@ class TestOrchestratorEmptyPipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )
@@ -596,7 +596,7 @@ class TestOrchestratorEmptyPipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -628,7 +628,7 @@ class TestOrchestratorEmptyPipeline:
         quarantine_sink = CollectSink(name="quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={
                 "default": as_sink(default_sink),
@@ -672,15 +672,17 @@ class TestOrchestratorAcceptsGraph:
 
         # Build config and graph from settings
         settings = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="output",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="output",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -690,8 +692,8 @@ class TestOrchestratorAcceptsGraph:
         plugins = instantiate_plugins_from_config(settings)
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -734,7 +736,7 @@ class TestOrchestratorAcceptsGraph:
         mock_sink.input_schema = schema_mock
 
         pipeline_config = PipelineConfig(
-            source=mock_source,
+            sources={"primary": mock_source},
             transforms=[],
             sinks={"output": mock_sink},
         )
@@ -743,7 +745,7 @@ class TestOrchestratorAcceptsGraph:
         orchestrator.run(pipeline_config, graph=graph, payload_store=payload_store)
 
         # Verify orchestrator called the node_id setter with correct value from graph
-        expected_source_id = graph.get_source()
+        expected_source_id = graph.get_sources()[0]
         source_node_id_setter.assert_called_once_with(expected_source_id)
 
         # Verify sink node_id was set with correct value from graph's sink_id_map
@@ -761,15 +763,17 @@ class TestOrchestratorAcceptsGraph:
 
         # Build config with MULTIPLE sinks
         settings = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="output_a",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="output_a",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output_a": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "a.json", "schema": {"mode": "observed"}}
@@ -782,8 +786,8 @@ class TestOrchestratorAcceptsGraph:
         plugins = instantiate_plugins_from_config(settings)
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -841,7 +845,7 @@ class TestOrchestratorAcceptsGraph:
         mock_sink_b.input_schema = schema_mock
 
         pipeline_config = PipelineConfig(
-            source=mock_source,
+            sources={"primary": mock_source},
             transforms=[],
             sinks={"output_a": mock_sink_a, "output_b": mock_sink_b},
         )
@@ -888,7 +892,7 @@ class TestOrchestratorAcceptsGraph:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )

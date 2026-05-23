@@ -31,20 +31,21 @@
 # arrival policy decides WHEN to merge; collision policy decides HOW to
 # reconcile overlapping field names once merging begins.
 
-source:
-  plugin: csv
-  on_success: raw
-  options:
-    path: examples/fork_coalesce/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'product: str'
-      - 'price: int'
-      - 'category: str'
-      - 'description: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: raw
+    options:
+      path: examples/fork_coalesce/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'product: str'
+        - 'price: int'
+        - 'category: str'
+        - 'description: str'
+      on_validation_failure: discard
 
 gates:
 - name: fork_gate

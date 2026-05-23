@@ -467,14 +467,14 @@ def test_valid_fork_coalesce_run_does_not_false_positive_after_sink_writes(
         coalesce_settings=[coalesce],
     )
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[],
         sinks={name: as_sink(sink) for name, sink in sinks.items()},
         coalesce_settings=[coalesce],
         gates=[gate],
     )
     settings = ElspethSettings(
-        source={"plugin": "list_source", "on_success": "list_source_out", "options": {}},
+        sources={"primary": {"plugin": "list_source", "on_success": "list_source_out", "options": {}}},
         sinks={name: {"plugin": "collect", "on_write_failure": "discard", "options": {}} for name in sinks},
         gates=[gate],
         coalesce=[coalesce],

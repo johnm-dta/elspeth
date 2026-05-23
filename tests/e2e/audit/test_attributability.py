@@ -70,7 +70,7 @@ def _run_pipeline(
     sink = sinks["default"]
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in tx_list],
         sinks={"default": as_sink(sink)},
     )

@@ -94,7 +94,7 @@ def _apply_explicit_success_routing(settings: Any) -> Any:
     gates = list(routed_settings.gates)
     aggregations = list(routed_settings.aggregations)
 
-    source_on_success = routed_settings.source.on_success
+    source_on_success = routed_settings.sources["primary"].on_success
     if source_on_success == _AUTO_SOURCE_ON_SUCCESS:
         if transforms or gates or aggregations:
             source_on_success = "source_out"
@@ -184,7 +184,7 @@ def _apply_explicit_success_routing(settings: Any) -> Any:
             )
         )
 
-    updated_source = routed_settings.source.model_copy(update={"on_success": source_on_success})
+    updated_source = routed_settings.sources["primary"].model_copy(update={"on_success": source_on_success})
 
     routed_settings = routed_settings.model_copy(
         update={
@@ -688,7 +688,7 @@ class TestSourceSinkValidation:
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv")
         graph.add_edge("my_source", "sink", label="continue")
 
-        assert graph.get_source() == "my_source"
+        assert graph.get_sources()[0] == "my_source"
 
     def test_get_source_crashes_on_no_source(self) -> None:
         """get_source() raises GraphValidationError when graph has no source node."""
@@ -699,7 +699,7 @@ class TestSourceSinkValidation:
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv")
 
         with pytest.raises(GraphValidationError, match="Expected exactly 1 source node, found 0"):
-            graph.get_source()
+            graph.get_sources()[0]
 
     def test_get_source_crashes_on_multiple_sources(self) -> None:
         """get_source() raises GraphValidationError when graph has multiple sources."""
@@ -712,7 +712,7 @@ class TestSourceSinkValidation:
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv")
 
         with pytest.raises(GraphValidationError, match="Expected exactly 1 source node, found 2"):
-            graph.get_source()
+            graph.get_sources()[0]
 
     def test_get_sink_nodes(self) -> None:
         from elspeth.contracts import NodeType
@@ -1069,15 +1069,17 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1087,8 +1089,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1098,7 +1100,7 @@ class TestExecutionGraphFromConfig:
         # Should have: source -> output_sink
         assert graph.node_count == 2
         assert graph.edge_count == 1
-        assert graph.get_source() is not None
+        assert graph.get_sources()[0] is not None
         assert len(graph.get_sinks()) == 1
 
     def test_from_config_is_valid(self, plugin_manager) -> None:
@@ -1111,15 +1113,17 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1129,8 +1133,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1152,15 +1156,17 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1186,8 +1192,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1235,16 +1241,18 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1272,8 +1280,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1287,16 +1295,18 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "on_success": "source_out",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "on_success": "source_out",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1316,8 +1326,8 @@ class TestExecutionGraphFromConfig:
         plugins = instantiate_plugins_from_config_raw(config)
         with pytest.raises(GraphValidationError, match=r"on_success 'nowhere' is neither a sink nor a known connection"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -1330,16 +1340,18 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "on_success": "source_out",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "on_success": "source_out",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1358,8 +1370,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1373,16 +1385,18 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "on_success": "source_out",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "on_success": "source_out",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1410,8 +1424,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1432,15 +1446,17 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1472,8 +1488,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1492,15 +1508,17 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "results": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "results.json", "schema": {"mode": "observed"}}
@@ -1521,8 +1539,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1546,15 +1564,17 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1573,8 +1593,8 @@ class TestExecutionGraphFromConfig:
         with pytest.raises(GraphValidationError) as exc_info:
             plugins = instantiate_plugins_from_config(config)
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -1594,15 +1614,17 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "results": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "results.json", "schema": {"mode": "observed"}}
@@ -1615,8 +1637,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1640,15 +1662,17 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1674,8 +1698,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1699,15 +1723,17 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -1733,8 +1759,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1759,15 +1785,17 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             transforms=[
                 _transform_settings(
                     TransformSettings,
@@ -1807,8 +1835,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1816,7 +1844,7 @@ class TestExecutionGraphFromConfig:
         )
 
         step_map = graph.build_step_map()
-        source_id = graph.get_source()
+        source_id = graph.get_sources()[0]
         assert source_id is not None
         assert step_map[source_id] == 0
 
@@ -1857,16 +1885,18 @@ class TestExecutionGraphFromConfig:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "on_success": "results",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "on_success": "results",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "results": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "results.json", "schema": {"mode": "observed"}}
@@ -1879,8 +1909,8 @@ class TestExecutionGraphFromConfig:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -1888,21 +1918,23 @@ class TestExecutionGraphFromConfig:
         )
 
         terminal_map = graph.get_terminal_sink_map()
-        source_node = graph.get_source()
+        source_node = graph.get_sources()[0]
         assert source_node is not None
         assert terminal_map[source_node] == "results"
 
         bad_config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "on_success": "missing_sink",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "on_success": "missing_sink",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "results": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "results.json", "schema": {"mode": "observed"}}
@@ -1912,8 +1944,8 @@ class TestExecutionGraphFromConfig:
         bad_plugins = instantiate_plugins_from_config_raw(bad_config)
         with pytest.raises(GraphValidationError, match=r"Source 'csv' on_success 'missing_sink' is neither a sink nor a known connection"):
             ExecutionGraph.from_plugin_instances(
-                source=bad_plugins.source,
-                source_settings=bad_plugins.source_settings,
+                sources=bad_plugins.sources,
+                source_settings_map=bad_plugins.source_settings_map,
                 transforms=bad_plugins.transforms,
                 sinks=bad_plugins.sinks,
                 aggregations=bad_plugins.aggregations,
@@ -1938,15 +1970,17 @@ class TestGateConnectionRouteMaterialization:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             gates=[
                 GateSettingsModel(
                     name="router",
@@ -1973,8 +2007,8 @@ class TestGateConnectionRouteMaterialization:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2005,15 +2039,17 @@ class TestGateConnectionRouteMaterialization:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             gates=[
                 GateSettingsModel(
                     name="router",
@@ -2037,8 +2073,8 @@ class TestGateConnectionRouteMaterialization:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2074,15 +2110,17 @@ class TestGateConnectionRouteMaterialization:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             gates=[
                 GateSettingsModel(
                     name="router",
@@ -2109,8 +2147,8 @@ class TestGateConnectionRouteMaterialization:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2141,15 +2179,17 @@ class TestGateConnectionRouteMaterialization:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             gates=[
                 GateSettingsModel(
                     name="terminal_gate",
@@ -2168,8 +2208,8 @@ class TestGateConnectionRouteMaterialization:
         plugins = instantiate_plugins_from_config_raw(config)
         with pytest.raises(GraphValidationError, match=r"neither a sink nor a known connection name"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -2191,15 +2231,17 @@ class TestExecutionGraphRouteMapping:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "results": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "results.json", "schema": {"mode": "observed"}}
@@ -2220,8 +2262,8 @@ class TestExecutionGraphRouteMapping:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2247,15 +2289,17 @@ class TestExecutionGraphRouteMapping:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "results": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "results.json", "schema": {"mode": "observed"}}
@@ -2283,8 +2327,8 @@ class TestExecutionGraphRouteMapping:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2311,15 +2355,17 @@ class TestExecutionGraphRouteMapping:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output-sink": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -2341,8 +2387,8 @@ class TestExecutionGraphRouteMapping:
         # DAG compilation should succeed with hyphenated sink names
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2416,15 +2462,17 @@ class TestExecutionGraphRouteMapping:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "clean": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "clean.json", "schema": {"mode": "observed"}}
@@ -2445,8 +2493,8 @@ class TestExecutionGraphRouteMapping:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2564,15 +2612,17 @@ class TestMultiEdgeScenarios:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -2597,8 +2647,8 @@ class TestMultiEdgeScenarios:
 
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2659,15 +2709,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "out.json", "schema": {"mode": "observed"}}
@@ -2694,8 +2746,8 @@ class TestCoalesceNodes:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2725,15 +2777,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -2760,8 +2814,8 @@ class TestCoalesceNodes:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2789,15 +2843,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -2821,8 +2877,8 @@ class TestCoalesceNodes:
 
         with pytest.raises(GraphValidationError, match=r"duplicate fork branches"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -2845,15 +2901,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -2883,8 +2941,8 @@ class TestCoalesceNodes:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2921,15 +2979,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -2962,8 +3022,8 @@ class TestCoalesceNodes:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -2995,15 +3055,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3030,8 +3092,8 @@ class TestCoalesceNodes:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -3064,15 +3126,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3099,8 +3163,8 @@ class TestCoalesceNodes:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -3131,15 +3195,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3174,8 +3240,8 @@ class TestCoalesceNodes:
 
         with pytest.raises(GraphValidationError, match="Duplicate branch name 'path_a'"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -3197,15 +3263,17 @@ class TestCoalesceNodes:
         # Pydantic validates min_length=2 for branches field
         with pytest.raises(ValidationError, match="at least 2 items"):
             ElspethSettings(
-                source=_source_settings(
-                    SourceSettings,
-                    plugin="csv",
-                    options={
-                        "path": "test.csv",
-                        "on_validation_failure": "discard",
-                        "schema": {"mode": "observed"},
-                    },
-                ),
+                sources={
+                    "primary": _source_settings(
+                        SourceSettings,
+                        plugin="csv",
+                        options={
+                            "path": "test.csv",
+                            "on_validation_failure": "discard",
+                            "schema": {"mode": "observed"},
+                        },
+                    )
+                },
                 sinks={
                     "output": SinkSettings(
                         plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3232,15 +3300,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3272,8 +3342,8 @@ class TestCoalesceNodes:
 
         with pytest.raises(GraphValidationError, match=r"branch 'path_x'.*no gate produces"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -3298,15 +3368,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3346,8 +3418,8 @@ class TestCoalesceNodes:
 
         # Use production path
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -3384,15 +3456,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3419,8 +3493,8 @@ class TestCoalesceNodes:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -3451,15 +3525,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3494,8 +3570,8 @@ class TestCoalesceNodes:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -3525,15 +3601,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3562,8 +3640,8 @@ class TestCoalesceNodes:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -3597,15 +3675,17 @@ class TestCoalesceNodes:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3633,8 +3713,8 @@ class TestCoalesceNodes:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -3832,16 +3912,18 @@ class TestSchemaValidation:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="to_router",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="to_router",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -3877,8 +3959,8 @@ class TestSchemaValidation:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -4418,16 +4500,17 @@ def test_from_plugin_instances_extracts_schemas():
     from elspeth.core.dag import ExecutionGraph
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: test.csv
-    schema:
-      mode: fixed
-      fields:
-        - "value: float"
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: test.csv
+      schema:
+        mode: fixed
+        fields:
+          - "value: float"
+      on_validation_failure: discard
 
 transforms:
   - name: passthrough_0
@@ -4462,8 +4545,8 @@ sinks:
         plugins = instantiate_plugins_from_config(config)
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -4472,7 +4555,7 @@ sinks:
         )
 
         # Verify schemas extracted
-        source_id = graph.get_source()
+        source_id = graph.get_sources()[0]
         assert source_id is not None
         source_info = graph.get_node_info(source_id)
         assert source_info.output_schema is not None
@@ -4498,14 +4581,15 @@ def test_from_plugin_instances_cycle_raises_graph_validation_error(monkeypatch: 
     from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: step_a
-  options:
-    path: test.csv
-    schema:
-      mode: observed
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: step_a
+    options:
+      path: test.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
 
 transforms:
   - name: passthrough_0
@@ -4542,8 +4626,8 @@ sinks:
 
         with pytest.raises(GraphValidationError, match="cycle"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -4780,15 +4864,17 @@ class TestDeterministicNodeIDs:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             transforms=[
                 _transform_settings(
                     TransformSettings,
@@ -4805,8 +4891,8 @@ class TestDeterministicNodeIDs:
         # Build graph twice with same config
         plugins1 = instantiate_plugins_from_config(config)
         graph1 = ExecutionGraph.from_plugin_instances(
-            source=plugins1.source,
-            source_settings=plugins1.source_settings,
+            sources=plugins1.sources,
+            source_settings_map={"primary": plugins1.source_settings},
             transforms=plugins1.transforms,
             sinks=plugins1.sinks,
             aggregations=plugins1.aggregations,
@@ -4815,8 +4901,8 @@ class TestDeterministicNodeIDs:
 
         plugins2 = instantiate_plugins_from_config(config)
         graph2 = ExecutionGraph.from_plugin_instances(
-            source=plugins2.source,
-            source_settings=plugins2.source_settings,
+            sources=plugins2.sources,
+            source_settings_map={"primary": plugins2.source_settings},
             transforms=plugins2.transforms,
             sinks=plugins2.sinks,
             aggregations=plugins2.aggregations,
@@ -4839,15 +4925,17 @@ class TestDeterministicNodeIDs:
         from elspeth.core.dag import ExecutionGraph
 
         config1 = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             transforms=[],
             sinks={
                 "out": SinkSettings(plugin="json", on_write_failure="discard", options={"path": "out.json", "schema": {"mode": "observed"}})
@@ -4855,15 +4943,17 @@ class TestDeterministicNodeIDs:
         )
 
         config2 = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "fixed", "fields": ["id: int"]},  # Different!
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "fixed", "fields": ["id: int"]},  # Different!
+                    },
+                )
+            },
             transforms=[],
             sinks={
                 "out": SinkSettings(plugin="json", on_write_failure="discard", options={"path": "out.json", "schema": {"mode": "observed"}})
@@ -4872,8 +4962,8 @@ class TestDeterministicNodeIDs:
 
         plugins1 = instantiate_plugins_from_config(config1)
         graph1 = ExecutionGraph.from_plugin_instances(
-            source=plugins1.source,
-            source_settings=plugins1.source_settings,
+            sources=plugins1.sources,
+            source_settings_map={"primary": plugins1.source_settings},
             transforms=plugins1.transforms,
             sinks=plugins1.sinks,
             aggregations=plugins1.aggregations,
@@ -4882,8 +4972,8 @@ class TestDeterministicNodeIDs:
 
         plugins2 = instantiate_plugins_from_config(config2)
         graph2 = ExecutionGraph.from_plugin_instances(
-            source=plugins2.source,
-            source_settings=plugins2.source_settings,
+            sources=plugins2.sources,
+            source_settings_map={"primary": plugins2.source_settings},
             transforms=plugins2.transforms,
             sinks=plugins2.sinks,
             aggregations=plugins2.aggregations,
@@ -4935,7 +5025,7 @@ class TestBranchGateMap:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(SourceSettings, plugin="null"),
+            sources={"primary": _source_settings(SourceSettings, plugin="null")},
             gates=[
                 _gate_settings(
                     GateSettings,
@@ -4962,8 +5052,8 @@ class TestBranchGateMap:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -4991,7 +5081,7 @@ class TestBranchGateMap:
         from elspeth.core.dag import ExecutionGraph
 
         settings = ElspethSettings(
-            source=_source_settings(SourceSettings, plugin="null"),
+            sources={"primary": _source_settings(SourceSettings, plugin="null")},
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "/tmp/test.json", "schema": {"mode": "observed"}}
@@ -5001,8 +5091,8 @@ class TestBranchGateMap:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -5028,8 +5118,8 @@ class TestDivertEdges:
 
         plugins = instantiate_plugins_from_config(settings)
         return ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -5042,15 +5132,17 @@ class TestDivertEdges:
         from elspeth.core.config import ElspethSettings, SinkSettings, SourceSettings
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "quarantine",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "quarantine",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "default": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "out.json", "schema": {"mode": "observed"}}
@@ -5074,15 +5166,17 @@ class TestDivertEdges:
         from elspeth.core.config import ElspethSettings, SinkSettings, SourceSettings
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "default": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "out.json", "schema": {"mode": "observed"}}
@@ -5107,15 +5201,17 @@ class TestDivertEdges:
         )
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             transforms=[
                 _transform_settings(
                     TransformSettings,
@@ -5153,15 +5249,17 @@ class TestDivertEdges:
         )
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "quarantine",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "quarantine",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             transforms=[
                 _transform_settings(
                     TransformSettings,
@@ -5200,15 +5298,17 @@ class TestDivertEdges:
         from elspeth.core.config import ElspethSettings, SinkSettings, SourceSettings
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "default",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "default",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "default": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "out.json", "schema": {"mode": "observed"}}
@@ -5236,15 +5336,17 @@ class TestDivertEdges:
         )
 
         settings = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             transforms=[
                 _transform_settings(
                     TransformSettings,
@@ -5297,16 +5399,18 @@ class TestTerminalGateRouteValidation:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="to_gate",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="to_gate",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -5328,8 +5432,8 @@ class TestTerminalGateRouteValidation:
         plugins = instantiate_plugins_from_config_raw(config)
         with pytest.raises(GraphValidationError, match=r"neither a sink nor a known connection name"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -5351,16 +5455,18 @@ class TestTerminalGateRouteValidation:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="to_gates",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="to_gates",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -5393,8 +5499,8 @@ class TestTerminalGateRouteValidation:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -5415,16 +5521,18 @@ class TestTerminalGateRouteValidation:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="to_gate",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="to_gate",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             transforms=[
                 _transform_settings(
                     TransformSettings,
@@ -5455,8 +5563,8 @@ class TestTerminalGateRouteValidation:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -5493,16 +5601,18 @@ class TestAggregationOnSuccessValidation:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="to_agg",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="to_agg",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -5530,8 +5640,8 @@ class TestAggregationOnSuccessValidation:
         plugins = instantiate_plugins_from_config_raw(config)
         with pytest.raises(GraphValidationError, match=r"Dangling output connections"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -5550,16 +5660,18 @@ class TestAggregationOnSuccessValidation:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="to_agg",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="to_agg",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -5587,8 +5699,8 @@ class TestAggregationOnSuccessValidation:
         plugins = instantiate_plugins_from_config_raw(config)
         with pytest.raises(GraphValidationError, match=r"on_success 'nonexistent_sink' is neither a sink nor a known connection"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -5611,16 +5723,18 @@ class TestAggregationOnSuccessValidation:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="to_agg",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="to_agg",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -5647,8 +5761,8 @@ class TestAggregationOnSuccessValidation:
 
         plugins = instantiate_plugins_from_config_raw(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -5695,16 +5809,18 @@ class TestCoalesceOnSuccessValidation:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="to_gate",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="to_gate",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -5736,8 +5852,8 @@ class TestCoalesceOnSuccessValidation:
         plugins = instantiate_plugins_from_config_raw(config)
         with pytest.raises(GraphValidationError, match=r"Dangling output|no incoming branches"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -5760,16 +5876,18 @@ class TestCoalesceOnSuccessValidation:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="to_gate",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="to_gate",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -5801,8 +5919,8 @@ class TestCoalesceOnSuccessValidation:
         plugins = instantiate_plugins_from_config_raw(config)
         # Coalesce on_success to a valid sink should build successfully
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -5822,16 +5940,18 @@ class TestCoalesceOnSuccessValidation:
         from elspeth.core.dag import ExecutionGraph, GraphValidationError
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                on_success="to_gate",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    on_success="to_gate",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -5863,8 +5983,8 @@ class TestCoalesceOnSuccessValidation:
         plugins = instantiate_plugins_from_config_raw(config)
         with pytest.raises(GraphValidationError, match=r"unknown sink 'nonexistent_sink'"):
             ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,
@@ -5889,15 +6009,17 @@ class TestNodeInfoImmutability:
         from elspeth.core.dag import ExecutionGraph
 
         config = ElspethSettings(
-            source=_source_settings(
-                SourceSettings,
-                plugin="csv",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": _source_settings(
+                    SourceSettings,
+                    plugin="csv",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "out.json", "schema": {"mode": "observed"}}
@@ -5906,8 +6028,8 @@ class TestNodeInfoImmutability:
         )
         plugins = instantiate_plugins_from_config(config)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,

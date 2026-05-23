@@ -1,17 +1,18 @@
-source:
-  plugin: csv
-  on_success: gate_in
-  options:
-    path: examples/large_scale_test/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'value: float'
-      - 'category: str'
-      - 'priority: int'
-      - 'timestamp: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: gate_in
+    options:
+      path: examples/large_scale_test/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'value: float'
+        - 'category: str'
+        - 'priority: int'
+        - 'timestamp: str'
+      on_validation_failure: discard
 gates:
 - name: value_threshold
   input: gate_in

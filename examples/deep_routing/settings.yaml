@@ -27,22 +27,23 @@
 #   - Every row reaches exactly one of 7 terminal sinks
 #   - Full audit lineage through 8 hops (source → screen → map → trim → 4 gates → sink)
 
-source:
-  plugin: csv
-  on_success: raw
-  options:
-    path: examples/deep_routing/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'applicant: str'
-      - 'amount: int'
-      - 'credit_score: int'
-      - 'loan_type: str'
-      - 'term_months: int'
-      - 'notes: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: raw
+    options:
+      path: examples/deep_routing/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'applicant: str'
+        - 'amount: int'
+        - 'credit_score: int'
+        - 'loan_type: str'
+        - 'term_months: int'
+        - 'notes: str'
+      on_validation_failure: discard
 
 transforms:
 # Stage 1: Screen for restricted content — flagged rows go to quarantine

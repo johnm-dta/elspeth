@@ -1549,7 +1549,6 @@ def validate_pipeline(
     # per-pipeline validation failure.
     try:
         assemble_and_validate_pipeline_config(
-            source=bundle.source,
             sources=bundle.sources,
             transforms=bundle.transforms,
             sinks=bundle.sinks,

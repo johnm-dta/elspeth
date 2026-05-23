@@ -36,7 +36,7 @@ class TestRepositoryConstruction:
     def test_repositories_share_database_ops(self, factory: RecorderFactory) -> None:
         """Round-trip: begin_run via lifecycle, then get_run confirms shared DB."""
         run = factory.run_lifecycle.begin_run(
-            config={"source": {"plugin": "csv"}},
+            config={"sources": {"primary": {"plugin": "csv"}}},
             canonical_version="v1",
         )
         retrieved = factory.run_lifecycle.get_run(run.run_id)

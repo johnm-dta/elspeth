@@ -319,7 +319,7 @@ class TestPipelineConfig:
         sink = Mock()
         sink.node_id = None
         return PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": sink},
             config={"key": "value"},
@@ -365,7 +365,7 @@ class TestPipelineConfig:
         frozen_coal = (Mock(),)
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=frozen_transforms,
             sinks=frozen_sinks,
             config=frozen_config,

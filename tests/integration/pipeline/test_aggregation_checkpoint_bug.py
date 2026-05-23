@@ -132,8 +132,8 @@ class TestAggregationCheckpointFixVerification:
         from elspeth.core.dag import ExecutionGraph
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=wire_transforms([transform], source_connection="source_out", final_sink="output"),
             sinks={"output": sink},
             aggregations={},
@@ -158,7 +158,7 @@ class TestAggregationCheckpointFixVerification:
         )
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": sink},
             gates=[],
@@ -175,7 +175,7 @@ class TestAggregationCheckpointFixVerification:
         )
 
         settings = ElspethSettings(
-            source=SourceSettings(plugin="buffering_source", on_success="source_out", options={}),
+            sources={"primary": SourceSettings(plugin="buffering_source", on_success="source_out", options={})},
             sinks={"output": SinkSettings(plugin="collecting_sink", on_write_failure="discard", options={})},
             transforms=[],
             gates=[],
@@ -270,8 +270,8 @@ class TestAggregationCheckpointFixVerification:
         from elspeth.core.dag import ExecutionGraph
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=wire_transforms([transform], source_connection="source_out", final_sink="output"),
             sinks={"output": sink},
             aggregations={},
@@ -295,7 +295,7 @@ class TestAggregationCheckpointFixVerification:
         )
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": sink},
             gates=[],
@@ -312,7 +312,7 @@ class TestAggregationCheckpointFixVerification:
         )
 
         settings = ElspethSettings(
-            source=SourceSettings(plugin="agg_only_source", on_success="source_out", options={}),
+            sources={"primary": SourceSettings(plugin="agg_only_source", on_success="source_out", options={})},
             sinks={"output": SinkSettings(plugin="collecting_sink", on_write_failure="discard", options={})},
             transforms=[],
             gates=[],

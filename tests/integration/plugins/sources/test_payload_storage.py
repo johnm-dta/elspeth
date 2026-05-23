@@ -96,7 +96,7 @@ def test_source_row_payloads_are_stored_during_run(tmp_path: Path, payload_store
 
     # Build pipeline config
     config = PipelineConfig(
-        source=as_source(test_source),
+        sources={"primary": as_source(test_source)},
         transforms=[],
         sinks={"output": as_sink(test_sink)},
         config={},

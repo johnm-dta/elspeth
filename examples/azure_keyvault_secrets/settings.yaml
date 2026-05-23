@@ -5,11 +5,12 @@ secrets:
     AZURE_OPENAI_KEY: azure-openai-api-key
     AZURE_OPENAI_ENDPOINT: azure-openai-endpoint
     ELSPETH_FINGERPRINT_KEY: elspeth-fingerprint-key
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: ./input/data.csv
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: ./input/data.csv
 transforms:
 - name: passthrough_0
   plugin: passthrough

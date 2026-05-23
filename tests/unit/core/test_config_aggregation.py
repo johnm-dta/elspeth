@@ -320,7 +320,7 @@ class TestElspethSettingsAggregations:
         )
 
         settings = ElspethSettings(
-            source=SourceSettings(plugin="csv", on_success="output"),
+            sources={"primary": SourceSettings(plugin="csv", on_success="output")},
             sinks={"output": SinkSettings(plugin="csv", on_write_failure="discard")},
         )
         assert settings.aggregations == []
@@ -336,7 +336,7 @@ class TestElspethSettingsAggregations:
         )
 
         settings = ElspethSettings(
-            source=SourceSettings(plugin="csv", on_success="output"),
+            sources={"primary": SourceSettings(plugin="csv", on_success="output")},
             sinks={"output": SinkSettings(plugin="csv", on_write_failure="discard")},
             aggregations=[
                 AggregationSettings(
@@ -363,7 +363,7 @@ class TestElspethSettingsAggregations:
 
         with pytest.raises(ValidationError, match=r"Node name 'batch_stats' is used by both"):
             ElspethSettings(
-                source=SourceSettings(plugin="csv", on_success="output"),
+                sources={"primary": SourceSettings(plugin="csv", on_success="output")},
                 sinks={"output": SinkSettings(plugin="csv", on_write_failure="discard")},
                 aggregations=[
                     AggregationSettings(

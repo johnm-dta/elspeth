@@ -83,6 +83,7 @@ class TestFinalizeSourceIterationContext:
             schema_contract_recorded=True,
             interrupted_by_shutdown=True,
             flush_end_of_input=False,
+            active_source=MagicMock(),
         )
 
         assert ctx.node_id == source_id, (
@@ -115,6 +116,7 @@ class TestFinalizeSourceIterationContext:
             schema_contract_recorded=True,
             interrupted_by_shutdown=False,
             flush_end_of_input=True,
+            active_source=MagicMock(),
         )
 
         assert ctx.node_id == source_id
@@ -143,6 +145,7 @@ class TestFinalizeSourceIterationContext:
                 schema_contract_recorded=True,
                 interrupted_by_shutdown=False,
                 flush_end_of_input=False,
+                active_source=MagicMock(),
             )
 
         flush_coalesce.assert_not_called()
@@ -170,6 +173,7 @@ class TestFinalizeSourceIterationContext:
                 schema_contract_recorded=True,
                 interrupted_by_shutdown=False,
                 flush_end_of_input=True,
+                active_source=MagicMock(),
             )
 
         flush_coalesce.assert_called_once()
@@ -197,6 +201,7 @@ class TestFinalizeSourceIterationContext:
                 schema_contract_recorded=True,
                 interrupted_by_shutdown=False,
                 flush_end_of_input=False,
+                active_source=MagicMock(),
             )
 
         flush_aggregation.assert_not_called()
@@ -224,6 +229,7 @@ class TestFinalizeSourceIterationContext:
                 schema_contract_recorded=True,
                 interrupted_by_shutdown=False,
                 flush_end_of_input=True,
+                active_source=MagicMock(),
             )
 
         flush_aggregation.assert_called_once()

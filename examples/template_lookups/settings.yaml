@@ -1,19 +1,20 @@
 landscape:
   url: sqlite:///examples/template_lookups/runs/audit.db
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: examples/template_lookups/input.csv
-    on_validation_failure: discard
-    schema:
-      mode: fixed
-      fields:
-      - 'ticket_id: str'
-      - 'category_id: str'
-      - 'priority_id: str'
-      - 'subject: str'
-      - 'body: str'
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: examples/template_lookups/input.csv
+      on_validation_failure: discard
+      schema:
+        mode: fixed
+        fields:
+        - 'ticket_id: str'
+        - 'category_id: str'
+        - 'priority_id: str'
+        - 'subject: str'
+        - 'body: str'
 sinks:
   output:
     plugin: json

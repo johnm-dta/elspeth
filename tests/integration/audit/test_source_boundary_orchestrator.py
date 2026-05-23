@@ -26,7 +26,7 @@ def test_orchestrator_records_source_boundary_failure_before_reraising() -> None
     sink = sinks["default"]
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[],
         sinks={"default": as_sink(sink)},
     )

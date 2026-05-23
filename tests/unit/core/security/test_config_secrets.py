@@ -700,13 +700,14 @@ class TestCLILoadSettingsWithSecrets:
         # Create minimal settings file (no secrets config = source='env')
         settings_file = tmp_path / "settings.yaml"
         settings_file.write_text("""
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
+      schema:
+        mode: observed
 sinks:
   output:
     plugin: csv
@@ -723,7 +724,7 @@ landscape: {}
 
         config, resolutions = _load_settings_with_secrets(settings_file)
 
-        assert config.source.plugin == "csv"
+        assert config.sources["primary"].plugin == "csv"
         assert resolutions == []  # No secrets to load
 
     def test_load_settings_with_secrets_keyvault_injects_env_vars(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -748,13 +749,14 @@ secrets:
   mapping:
     TEST_API_KEY: test-api-key-secret
 
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
+      schema:
+        mode: observed
 sinks:
   output:
     plugin: csv
@@ -778,7 +780,7 @@ landscape: {}
             config, resolutions = _load_settings_with_secrets(settings_file)
 
         # Settings loaded successfully
-        assert config.source.plugin == "csv"
+        assert config.sources["primary"].plugin == "csv"
 
         # Secret was injected into environment
         assert os.environ["TEST_API_KEY"] == "injected-key-value"
@@ -808,12 +810,13 @@ secrets:
   mapping:
     MISSING_KEY: missing-secret
 
-source:
-  plugin: csv
-  options:
-    path: input.csv
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    options:
+      path: input.csv
+      schema:
+        mode: observed
 sinks:
   output:
     plugin: csv
@@ -857,13 +860,14 @@ landscape: {}
         settings_file = tmp_path / "settings.yaml"
         settings_file.write_text("""
 secrets: null
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
+      schema:
+        mode: observed
 sinks:
   output:
     plugin: csv
@@ -880,7 +884,7 @@ landscape: {}
 
         config, resolutions = _load_settings_with_secrets(settings_file)
 
-        assert config.source.plugin == "csv"
+        assert config.sources["primary"].plugin == "csv"
         assert resolutions == []
 
     def test_load_settings_with_secrets_rejects_non_mapping_secrets_section(self, tmp_path: Path) -> None:
@@ -888,13 +892,14 @@ landscape: {}
         settings_file = tmp_path / "settings.yaml"
         settings_file.write_text("""
 secrets: []
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
+      schema:
+        mode: observed
 sinks:
   output:
     plugin: csv

@@ -37,19 +37,20 @@ def example_dir(tmp_path: Path) -> Path:
     settings_yaml = example_dst / "settings.yaml"
     settings_yaml.write_text(
         f"""\
-source:
-  plugin: csv
-  on_success: deagg_in
-  options:
-    path: {example_dst / "input.csv"}
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'name: str'
-      - 'copies: int'
-      - 'category: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: deagg_in
+    options:
+      path: {example_dst / "input.csv"}
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'name: str'
+        - 'copies: int'
+        - 'category: str'
+      on_validation_failure: discard
 aggregations:
 - name: replicate_batch
   plugin: batch_replicate
@@ -147,19 +148,20 @@ def observed_agg_example_dir(tmp_path: Path) -> Path:
     settings_yaml = example_dst / "settings.yaml"
     settings_yaml.write_text(
         f"""\
-source:
-  plugin: csv
-  on_success: deagg_in
-  options:
-    path: {example_dst / "input.csv"}
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'name: str'
-      - 'copies: int'
-      - 'category: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: deagg_in
+    options:
+      path: {example_dst / "input.csv"}
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'name: str'
+        - 'copies: int'
+        - 'category: str'
+      on_validation_failure: discard
 aggregations:
 - name: replicate_batch
   plugin: batch_replicate
@@ -211,8 +213,8 @@ class TestDeaggregationObservedAggregationRequiresExplicitSchema:
 
         with pytest.raises(GraphValidationError, match=r"does not guarantee"):
             graph = ExecutionGraph.from_plugin_instances(
-                source=plugins.source,
-                source_settings=plugins.source_settings,
+                sources=plugins.sources,
+                source_settings_map=plugins.source_settings_map,
                 transforms=plugins.transforms,
                 sinks=plugins.sinks,
                 aggregations=plugins.aggregations,

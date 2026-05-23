@@ -25,16 +25,17 @@ def test_compatible_pipeline_passes_validation():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: test_input.csv
-    schema:
-      mode: fixed
-      fields:
-        - "value: float"
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: test_input.csv
+      schema:
+        mode: fixed
+        fields:
+          - "value: float"
+      on_validation_failure: discard
 
 transforms:
   - name: passthrough_0
@@ -78,16 +79,17 @@ def test_transform_chain_incompatibility_detected():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: test_input.csv
-    schema:
-      mode: fixed
-      fields:
-        - "field_a: str"
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: test_input.csv
+      schema:
+        mode: fixed
+        fields:
+          - "field_a: str"
+      on_validation_failure: discard
 
 transforms:
   - name: passthrough_0
@@ -145,16 +147,17 @@ def test_aggregation_output_incompatibility_detected():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: stats_input
-  options:
-    path: test_input.csv
-    schema:
-      mode: fixed
-      fields:
-        - "value: float"
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: stats_input
+    options:
+      path: test_input.csv
+      schema:
+        mode: fixed
+        fields:
+          - "value: float"
+      on_validation_failure: discard
 
 aggregations:
   - name: stats
@@ -202,13 +205,14 @@ def test_dynamic_schemas_skip_validation():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: test_input.csv
-    schema: {mode: observed}  # Dynamic schema
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: test_input.csv
+      schema: {mode: observed}  # Dynamic schema
+      on_validation_failure: discard
 
 transforms:
   - name: passthrough_0
@@ -247,16 +251,17 @@ def test_aggregation_incoming_edge_uses_input_schema():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: stats_input
-  options:
-    path: test.csv
-    schema:
-      mode: fixed
-      fields:
-        - "wrong_field: str"  # Aggregation expects 'value', not 'wrong_field'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: stats_input
+    options:
+      path: test.csv
+      schema:
+        mode: fixed
+        fields:
+          - "wrong_field: str"  # Aggregation expects 'value', not 'wrong_field'
+      on_validation_failure: discard
 
 aggregations:
   - name: stats
@@ -308,16 +313,17 @@ def test_aggregation_outgoing_edge_uses_output_schema():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: stats_input
-  options:
-    path: test.csv
-    schema:
-      mode: fixed
-      fields:
-        - "value: float"
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: stats_input
+    options:
+      path: test.csv
+      schema:
+        mode: fixed
+        fields:
+          - "value: float"
+      on_validation_failure: discard
 
 aggregations:
   - name: stats
@@ -385,14 +391,16 @@ def test_two_phase_validation_separates_self_and_compatibility_errors(plugin_man
 
     # PHASE 2 should fail: Well-formed schemas, incompatible connection
     good_self_bad_compat_config = {
-        "source": {
-            "plugin": "csv",
-            "on_success": "source_out",
-            "options": {
-                "path": "test.csv",
-                "schema": {"mode": "fixed", "fields": ["id: int"]},  # Only has 'id'
-                "on_validation_failure": "discard",
-            },
+        "sources": {
+            "primary": {
+                "plugin": "csv",
+                "on_success": "source_out",
+                "options": {
+                    "path": "test.csv",
+                    "schema": {"mode": "fixed", "fields": ["id: int"]},  # Only has 'id'
+                    "on_validation_failure": "discard",
+                },
+            }
         },
         "transforms": [
             {
@@ -424,8 +432,8 @@ def test_two_phase_validation_separates_self_and_compatibility_errors(plugin_man
     # Graph construction should fail (PHASE 2 - schemas incompatible)
     with pytest.raises(GraphValidationError, match=r"Missing fields.*email"):
         ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,

@@ -344,8 +344,10 @@ class TestHashSettingsFile:
         result = _hash_settings_file(settings)
         expected_payload = {
             "plugins": {
-                "source": {
-                    "path": "data.csv",
+                "sources": {
+                    "primary": {
+                        "path": "data.csv",
+                    }
                 },
             },
         }

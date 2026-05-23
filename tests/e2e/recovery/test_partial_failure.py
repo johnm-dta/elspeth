@@ -96,15 +96,15 @@ def _build_linear_graph(config: PipelineConfig) -> ExecutionGraph:
 
     # Set source routing
     source_connection = "source_out" if transforms else sink_name
-    config.source.on_success = source_connection
-    source_settings = SourceSettings(plugin=config.source.name, on_success=source_connection, options={})
+    config.sources["primary"].on_success = source_connection
+    source_settings = SourceSettings(plugin=config.sources["primary"].name, on_success=source_connection, options={})
 
     # Wire transforms with explicit routing
     wired = wire_transforms(transforms, source_connection=source_connection, final_sink=sink_name)
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=config.source,
-        source_settings=source_settings,
+        sources={"primary": config.sources["primary"]},
+        source_settings_map={"primary": source_settings},
         transforms=wired,
         sinks=config.sinks,
         aggregations={},
@@ -135,7 +135,7 @@ class TestPartialFailure:
         sink = CollectSink("default")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[transform],  # type: ignore[list-item]
             sinks={"default": as_sink(sink)},
         )
@@ -228,7 +228,7 @@ class TestPartialFailure:
         sink = CollectSink("default")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[transform],  # type: ignore[list-item]
             sinks={"default": as_sink(sink)},
         )
@@ -272,7 +272,7 @@ class TestPartialFailure:
         sink = CollectSink("default")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[transform],  # type: ignore[list-item]
             sinks={"default": as_sink(sink)},
         )

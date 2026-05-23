@@ -18,14 +18,16 @@ class TestValidateCommand:
     def valid_config(self, tmp_path: Path) -> Path:
         """Create a valid pipeline config using new schema."""
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": "/data/input.csv",
-                    "on_validation_failure": "quarantine",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": "/data/input.csv",
+                        "on_validation_failure": "quarantine",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -72,14 +74,16 @@ class TestValidateCommand:
     def invalid_output_sink_config(self, tmp_path: Path) -> Path:
         """Create config with invalid source on_success sink reference."""
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "nonexistent",  # References non-existent sink
-                "options": {
-                    "path": "/data/input.csv",
-                    "on_validation_failure": "quarantine",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "nonexistent",  # References non-existent sink
+                    "options": {
+                        "path": "/data/input.csv",
+                        "on_validation_failure": "quarantine",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -111,14 +115,16 @@ class TestValidateCommand:
         input_csv.write_text("id,name\n1,Alice\n")
 
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(input_csv),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(input_csv),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -161,14 +167,16 @@ class TestValidateCommand:
         """A null secrets section should behave like an omitted section."""
         config = {
             "secrets": None,
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(tmp_path / "input.csv"),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(tmp_path / "input.csv"),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -225,14 +233,15 @@ class TestValidateCommandGraphValidation:
         """Validate command catches gate routing to nonexistent sink."""
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: my_gate
-  options:
-    path: /data/input.csv
-    on_validation_failure: quarantine
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: my_gate
+    options:
+      path: /data/input.csv
+      on_validation_failure: quarantine
+      schema:
+        mode: observed
 
 sinks:
   output:
@@ -264,14 +273,15 @@ gates:
         """Validate command shows graph structure on success."""
         config_file = tmp_path / "settings.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-  on_success: classifier
-  options:
-    path: /data/input.csv
-    on_validation_failure: quarantine
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: classifier
+    options:
+      path: /data/input.csv
+      on_validation_failure: quarantine
+      schema:
+        mode: observed
 
 sinks:
   results:

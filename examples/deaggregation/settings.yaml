@@ -1,16 +1,17 @@
-source:
-  plugin: csv
-  on_success: deagg_in
-  options:
-    path: examples/deaggregation/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'name: str'
-      - 'copies: int'
-      - 'category: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: deagg_in
+    options:
+      path: examples/deaggregation/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'name: str'
+        - 'copies: int'
+        - 'category: str'
+      on_validation_failure: discard
 aggregations:
 - name: replicate_batch
   plugin: batch_replicate

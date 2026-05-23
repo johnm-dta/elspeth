@@ -156,11 +156,11 @@ def _build_production_graph(config: PipelineConfig) -> ExecutionGraph:
     if not row_transforms and config.gates:
         source_on_success = config.gates[0].input
 
-    config.source.on_success = source_on_success
+    config.sources["primary"].on_success = source_on_success
 
     return ExecutionGraph.from_plugin_instances(
-        source=config.source,
-        source_settings=SourceSettings(plugin=config.source.name, on_success=source_on_success, options={}),
+        sources={"primary": config.sources["primary"]},
+        source_settings_map={"primary": SourceSettings(plugin=config.sources["primary"].name, on_success=source_on_success, options={})},
         transforms=wire_transforms(
             row_transforms,
             source_connection=source_on_success,
@@ -221,7 +221,7 @@ class TestTerminalStateProperty:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -259,7 +259,7 @@ class TestTerminalStateProperty:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -294,7 +294,7 @@ class TestTerminalStateProperty:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -331,7 +331,7 @@ class TestTerminalStateEdgeCases:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -359,7 +359,7 @@ class TestTerminalStateEdgeCases:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -382,7 +382,7 @@ class TestTerminalStateEdgeCases:
 
         # No transforms - source direct to sink
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],  # Empty!
             sinks={"default": as_sink(sink)},
         )
@@ -463,8 +463,8 @@ class TestTerminalStateAggregation:
 
         # Build graph via production path (same as T18 characterization tests)
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=wire_transforms([transform], source_connection="source_out", final_sink="default"),
             sinks={"default": sink},
             aggregations={},
@@ -487,7 +487,7 @@ class TestTerminalStateAggregation:
         )
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"default": sink},
             aggregation_settings={transform_node_id: agg_settings},

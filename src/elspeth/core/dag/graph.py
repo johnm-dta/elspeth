@@ -435,21 +435,6 @@ class ExecutionGraph:
         except nx.NetworkXUnfeasible as e:
             raise GraphValidationError(f"Cannot sort graph: {e}") from e
 
-    def get_source(self) -> NodeID:
-        """Get the source node ID.
-
-        Returns:
-            The source node ID.
-
-        Raises:
-            GraphValidationError: If not exactly one source exists (construction bug).
-        """
-        # All nodes have "info" - added via add_node(), direct access is safe
-        sources = [NodeID(node_id) for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == NodeType.SOURCE]
-        if len(sources) != 1:
-            raise GraphValidationError(f"Expected exactly 1 source node, found {len(sources)}. This indicates a graph construction bug.")
-        return sources[0]
-
     def get_sources(self) -> list[NodeID]:
         """Get all source node IDs."""
         return [NodeID(node_id) for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == NodeType.SOURCE]
@@ -566,18 +551,6 @@ class ExecutionGraph:
     def is_sink_node(self, node_id: NodeID) -> bool:
         """Check if a node is a sink node."""
         return self.get_node_info(node_id).node_type == NodeType.SINK
-
-    def get_first_transform_node(self) -> NodeID | None:
-        """Get the first processing node after source via continue edge.
-
-        Returns:
-            Node ID of the first processing node (transform/gate/aggregation),
-            or None for source-only pipelines.
-        """
-        sources = self.get_sources()
-        if len(sources) != 1:
-            return None
-        return self.get_next_node(sources[0])
 
     def get_next_node(self, node_id: NodeID) -> NodeID | None:
         """Follow the continue MOVE edge to the next processing node.
@@ -697,16 +670,14 @@ class ExecutionGraph:
     @classmethod
     def from_plugin_instances(
         cls,
-        source: SourceProtocol | None = None,
-        source_settings: SourceSettings | None = None,
+        *,
+        sources: Mapping[str, SourceProtocol],
+        source_settings_map: Mapping[str, SourceSettings],
         transforms: Sequence[WiredTransform] = (),
         sinks: Mapping[str, SinkProtocol] | None = None,
         aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]] | None = None,
         gates: Sequence[GateSettings] = (),
         coalesce_settings: Sequence[CoalesceSettings] | None = None,
-        *,
-        sources: Mapping[str, SourceProtocol] | None = None,
-        source_settings_map: Mapping[str, SourceSettings] | None = None,
         queues: Mapping[str, QueueSettings] | None = None,
     ) -> ExecutionGraph:
         """Build ExecutionGraph from plugin instances.
@@ -717,16 +688,19 @@ class ExecutionGraph:
         Routing is explicit: terminal transforms and sources declare their
         output sink via on_success. There is no default_sink fallback.
 
+        Per ADR-025 §2 the source surface is plural-only: callers pass
+        ``sources`` and ``source_settings_map`` keyed by source name. The
+        prior singular ``source=`` / ``source_settings=`` keyword
+        arguments and their legacy single-source facade are deleted.
+
         Args:
-            source: Instantiated source plugin
-            source_settings: Source settings (wiring metadata)
+            sources: Named source plugin instances (one or more per graph).
+            source_settings_map: Source settings keyed by the same source names.
             transforms: Wired transforms (plugin instance + settings metadata)
             sinks: Dict of sink_name -> instantiated sink
             aggregations: Dict of agg_name -> (transform_instance, AggregationSettings)
             gates: Config-driven gate settings
             coalesce_settings: Coalesce configs for fork/join patterns
-            sources: Named source plugin instances for multi-source graphs
-            source_settings_map: Source settings keyed by the same source names
             queues: Declared pass-through scheduling queues
 
         Returns:
@@ -741,15 +715,13 @@ class ExecutionGraph:
 
         return build_execution_graph(
             cls=cls,
-            source=source,
-            source_settings=source_settings,
+            sources=sources,
+            source_settings_map=source_settings_map,
             transforms=transforms,
             sinks=sinks,
             aggregations=aggregations,
             gates=gates,
             coalesce_settings=coalesce_settings,
-            sources=sources,
-            source_settings_map=source_settings_map,
             queues=queues,
         )
 

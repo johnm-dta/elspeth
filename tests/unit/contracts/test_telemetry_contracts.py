@@ -388,7 +388,7 @@ class TestOrchestratorTelemetryWiringContract:
         sink = CollectSink()
 
         pipeline_config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(TelemetryCapturingTransform())],
             sinks={"output": as_sink(sink)},
         )
@@ -448,7 +448,7 @@ class TestOrchestratorTelemetryWiringContract:
         sink = CollectSink()
 
         pipeline_config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(PassTransform())],
             sinks={"output": as_sink(sink)},
         )

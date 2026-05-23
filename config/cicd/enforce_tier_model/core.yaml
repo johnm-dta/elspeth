@@ -195,7 +195,7 @@ allow_hits:
     so ANY failure in grade updates must not abort the loop for remaining runs
   safety: Exception caught and logged via structlog, run_id added to grade_update_failures
     in PurgeResult, operator informed via CLI output
-- key: core/dag/graph.py:R6:ExecutionGraph:warn_divert_coalesce_interactions:fp=03d7c23063749855
+- key: core/dag/graph.py:R6:ExecutionGraph:warn_divert_coalesce_interactions:fp=1de9a5d11995f8f2
   owner: architecture
   reason: Silent except in schema lookup — DIVERT edge may target non-existent node
     (forward reference or optional path)

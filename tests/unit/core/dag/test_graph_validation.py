@@ -280,7 +280,7 @@ class TestGetSourceErrorPaths:
         graph.add_node("t1", node_type=NodeType.TRANSFORM, plugin_name="passthrough")
 
         with pytest.raises(GraphValidationError, match=r"Expected exactly 1 source.*found 0"):
-            graph.get_source()
+            graph.get_sources()[0]
 
     def test_multiple_sources_raises(self) -> None:
         """Graph with two source nodes must raise."""
@@ -289,11 +289,11 @@ class TestGetSourceErrorPaths:
         graph.add_node("src_b", node_type=NodeType.SOURCE, plugin_name="csv")
 
         with pytest.raises(GraphValidationError, match=r"Expected exactly 1 source.*found 2"):
-            graph.get_source()
+            graph.get_sources()[0]
 
     def test_empty_graph_raises(self) -> None:
         """Completely empty graph has zero sources."""
         graph = ExecutionGraph()
 
         with pytest.raises(GraphValidationError, match=r"Expected exactly 1 source.*found 0"):
-            graph.get_source()
+            graph.get_sources()[0]

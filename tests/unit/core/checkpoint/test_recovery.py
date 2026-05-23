@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from pydantic import ConfigDict
-from sqlalchemy import Connection
+from sqlalchemy import Connection, select
 
 from elspeth.contracts import (
     Checkpoint,
@@ -43,6 +43,7 @@ from elspeth.core.landscape.schema import (
     checkpoints_table,
     nodes_table,
     rows_table,
+    run_sources_table,
     runs_table,
     token_outcomes_table,
     tokens_table,
@@ -96,6 +97,17 @@ def _insert_run(
     with_contract: bool = False,
     contract_json_override: str | None = None,
 ) -> None:
+    """Insert a ``runs`` row, plus a ``run_sources`` row when a contract is requested.
+
+    Per ADR-025 §3 Decision 5 the schema contract lives on
+    ``run_sources.schema_contract_json``; the legacy ``runs.schema_contract_json``
+    column is still populated here so any straggler reader observes the same
+    value, but ``verify_contract_integrity`` consults ``run_sources``
+    exclusively. The helper auto-creates a SOURCE node "source-node" when a
+    contract is requested so the ``run_sources`` foreign-key constraint
+    holds; callers that need to inspect the source node explicitly insert
+    additional nodes via :func:`_insert_node` after this helper returns.
+    """
     schema_contract_json: str | None = None
     schema_contract_hash: str | None = None
     if with_contract:
@@ -119,6 +131,33 @@ def _insert_run(
             openrouter_catalog_source="bundled",
         )
     )
+
+    if schema_contract_json is not None:
+        # Ensure the SOURCE node exists before writing run_sources (FK constraint).
+        # The node may already have been inserted by an earlier helper call;
+        # check first instead of relying on ON CONFLICT semantics, since the
+        # in-memory SQLite engine doesn't return rowcount reliably for
+        # INSERT OR IGNORE under all dialects.
+        existing_node = conn.execute(
+            select(nodes_table.c.node_id).where(nodes_table.c.node_id == "source-node").where(nodes_table.c.run_id == run_id)
+        ).fetchone()
+        if existing_node is None:
+            _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
+        conn.execute(
+            run_sources_table.insert().values(
+                run_id=run_id,
+                source_node_id="source-node",
+                source_name="primary",
+                plugin_name="test_source",
+                lifecycle_state="loaded",
+                config_hash="src_cfg",
+                schema_json="{}",
+                schema_contract_json=schema_contract_json,
+                schema_contract_hash=schema_contract_hash,
+                field_resolution_json=None,
+                recorded_at=datetime.now(UTC),
+            )
+        )
 
 
 def _insert_node(conn: Connection, run_id: str, node_id: str, *, node_type: NodeType = NodeType.TRANSFORM) -> None:
@@ -211,7 +250,10 @@ def _create_failed_run_with_checkpoint(
 
     with db.connection() as conn:
         _insert_run(conn, run_id, status=status, with_contract=with_contract)
-        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
+        # _insert_run auto-creates "source-node" + run_sources when with_contract=True
+        # (per ADR-025 §3 Decision 5). Only insert explicitly when no contract is set.
+        if not with_contract:
+            _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, checkpoint_node_id)
         _insert_row(conn, run_id, "row-0", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "tok-0", "row-0")
@@ -478,7 +520,6 @@ def test_get_unprocessed_rows_orders_by_ingest_sequence(
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
-        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-a", row_index=0, source_data_ref=None)
         _insert_row(conn, run_id, "row-b", row_index=1, source_data_ref=None)
@@ -514,7 +555,6 @@ def test_get_unprocessed_rows_uses_terminal_path_delegation_set(
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
-        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-resume-delegation", row_index=0, source_data_ref=None)
         _insert_token(conn, run_id, "token-resume-delegation-parent", "row-resume-delegation")
@@ -547,7 +587,6 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
-        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, "checkpoint-node")
 
         # row-completed: one completed token -> should be excluded.
@@ -644,7 +683,6 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
-        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, "checkpoint-node")
 
         # row-a: incomplete token is buffered -> excluded
@@ -744,7 +782,6 @@ def test_get_unprocessed_rows_excludes_coalesce_buffered_rows(
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
-        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, "checkpoint-node")
 
         # row-coalesce-buffered: incomplete token buffered in coalesce -> excluded
@@ -786,7 +823,6 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
-        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, "checkpoint-node")
 
         # row-agg: buffered in aggregation -> excluded
@@ -858,7 +894,6 @@ def test_get_unprocessed_rows_coalesce_multi_branch_collects_all_tokens(
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
-        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, "checkpoint-node")
 
         # row with two tokens, both buffered in different coalesce branches -> excluded
@@ -1113,7 +1148,6 @@ def test_get_unprocessed_rows_handles_delegation_token_with_completed_leaf(
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
-        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, "checkpoint-node")
         _insert_row(conn, run_id, "row-forked-complete", row_index=1, source_data_ref=None)
         _insert_token(conn, run_id, "tok-parent", "row-forked-complete")
@@ -1249,7 +1283,6 @@ def test_get_unprocessed_rows_excludes_diverted_rows(
     graph = _create_graph(node_id="checkpoint-node")
     with db.connection() as conn:
         _insert_run(conn, run_id, status=RunStatus.FAILED, with_contract=True)
-        _insert_node(conn, run_id, "source-node", node_type=NodeType.SOURCE)
         _insert_node(conn, run_id, "checkpoint-node")
 
         # row-diverted: one token diverted to failsink -> terminal, exclude.

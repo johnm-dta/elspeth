@@ -1,16 +1,17 @@
-source:
-  plugin: csv
-  on_success: gate_in
-  options:
-    path: examples/threshold_gate/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'name: str'
-      - 'amount: int'
-      - 'category: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: gate_in
+    options:
+      path: examples/threshold_gate/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'name: str'
+        - 'amount: int'
+        - 'category: str'
+      on_validation_failure: discard
 gates:
 - name: amount_threshold
   input: gate_in

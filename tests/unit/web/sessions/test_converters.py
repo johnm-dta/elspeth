@@ -26,11 +26,13 @@ def _make_record(**overrides: Any) -> CompositionStateRecord:
         "id": uuid4(),
         "session_id": uuid4(),
         "version": 1,
-        "source": {
-            "plugin": "csv",
-            "on_success": "output",
-            "options": {"path": "test.csv", "schema": {"mode": "observed"}},
-            "on_validation_failure": "quarantine",
+        "sources": {
+            "primary": {
+                "plugin": "csv",
+                "on_success": "output",
+                "options": {"path": "test.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            }
         },
         "nodes": [],
         "edges": [],

@@ -1146,7 +1146,6 @@ class Orchestrator:
         return DAGTraversalContext(
             node_step_map=node_step_map,
             node_to_plugin=node_to_plugin,
-            first_transform_node_id=graph.get_first_transform_node(),
             node_to_next=node_to_next,
             coalesce_node_map=graph.get_coalesce_id_map(),
             branch_first_node=graph.get_branch_first_nodes(),
@@ -1273,14 +1272,23 @@ class Orchestrator:
         branch_to_sink = graph.get_branch_to_sink_map()
         typed_aggregation_settings: dict[NodeID, AggregationSettings] = {NodeID(k): v for k, v in config.aggregation_settings.items()}
 
+        # Per ADR-025 §1 the processor is built once and receives the active
+        # source plugin per ``process_row`` call. The constructor-level
+        # ``source_plugin`` / ``source_on_success`` defaults are the
+        # first-declared-source view, used only as a fallback for callers
+        # that do not pass an explicit ``source_plugin`` (existing
+        # single-source tests and the resume path). Multi-source callers
+        # override per row via ``process_row(source_plugin=active_source)``.
+        first_source_name = next(iter(config.sources))
+        first_source = config.sources[first_source_name]
         processor = RowProcessor(
             execution=factory.execution,
             data_flow=factory.data_flow,
             span_factory=self._span_factory,
             run_id=run_id,
             source_node_id=source_id,
-            source_on_success=config.source.on_success,
-            source_plugin=config.source,
+            source_on_success=first_source.on_success,
+            source_plugin=first_source,
             edge_map=edge_map,
             route_resolution_map=route_resolution_map,
             traversal=traversal,
@@ -1375,14 +1383,22 @@ class Orchestrator:
         try:
             self._events.emit(PhaseStarted(phase=PipelinePhase.DATABASE, action=PhaseAction.CONNECTING))
 
-            # Serialize source schema for resume type restoration
-            # This enables proper type coercion (datetime/Decimal) when resuming from JSON payloads
-            # SourceProtocol requires output_schema - all sources have schemas (even dynamic ones)
-            source_schema_json = json.dumps(config.source.output_schema.model_json_schema())
-
-            # Get source schema contract for resume PipelineRow wrapping
-            # This enables proper contract propagation when resuming from stored payloads
-            source_contract = config.source.get_schema_contract()
+            # Serialize the first source's schema for resume type restoration.
+            # This enables proper type coercion (datetime/Decimal) when resuming
+            # from JSON payloads. Per ADR-025 §3 the authoritative per-source
+            # contract surface is ``run_sources`` (one row per declared source),
+            # populated by ``_run_main_processing_loop`` as each source iterates;
+            # the run-level ``runs.source_schema_json`` / ``runs.contract_json``
+            # entries here are an arbitrarily-chosen first-source view kept for
+            # the begin_run signature only and are explicit fabrication-by-
+            # programmer per the ADR-025 doctrine note ("an arbitrary pick of
+            # one source's contract as 'the' run contract is acceptable for the
+            # run-level singleton; consumers must consult ``run_sources`` for
+            # per-row attribution").
+            first_source_name = next(iter(config.sources))
+            first_source = config.sources[first_source_name]
+            source_schema_json = json.dumps(first_source.output_schema.model_json_schema())
+            source_contract = first_source.get_schema_contract()
 
             factory = RecorderFactory(self._db, payload_store=payload_store)
             run = factory.run_lifecycle.begin_run(
@@ -1411,7 +1427,7 @@ class Orchestrator:
                     timestamp=datetime.now(UTC),
                     run_id=run.run_id,
                     config_hash=run.config_hash,
-                    source_plugin=config.source.name,
+                    source_plugin=first_source.name,
                 )
             )
 
@@ -1856,6 +1872,14 @@ class Orchestrator:
             source_info = graph.get_node_info(candidate_source_id)
             source_name = str(source_info.config["source_name"] if "source_name" in source_info.config else "source")
             source_id_map[source_name] = candidate_source_id
+        # Per ADR-025 §3, this ``source_id`` is the run-level singleton scaffold
+        # used only as a fallback for resume-shutdown checkpoint identity
+        # (``shutdown_checkpoint_source_id``) and the begin_run singleton
+        # surface. Per-row attribution always consults the row's
+        # ``source_node_id`` against ``run_sources``; this is explicit
+        # fabrication-by-programmer, not a main-path source lookup. See the
+        # documented sibling at the ``_build_processor`` site above for the
+        # same pattern in pipeline assembly.
         source_id = next(iter(source_id_map.values()))
         transform_id_map: dict[int, NodeID] = graph.get_transform_id_map()
         sink_id_map: dict[SinkName, NodeID] = graph.get_sink_id_map()
@@ -2160,13 +2184,22 @@ class Orchestrator:
             GraphArtifacts populated from existing Landscape records.
         """
         # Get explicit node ID mappings from graph. Resume must preserve every
-        # source root from the original multi-source DAG; graph.get_source()
+        # source root from the original multi-source DAG; graph.get_sources()[0]
         # is intentionally single-source-only and invalid here.
         source_id_map: dict[str, NodeID] = {}
         for candidate_source_id in graph.get_sources():
             source_info = graph.get_node_info(candidate_source_id)
             source_name = str(source_info.config["source_name"] if "source_name" in source_info.config else "source")
             source_id_map[source_name] = candidate_source_id
+        # Per ADR-025 §3, this ``source_id`` is resume-scaffolding (carried
+        # on the ResumePoint as ``shutdown_checkpoint_source_id`` so a
+        # resumed run can re-derive its source attribution surface) rather
+        # than main-path source attribution. Per-row attribution always
+        # consults the row's persisted ``source_node_id`` against
+        # ``run_sources``; this is explicit fabrication-by-programmer for
+        # the run-level singleton view. See the documented sibling at the
+        # ``_build_processor`` site for the same pattern in pipeline
+        # assembly.
         source_id = next(iter(source_id_map.values()))
         sink_id_map = graph.get_sink_id_map()
         transform_id_map = graph.get_transform_id_map()
@@ -2301,6 +2334,8 @@ class Orchestrator:
         ingest_sequence: int,
         edge_map: Mapping[tuple[NodeID, str], str],
         loop_ctx: LoopContext,
+        *,
+        active_source: SourceProtocol,
     ) -> None:
         """Handle a quarantined source row: route directly to configured sink.
 
@@ -2330,7 +2365,7 @@ class Orchestrator:
         # Validate destination exists - crash on plugin bug
         if not quarantine_sink:
             raise RouteValidationError(
-                f"Source '{config.source.name}' yielded quarantined row "
+                f"Source '{active_source.name}' yielded quarantined row "
                 f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
                 f"with missing quarantine_destination. "
                 f"This is a plugin bug: quarantined rows MUST specify a destination. "
@@ -2338,13 +2373,13 @@ class Orchestrator:
             )
         if quarantine_sink not in config.sinks:
             raise RouteValidationError(
-                f"Source '{config.source.name}' yielded quarantined row "
+                f"Source '{active_source.name}' yielded quarantined row "
                 f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
                 f"with invalid quarantine_destination='{quarantine_sink}'. "
                 f"No sink named '{quarantine_sink}' exists. "
                 f"Available sinks: {sorted(config.sinks.keys())}. "
                 f"This is a plugin bug: quarantine_destination must match "
-                f"source._on_validation_failure='{config.source._on_validation_failure}'."
+                f"source._on_validation_failure='{active_source._on_validation_failure}'."
             )
 
         # Destination validated. Source quarantine is a FAILURE lifecycle with
@@ -2460,7 +2495,8 @@ class Orchestrator:
         self,
         factory: RecorderFactory,
         run_id: str,
-        config: PipelineConfig,
+        *,
+        active_source: SourceProtocol,
     ) -> bool:
         """Record source field resolution mapping if available.
 
@@ -2468,10 +2504,13 @@ class Orchestrator:
         or post-loop for empty sources (header-only files where the loop never
         executes but the source computed field resolution).
 
+        Per ADR-025 §1 the active source is passed explicitly; field
+        resolution is per-source, not per-pipeline.
+
         Returns:
             True if field resolution was recorded, False otherwise.
         """
-        field_resolution = config.source.get_field_resolution()
+        field_resolution = active_source.get_field_resolution()
         if field_resolution is None:
             return False
 
@@ -2486,7 +2525,7 @@ class Orchestrator:
             FieldResolutionApplied(
                 timestamp=datetime.now(UTC),
                 run_id=run_id,
-                source_plugin=config.source.name,
+                source_plugin=active_source.name,
                 field_count=len(resolution_mapping),
                 normalization_version=normalization_version,
                 resolution_mapping=resolution_mapping,
@@ -2499,8 +2538,9 @@ class Orchestrator:
         factory: RecorderFactory,
         run_id: str,
         source_id: NodeID,
-        config: PipelineConfig,
         ctx: PluginContext,
+        *,
+        active_source: SourceProtocol,
     ) -> bool:
         """Record source schema contract if available.
 
@@ -2511,7 +2551,7 @@ class Orchestrator:
         Returns:
             True if schema contract was recorded, False otherwise.
         """
-        schema_contract = config.source.get_schema_contract()
+        schema_contract = active_source.get_schema_contract()
         if schema_contract is None:
             return False
 
@@ -2721,6 +2761,7 @@ class Orchestrator:
         *,
         interrupted_by_shutdown: bool,
         flush_end_of_input: bool,
+        active_source: SourceProtocol,
     ) -> None:
         """Post-loop work after source iteration completes or is interrupted.
 
@@ -2802,28 +2843,31 @@ class Orchestrator:
         # Record field resolution for empty sources (header-only files).
         # For sources with rows, this was recorded inside the loop on first iteration.
         if not field_resolution_recorded:
-            self._record_field_resolution(factory, run_id, config)
+            self._record_field_resolution(factory, run_id, active_source=active_source)
 
         # Record schema contract for runs with no valid source rows.
         # In-loop recording happens on first VALID row. For all-invalid
         # or empty inputs, that branch never executes.
         if not schema_contract_recorded:
-            self._record_schema_contract(factory, run_id, source_id, config, ctx)
+            self._record_schema_contract(factory, run_id, source_id, ctx, active_source=active_source)
 
     def _load_source_with_events(
         self,
-        config: PipelineConfig,
         run_id: str,
         ctx: PluginContext,
-        source: SourceProtocol | None = None,
+        *,
+        active_source: SourceProtocol,
     ) -> Iterator[SourceRow]:
         """Execute SOURCE phase: emit lifecycle events, load source, handle errors.
 
         SOURCE phase is complete when this method returns. Errors during load()
         (file not found, auth failure) are emitted as PhaseError before re-raising.
+
+        Per ADR-025 §1 callers pass the active ``SourceProtocol`` explicitly;
+        the orchestrator no longer reads a "current source" pseudo-attribute
+        from ``PipelineConfig``.
         """
 
-        active_source = source or config.source
         phase_start = time.perf_counter()
         self._events.emit(PhaseStarted(phase=PipelinePhase.SOURCE, action=PhaseAction.INITIALIZING, target=active_source.name))
         self._emit_telemetry(
@@ -2858,6 +2902,8 @@ class Orchestrator:
         source_id: NodeID,
         edge_map: Mapping[tuple[NodeID, str], str],
         *,
+        active_source_name: str,
+        active_source: SourceProtocol,
         shutdown_event: threading.Event | None = None,
         flush_end_of_input: bool = True,
     ) -> LoopResult:
@@ -2891,7 +2937,7 @@ class Orchestrator:
             node_id=source_id,
             operation_type="source_load",
             ctx=ctx,
-            input_data={"source_plugin": config.source.name},
+            input_data={"source_plugin": active_source.name},
         ) as source_op_handle:
             # Generator-based sources execute on next() — restore operation_id
             # before each iteration so external calls are attributed to source_load
@@ -2902,27 +2948,31 @@ class Orchestrator:
                 source_id=source_id,
                 source_operation_id=source_operation_id,
             )
-            source_name = next(iter(config.sources))
             factory.run_lifecycle.record_run_source(
                 run_id=run_id,
                 source_node_id=source_id,
-                source_name=source_name,
-                plugin_name=config.source.name,
-                config_hash=stable_hash(config.source.config),
-                source_schema_json=json.dumps(config.source.output_schema.model_json_schema()),
-                schema_contract=config.source.get_schema_contract(),
+                source_name=active_source_name,
+                plugin_name=active_source.name,
+                config_hash=stable_hash(active_source.config),
+                source_schema_json=json.dumps(active_source.output_schema.model_json_schema()),
+                schema_contract=active_source.get_schema_contract(),
                 lifecycle_state="loading",
             )
 
-            source_iterator = self._load_source_with_events(config, run_id, ctx)
+            source_iterator = self._load_source_with_events(run_id, ctx, active_source=active_source)
 
             # Deferred recording flags — field resolution after first iteration,
-            # schema contract after first VALID row. This flag is deliberately
-            # source-local: a previous source may have populated the legacy
-            # run-level contract while this source still needs its own
-            # run_sources backfill before row processing can fail.
+            # schema contract after first VALID row. Both flags start False so
+            # the first valid row always triggers the in-loop ``_record_schema_contract``
+            # call, which backfills ``run_sources.schema_contract_json`` BEFORE
+            # ``process_row`` can fail at the source boundary. Pre-seeding this
+            # flag from ``active_source.get_schema_contract()`` would skip the
+            # backfill when an observed source set its contract during the
+            # ``_load_source_with_events`` first ``next()`` pull — leaving
+            # ``run_sources`` without a contract for resume even though a row
+            # was already persisted (ADR-025 §3).
             field_resolution_recorded = False
-            schema_contract_recorded = config.source.get_schema_contract() is not None
+            schema_contract_recorded = False
 
             # PROCESS phase
             phase_start = time.perf_counter()
@@ -2964,7 +3014,7 @@ class Orchestrator:
                     # Record field resolution on first iteration (generators execute body on first next())
                     if not field_resolution_recorded:
                         field_resolution_recorded = True
-                        self._record_field_resolution(factory, run_id, config)
+                        self._record_field_resolution(factory, run_id, active_source=active_source)
 
                     # Quarantine path — route directly to sink, skip normal processing
                     if source_item.is_quarantined:
@@ -2977,6 +3027,7 @@ class Orchestrator:
                             ingest_sequence,
                             edge_map,
                             loop_ctx,
+                            active_source=active_source,
                         )
                         quarantine_sink = source_item.quarantine_destination
                         if quarantine_sink is not None and loop_ctx.pending_tokens[quarantine_sink]:
@@ -2998,7 +3049,9 @@ class Orchestrator:
                         continue
 
                     # Record schema contract on first VALID row (quarantined rows don't populate contract)
-                    if not schema_contract_recorded and self._record_schema_contract(factory, run_id, source_id, config, ctx):
+                    if not schema_contract_recorded and self._record_schema_contract(
+                        factory, run_id, source_id, ctx, active_source=active_source
+                    ):
                         schema_contract_recorded = True
 
                     # Clear operation_id — source item is fetched, transforms set their own state_id
@@ -3020,8 +3073,8 @@ class Orchestrator:
                         transforms=config.transforms,
                         ctx=ctx,
                         source_node_id=source_id,
-                        source_plugin=config.source,
-                        source_on_success=config.source.on_success,
+                        source_plugin=active_source,
+                        source_on_success=active_source.on_success,
                         source_row_index=current_source_row_index,
                         ingest_sequence=ingest_sequence,
                     )
@@ -3070,8 +3123,9 @@ class Orchestrator:
                     schema_contract_recorded,
                     interrupted_by_shutdown=interrupted_by_shutdown,
                     flush_end_of_input=flush_end_of_input,
+                    active_source=active_source,
                 )
-                field_resolution = config.source.get_field_resolution()
+                field_resolution = active_source.get_field_resolution()
                 resolution_mapping: Mapping[str, str] | None = None
                 normalization_version: str | None = None
                 if field_resolution is not None:
@@ -3079,18 +3133,18 @@ class Orchestrator:
                 factory.run_lifecycle.record_run_source(
                     run_id=run_id,
                     source_node_id=source_id,
-                    source_name=source_name,
-                    plugin_name=config.source.name,
-                    config_hash=stable_hash(config.source.config),
-                    source_schema_json=json.dumps(config.source.output_schema.model_json_schema()),
-                    schema_contract=config.source.get_schema_contract(),
+                    source_name=active_source_name,
+                    plugin_name=active_source.name,
+                    config_hash=stable_hash(active_source.config),
+                    source_schema_json=json.dumps(active_source.output_schema.model_json_schema()),
+                    schema_contract=active_source.get_schema_contract(),
                     field_resolution_mapping=resolution_mapping,
                     normalization_version=normalization_version,
                     lifecycle_state="interrupted" if interrupted_by_shutdown else "loaded",
                 )
 
             except Exception as e:
-                self._emit_phase_error(PipelinePhase.PROCESS, e, target=config.source.name)
+                self._emit_phase_error(PipelinePhase.PROCESS, e, target=active_source.name)
                 raise
 
         return LoopResult(
@@ -3343,38 +3397,26 @@ class Orchestrator:
         )
 
         try:
-            # 3. Source + Process phase
+            # 3. Source + Process phase. Per ADR-025 §1 each declared source
+            # is iterated in turn with the active ``SourceProtocol`` passed
+            # explicitly into the loop; the prior synthetic
+            # ``replace(config, source=..., sources={...})`` per-iteration
+            # config-mutation pattern is deleted.
             loop_result: LoopResult | None = None
             source_items = tuple(artifacts.source_id_map.items())
             for source_ordinal, (source_name, source_id) in enumerate(source_items):
-                source_config = replace(
-                    config,
-                    source=config.sources[source_name],
-                    sources={source_name: config.sources[source_name]},
-                )
-                source_loop_ctx = LoopContext(
-                    counters=loop_ctx.counters,
-                    pending_tokens=loop_ctx.pending_tokens,
-                    processor=loop_ctx.processor,
-                    ctx=loop_ctx.ctx,
-                    config=source_config,
-                    agg_transform_lookup=loop_ctx.agg_transform_lookup,
-                    coalesce_executor=loop_ctx.coalesce_executor,
-                    coalesce_node_map=loop_ctx.coalesce_node_map,
-                    last_token_id=loop_ctx.last_token_id,
-                    last_token_source_id=loop_ctx.last_token_source_id,
-                )
+                active_source = config.sources[source_name]
                 loop_result = self._run_main_processing_loop(
-                    source_loop_ctx,
+                    loop_ctx,
                     factory,
                     run_id,
                     source_id,
                     artifacts.edge_map,
+                    active_source_name=source_name,
+                    active_source=active_source,
                     shutdown_event=shutdown_event,
                     flush_end_of_input=source_ordinal == len(source_items) - 1,
                 )
-                loop_ctx.last_token_id = source_loop_ctx.last_token_id
-                loop_ctx.last_token_source_id = source_loop_ctx.last_token_source_id
                 if loop_result.interrupted:
                     break
 

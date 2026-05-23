@@ -336,7 +336,7 @@ class TestComposerTextOnlyResponse:
                     "id": "call_bad_pipeline",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {"on_success": "rows", "options": {}},
+                        "sources": {"primary": {"on_success": "rows", "options": {}}},
                         "nodes": [],
                         "edges": [],
                         "outputs": [],
@@ -893,19 +893,21 @@ class TestComposerSingleToolCall:
         user_message_id = _insert_user_message(engine, session_id, user_message_content)
         output_path = tmp_path / "outputs" / "append.csv"
         pipeline_args = {
-            "source": {
-                "plugin": "text",
-                "on_success": "source_out",
-                "options": {
-                    "column": "text",
-                    "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
-                },
-                "inline_blob": {
-                    "filename": "input.txt",
-                    "mime_type": "text/plain",
-                    "content": "hello",
-                },
-                "on_validation_failure": "discard",
+            "sources": {
+                "primary": {
+                    "plugin": "text",
+                    "on_success": "source_out",
+                    "options": {
+                        "column": "text",
+                        "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                    },
+                    "inline_blob": {
+                        "filename": "input.txt",
+                        "mime_type": "text/plain",
+                        "content": "hello",
+                    },
+                    "on_validation_failure": "discard",
+                }
             },
             "nodes": [
                 {
@@ -1418,9 +1420,11 @@ class TestComposerErrorHandling:
                     "id": "call_bad",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {
-                            "on_success": "source_out",
-                            "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                        "sources": {
+                            "primary": {
+                                "on_success": "source_out",
+                                "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                            }
                         },
                         "nodes": [
                             {
@@ -1494,10 +1498,12 @@ class TestComposerErrorHandling:
                     "id": "call_ok",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {
-                            "plugin": "csv",
-                            "on_success": "t1",
-                            "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                        "sources": {
+                            "primary": {
+                                "plugin": "csv",
+                                "on_success": "t1",
+                                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                            }
                         },
                         "nodes": [
                             {
@@ -1574,11 +1580,13 @@ class TestComposerErrorHandling:
                     "id": "call_partial",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {
-                            "plugin": "csv",
-                            "on_success": "t1",
-                            "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
-                            "inline_blob": {"filename": "data.csv"},
+                        "sources": {
+                            "primary": {
+                                "plugin": "csv",
+                                "on_success": "t1",
+                                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                                "inline_blob": {"filename": "data.csv"},
+                            }
                         },
                         "nodes": [
                             {
@@ -5862,11 +5870,13 @@ class TestAttemptProofRepair:
         result = exec_tool(
             "set_pipeline",
             {
-                "source": {
-                    "plugin": "csv",
-                    "on_success": "rows",
-                    "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
-                    "on_validation_failure": "discard",
+                "sources": {
+                    "primary": {
+                        "plugin": "csv",
+                        "on_success": "rows",
+                        "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                        "on_validation_failure": "discard",
+                    }
                 },
                 "nodes": [],
                 "edges": [],

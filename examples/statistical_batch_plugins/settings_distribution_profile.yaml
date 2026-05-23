@@ -1,16 +1,17 @@
-source:
-  plugin: csv
-  on_success: profile_in
-  options:
-    path: examples/statistical_batch_plugins/distribution_scores.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'variant: str'
-      - 'latency_ms: float'
-      - 'quality_score: float'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: profile_in
+    options:
+      path: examples/statistical_batch_plugins/distribution_scores.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'variant: str'
+        - 'latency_ms: float'
+        - 'quality_score: float'
+      on_validation_failure: discard
 aggregations:
 - name: latency_profile
   plugin: batch_distribution_profile

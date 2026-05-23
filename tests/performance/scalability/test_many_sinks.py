@@ -70,7 +70,7 @@ def _build_many_sinks_pipeline(
     source = ListSource(rows, on_success="gate_chain_in")
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[],
         sinks={name: as_sink(s) for name, s in sinks.items()},
         gates=gates,

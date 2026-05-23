@@ -35,7 +35,7 @@ def _runtime_val_manifest_json() -> str:
 def _build_minimal_run():
     source, _transforms, sinks, graph = build_linear_pipeline([{"value": 1}], transforms=[])
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[],
         sinks={"default": as_sink(sinks["default"])},
     )
@@ -227,7 +227,7 @@ def _setup_adr019_failed_resume_run(
     transform = PassTransform()
     _, _, _, graph = build_linear_pipeline(source_data, transforms=[as_transform(transform)])
 
-    source_nid = graph.get_source()
+    source_nid = graph.get_sources()[0]
     assert source_nid is not None
     transform_id_map = graph.get_transform_id_map()
     sink_id_map = graph.get_sink_id_map()
@@ -399,7 +399,7 @@ def _build_resume_environment(run_id: str, *, num_rows: int, processed_count: in
     source.on_success = "default"
     sink = CollectSink()
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(transform)],
         sinks={"default": as_sink(sink)},
     )

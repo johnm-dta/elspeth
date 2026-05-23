@@ -26,17 +26,18 @@ def test_schema_validation_actually_works() -> None:
     # This exact config would PASS validation before fix (bug)
     # Should FAIL validation after fix (correct)
     config_yaml = """
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: input.csv
-    schema:
-      mode: fixed
-      fields:
-        - "field_a: str"
-        - "field_b: int"
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: input.csv
+      schema:
+        mode: fixed
+        fields:
+          - "field_a: str"
+          - "field_b: int"
+      on_validation_failure: discard
 
 transforms:
   - name: passthrough_0
@@ -91,17 +92,18 @@ def test_compatible_schemas_still_pass() -> None:
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: input.csv
-    schema:
-      mode: fixed
-      fields:
-        - "field_a: str"
-        - "field_b: int"
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: input.csv
+      schema:
+        mode: fixed
+        fields:
+          - "field_a: str"
+          - "field_b: int"
+      on_validation_failure: discard
 
 transforms:
   - name: passthrough_0

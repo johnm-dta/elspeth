@@ -172,7 +172,6 @@ def _make_processor(
     traversal = DAGTraversalContext(
         node_step_map=traversal_steps,
         node_to_plugin=traversal_node_to_plugin,
-        first_transform_node_id=first_transform_node_id,
         node_to_next=traversal_next,
         coalesce_node_map=coalesce_nodes,
     )
@@ -367,7 +366,6 @@ class TestTraversalNextNodeInvariants:
             factory,
             node_step_map={source_node: 0, transform_node: 1},
             node_to_next={source_node: transform_node},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
         )
 
@@ -423,7 +421,6 @@ class TestAuditStepResolutionInvariants:
         traversal = DAGTraversalContext(
             node_step_map={},
             node_to_plugin={},
-            first_transform_node_id=None,
             node_to_next={source_node: None},
             coalesce_node_map={},
         )
@@ -1433,7 +1430,6 @@ class TestProcessRowSingleTransform:
             factory,
             node_step_map={source_node: 0, transform_node: 1},
             node_to_next={source_node: transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
         )
         return db, factory, processor
@@ -1607,7 +1603,6 @@ class TestAggregationFailureMatrix:
             factory,
             node_step_map={source_node: 0, agg_node: 1, NodeID("downstream-2"): 2},
             node_to_next=traversal_next,
-            first_transform_node_id=agg_node,
             node_to_plugin={agg_node: transform},
             aggregation_settings={
                 agg_node: AggregationSettings(
@@ -2123,7 +2118,6 @@ class TestTransformModeOutcomeOrdering:
             factory,
             node_step_map={source_node: 0, agg_node: 1},
             node_to_next={source_node: agg_node, agg_node: None},
-            first_transform_node_id=agg_node,
             node_to_plugin={agg_node: transform},
             aggregation_settings={
                 agg_node: AggregationSettings(
@@ -2344,7 +2338,6 @@ class TestProcessRowGateBranching:
                 expander_node: terminal_node,
                 terminal_node: None,
             },
-            first_transform_node_id=gate_node,
             node_to_plugin={
                 gate_node: config_gate,
                 expander_node: expander,
@@ -2430,7 +2423,6 @@ class TestProcessRowGateBranching:
                 router_node: coalesce_node,
                 coalesce_node: None,
             },
-            first_transform_node_id=router_node,
             coalesce_node_ids={CoalesceName("merge"): coalesce_node},
             # Intentionally omit coalesce_on_success_map
         )
@@ -2471,7 +2463,6 @@ class TestProcessRowGateBranching:
                 jump_start_node: downstream_transform_node,
                 downstream_transform_node: None,
             },
-            first_transform_node_id=jump_start_node,
             node_to_plugin={
                 jump_start_node: branch_transform1,
                 downstream_transform_node: branch_transform2,
@@ -2499,7 +2490,6 @@ class TestProcessRowGateBranching:
             sink_names=frozenset({"source_sink", "branch_sink"}),
             node_step_map={NodeID("source-0"): 0},
             node_to_next={NodeID("source-0"): None},
-            first_transform_node_id=None,
         )
 
         results = processor.process_token(
@@ -2570,7 +2560,6 @@ class TestProcessRowGateBranching:
             sink_names=frozenset({"sink_a", "sink_b", "sink_c"}),
             node_step_map={source_node: 0, gate_node: 1, transform_node: 2},
             node_to_next={source_node: gate_node, gate_node: transform_node, transform_node: None},
-            first_transform_node_id=gate_node,
             node_to_plugin={gate_node: gate_config, transform_node: transform},
         )
 
@@ -2676,7 +2665,6 @@ class TestProcessRowMultiRowOutput:
             factory,
             node_step_map={source_node: 0, transform_node: 1},
             node_to_next={source_node: transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
         )
 
@@ -2725,7 +2713,6 @@ class TestProcessRowMultiRowOutput:
             factory,
             node_step_map={source_node: 0, transform_node: 1},
             node_to_next={source_node: transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
         )
 
@@ -2883,7 +2870,6 @@ class TestProcessToken:
             coalesce_on_success_map={CoalesceName("merge"): "coalesce_sink"},
             node_step_map={NodeID("coalesce::merge"): 1, NodeID("transform-1"): 2},
             node_to_next={NodeID("coalesce::merge"): NodeID("transform-1"), NodeID("transform-1"): None},
-            first_transform_node_id=NodeID("transform-1"),
             node_to_plugin={NodeID("transform-1"): transform},
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
@@ -3015,7 +3001,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
         )
@@ -3084,7 +3069,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
         )
@@ -3155,7 +3139,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
         )
@@ -3180,7 +3163,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
             scheduler_lease_owner="resume-worker",
@@ -3261,7 +3243,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
             scheduler_lease_owner="crashed-worker",
@@ -3300,7 +3281,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
             scheduler_lease_owner="resume-worker",
@@ -3383,7 +3363,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
             scheduler_lease_owner="crashed-worker",
@@ -3435,7 +3414,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
             scheduler_lease_owner="resume-worker",
@@ -3519,7 +3497,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
             clock=clock,
@@ -3597,7 +3574,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
         )
@@ -3666,7 +3642,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
         )
@@ -3777,7 +3752,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
         )
@@ -3847,7 +3821,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
         )
@@ -3918,7 +3891,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
         )
@@ -3989,7 +3961,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={NodeID("source-0"): 0, transform_node: 1},
             node_to_next={NodeID("source-0"): transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
             scheduler=factory.scheduler,
         )
@@ -4276,7 +4247,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={source_node: 0, agg_node: 1},
             node_to_next={source_node: agg_node, agg_node: None},
-            first_transform_node_id=agg_node,
             node_to_plugin={agg_node: transform},
             aggregation_settings={
                 agg_node: AggregationSettings(
@@ -4339,7 +4309,6 @@ class TestDurableSchedulerResumeDrain:
             factory,
             node_step_map={source_node: 0, agg_node: 1},
             node_to_next={source_node: agg_node, agg_node: None},
-            first_transform_node_id=agg_node,
             node_to_plugin={agg_node: transform},
             aggregation_settings={
                 agg_node: AggregationSettings(
@@ -4465,7 +4434,6 @@ class TestInnerTraversalCycleGuard:
                 s2: s1,  # cycle back
             },
             node_step_map={NodeID("source-0"): 0, s1: 1, s2: 2},
-            first_transform_node_id=None,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 1})
@@ -5322,7 +5290,6 @@ class TestUnknownTransformType:
             factory,
             node_step_map={source_node: 0, fake_node: 1},
             node_to_next={source_node: fake_node, fake_node: None},
-            first_transform_node_id=fake_node,
             node_to_plugin={fake_node: fake_plugin},
         )
 
@@ -5366,7 +5333,6 @@ class TestRoutingInvariantFailures:
             source_on_success="   ",
             node_step_map={NodeID("source-0"): 0},
             node_to_next={NodeID("source-0"): None},
-            first_transform_node_id=None,
         )
 
         with pytest.raises(OrchestrationInvariantError, match="No effective sink for token"):
@@ -5514,7 +5480,6 @@ class TestTerminalDeaggregationSinkRouting:
             source_on_success="source_sink",
             node_step_map={source_node: 0, transform_node: 1},
             node_to_next={source_node: transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
         )
 
@@ -5592,7 +5557,6 @@ class TestTerminalDeaggregationSinkRouting:
             source_on_success="source_sink",
             node_step_map={source_node: 0, expander_node: 1, terminal_node: 2},
             node_to_next={source_node: expander_node, expander_node: terminal_node, terminal_node: None},
-            first_transform_node_id=expander_node,
             node_to_plugin={expander_node: expander, terminal_node: terminal},
         )
 
@@ -5686,7 +5650,6 @@ class TestCoalesceTraversalInvariant:
                 coalesce_node: downstream_node,
                 downstream_node: None,
             },
-            first_transform_node_id=transform_node,
             node_to_plugin={downstream_node: transform},
             coalesce_node_ids={CoalesceName("merge"): coalesce_node},
             coalesce_on_success_map={CoalesceName("merge"): "output"},
@@ -5731,7 +5694,6 @@ class TestCoalesceTraversalInvariant:
             source_on_success="output",
             node_step_map={source_node: 0, coalesce_node: 1},
             node_to_next={source_node: coalesce_node, coalesce_node: None},
-            first_transform_node_id=coalesce_node,
             coalesce_node_ids={CoalesceName("merge"): coalesce_node},
             coalesce_on_success_map={CoalesceName("merge"): "output"},
         )
@@ -5842,7 +5804,6 @@ class TestGateSinkRoutingNotifiesCoalesce:
             source_on_success="default",
             node_step_map={source_node: 0, gate_node: 1},
             node_to_next={source_node: gate_node, gate_node: None},
-            first_transform_node_id=gate_node,
             node_to_plugin={gate_node: gate_config},
             coalesce_executor=coalesce,
             branch_to_coalesce={BranchName("path_a"): CoalesceName("merge")},
@@ -5937,7 +5898,6 @@ class TestGateSinkRoutingNotifiesCoalesce:
             source_on_success="default",
             node_step_map={source_node: 0, gate_node: 1},
             node_to_next={source_node: gate_node, gate_node: None},
-            first_transform_node_id=gate_node,
             node_to_plugin={gate_node: gate_config},
             coalesce_executor=coalesce,
             branch_to_coalesce={BranchName("path_a"): CoalesceName("merge")},
@@ -6018,7 +5978,6 @@ class TestGateSinkRoutingNotifiesCoalesce:
             source_on_success="default",
             node_step_map={source_node: 0, gate_node: 1},
             node_to_next={source_node: gate_node, gate_node: None},
-            first_transform_node_id=gate_node,
             node_to_plugin={gate_node: gate_config},
             coalesce_executor=coalesce,
         )
@@ -6091,7 +6050,6 @@ class TestGateSinkRoutingNotifiesCoalesce:
             source_on_success="default",
             node_step_map={source_node: 0, gate_node: 1},
             node_to_next={source_node: gate_node, gate_node: None},
-            first_transform_node_id=gate_node,
             node_to_plugin={gate_node: gate_config},
             coalesce_executor=Mock(),
         )
@@ -6189,7 +6147,6 @@ class TestGateJumpPastCoalesceInvariant:
                 coalesce_node: past_coalesce_node,
                 past_coalesce_node: None,
             },
-            first_transform_node_id=gate_node,
             node_to_plugin={
                 gate_node: config_gate,
                 past_coalesce_node: past_coalesce_transform,
@@ -6290,7 +6247,6 @@ class TestGateJumpPastCoalesceInvariant:
                 transform_node: coalesce_node,
                 coalesce_node: None,
             },
-            first_transform_node_id=gate_node,
             node_to_plugin={
                 gate_node: config_gate,
                 transform_node: transform,

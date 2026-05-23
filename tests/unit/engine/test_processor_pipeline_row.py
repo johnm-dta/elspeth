@@ -49,7 +49,6 @@ def _empty_traversal(source_node_id: str = "source_001") -> DAGTraversalContext:
     return DAGTraversalContext(
         node_step_map={source_node: 0},
         node_to_plugin={},
-        first_transform_node_id=None,
         node_to_next={source_node: None},
         coalesce_node_map={},
     )

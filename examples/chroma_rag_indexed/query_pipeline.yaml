@@ -13,17 +13,18 @@ commencement_gates:
 - name: corpus_ready
   condition: "collections['science-facts-indexed']['count'] > 0"
 
-source:
-  plugin: csv
-  on_success: rag_in
-  options:
-    path: examples/chroma_rag_indexed/questions.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'question: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: rag_in
+    options:
+      path: examples/chroma_rag_indexed/questions.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'question: str'
+      on_validation_failure: discard
 
 transforms:
 - name: retrieve

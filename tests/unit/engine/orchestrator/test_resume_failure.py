@@ -181,7 +181,7 @@ class TestResumeFinalizesAsFailed:
         processor.drain_scheduled_work.return_value = [make_row_result({"value": 1}, sink_name="default")]
         processor.process_existing_row.side_effect = AssertionError("source row replay must not run while scheduler work exists")
         config = PipelineConfig(
-            source=MagicMock(),
+            sources={"primary": MagicMock()},
             transforms=(),
             sinks={"default": MagicMock()},
         )
@@ -227,7 +227,7 @@ class TestResumeFinalizesAsFailed:
         processor.drain_scheduled_work.return_value = [make_row_result({"value": 1}, sink_name="default")]
         processor.process_existing_row.side_effect = AssertionError("mixed scheduler coverage must fail before row replay policy")
         config = PipelineConfig(
-            source=MagicMock(),
+            sources={"primary": MagicMock()},
             transforms=(),
             sinks={"default": MagicMock()},
         )
@@ -278,7 +278,6 @@ class TestResumeFinalizesAsFailed:
         processor.process_existing_row.side_effect = AssertionError("source row replay must not run while scheduler work remains")
         processor.summarize_scheduled_work.return_value = ("BLOCKED count=1 node=join-results",)
         config = PipelineConfig(
-            source=source,
             sources={"source": source},
             transforms=(),
             sinks={"default": MagicMock()},
@@ -329,7 +328,7 @@ class TestResumeFinalizesAsFailed:
         flush_sinks.assert_called_once()
 
     def test_setup_resume_context_uses_all_source_roots(self) -> None:
-        """Multi-source resume must build a full source map instead of calling graph.get_source()."""
+        """Multi-source resume must build a full source map instead of calling graph.get_sources()[0]."""
         orch = _make_orchestrator(make_landscape_db())
         graph = ExecutionGraph()
         graph.add_node(
@@ -359,7 +358,6 @@ class TestResumeFinalizesAsFailed:
         sink.name = "json"
         sink._on_write_failure = "discard"
         config = PipelineConfig(
-            source=orders_source,
             sources={"orders": orders_source, "refunds": refunds_source},
             transforms=(),
             sinks={"output": sink},
@@ -382,7 +380,6 @@ class TestResumeFinalizesAsFailed:
         processor.has_scheduled_work.return_value = False
         processor.process_existing_row.return_value = []
         config = PipelineConfig(
-            source=MagicMock(),
             sources={"orders": MagicMock(), "refunds": MagicMock()},
             transforms=(),
             sinks={"default": MagicMock()},
@@ -450,7 +447,6 @@ class TestResumeFinalizesAsFailed:
         source.get_schema_contract.return_value = MagicMock(name="refunds-contract")
         source.get_field_resolution.return_value = None
         config = PipelineConfig(
-            source=source,
             sources={"refunds": source},
             transforms=(),
             sinks={"refunds_sink": MagicMock()},
@@ -481,7 +477,7 @@ class TestResumeFinalizesAsFailed:
             coalesce_node_map={},
         )
 
-        def _load_source(config_arg, run_id_arg, ctx_arg):
+        def _load_source(run_id_arg, ctx_arg, *, active_source):
             events.append("load")
             assert ctx_arg.node_id == NodeID("source-refunds")
             assert ctx_arg.operation_id == "source-op-1"
@@ -498,6 +494,8 @@ class TestResumeFinalizesAsFailed:
                 run_id="run-1",
                 source_id=NodeID("source-refunds"),
                 edge_map={},
+                active_source_name="refunds",
+                active_source=source,
                 flush_end_of_input=True,
             )
 
@@ -538,16 +536,23 @@ class TestResumeFinalizesAsFailed:
                 "properties": {field_name: {"type": "string"}},
             }
             source.get_field_resolution.return_value = None
-            source.get_schema_contract.side_effect = [None, None, contract, contract]
+            # Three calls per source after the schema_contract_recorded pre-flag
+            # was removed (multi-source-token-scheduler Fix 2): the first call
+            # happens inside ``record_run_source(..., lifecycle_state="loading")``
+            # BEFORE iteration begins (the observed source has not seen its
+            # first row yet, so the contract is None); the second happens
+            # inside ``_record_schema_contract`` AFTER the first valid row;
+            # the third happens at the post-loop ``record_run_source(..., lifecycle_state="loaded")``
+            # update once iteration completes (the contract is now locked).
+            source.get_schema_contract.side_effect = [None, contract, contract]
             return PipelineConfig(
-                source=source,
                 sources={source_name: source},
                 transforms=(),
                 sinks={"sink": MagicMock()},
             )
 
-        def _load_source(config_arg, run_id_arg, ctx_arg):
-            contract = orders_contract if "orders" in config_arg.sources else refunds_contract
+        def _load_source(run_id_arg, ctx_arg, *, active_source):
+            contract = orders_contract if active_source.config["path"].startswith("orders") else refunds_contract
             field_name = "order_id" if contract is orders_contract else "refund_id"
             assert ctx_arg.node_id in {NodeID("source-orders"), NodeID("source-refunds")}
             assert ctx_arg.operation_id == "source-op-1"
@@ -578,6 +583,8 @@ class TestResumeFinalizesAsFailed:
                     run_id="run-1",
                     source_id=source_id,
                     edge_map={},
+                    active_source_name=source_name,
+                    active_source=config.sources[source_name],
                     flush_end_of_input=True,
                 )
 
@@ -603,9 +610,11 @@ class TestResumeFinalizesAsFailed:
         source.on_success = "refunds_sink"
         source.output_schema.model_json_schema.return_value = {"type": "object", "properties": {"refund_id": {"type": "string"}}}
         source.get_field_resolution.return_value = None
-        source.get_schema_contract.side_effect = [None, None, refunds_contract]
+        # Two calls per source (multi-source-token-scheduler Fix 2):
+        # 1) ``record_run_source`` BEFORE first row (contract not yet locked),
+        # 2) ``_record_schema_contract`` AFTER first valid row.
+        source.get_schema_contract.side_effect = [None, refunds_contract]
         config = PipelineConfig(
-            source=source,
             sources={"refunds": source},
             transforms=(),
             sinks={"refunds_sink": MagicMock()},
@@ -634,7 +643,7 @@ class TestResumeFinalizesAsFailed:
             coalesce_node_map={},
         )
 
-        def _load_source(config_arg, run_id_arg, ctx_arg):
+        def _load_source(run_id_arg, ctx_arg, *, active_source):
             return iter((make_source_row({"refund_id": "r1"}, contract=refunds_contract),))
 
         with (
@@ -648,6 +657,8 @@ class TestResumeFinalizesAsFailed:
                 run_id="run-1",
                 source_id=NodeID("source-refunds"),
                 edge_map={},
+                active_source_name="refunds",
+                active_source=source,
                 flush_end_of_input=True,
             )
 
@@ -662,7 +673,6 @@ class TestResumeFinalizesAsFailed:
         source.on_success = "sink"
         sink = MagicMock()
         config = PipelineConfig(
-            source=source,
             sources={"orders": source},
             transforms=(),
             sinks={"sink": sink},
@@ -989,14 +999,14 @@ class TestBuildProcessorCallsCleanupOnFailure:
         tracked_transform.name = "tracked"
         config.transforms = [tracked_transform]
         config.sinks = {}
-        config.source = MagicMock()
-        config.sources = {"source": config.source}
+        primary_source = MagicMock()
+        config.sources = {"primary": primary_source}
 
         orch._cleanup_plugins(config, ctx)
 
         tracked_transform.on_complete.assert_called_once()
         tracked_transform.close.assert_called_once()
-        config.source.close.assert_called_once()
+        primary_source.close.assert_called_once()
 
     def test_build_processor_failure_path_cleans_up_with_source(self) -> None:
         """When _build_processor raises inside _initialize_run_context,
@@ -1020,7 +1030,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
         tracked_transform = MagicMock()
         tracked_transform.name = "tracked"
         tracked_transform.node_id = None
-        config.source = tracked_source
+        config.sources["primary"] = tracked_source
         config.sources = {"source": tracked_source}
         config.transforms = [tracked_transform]
         config.sinks = {}
@@ -1131,7 +1141,7 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         bad_transform.name = "bad_transform"
         config.transforms = [bad_transform]
         config.sinks = {}
-        config.source = MagicMock()
+        config.sources["primary"] = MagicMock()
 
         with pytest.raises(FrameworkBugError, match="internal corruption"):
             orch._cleanup_plugins(config, ctx)
@@ -1152,7 +1162,7 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         bad_sink.close.side_effect = AuditIntegrityError("audit DB corrupted")
         bad_sink.name = "bad_sink"
         config.sinks = {"output": bad_sink}
-        config.source = MagicMock()
+        config.sources["primary"] = MagicMock()
 
         with pytest.raises(AuditIntegrityError, match="audit DB corrupted"):
             orch._cleanup_plugins(config, ctx)
@@ -1172,7 +1182,7 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         bad_transform.name = "flaky_transform"
         config.transforms = [bad_transform]
         config.sinks = {}
-        config.source = MagicMock()
+        config.sources["primary"] = MagicMock()
 
         with pytest.raises(RuntimeError, match="Plugin cleanup failed"):
             orch._cleanup_plugins(config, ctx)

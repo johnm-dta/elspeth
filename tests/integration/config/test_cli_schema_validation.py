@@ -14,15 +14,16 @@ def test_cli_run_detects_schema_incompatibility():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  options:
-    path: test_input.csv
-    schema:
-      mode: fixed
-      fields:
-        - "field_a: str"
-    on_success: output
+sources:
+  primary:
+    plugin: csv
+    options:
+      path: test_input.csv
+      schema:
+        mode: fixed
+        fields:
+          - "field_a: str"
+      on_success: output
 
 transforms:
   - plugin: passthrough
@@ -61,15 +62,16 @@ def test_cli_validate_detects_schema_incompatibility():
     runner = CliRunner()
 
     config_yaml = """
-source:
-  plugin: csv
-  options:
-    path: test_input.csv
-    schema:
-      mode: fixed
-      fields:
-        - "field_a: str"
-    on_success: output
+sources:
+  primary:
+    plugin: csv
+    options:
+      path: test_input.csv
+      schema:
+        mode: fixed
+        fields:
+          - "field_a: str"
+      on_success: output
 
 transforms:
   - plugin: passthrough

@@ -1,18 +1,19 @@
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: examples/schema_contracts_demo/input.csv
-    schema:
-      mode: flexible
-      fields:
-      - 'customer_id: str'
-      - 'amount_usd: float'
-      - 'transaction_date_time: str'
-      - 'product_name: str'
-      - 'status_active_inactive: str'
-      - 'notes_comments: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: examples/schema_contracts_demo/input.csv
+      schema:
+        mode: flexible
+        fields:
+        - 'customer_id: str'
+        - 'amount_usd: float'
+        - 'transaction_date_time: str'
+        - 'product_name: str'
+        - 'status_active_inactive: str'
+        - 'notes_comments: str'
+      on_validation_failure: discard
 transforms:
 - name: passthrough_0
   plugin: passthrough

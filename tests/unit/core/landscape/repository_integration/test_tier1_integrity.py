@@ -494,7 +494,7 @@ class TestRecorderHashIntegrity:
         pipeline configuration used for this run.
         """
         config = {
-            "source": {"plugin": "csv", "path": "data.csv"},
+            "sources": {"primary": {"plugin": "csv", "path": "data.csv"}},
             "transforms": [{"plugin": "passthrough"}],
             "sinks": [{"plugin": "csv", "path": "output.csv"}],
         }

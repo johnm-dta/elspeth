@@ -32,8 +32,8 @@ def _build_graph(config: ElspethSettings) -> ExecutionGraph:
 
     plugins = instantiate_plugins_from_config(config)
     return ExecutionGraph.from_plugin_instances(
-        source=plugins.source,
-        source_settings=plugins.source_settings,
+        sources=plugins.sources,
+        source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
         sinks=plugins.sinks,
         aggregations=plugins.aggregations,
@@ -85,7 +85,7 @@ class TestEmptyRegistry:
     def test_source_only_pipeline(self) -> None:
         """Source directly routes to sink — no registry entries for transforms."""
         config = ElspethSettings(
-            source=_observed_source(on_success="output"),
+            sources={"primary": _observed_source(on_success="output")},
             sinks={"output": _observed_sink()},
         )
         graph = _build_graph(config)
@@ -100,7 +100,7 @@ class TestSingleProducerConsumer:
     def test_single_transform_chain(self) -> None:
         """Source -> transform -> sink with explicit connection name."""
         config = ElspethSettings(
-            source=_observed_source(on_success="data_out"),
+            sources={"primary": _observed_source(on_success="data_out")},
             sinks={"output": _observed_sink()},
             transforms=[
                 _observed_transform("t1", input="data_out", on_success="output"),
@@ -114,7 +114,7 @@ class TestSingleProducerConsumer:
     def test_multi_transform_chain(self) -> None:
         """Source -> t1 -> t2 -> sink with named connections."""
         config = ElspethSettings(
-            source=_observed_source(on_success="src_out"),
+            sources={"primary": _observed_source(on_success="src_out")},
             sinks={"output": _observed_sink()},
             transforms=[
                 _observed_transform("t1", input="src_out", on_success="conn_1_2"),
@@ -138,7 +138,7 @@ class TestDuplicateProducer:
         rejects the duplicate on_success first.
         """
         config = ElspethSettings(
-            source=_observed_source(on_success="src_out"),
+            sources={"primary": _observed_source(on_success="src_out")},
             sinks={"output": _observed_sink()},
             transforms=[
                 _observed_transform("t1", input="src_out", on_success="shared_conn"),
@@ -152,7 +152,7 @@ class TestDuplicateProducer:
     def test_duplicate_consumer_rejected(self) -> None:
         """Two transforms consuming the same connection name is a duplicate consumer error."""
         config = ElspethSettings(
-            source=_observed_source(on_success="shared_input"),
+            sources={"primary": _observed_source(on_success="shared_input")},
             sinks={"output": _observed_sink()},
             transforms=[
                 _observed_transform("t1", input="shared_input", on_success="output"),
@@ -169,7 +169,7 @@ class TestOrphanedProducer:
     def test_on_success_neither_sink_nor_connection_rejected(self) -> None:
         """Transform on_success pointing to unknown target is rejected."""
         config = ElspethSettings(
-            source=_observed_source(on_success="src_out"),
+            sources={"primary": _observed_source(on_success="src_out")},
             sinks={"output": _observed_sink()},
             transforms=[
                 _observed_transform("t1", input="src_out", on_success="dangling"),
@@ -185,7 +185,7 @@ class TestOrphanedConsumer:
     def test_input_references_nonexistent_connection(self) -> None:
         """Transform consumes a connection that no node produces."""
         config = ElspethSettings(
-            source=_observed_source(on_success="src_out"),
+            sources={"primary": _observed_source(on_success="src_out")},
             sinks={"output": _observed_sink()},
             transforms=[
                 _observed_transform("t1", input="does_not_exist", on_success="output"),
@@ -203,7 +203,7 @@ class TestNamespaceCollision:
         # t1 produces to "flagged_conn" as a connection (not a sink name),
         # t2 consumes it and routes to "output" sink. This should succeed.
         config = ElspethSettings(
-            source=_observed_source(on_success="src_out"),
+            sources={"primary": _observed_source(on_success="src_out")},
             sinks={"output": _observed_sink(), "flagged": _observed_sink(options={"path": "flagged.json", "schema": {"mode": "observed"}})},
             transforms=[
                 _observed_transform("t1", input="src_out", on_success="flagged_conn"),
@@ -226,7 +226,7 @@ class TestGateRouteResolution:
         the second gate; the false branch routes directly to a sink.
         """
         config = ElspethSettings(
-            source=_observed_source(on_success="src_out"),
+            sources={"primary": _observed_source(on_success="src_out")},
             sinks={
                 "output": _observed_sink(),
                 "flagged": _observed_sink(options={"path": "flagged.json", "schema": {"mode": "observed"}}),
@@ -259,7 +259,7 @@ class TestMultiRouteConvergence:
     def test_two_routes_same_target(self) -> None:
         """Multiple gate routes from the same gate converging to the same connection."""
         config = ElspethSettings(
-            source=_observed_source(on_success="src_out"),
+            sources={"primary": _observed_source(on_success="src_out")},
             sinks={
                 "output": _observed_sink(),
             },
@@ -290,7 +290,7 @@ class TestLevenshteinSuggestions:
     def test_near_miss_connection_name_gets_suggestion(self) -> None:
         """Typo in connection name should suggest correct name."""
         config = ElspethSettings(
-            source=_observed_source(on_success="source_output"),
+            sources={"primary": _observed_source(on_success="source_output")},
             sinks={"output": _observed_sink()},
             transforms=[
                 # Typo: "source_outpt" instead of "source_output"
@@ -305,7 +305,7 @@ class TestLevenshteinSuggestions:
     def test_completely_wrong_name_no_suggestion(self) -> None:
         """Completely unrelated connection name has no useful suggestion."""
         config = ElspethSettings(
-            source=_observed_source(on_success="alpha"),
+            sources={"primary": _observed_source(on_success="alpha")},
             sinks={"output": _observed_sink()},
             transforms=[
                 _observed_transform("t1", input="zzzzz_totally_wrong", on_success="output"),

@@ -255,8 +255,8 @@ class TestBranchFirstNodes:
         sinks: dict[str, CollectSink] = {"output": CollectSink("output")}
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=cast("SourceProtocol", source),
-            source_settings=source_settings,
+            sources={"primary": cast("SourceProtocol", source)},
+            source_settings_map={"primary": source_settings},
             transforms=all_wired,
             sinks=cast("dict[str, SinkProtocol]", sinks),
             aggregations={},
@@ -323,8 +323,8 @@ class TestBranchFirstNodes:
         sinks: dict[str, CollectSink] = {"output": CollectSink("output")}
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=cast("SourceProtocol", source),
-            source_settings=source_settings,
+            sources={"primary": cast("SourceProtocol", source)},
+            source_settings_map={"primary": source_settings},
             transforms=all_wired,
             sinks=cast("dict[str, SinkProtocol]", sinks),
             aggregations={},
@@ -398,8 +398,8 @@ class TestBranchFirstNodes:
         sinks: dict[str, CollectSink] = {"output": CollectSink("output")}
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=cast("SourceProtocol", source),
-            source_settings=source_settings,
+            sources={"primary": cast("SourceProtocol", source)},
+            source_settings_map={"primary": source_settings},
             transforms=all_wired,
             sinks=cast("dict[str, SinkProtocol]", sinks),
             aggregations={},

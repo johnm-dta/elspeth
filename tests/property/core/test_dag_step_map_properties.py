@@ -148,8 +148,8 @@ def _build_graph(
         ]
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=cast(SourceProtocol, source),
-        source_settings=source_settings,
+        sources={"primary": cast(SourceProtocol, source)},
+        source_settings_map={"primary": source_settings},
         transforms=wired_transforms,
         sinks=cast("dict[str, SinkProtocol]", sinks),
         aggregations=cast("dict[str, tuple[TransformProtocol, AggregationSettings]]", aggregations),
@@ -179,7 +179,7 @@ class TestStepMapSchemaContract:
 
         actual = graph.build_step_map()
 
-        source_id = graph.get_source()
+        source_id = graph.get_sources()[0]
         assert source_id is not None
         assert actual[source_id] == 0
 

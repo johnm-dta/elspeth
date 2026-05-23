@@ -32,10 +32,11 @@ secrets:
   mapping:
     TEST_SECRET: test-secret
 
-source:
-  plugin: null
-  options:
-    on_success: output
+sources:
+  primary:
+    plugin: null
+    options:
+      on_success: output
 
 sinks:
   output:
@@ -70,10 +71,11 @@ secrets:
   mapping:
     MISSING_SECRET: nonexistent-secret
 
-source:
-  plugin: null
-  options:
-    on_success: output
+sources:
+  primary:
+    plugin: null
+    options:
+      on_success: output
 
 sinks:
   output:
@@ -100,10 +102,11 @@ sinks:
 secrets:
   source: env
 
-source:
-  plugin: null
-  options:
-    on_success: output
+sources:
+  primary:
+    plugin: null
+    options:
+      on_success: output
 
 sinks:
   output:
@@ -129,10 +132,11 @@ secrets:
   mapping:
     KEY: secret
 
-source:
-  plugin: null
-  options:
-    on_success: output
+sources:
+  primary:
+    plugin: null
+    options:
+      on_success: output
 
 sinks:
   output:
@@ -156,10 +160,11 @@ secrets:
   mapping:
     KEY: secret
 
-source:
-  plugin: null
-  options:
-    on_success: output
+sources:
+  primary:
+    plugin: null
+    options:
+      on_success: output
 
 sinks:
   output:
@@ -179,10 +184,11 @@ sinks:
         # No secrets section at all - should default to source: env
         settings_file = tmp_path / "settings.yaml"
         settings_file.write_text("""
-source:
-  plugin: null
-  options:
-    on_success: output
+sources:
+  primary:
+    plugin: null
+    options:
+      on_success: output
 
 sinks:
   output:
@@ -210,10 +216,11 @@ secrets:
   mapping:
     KEY: secret
 
-source:
-  plugin: null
-  options:
-    on_success: output
+sources:
+  primary:
+    plugin: null
+    options:
+      on_success: output
 
 sinks:
   output:

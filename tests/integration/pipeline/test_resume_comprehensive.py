@@ -346,7 +346,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": strict_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
         )
@@ -435,7 +435,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": strict_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
         )
@@ -689,7 +689,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": strict_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
         )
@@ -848,6 +848,23 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create rows with datetime payloads
             for i in range(3):
                 row_data = {
@@ -918,7 +935,7 @@ class TestResumeComprehensive:
         passthrough = DatetimeAssertingPassThrough({"schema": resume_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": resume_schema, "mode": "append"}))},
         )
@@ -1068,6 +1085,23 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create rows with Decimal payloads (high precision value)
             for i in range(2):
                 row_data = {
@@ -1128,7 +1162,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": resume_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": resume_schema, "mode": "append"}))},
         )
@@ -1274,6 +1308,23 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create rows with array payloads
             for i in range(2):
                 row_data = {
@@ -1331,7 +1382,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": {"mode": "observed"}})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={
                 "default": inject_write_failure(
@@ -1482,6 +1533,23 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create rows with nested object payloads
             for i in range(2):
                 row_data = {
@@ -1539,7 +1607,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": {"mode": "observed"}})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={
                 "default": inject_write_failure(
@@ -1683,6 +1751,23 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create a dummy row (won't be processed - resume will fail during schema reconstruction)
             row_data = {"id": 0, "location": "some-location"}
             ref = payload_store.store(json.dumps(row_data).encode())
@@ -1727,7 +1812,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": {"mode": "observed"}})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={
                 "default": inject_write_failure(
@@ -1847,7 +1932,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": resume_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={
                 "default": inject_write_failure(
@@ -2026,7 +2111,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": resume_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={
                 "default": inject_write_failure(
@@ -2390,7 +2475,6 @@ class TestMultiSourceResumeContractDispatch:
         processor.process_existing_row.return_value = []
 
         config = PipelineConfig(
-            source=MagicMock(),
             sources={"orders": MagicMock(), "refunds": MagicMock()},
             transforms=(),
             sinks={"default": MagicMock()},

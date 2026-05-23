@@ -56,7 +56,7 @@ def _make_config(
     source = Mock()
     source.name = "test-source"
     return PipelineConfig(
-        source=source,
+        sources={"primary": source},
         transforms=transforms or [],
         sinks={"output": Mock()},
         aggregation_settings=aggregation_settings or {},

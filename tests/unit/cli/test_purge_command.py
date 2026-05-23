@@ -20,12 +20,13 @@ def _write_minimal_settings(settings_path: Path, *, landscape_url: str) -> None:
         f"""
 landscape:
   url: {landscape_url}
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   output:
     plugin: csv

@@ -17,18 +17,19 @@
 #   2. Run this pipeline:
 #      elspeth run --settings examples/chaosweb/settings.yaml --execute
 
-source:
-  plugin: csv
-  on_success: urls
-  options:
-    path: examples/chaosweb/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'url: str'
-      - 'label: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: urls
+    options:
+      path: examples/chaosweb/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'url: str'
+        - 'label: str'
+      on_validation_failure: discard
 
 transforms:
 # Stage 1: Fetch pages from ChaosWeb — failures route to scrape_failures

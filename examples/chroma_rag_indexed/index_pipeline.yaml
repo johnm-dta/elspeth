@@ -1,16 +1,17 @@
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: examples/chroma_rag_indexed/documents.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'doc_id: str'
-      - 'text_content: str'
-      - 'topic: str'
-      - 'subtopic: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: examples/chroma_rag_indexed/documents.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'doc_id: str'
+        - 'text_content: str'
+        - 'topic: str'
+        - 'subtopic: str'
+      on_validation_failure: discard
 
 sinks:
   output:

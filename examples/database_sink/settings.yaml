@@ -8,20 +8,21 @@
 # The database sink creates the table automatically on first write.
 # Uses SQLite so no external database server is needed.
 
-source:
-  plugin: csv
-  on_success: validated
-  options:
-    path: examples/database_sink/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'customer: str'
-      - 'amount: int'
-      - 'category: str'
-      - 'region: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: validated
+    options:
+      path: examples/database_sink/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'customer: str'
+        - 'amount: int'
+        - 'category: str'
+        - 'region: str'
+      on_validation_failure: discard
 
 gates:
 - name: value_gate

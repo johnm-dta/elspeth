@@ -1,16 +1,17 @@
-source:
-  plugin: csv
-  on_success: threshold_in
-  options:
-    path: examples/statistical_batch_plugins/threshold_scores.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'prompt_variant: str'
-      - 'quality_score: float'
-      - 'latency_ms: float'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: threshold_in
+    options:
+      path: examples/statistical_batch_plugins/threshold_scores.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'prompt_variant: str'
+        - 'quality_score: float'
+        - 'latency_ms: float'
+      on_validation_failure: discard
 aggregations:
 - name: quality_thresholds
   plugin: batch_threshold_summary

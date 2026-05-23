@@ -33,8 +33,8 @@ def _build_graph(
         sinks["csv_failsink"] = failsink
 
     return ExecutionGraph.from_plugin_instances(
-        source=cast(SourceProtocol, source),
-        source_settings=source_settings,
+        sources={"primary": cast(SourceProtocol, source)},
+        source_settings_map={"primary": source_settings},
         transforms=[],
         sinks=cast("dict[str, SinkProtocol]", sinks),
         aggregations={},

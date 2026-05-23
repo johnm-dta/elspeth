@@ -1,15 +1,16 @@
-source:
-  plugin: csv
-  on_success: paired_in
-  options:
-    path: examples/statistical_batch_plugins/paired_preferences.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'case_id: str'
-      - 'variant: str'
-      - 'preference_score: float'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: paired_in
+    options:
+      path: examples/statistical_batch_plugins/paired_preferences.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'case_id: str'
+        - 'variant: str'
+        - 'preference_score: float'
+      on_validation_failure: discard
 aggregations:
 - name: paired_prompt_preference
   plugin: batch_paired_preference

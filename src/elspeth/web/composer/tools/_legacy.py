@@ -108,7 +108,10 @@ if TYPE_CHECKING:
 
 # Module-level OTel counter for authoring validation outcomes in preview_pipeline.
 # Attributes: outcome (valid | invalid)
-_AUTHORING_VALIDATION_COUNTER = metrics.get_meter(__name__).create_counter(
+# Meter name is pinned to the public package path "elspeth.web.composer.tools" so the
+# operational dashboard surface survives this module being decomposed into a subpackage.
+# Operators alert on this meter name — do not let __name__ silently rename it.
+_AUTHORING_VALIDATION_COUNTER = metrics.get_meter("elspeth.web.composer.tools").create_counter(
     "composer.authoring_validation.total",
     description="Total authoring (Stage 1) validation outcomes from preview_pipeline",
 )

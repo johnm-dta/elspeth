@@ -6,10 +6,36 @@ import fnmatch
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+class JudgeVerdict(StrEnum):
+    """The verdict an allowlist entry carries from the cicd-judge.
+
+    Members:
+        ACCEPTED: The judge read the agent's rationale and the
+            surrounding code and approved the suppression.
+        BLOCKED: The judge rejected the rationale. Entries with this
+            verdict should NOT exist in the allowlist — the CLI declines
+            to write them. Reserved for in-memory representation only.
+        OVERRIDDEN_BY_OPERATOR: A human operator chose to bypass the
+            judge's verdict. This is distinct from ACCEPTED and is the
+            audit signal that a human used their authority to override
+            the gate. The rotation rate of this verdict is itself a
+            meta-metric.
+
+    Entries written before the judge existed carry ``judge_verdict=None``
+    on the dataclass — that absence is the honest representation of
+    "pre-judge era" rather than a fabricated default verdict.
+    """
+
+    ACCEPTED = "ACCEPTED"
+    BLOCKED = "BLOCKED"
+    OVERRIDDEN_BY_OPERATOR = "OVERRIDDEN_BY_OPERATOR"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +56,30 @@ class FindingKey:
 
 @dataclass(slots=True)
 class AllowlistEntry:
-    """An exact allowlist entry for one finding fingerprint."""
+    """An exact allowlist entry for one finding fingerprint.
+
+    Judge metadata (``judge_verdict``, ``judge_recorded_at``,
+    ``judge_model``, ``judge_rationale``) is ``None`` for entries
+    written before the cicd-judge gate existed. Per the project's
+    fabrication-decision test, ``None`` is the honest representation
+    of "this entry predates the judge" — filling in a synthetic
+    "UNKNOWN" verdict or epoch timestamp would invent audit data the
+    judge never produced. Entries written through ``elspeth-lints
+    justify`` carry the full judge-metadata tuple.
+
+    ``judge_model_verdict`` is the *model's* verdict, distinct from
+    ``judge_verdict`` (the *entry's* verdict). They diverge only when
+    the operator used ``--operator-override``: ``judge_verdict`` then
+    becomes ``OVERRIDDEN_BY_OPERATOR`` and ``judge_model_verdict``
+    preserves what the model originally said (typically ``BLOCKED``,
+    less commonly ``ACCEPTED``). For non-override entries this field
+    is ``None``: the model's verdict and the entry's verdict are
+    identical, so duplicating it would be fabrication of a divergence
+    that doesn't exist. The field's value is "override-rate-by-
+    underlying-verdict is queryable" — a downstream aggregator can
+    distinguish overrides of ACCEPTED entries (harmless) from
+    overrides of BLOCKED entries (the dangerous signal).
+    """
 
     key: str
     owner: str
@@ -42,6 +91,11 @@ class AllowlistEntry:
     pattern: str | None = None
     source_file: str = ""
     matched: bool = field(default=False, compare=False)
+    judge_verdict: JudgeVerdict | None = None
+    judge_recorded_at: datetime | None = None
+    judge_model: str | None = None
+    judge_rationale: str | None = None
+    judge_model_verdict: JudgeVerdict | None = None
 
     def matches(self, finding: FindingKey) -> bool:
         """Return whether this exact entry suppresses the finding."""
@@ -261,20 +315,124 @@ def _parse_allow_hits(data: dict[str, Any], *, source_file: str) -> list[Allowli
     entries: list[AllowlistEntry] = []
     for index, raw_entry in enumerate(entries_raw):
         entry = _mapping_value(raw_entry, f"allow_hits[{index}]")
-        entries.append(
-            AllowlistEntry(
-                key=_required_string(entry, "key", context=f"allow_hits[{index}]"),
-                owner=_required_string(entry, "owner", context=f"allow_hits[{index}]"),
-                reason=_required_string(entry, "reason", context=f"allow_hits[{index}]"),
-                safety=_required_string(entry, "safety", context=f"allow_hits[{index}]"),
-                expires=_optional_date_alias(entry, "expires", "expires_at", context=f"allow_hits[{index}]"),
-                file_fingerprint=_optional_string(entry, "file_fingerprint", context=f"allow_hits[{index}]"),
-                ast_path=_optional_string(entry, "ast_path", context=f"allow_hits[{index}]"),
-                pattern=_optional_string(entry, "pattern", context=f"allow_hits[{index}]"),
-                source_file=source_file,
-            )
+        ctx = f"allow_hits[{index}]"
+        allowlist_entry = AllowlistEntry(
+            key=_required_string(entry, "key", context=ctx),
+            owner=_required_string(entry, "owner", context=ctx),
+            reason=_required_string(entry, "reason", context=ctx),
+            safety=_required_string(entry, "safety", context=ctx),
+            expires=_optional_date_alias(entry, "expires", "expires_at", context=ctx),
+            file_fingerprint=_optional_string(entry, "file_fingerprint", context=ctx),
+            ast_path=_optional_string(entry, "ast_path", context=ctx),
+            pattern=_optional_string(entry, "pattern", context=ctx),
+            source_file=source_file,
+            judge_verdict=_optional_judge_verdict(entry, "judge_verdict", context=ctx),
+            judge_recorded_at=_optional_datetime(entry, "judge_recorded_at", context=ctx),
+            judge_model=_optional_string(entry, "judge_model", context=ctx),
+            judge_rationale=_optional_string(entry, "judge_rationale", context=ctx),
+            judge_model_verdict=_optional_judge_verdict(entry, "judge_model_verdict", context=ctx),
         )
+        _validate_judge_metadata_atomic(allowlist_entry, context=ctx)
+        entries.append(allowlist_entry)
     return entries
+
+
+def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> None:
+    """Crash if an entry's judge-metadata cluster is internally inconsistent.
+
+    The judge-metadata fields are a tightly coupled audit record: they
+    must be either *all absent* (the pre-judge era representation, where
+    ``judge_verdict`` is ``None`` and every other ``judge_*`` field is
+    ``None``) or *all present* (a fully-recorded judge interaction, where
+    ``judge_verdict``, ``judge_recorded_at``, ``judge_model``, and
+    ``judge_rationale`` are all set, with ``judge_model_verdict`` set
+    iff the entry's verdict is ``OVERRIDDEN_BY_OPERATOR``).
+
+    The fields are our own data (Tier 1 in the project's trust model):
+    an allowlist on disk was written by ``elspeth-lints justify`` or
+    hand-edited by an operator, both of which are inside our trust
+    boundary. Inconsistent shape is corruption — half-written audit
+    state, a partial revert, a botched merge — and must crash on load
+    rather than silently propagate into the gate's decision. Per
+    CLAUDE.md Tier-1 doctrine: "wrong type = crash, NULL where
+    unexpected = crash, invalid enum value = crash."
+
+    The four invariants enforced:
+
+    1. ``judge_verdict == OVERRIDDEN_BY_OPERATOR`` implies
+       ``judge_model_verdict is not None`` — an override entry must
+       record what the underlying model said so the meta-metric
+       "override-rate-by-underlying-verdict" remains queryable; an
+       override with no recorded model verdict is fabrication of "we
+       overrode something" without recording what.
+    2. Non-override entries with ``judge_verdict is not None`` must have
+       ``judge_model_verdict is None`` — for a non-override entry the
+       model's verdict and the entry's verdict are identical by
+       construction; carrying a divergent value fabricates a divergence
+       signal that doesn't exist.
+    3. ``judge_verdict is not None`` implies the recorded_at + model +
+       rationale triple is also non-None — these four fields are atomic;
+       a partial write is corruption.
+    4. ``judge_verdict is None`` implies every other ``judge_*`` field
+       is also None — a pre-judge-era entry MUST NOT carry stray model
+       metadata; that would be evidence of partial revert / merge
+       corruption.
+    """
+    # Invariant 4: pre-judge entries are fully empty in the judge cluster.
+    if entry.judge_verdict is None:
+        stray: list[str] = []
+        if entry.judge_recorded_at is not None:
+            stray.append("judge_recorded_at")
+        if entry.judge_model is not None:
+            stray.append("judge_model")
+        if entry.judge_rationale is not None:
+            stray.append("judge_rationale")
+        if entry.judge_model_verdict is not None:
+            stray.append("judge_model_verdict")
+        if stray:
+            raise ValueError(
+                f"{context}: judge_verdict is absent but other judge metadata is present "
+                f"({', '.join(stray)}); pre-judge entries must omit every judge_* field. "
+                "This shape indicates a partial revert or merge corruption."
+            )
+        return
+
+    # Invariant 3: post-judge entries record the full quartet.
+    missing: list[str] = []
+    if entry.judge_recorded_at is None:
+        missing.append("judge_recorded_at")
+    if entry.judge_model is None:
+        missing.append("judge_model")
+    if entry.judge_rationale is None:
+        missing.append("judge_rationale")
+    if missing:
+        raise ValueError(
+            f"{context}: judge_verdict is set ({entry.judge_verdict.value!r}) but the "
+            f"required companion fields are missing ({', '.join(missing)}); the judge-"
+            "metadata quartet (judge_verdict + judge_recorded_at + judge_model + "
+            "judge_rationale) is atomic. A partial write is corruption."
+        )
+
+    # Invariants 1 and 2: judge_model_verdict's presence is gated by
+    # whether this is an override entry.
+    if entry.judge_verdict is JudgeVerdict.OVERRIDDEN_BY_OPERATOR:
+        if entry.judge_model_verdict is None:
+            raise ValueError(
+                f"{context}: judge_verdict is OVERRIDDEN_BY_OPERATOR but "
+                "judge_model_verdict is absent; override entries must record what the "
+                "underlying model said so override-rate-by-underlying-verdict remains "
+                "queryable. An override with no recorded model verdict is fabrication."
+            )
+    else:
+        if entry.judge_model_verdict is not None:
+            raise ValueError(
+                f"{context}: judge_verdict is {entry.judge_verdict.value!r} (non-"
+                f"override) but judge_model_verdict is set "
+                f"({entry.judge_model_verdict.value!r}); for non-override entries the "
+                "model's verdict and the entry's verdict are identical by "
+                "construction, so recording a separate judge_model_verdict "
+                "fabricates a divergence that doesn't exist."
+            )
 
 
 def _parse_per_file_rules(data: dict[str, Any], *, valid_rule_ids: Collection[str], source_file: str) -> list[PerFileRule]:
@@ -399,3 +557,54 @@ def _bool_value(data: dict[str, Any], key: str, *, default: bool) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"defaults.{key} must be a boolean")
     return value
+
+
+def _optional_judge_verdict(data: dict[str, Any], key: str, *, context: str) -> JudgeVerdict | None:
+    """Parse an optional ``judge_verdict`` field.
+
+    Absent / null both yield ``None`` (the "pre-judge era" representation).
+    Any other value MUST be one of the enum members, exact string match.
+    Rejecting unknown values keeps the audit trail's set of recorded
+    verdicts bounded to the schema; a YAML carrying a garbage verdict is
+    a corruption signal that should crash on load, not silently round-
+    trip.
+    """
+    if key not in data or data[key] is None:
+        return None
+    value = data[key]
+    if not isinstance(value, str):
+        raise ValueError(f"{context}.{key} must be a string, null, or absent")
+    try:
+        return JudgeVerdict(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{context}.{key} must be one of {[m.value for m in JudgeVerdict]}; got {value!r}"
+        ) from exc
+
+
+def _optional_datetime(data: dict[str, Any], key: str, *, context: str) -> datetime | None:
+    """Parse an optional ISO-8601 datetime field.
+
+    Absent / null both yield ``None``. Strings are parsed via
+    ``datetime.fromisoformat``; PyYAML may also pre-parse a timestamp
+    to a ``datetime`` (when the YAML scalar is a bare ISO timestamp), in
+    which case we accept it. Naive datetimes (no tzinfo) are rejected —
+    the judge always records UTC-aware timestamps and a naive value is
+    a corruption signal.
+    """
+    if key not in data or data[key] is None:
+        return None
+    value = data[key]
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            raise ValueError(f"{context}.{key} must be a timezone-aware ISO-8601 timestamp")
+        return value
+    if not isinstance(value, str):
+        raise ValueError(f"{context}.{key} must be an ISO-8601 timestamp string, null, or absent")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{context}.{key} must be a valid ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{context}.{key} must include a timezone offset")
+    return parsed

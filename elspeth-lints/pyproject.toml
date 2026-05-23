@@ -6,6 +6,15 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["pyyaml>=6.0,<7"]
 
+[project.optional-dependencies]
+# The 'judge' extra pulls in the Anthropic SDK used by the `justify`
+# subcommand. The lint tool itself must remain installable without a
+# network LLM SDK (it runs in CI lanes that don't carry an API key),
+# so this is intentionally optional. Install with:
+#     uv pip install -e ".[judge]"  (from the elspeth-lints/ directory)
+# or include the extra in the root project's dev install.
+judge = ["anthropic>=0.39,<1"]
+
 [project.scripts]
 elspeth-lints = "elspeth_lints.core.cli:main"
 

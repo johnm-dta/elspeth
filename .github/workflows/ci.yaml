@@ -157,6 +157,13 @@ jobs:
             --rules trust_tier.tier_model \
             --root src/elspeth
 
+      - name: Run trust-boundary honesty-gate elspeth-lints rules
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules trust_boundary.tests,trust_boundary.scope,trust_boundary.tier \
+            --root src/elspeth
+
       - name: Forbid new bespoke CI enforcers
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: |

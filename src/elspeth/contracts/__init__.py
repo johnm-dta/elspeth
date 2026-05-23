@@ -274,6 +274,11 @@ from elspeth.contracts.transform_contract import (
     create_output_contract_from_schema,
     validate_output_against_contract,
 )
+from elspeth.contracts.trust_boundary import (
+    BoundaryRule,
+    TrustBoundaryMetadata,
+    trust_boundary,
+)
 from elspeth.contracts.type_normalization import (
     UNSUPPORTED_CONTRACT_TYPE,
     classify_runtime_type,
@@ -553,4 +558,8 @@ __all__ = [  # Grouped by category for readability
     "CatalogValueSource",
     "DerivedFromSiblingValueSource",
     "ValueSource",
+    # trust boundary
+    "BoundaryRule",
+    "TrustBoundaryMetadata",
+    "trust_boundary",
 ]

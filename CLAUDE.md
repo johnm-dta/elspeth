@@ -186,6 +186,11 @@ env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli dump
 # Also supports --format mermaid (inline diagrams) and --format dot (Graphviz).
 # Full reference: engine-patterns-reference skill, "Layer Architecture & Dependency Analysis" section.
 
+# Allowlist fingerprint rotation (post-refactor; mechanical, no judgement)
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli rotate --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --dry-run --auto-pair-symmetric
+# Drop --dry-run to apply. Surfaces rotations, ambiguous N:M groups, stale entries,
+# and TODO-stub debt that needs judge review. Slice 1 of the cicd-judge-cli prototype.
+
 # CLI
 elspeth run --settings pipeline.yaml --execute        # Execute pipeline
 elspeth resume <run_id>                               # Resume interrupted run

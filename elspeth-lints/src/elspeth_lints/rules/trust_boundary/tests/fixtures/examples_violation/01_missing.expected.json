@@ -1,0 +1,12 @@
+[
+  {
+    "column": 1,
+    "file_path": "bad.py",
+    "fingerprint": "e7cac6dd47bf6af6",
+    "line": 4,
+    "message": "@trust_boundary has no test_ref; a behavioural test is mandatory for trust-boundary suppressions.",
+    "rule_id": "TBE1",
+    "severity": "error",
+    "suggestion": "Every @trust_boundary must carry a test_ref pointing to a pytest node that exercises the documented invariant on malformed input. Add test_ref='tests/.../test_module.py::test_function'."
+  }
+]

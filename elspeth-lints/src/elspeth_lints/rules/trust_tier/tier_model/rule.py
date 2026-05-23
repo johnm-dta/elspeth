@@ -45,6 +45,13 @@ from elspeth_lints.core.protocols import (
 )
 from elspeth_lints.core.protocols import RuleContext, RuleMetadata, RuleScope, Severity
 from elspeth_lints.rules.trust_tier.tier_model.metadata import RULE_ID, RULE_METADATA
+from elspeth_lints.rules.trust_tier.tier_model.trust_boundary_suppress import (
+    BoundaryFinding,
+    _BoundaryMetadata,
+    compute_derived_names,
+    extract_boundary_metadata,
+    subject_is_rooted,
+)
 
 # =============================================================================
 # Data Structures
@@ -179,6 +186,41 @@ RULES: dict[str, dict[str, Any]] = {
         "name": "upward-import",
         "description": "Import from a higher layer violates the dependency hierarchy (contracts→core→engine→plugins)",
         "remediation": "Move code down, extract primitives, or restructure caller (see CLAUDE.md Layer Dependency Rules)",
+    },
+    # =========================================================================
+    # @trust_boundary decorator hygiene
+    # =========================================================================
+    # These two findings fire on the decorator itself, not on suppressed
+    # patterns. They guarantee that a malformed ``@trust_boundary`` cannot
+    # silently disable suppression analysis: if the analyzer cannot read the
+    # decorator's metadata, the author hears about it AND the decorator is
+    # treated as inert (so any rule violations inside the function remain
+    # visible). Severity matches the rest of tier_model — ERROR — because a
+    # malformed decorator defeats the suppression argument and must not be
+    # merged.
+    "R_TB_NONLITERAL": {
+        "name": "trust-boundary-non-literal-arg",
+        "description": (
+            "@trust_boundary kwargs must be static literals; references to "
+            "names, calls, or comprehensions defeat the static suppression analysis."
+        ),
+        "remediation": (
+            "Inline the literal value(s) in the decorator call. Constants "
+            "imported from another module are still literals at the call site "
+            "because the decorator is keyword-only; replace any computed values."
+        ),
+    },
+    "R_TB_MALFORMED": {
+        "name": "trust-boundary-malformed-metadata",
+        "description": (
+            "@trust_boundary metadata is the wrong shape "
+            "(e.g. 'suppresses' is not a tuple, 'source_param' is not a string)."
+        ),
+        "remediation": (
+            "Compare the call to the documented signature in "
+            "src/elspeth/contracts/trust_boundary.py. 'suppresses' must be "
+            "tuple[str, ...]; 'source_param' must be a non-empty string."
+        ),
     },
 }
 
@@ -408,6 +450,12 @@ class TierModelVisitor(ast.NodeVisitor):
         self.node_stack: list[ast.AST] = []
         self._decorator_lines: set[int] = set()  # Track lines that are decorators
         self._import_aliases: dict[str, str] = {}
+        # Stack of (metadata, derived_names) pairs — one entry per nested
+        # function. ``None`` means the function has no ``@trust_boundary``
+        # decorator. We push on entry to every function so popping is symmetric
+        # and we can look at "the innermost enclosing decorated function" via
+        # a reverse walk of the stack.
+        self._boundary_stack: list[tuple[_BoundaryMetadata, frozenset[str]] | None] = []
 
     def visit(self, node: ast.AST) -> Any:
         """Visit a node while retaining ancestor context for receiver-shape checks."""
@@ -442,8 +490,73 @@ class TierModelVisitor(ast.NodeVisitor):
         payload = f"{rule_id}|{ast_path}|{node_dump}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
+    def _current_boundary(self) -> tuple[_BoundaryMetadata, frozenset[str]] | None:
+        """Return the active ``@trust_boundary`` context, if any.
+
+        Walks the boundary stack from innermost outward and returns the first
+        non-``None`` entry. Nested functions whose own decorator is missing
+        still inherit the outer function's boundary because nested-function
+        bodies share the outer scope's name bindings; finding-suppression
+        inside the nested function on names rooted at the outer boundary
+        parameter is correct under the same dataflow argument.
+
+        Returns ``None`` if no enclosing function carries a ``@trust_boundary``.
+        """
+        for entry in reversed(self._boundary_stack):
+            if entry is not None:
+                return entry
+        return None
+
+    def _finding_subject_node(self, rule_id: str, node: ast.AST) -> ast.AST | None:
+        """Return the AST node whose rootedness determines suppression.
+
+        Only R1 and R5 are listed as suppressible by the documented
+        ``BoundaryRule`` Literal in ``elspeth.contracts.trust_boundary``;
+        the helper still returns sensible subject nodes for the other
+        dict/attr defensive-pattern rules so that adding them to
+        ``BoundaryRule`` later is a one-line decorator-side change.
+
+        Rules that cannot meaningfully be "rooted at a value" (exception
+        handlers, contextlib.suppress, broad except) return ``None``:
+        suppression of those rules via the decorator is never honoured
+        because the trust-boundary doctrine sanctions defensive *value
+        access* on external data, not blanket exception swallowing.
+        """
+        if rule_id in {"R1", "R8", "R9"} and isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            # ``x.get(...)`` / ``x.setdefault(...)`` / ``x.pop(...)`` —
+            # rooted at the receiver ``func.value``.
+            return node.func.value
+        if rule_id == "R5" and isinstance(node, ast.Call) and node.args:
+            # ``isinstance(target, ...)`` — rooted at the first arg.
+            return node.args[0]
+        if rule_id == "R2" and isinstance(node, ast.Call) and node.args:
+            # ``getattr(obj, name, default)`` — rooted at the first arg (obj).
+            return node.args[0]
+        return None
+
+    def _is_suppressed_by_boundary(self, rule_id: str, node: ast.AST) -> bool:
+        """Return True if a ``@trust_boundary`` covers this finding.
+
+        See module docstring of :mod:`trust_boundary_suppress` for the
+        auditability rationale: there is no telemetry surface for the
+        suppression event; the decorator's existence (visible in code
+        review) is the audit signal.
+        """
+        boundary = self._current_boundary()
+        if boundary is None:
+            return False
+        metadata, derived_names = boundary
+        if rule_id not in metadata.suppresses:
+            return False
+        subject = self._finding_subject_node(rule_id, node)
+        if subject is None:
+            return False
+        return subject_is_rooted(subject, derived_names)
+
     def _add_finding(self, rule_id: str, node: ast.expr | ast.stmt | ast.ExceptHandler, message: str) -> None:
-        """Record a finding."""
+        """Record a finding, unless an enclosing ``@trust_boundary`` covers it."""
+        if self._is_suppressed_by_boundary(rule_id, node):
+            return
         self.findings.append(
             Finding(
                 rule_id=rule_id,
@@ -454,6 +567,27 @@ class TierModelVisitor(ast.NodeVisitor):
                 fingerprint=self._fingerprint_node(rule_id, node),
                 code_snippet=self._get_code_snippet(node.lineno),
                 message=message,
+            )
+        )
+
+    def _add_boundary_diagnostic(self, diagnostic: BoundaryFinding) -> None:
+        """Surface a malformed-decorator diagnostic as an ordinary finding.
+
+        These diagnostics target the decorator call site itself (not the
+        function body), so they bypass the suppression check — a malformed
+        decorator cannot suppress its own error.
+        """
+        node = diagnostic.node
+        self.findings.append(
+            Finding(
+                rule_id=diagnostic.rule_id,
+                file_path=self.file_path,
+                line=node.lineno,
+                col=node.col_offset,
+                symbol_context=tuple(self.symbol_stack),
+                fingerprint=self._fingerprint_node(diagnostic.rule_id, node),
+                code_snippet=self._get_code_snippet(node.lineno),
+                message=diagnostic.message,
             )
         )
 
@@ -487,9 +621,13 @@ class TierModelVisitor(ast.NodeVisitor):
             self._decorator_lines.add(decorator.lineno)
         self.symbol_stack.append(node.name)
         self.function_stack.append(node)
-        self.generic_visit(node)
-        self.function_stack.pop()
-        self.symbol_stack.pop()
+        self._enter_boundary_context(node)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._boundary_stack.pop()
+            self.function_stack.pop()
+            self.symbol_stack.pop()
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         """Track async function context."""
@@ -498,9 +636,68 @@ class TierModelVisitor(ast.NodeVisitor):
             self._decorator_lines.add(decorator.lineno)
         self.symbol_stack.append(node.name)
         self.function_stack.append(node)
-        self.generic_visit(node)
-        self.function_stack.pop()
-        self.symbol_stack.pop()
+        self._enter_boundary_context(node)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._boundary_stack.pop()
+            self.function_stack.pop()
+            self.symbol_stack.pop()
+
+    def _enter_boundary_context(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """Parse ``@trust_boundary`` (if present) and push the suppression context.
+
+        Always pushes onto ``_boundary_stack`` so the pop in the visit
+        wrappers is unconditional. A ``None`` entry means "no decorator on
+        this function" (the common case). Malformed decorators push
+        ``None`` AND emit a finding so the suppression is rejected loudly.
+
+        ``source_param`` is validated against the function signature here
+        (rather than relying on the runtime decorator's check) so the rule
+        can flag the decorator at lint time even if the function is never
+        imported. A mismatch is reported as R_TB_MALFORMED.
+        """
+        metadata, diagnostics = extract_boundary_metadata(node)
+        for diagnostic in diagnostics:
+            self._add_boundary_diagnostic(diagnostic)
+
+        if metadata is None:
+            self._boundary_stack.append(None)
+            return
+
+        # Confirm source_param actually names a parameter of the function.
+        # ``args.args`` covers positional + keyword-or-positional;
+        # ``kwonlyargs`` covers keyword-only; ``posonlyargs`` covers
+        # positional-only. ``vararg`` / ``kwarg`` cover ``*args`` / ``**kwargs``.
+        # If a decorator nominates ``**kwargs`` as the source_param, that is
+        # legitimate — the function body subscripts ``kwargs`` like a dict —
+        # so we include vararg/kwarg in the parameter set.
+        param_names: set[str] = set()
+        param_names.update(arg.arg for arg in node.args.posonlyargs)
+        param_names.update(arg.arg for arg in node.args.args)
+        param_names.update(arg.arg for arg in node.args.kwonlyargs)
+        if node.args.vararg is not None:
+            param_names.add(node.args.vararg.arg)
+        if node.args.kwarg is not None:
+            param_names.add(node.args.kwarg.arg)
+
+        if metadata.source_param not in param_names:
+            self._add_boundary_diagnostic(
+                BoundaryFinding(
+                    rule_id="R_TB_MALFORMED",
+                    message=(
+                        f"@trust_boundary(source_param={metadata.source_param!r}) does not "
+                        f"name a parameter of {node.name!r}; "
+                        f"signature parameters are {sorted(param_names)!r}."
+                    ),
+                    node=metadata.decorator_node,
+                )
+            )
+            self._boundary_stack.append(None)
+            return
+
+        derived_names = compute_derived_names(node, metadata.source_param)
+        self._boundary_stack.append((metadata, derived_names))
 
     def _is_default_return_value(self, value: ast.expr | None) -> bool:
         """True if return value is a silent default (None, empty container, empty string, zero)."""

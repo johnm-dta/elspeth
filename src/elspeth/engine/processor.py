@@ -2395,9 +2395,36 @@ class RowProcessor:
         This is the recovery entry point: a fresh processor can resume work
         items that were persisted by an earlier process without re-reading the
         source or re-running source-boundary validation.
+
+        **Single-active-resume precondition.** Per ADR-026 Precondition #9, a
+        multi-worker deployment cannot ship until a separate deployment-shape
+        ADR fixes worker identity, lease heartbeating (elspeth-ddde8144b6), and
+        spawn/supervision. Until then, exactly one ``RowProcessor`` may run a
+        drain against a given ``run_id`` at a time. This invariant is enforced
+        mechanically here: if any peer (non-caller) ``lease_owner`` holds an
+        unexpired LEASED row on this run, the drain refuses to start. The
+        sink-bound RowResult emission path in ``_drain_preexisting_pending_sinks``
+        would otherwise race with the peer's still-in-flight processing —
+        eventual lease expiry permits the helper to re-emit a RowResult for a
+        token the peer has already produced (filigree elspeth-66be4216cd, G3).
         """
         if self._scheduler is None:
             raise OrchestrationInvariantError("Cannot drain scheduled work without a scheduler repository")
+        peer_owners = self._scheduler.peer_active_leases(
+            run_id=self._run_id,
+            caller_owner=self._scheduler_lease_owner,
+            now=self._clock.now_utc(),
+        )
+        if peer_owners:
+            raise AuditIntegrityError(
+                f"Scheduler refusing to drain run_id={self._run_id!r} under "
+                f"lease_owner={self._scheduler_lease_owner!r}: peer worker(s) "
+                f"{list(peer_owners)!r} hold unexpired leases on the same run. "
+                "ADR-026 Precondition #9 (single-active-resume) is violated. "
+                "RC6 may not ship N>1 workers until the multi-worker "
+                "deployment-shape ADR lands and elspeth-ddde8144b6 (lease "
+                "heartbeat) is implemented."
+            )
         return self._drain_scheduler_claims(ctx=ctx, pending_items={}, recover_pending_sinks=True)
 
     def has_scheduled_work(self) -> bool:

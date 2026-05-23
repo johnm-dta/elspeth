@@ -549,12 +549,27 @@ class TokenSchedulerRepository:
                 )
         return self._item_from_mapping(claimed)
 
-    def recover_expired_leases(self, *, run_id: str, now: datetime) -> int:
+    def recover_expired_leases(self, *, run_id: str, now: datetime, caller_owner: str) -> int:
         """Return expired LEASED work to READY for retry by another worker.
 
         Recovery advances the durable scheduler attempt so any node state
         created before the crashed worker lost its lease is not replayed under
         the same ``(token_id, node_id, attempt)`` audit identity.
+
+        ``caller_owner`` is the lease_owner of the caller making the recovery
+        sweep (every RowProcessor instance owns a unique
+        ``row-processor:<run_id>:<uuid>`` identity). Leases owned by this caller
+        are skipped: a worker must never reap its own still-running lease.
+        Any token processing step that exceeds the lease window (LLM/HTTP
+        pipelines exceed the default with regularity) would otherwise have its
+        in-flight lease silently transitioned back to READY by the next
+        iteration of the same worker's drain loop, leaving the worker holding
+        a stale ``expected_lease_owner`` that fails CAS on the subsequent
+        ``mark_terminal`` / ``mark_pending_sink`` / ``mark_blocked`` write and
+        kills the run. The function's job is to reap leases held by *other*
+        workers (a previous crashed RowProcessor with a different uuid; in
+        future a peer worker), not the caller's own work. See
+        filigree elspeth-941f1508f5.
         """
         with self._engine.begin() as conn:
             expired = conn.execute(
@@ -562,6 +577,7 @@ class TokenSchedulerRepository:
                 .where(token_work_items_table.c.run_id == run_id)
                 .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
                 .where(token_work_items_table.c.lease_expires_at < now)
+                .where(token_work_items_table.c.lease_owner != caller_owner)
                 .order_by(token_work_items_table.c.ingest_sequence, token_work_items_table.c.step_index)
             ).mappings()
             recovered = 0
@@ -579,6 +595,7 @@ class TokenSchedulerRepository:
                     .where(token_work_items_table.c.work_item_id == row["work_item_id"])
                     .where(token_work_items_table.c.run_id == run_id)
                     .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
+                    .where(token_work_items_table.c.lease_owner != caller_owner)
                     .values(
                         work_item_id=next_work_item_id,
                         attempt=next_attempt,

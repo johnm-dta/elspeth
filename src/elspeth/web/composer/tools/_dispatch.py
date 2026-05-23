@@ -73,9 +73,6 @@ from elspeth.web.composer.tools.sessions import (
     _execute_get_pipeline_state,
     _handle_set_pipeline,
 )
-from elspeth.web.composer.tools.sinks import (
-    _handle_list_sinks,
-)
 from elspeth.web.composer.tools.sources import (
     _execute_inspect_source,
     _execute_set_source_from_blob,
@@ -85,6 +82,7 @@ from elspeth.web.composer.tools.sources import (
     _handle_set_source,
 )
 from elspeth.web.composer.tools.transforms import (
+    _handle_list_sinks,
     _handle_list_transforms,
     _handle_patch_node_options,
     _handle_remove_edge,

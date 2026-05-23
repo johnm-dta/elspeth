@@ -7,8 +7,8 @@ Decomposed package. Plane modules:
   every other plane imports from.
 - ``blobs`` — session-scoped binary blob storage handlers.
 - ``sources`` — source-spec mutation handlers and source-from-blob bridge.
-- ``transforms`` — node, edge, metadata graph-mutation handlers.
-- ``sinks`` — sink discovery.
+- ``transforms`` — node, edge, metadata graph-mutation handlers, plus sink
+  discovery (sinks are terminal transforms; no separate plane).
 - ``outputs`` — output (sink-instance) mutation handlers.
 - ``recipes`` — pipeline-recipe discovery and application handlers.
 - ``secrets`` — secret-reference discovery, validation, and wiring handlers.
@@ -208,9 +208,6 @@ from elspeth.web.composer.tools.sessions import (
     _serialize_full_pipeline_state,
     _utc_day_start,
 )
-from elspeth.web.composer.tools.sinks import (
-    _handle_list_sinks,
-)
 from elspeth.web.composer.tools.sources import (
     _MIME_TO_SOURCE,
     SourceBlobPayload,
@@ -240,6 +237,7 @@ from elspeth.web.composer.tools.transforms import (
     _execute_set_metadata,
     _execute_upsert_edge,
     _execute_upsert_node,
+    _handle_list_sinks,
     _handle_list_transforms,
     _handle_patch_node_options,
     _handle_remove_edge,

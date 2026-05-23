@@ -1086,14 +1086,155 @@ def _build_yaml_entry_text(
     return "\n".join(lines) + "\n"
 
 
+# YAML 1.1 implicit-resolver regexes lifted verbatim from PyYAML's
+# ``yaml.resolver.Resolver`` registrations (site-packages/yaml/resolver.py).
+# PyYAML's safe_load is the loader we round-trip through; any plain scalar
+# that one of these patterns matches will be coerced from str to a non-str
+# Python value on reload. For a Tier-1 audit field that operator-supplied
+# strings flow into (e.g. ``--owner yes``), that silent type change is
+# evidence corruption. The writer's job is to quote the string in those
+# cases so the loader receives an explicit ``tag:yaml.org,2002:str``.
+#
+# Case matters: PyYAML's bool regex is NOT case-insensitive — only the
+# three variants lower/Title/UPPER per word — so ``yEs`` round-trips fine
+# unquoted. We replicate that exactly rather than over-quoting on a
+# case-insensitive match.
+_YAML11_BOOL_RE = re.compile(
+    r"""^(?:yes|Yes|YES|no|No|NO
+            |true|True|TRUE|false|False|FALSE
+            |on|On|ON|off|Off|OFF)$""",
+    re.VERBOSE,
+)
+_YAML11_NULL_RE = re.compile(
+    r"""^(?: ~
+            |null|Null|NULL
+            | )$""",
+    re.VERBOSE,
+)
+_YAML11_INT_RE = re.compile(
+    r"""^(?:[-+]?0b[0-1_]+
+            |[-+]?0[0-7_]+
+            |[-+]?(?:0|[1-9][0-9_]*)
+            |[-+]?0x[0-9a-fA-F_]+
+            |[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+)$""",
+    re.VERBOSE,
+)
+_YAML11_FLOAT_RE = re.compile(
+    r"""^(?:[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?
+            |\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?
+            |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*
+            |[-+]?\.(?:inf|Inf|INF)
+            |\.(?:nan|NaN|NAN))$""",
+    re.VERBOSE,
+)
+_YAML11_MERGE_RE = re.compile(r"^(?:<<)$")
+_YAML11_VALUE_RE = re.compile(r"^(?:=)$")
+_YAML11_TIMESTAMP_RE = re.compile(
+    r"""^(?:[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]
+            |[0-9][0-9][0-9][0-9] -[0-9][0-9]? -[0-9][0-9]?
+             (?:[Tt]|[ \t]+)[0-9][0-9]?
+             :[0-9][0-9] :[0-9][0-9] (?:\.[0-9]*)?
+             (?:[ \t]*(?:Z|[-+][0-9][0-9]?(?::[0-9][0-9])?))?)$""",
+    re.VERBOSE,
+)
+
+_YAML11_IMPLICIT_NON_STR_RESOLVERS: tuple[re.Pattern[str], ...] = (
+    _YAML11_BOOL_RE,
+    _YAML11_NULL_RE,
+    _YAML11_INT_RE,
+    _YAML11_FLOAT_RE,
+    _YAML11_MERGE_RE,
+    _YAML11_VALUE_RE,
+    _YAML11_TIMESTAMP_RE,
+)
+
+
+def _value_resolves_to_non_str(value: str) -> bool:
+    """Return True iff PyYAML safe_load would coerce ``value`` (as a plain
+    scalar) to something other than ``str``.
+
+    The empty string is included because PyYAML's null resolver matches it
+    (see the regex: alternation ``| `` with an empty alternative); an
+    unquoted empty value reloads as ``None``.
+    """
+    if value == "":
+        return True
+    return any(pattern.match(value) is not None for pattern in _YAML11_IMPLICIT_NON_STR_RESOLVERS)
+
+
 def _yaml_inline_scalar(value: str) -> str:
     """Quote a string for inline YAML scalar emission when it needs it.
 
-    Conservative: any character outside ``[A-Za-z0-9._/-]`` triggers
-    single-quoting. Single quotes inside the value are escaped by
-    doubling them, per YAML 1.2.
+    Two reasons to quote:
+
+    1. The value contains characters outside the bare-scalar safe set
+       (``[A-Za-z0-9._/-]``) — the historic reason this helper existed.
+    2. The value, while bare-safe, would be coerced to a non-string by
+       PyYAML's safe_load implicit resolvers — e.g. ``yes`` → ``True``,
+       ``null`` → ``None``, ``42`` → ``42``, ``2024-01-01`` → ``date``.
+       This is the C2-5 fix: an operator passing ``--owner yes`` must
+       not have the audit record's ``owner`` field reload as the Python
+       boolean ``True``.
+
+    Quoting style is single-quoted with internal ``'`` doubled, per YAML
+    1.1 §9.3.2. Single-quoted scalars cannot represent C0 control
+    characters (NUL through US, excluding TAB/LF/CR per YAML 1.1 §5.3);
+    rather than silently producing un-loadable YAML, we raise. Pathological
+    inputs in a Tier-1 audit field are a programmer-error signal, not a
+    user-data-fault to coerce around.
     """
-    if value and all(ch.isalnum() or ch in "._/-" for ch in value):
+    # PyYAML's Reader.NON_PRINTABLE pattern (yaml/reader.py) defines the
+    # exact set of codepoints safe_load accepts. Anything outside it raises
+    # ReaderError at load time with a stack trace that doesn't point at the
+    # writer. We replicate the rejection at write time so the failure
+    # surfaces with a message that names the audit field and the offending
+    # codepoint. The accepted set is:
+    #   TAB (\x09), LF (\x0A), CR (\x0D),
+    #   \x20-\x7E (printable ASCII),
+    #   \x85 (NEL), \xA0-퟿, -�,
+    #   \U00010000-\U0010FFFF
+    # All other codepoints are unrepresentable in a YAML 1.1 single-quoted
+    # scalar that the loader will accept.
+    # Inside the reader-accepted set, single-quoted *flow* (inline) scalars
+    # further fold LF / CR / NEL to a single space at load time (YAML 1.1
+    # §6.3.2 line-break normalisation); the bytes survive the reader but
+    # are not preserved on round-trip. Reject both classes here so the
+    # failure surfaces at write time with a message naming the codepoint,
+    # rather than as a silent reload corruption or a downstream ReaderError
+    # with an unhelpful stack trace.
+    #
+    # The multi-paragraph audit fields (``reason``, ``safety``,
+    # ``judge_rationale``) legitimately contain newlines; they go through
+    # block-scalar emission (``|-``) elsewhere in _build_yaml_entry_text
+    # and never reach this helper.
+    folded_line_breaks = {0x0A, 0x0D, 0x85}
+    for ch in value:
+        codepoint = ord(ch)
+        reader_accepts = (
+            ch in "\t\n\r"
+            or 0x20 <= codepoint <= 0x7E
+            or codepoint == 0x85
+            or 0xA0 <= codepoint <= 0xD7FF
+            or 0xE000 <= codepoint <= 0xFFFD
+            or 0x10000 <= codepoint <= 0x10FFFF
+        )
+        if not reader_accepts:
+            raise ValueError(
+                f"_yaml_inline_scalar: value contains non-printable character "
+                f"U+{codepoint:04X} which PyYAML's safe_load rejects; "
+                f"refusing to emit corrupt audit data. Caller must "
+                f"sanitise upstream."
+            )
+        if codepoint in folded_line_breaks:
+            raise ValueError(
+                f"_yaml_inline_scalar: value contains line-break character "
+                f"U+{codepoint:04X} which YAML's single-quoted flow scalar "
+                f"folds to a single space on reload; refusing to emit a "
+                f"value that won't round-trip. Use a block scalar for "
+                f"multi-line audit fields."
+            )
+    needs_quote = not value or any(not (ch.isalnum() or ch in "._/-") for ch in value) or _value_resolves_to_non_str(value)
+    if not needs_quote:
         return value
     escaped = value.replace("'", "''")
     return f"'{escaped}'"

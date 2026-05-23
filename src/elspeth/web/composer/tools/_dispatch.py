@@ -512,3 +512,46 @@ for _decl in _REGISTERED_TOOLS:
         )
 
 del _decl, _name, _handler  # keep module namespace clean
+
+
+# ---------------------------------------------------------------------------
+# MANIFEST ↔ registry set-equality invariant.
+#
+# Closes LLM-safety review finding #2 (2026-05-23): a tool registered in the
+# composer-tools surface but not present in ``redaction.MANIFEST`` is the
+# asymmetric failure mode of the existing call-time guard. The dispatcher
+# would route the call, the handler would run, and the response-redaction
+# path at ``service.py`` would skip redaction silently because its lookup
+# (``if tool_name in MANIFEST:``) gates on presence. Raw LLM-supplied
+# arguments and raw handler responses would then land in ``chat_messages``
+# without sanitisation — a Tier-1 audit-integrity breach.
+#
+# The reverse direction (MANIFEST entry without registered tool) was already
+# caught at call time by ``redact_tool_call_response``'s ``not in MANIFEST``
+# guard. This block closes the forward direction.
+#
+# Cycle note: ``redaction.py`` cannot perform this check itself — it is
+# imported BY every plane module (which ``_registry.py`` aggregates). At
+# the point ``_dispatch.py``'s module body executes, both ``redaction.MANIFEST``
+# and the registry have fully loaded, so the import is safe here.
+#
+# ``request_advisor_hint`` lives in MANIFEST but not in any handler dict —
+# it is intercepted in ``service.py`` before ``execute_tool``. Including
+# it in the expected set keeps the equality precise.
+# ---------------------------------------------------------------------------
+
+from elspeth.web.composer.redaction import MANIFEST as _MANIFEST  # noqa: E402  (after-registry by design)
+
+_expected_manifest_names: frozenset[str] = (
+    frozenset(decl.name for decl in _REGISTERED_TOOLS) | frozenset(_SESSION_AWARE_TOOL_HANDLERS) | frozenset({"request_advisor_hint"})
+)
+_manifest_names: frozenset[str] = frozenset(_MANIFEST.keys())
+if _expected_manifest_names != _manifest_names:
+    raise RuntimeError(
+        "redaction.MANIFEST diverges from the composer tool registry — every "
+        "dispatchable tool MUST have a MANIFEST entry or its response will be "
+        "persisted without redaction. "
+        f"+{_expected_manifest_names - _manifest_names} (registered but no MANIFEST entry) "
+        f"-{_manifest_names - _expected_manifest_names} (MANIFEST entry without a registered tool)"
+    )
+del _expected_manifest_names, _manifest_names

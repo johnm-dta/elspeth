@@ -77,11 +77,20 @@ class ToolKind(Enum):
     """Tool-classification kinds.
 
     Each declaration carries exactly one kind. The kind determines (a) which
-    dispatcher path the handler is routed through (sync vs async, plain vs
-    blob vs secret kwarg shape) and (b) which ``discovery.py`` name-set the
-    tool's name must appear in. Discovery vs mutation is the cacheability
-    boundary; blob vs secret is the kwarg-shape boundary; session-aware is
-    the sync/async boundary.
+    dispatcher path the handler is routed through (plain vs blob vs secret
+    kwarg shape) and (b) which ``_registry`` name-set the tool's name must
+    appear in. Discovery vs mutation is the cacheability boundary; blob vs
+    secret is the kwarg-shape boundary.
+
+    Session-aware async tools do NOT have a ``ToolKind`` member today —
+    they are dispatched outside ``execute_tool`` via the async session
+    path and do not carry a ``ToolDeclaration`` because the declaration's
+    ``handler`` is typed synchronously. Widening to admit async is tracked
+    under ``elspeth-f5da936747``; when that lands, a ``SESSION_AWARE`` kind
+    will be re-added concurrently with the first declaration that uses it.
+    Advertising an enum value with no callers today would be a dead
+    forward-pretend that this commit removes (solution-architect M1
+    review finding, 2026-05-23).
     """
 
     DISCOVERY = "discovery"
@@ -90,7 +99,6 @@ class ToolKind(Enum):
     BLOB_MUTATION = "blob_mutation"
     SECRET_DISCOVERY = "secret_discovery"
     SECRET_MUTATION = "secret_mutation"
-    SESSION_AWARE = "session_aware"
 
 
 _MUTATION_KINDS: Final[frozenset[ToolKind]] = frozenset(
@@ -98,7 +106,6 @@ _MUTATION_KINDS: Final[frozenset[ToolKind]] = frozenset(
         ToolKind.MUTATION,
         ToolKind.BLOB_MUTATION,
         ToolKind.SECRET_MUTATION,
-        ToolKind.SESSION_AWARE,
     }
 )
 

@@ -919,9 +919,15 @@ class TestToolDeclarationInvariants:
         with pytest.raises(ValueError, match="cacheable=True is forbidden"):
             self._make(kind=ToolKind.MUTATION, cacheable=True)
 
-    def test_cacheable_session_aware_raises(self) -> None:
-        with pytest.raises(ValueError, match="cacheable=True is forbidden"):
-            self._make(kind=ToolKind.SESSION_AWARE, cacheable=True)
+    def test_tool_kind_has_no_session_aware_value(self) -> None:
+        """SESSION_AWARE was a dead enum value advertising a shape no
+        declaration carried — removed by the 2026-05-23 four-agent review
+        cleanup. When ``elspeth-f5da936747`` widens ``ToolDeclaration`` to
+        admit async handlers, ``SESSION_AWARE`` will be re-added together
+        with the first declaration that uses it. This test pins that
+        invariant so the kind cannot silently re-appear unaccompanied.
+        """
+        assert "SESSION_AWARE" not in ToolKind.__members__
 
     def test_non_blob_mutation_with_blob_quota_raises(self) -> None:
         with pytest.raises(ValueError, match="needs_blob_quota=True is "):

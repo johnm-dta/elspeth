@@ -138,8 +138,11 @@ _CATEGORY_BY_KIND: Final[dict[ToolKind, str]] = {
     ToolKind.BLOB_MUTATION: _BLOBS_CATEGORY,
     ToolKind.SECRET_DISCOVERY: _SECRETS_CATEGORY,
     ToolKind.SECRET_MUTATION: _SECRETS_CATEGORY,
-    ToolKind.SESSION_AWARE: _DIAGNOSTICS_CATEGORY,
 }
+# The session-aware tool ``request_interpretation_review`` does not carry a
+# ``ToolKind`` (it dispatches outside ``execute_tool`` and is not in
+# ``_REGISTERED_TOOLS``); its category is set explicitly via
+# ``_CATEGORY_OVERRIDES`` below.
 
 # Per-tool inline annotations — hand-curated parenthetical guidance appended
 # after the backticked tool name within its category bullet. These are

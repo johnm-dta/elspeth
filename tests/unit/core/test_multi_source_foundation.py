@@ -1674,7 +1674,16 @@ def test_scheduler_recover_expired_leases_reaps_null_owner_wedged_row() -> None:
         row_payload_json=payload,
     )
     # Forge an invariant-violating wedge: status=LEASED but lease_owner=NULL.
+    # ``ck_token_work_items_lease_owner_required_when_leased`` (elspeth-36d5635402)
+    # now actually rejects this in normal writes; the wedge can still appear in
+    # production via direct DB tampering, manual operator UPDATE, schema
+    # migration drift, or restore from a backup taken before the CHECK
+    # literal was corrected. ``recover_expired_leases`` is defence-in-depth
+    # for those out-of-band scenarios, so the test temporarily bypasses
+    # ``ignore_check_constraints`` to construct the otherwise-unreachable
+    # input state.
     with engine.begin() as conn:
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = ON")
         conn.execute(
             token_work_items_table.update()
             .where(token_work_items_table.c.work_item_id == item.work_item_id)
@@ -1684,6 +1693,7 @@ def test_scheduler_recover_expired_leases_reaps_null_owner_wedged_row() -> None:
                 lease_expires_at=now + timedelta(seconds=30),
             )
         )
+        conn.exec_driver_sql("PRAGMA ignore_check_constraints = OFF")
 
     recovered = repo.recover_expired_leases(
         run_id="run-1",

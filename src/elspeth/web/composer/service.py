@@ -73,6 +73,11 @@ from elspeth.web.composer.llm_response_parsing import (
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
     ComposerProgressSink,
+    _emit_progress,
+    _model_call_progress_event,
+    _tool_batch_progress_event,
+    _tool_completed_progress_event,
+    _tool_started_progress_event,
     convergence_progress_event,
 )
 from elspeth.web.composer.prompts import build_messages, build_run_diagnostics_messages, build_system_prompt
@@ -4490,143 +4495,6 @@ def _infer_provider_from_unprefixed_model_name(model: str) -> str | None:
     if normalized.startswith("claude"):
         return "anthropic"
     return None
-
-
-async def _emit_progress(
-    progress: ComposerProgressSink | None,
-    event: ComposerProgressEvent,
-) -> None:
-    """Emit provider-safe progress when a sink is available."""
-    if progress is None:
-        return
-    await progress(event)
-
-
-def _model_call_progress_event(message: str) -> ComposerProgressEvent:
-    headline = "I'm asking the model to choose the next safe pipeline update."
-    normalized = message.lower()
-    if "html" in normalized and "json" in normalized:
-        headline = "I'm asking the model to choose an HTML input and JSON output."
-    return ComposerProgressEvent(
-        phase="calling_model",
-        headline=headline,
-        evidence=("The composer is using the prepared prompt and visible pipeline state.",),
-        likely_next="The model may answer directly or request safe pipeline tools.",
-    )
-
-
-def _tool_batch_progress_event(tool_names: tuple[str, ...]) -> ComposerProgressEvent:
-    if any(_is_schema_or_catalog_tool(name) for name in tool_names):
-        return ComposerProgressEvent(
-            phase="using_tools",
-            headline="The model requested plugin schemas.",
-            evidence=("Checking available source, transform, and sink tools.",),
-            likely_next="ELSPETH will use visible schemas to guide the pipeline shape.",
-        )
-    if any(name in {"get_pipeline_state", "preview_pipeline", "diff_pipeline"} for name in tool_names):
-        return ComposerProgressEvent(
-            phase="using_tools",
-            headline="The model is checking the current pipeline.",
-            evidence=("Reading the visible pipeline graph and validation summary.",),
-            likely_next="ELSPETH will compare the request with the current setup.",
-        )
-    if any(_is_secret_tool(name) for name in tool_names):
-        return ComposerProgressEvent(
-            phase="using_tools",
-            headline="The model is checking available secret references.",
-            evidence=("Checking available secret references without reading secret values.",),
-            likely_next="ELSPETH will keep any credential references deferred.",
-        )
-    if any(not is_discovery_tool(name) for name in tool_names):
-        return ComposerProgressEvent(
-            phase="using_tools",
-            headline="The model is updating the pipeline graph.",
-            evidence=("A pipeline-editing tool was requested.",),
-            likely_next="ELSPETH will validate the result before saving it.",
-        )
-    return ComposerProgressEvent(
-        phase="using_tools",
-        headline="The model requested composer tool information.",
-        evidence=("Checking visible composer tool results.",),
-        likely_next="ELSPETH will continue from the tool response.",
-    )
-
-
-def _tool_started_progress_event(tool_name: str) -> ComposerProgressEvent:
-    if _is_schema_or_catalog_tool(tool_name):
-        return ComposerProgressEvent(
-            phase="using_tools",
-            headline="I'm checking available source, transform, and sink tools.",
-            evidence=("Reading plugin names and schemas only.",),
-            likely_next="ELSPETH will choose compatible pipeline components.",
-        )
-    if _is_secret_tool(tool_name):
-        return ComposerProgressEvent(
-            phase="using_tools",
-            headline="I'm checking available secret references.",
-            evidence=("Secret names can be checked; secret values stay hidden.",),
-            likely_next="ELSPETH will wire only deferred secret references if needed.",
-        )
-    if is_discovery_tool(tool_name):
-        return ComposerProgressEvent(
-            phase="using_tools",
-            headline="I'm checking the current pipeline and tool context.",
-            evidence=("Reading visible composer state.",),
-            likely_next="ELSPETH will use the result to decide the next action.",
-        )
-    return ComposerProgressEvent(
-        phase="using_tools",
-        headline="I'm updating the pipeline graph.",
-        evidence=("A pipeline-editing tool is running.",),
-        likely_next="ELSPETH will validate the updated pipeline.",
-    )
-
-
-def _tool_completed_progress_event(tool_name: str, success: bool) -> ComposerProgressEvent:
-    if not success:
-        return ComposerProgressEvent(
-            phase="using_tools",
-            headline="A composer tool reported a visible blocker.",
-            evidence=("The tool result was returned without exposing raw request values.",),
-            likely_next="ELSPETH will ask the model to adjust the pipeline request.",
-        )
-    if is_discovery_tool(tool_name):
-        return ComposerProgressEvent(
-            phase="using_tools",
-            headline="The requested tool information is ready.",
-            evidence=(_safe_tool_evidence(tool_name),),
-            likely_next="ELSPETH will continue with the visible result.",
-        )
-    return ComposerProgressEvent(
-        phase="validating",
-        headline="The composer has updated the pipeline and is validating the result.",
-        evidence=("A pipeline-editing tool completed successfully.",),
-        likely_next="ELSPETH will save the updated pipeline if it is accepted.",
-    )
-
-
-def _is_schema_or_catalog_tool(tool_name: str) -> bool:
-    return tool_name in {
-        "list_sources",
-        "list_transforms",
-        "list_sinks",
-        "get_plugin_schema",
-        "list_models",
-    }
-
-
-def _is_secret_tool(tool_name: str) -> bool:
-    return tool_name in {"list_secret_refs", "validate_secret_ref", "wire_secret_ref"}
-
-
-def _safe_tool_evidence(tool_name: str) -> str:
-    if _is_schema_or_catalog_tool(tool_name):
-        return "Checking available source, transform, and sink tools."
-    if _is_secret_tool(tool_name):
-        return "Checking available secret references without reading secret values."
-    if tool_name in {"get_pipeline_state", "preview_pipeline", "diff_pipeline"}:
-        return "Reading the visible pipeline graph and validation summary."
-    return "Using visible composer tool output."
 
 
 def _pydantic_default(obj: Any) -> Any:

@@ -68,8 +68,9 @@ def setup_resume_context(
     Returns:
         GraphArtifacts populated from existing Landscape records.
     """
-    # Get explicit node ID mappings from graph
-    source_id = graph.get_source()
+    # Get explicit node ID mappings from graph. Resume must preserve every
+    # source root from the original multi-source DAG; a singleton
+    # ``graph.get_source()`` lookup is intentionally single-source-only.
     source_id_map: dict[str, NodeID] = {}
     for candidate_source_id in graph.get_sources():
         source_info = graph.get_node_info(candidate_source_id)
@@ -80,6 +81,7 @@ def setup_resume_context(
                 f"This is a graph-construction bug — node config keys: {sorted(source_info.config.keys())}."
             )
         source_id_map[str(source_info.config["source_name"])] = candidate_source_id
+    source_id = next(iter(source_id_map.values()))
     sink_id_map = graph.get_sink_id_map()
     transform_id_map = graph.get_transform_id_map()
     config_gate_id_map = graph.get_config_gate_id_map()

@@ -259,8 +259,6 @@ def _setup_adr019_failed_resume_run(
                 canonical_version="v1",
                 status=RunStatus.FAILED,
                 source_schema_json=json.dumps({"properties": {"value": {"type": "integer"}}, "required": ["value"]}),
-                schema_contract_json=audit_record.to_json(),
-                schema_contract_hash=contract.version_hash(),
                 runtime_val_manifest_json=_runtime_val_manifest_json(),
                 openrouter_catalog_sha256="0" * 64,
                 openrouter_catalog_source="bundled",
@@ -505,6 +503,8 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
         source_id,
         edge_map,
         *,
+        active_source_name,
+        active_source,
         shutdown_event=None,
         flush_end_of_input=True,
     ):
@@ -583,6 +583,8 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
             run_id,
             source_id,
             edge_map,
+            active_source_name=active_source_name,
+            active_source=active_source,
             shutdown_event=shutdown_event,
             flush_end_of_input=flush_end_of_input,
         )

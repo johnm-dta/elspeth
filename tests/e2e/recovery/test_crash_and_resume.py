@@ -312,7 +312,6 @@ class TestResumeIdempotence:
         run = factory.run_lifecycle.begin_run(
             config={"test": "resume"},
             canonical_version="sha256-rfc8785-v1",
-            schema_contract=source_contract,
         )
         run_id = run.run_id
 
@@ -381,7 +380,29 @@ class TestResumeIdempotence:
             mode=RoutingMode.MOVE,
         )
 
-        # Contract already stored via begin_run(schema_contract=...) above.
+        # ADR-025 §3 Decision 5 (G6): schema contracts live exclusively in
+        # ``run_sources``. The legacy ``begin_run(schema_contract=...)``
+        # path was deleted; resume reconstruction now reads the contract
+        # from the per-source ``run_sources`` record. Mirror what the
+        # production orchestrator writes via ``_emit_source_loading``.
+        factory.run_lifecycle.record_run_source(
+            run_id=run_id,
+            source_node_id="source",
+            source_name="source",
+            plugin_name="list_source",
+            config_hash="crash-and-resume",
+            lifecycle_state="loaded",
+            source_schema_json=json.dumps(
+                {
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "value": {"type": "integer"},
+                    },
+                    "required": ["id", "value"],
+                }
+            ),
+            schema_contract=source_contract,
+        )
         # Record the source node's output contract for resume.
         factory.data_flow.update_node_output_contract(run_id, "source", source_contract)
 
@@ -999,7 +1020,6 @@ class TestAggregationRecovery:
         run = factory.run_lifecycle.begin_run(
             config={"aggregation": {"trigger": {"count": 5}}},
             canonical_version="sha256-rfc8785-v1",
-            schema_contract=test_contract,
         )
 
         # Register nodes using raw SQL
@@ -1032,6 +1052,21 @@ class TestAggregationRecovery:
                 )
             )
             conn.commit()
+
+        # ADR-025 §3 Decision 5 (G6): record per-source contract via
+        # ``run_sources`` (the legacy ``begin_run(schema_contract=...)``
+        # path was deleted; readers and writers are now symmetric on
+        # ``run_sources``).
+        factory.run_lifecycle.record_run_source(
+            run_id=run.run_id,
+            source_node_id="source",
+            source_name="source",
+            plugin_name="test_source",
+            config_hash="test",
+            lifecycle_state="loaded",
+            source_schema_json='{"properties": {"test_field": {"type": "string"}}, "required": ["test_field"]}',
+            schema_contract=test_contract,
+        )
 
         # Create 3 rows (partial aggregation -- trigger is at 5)
         tokens = []

@@ -1620,7 +1620,9 @@ class DataFlowRepository:
             contract: SchemaContract with inferred/evolved fields
 
         Note:
-            This is the complement to update_run_contract() for node-level contracts.
+            This is the complement to ``update_run_source_contract()`` for
+            node-level contracts (the per-source ``run_sources`` writer that
+            superseded the deleted run-level singleton ``update_run_contract``).
             Used for dynamic schema discovery and transform schema evolution.
         """
         audit_record = ContractAuditRecord.from_contract(contract)

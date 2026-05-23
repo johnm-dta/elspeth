@@ -100,7 +100,6 @@ class TestAggregationRecoveryIntegration:
         run = factory.run_lifecycle.begin_run(
             config={"aggregation": {"trigger": {"count": 3}}},
             canonical_version="sha256-rfc8785-v1",
-            schema_contract=_create_test_schema_contract(),
         )
 
         # Register nodes using raw SQL to avoid schema_config requirement
@@ -224,7 +223,6 @@ class TestAggregationRecoveryIntegration:
         run = factory.run_lifecycle.begin_run(
             config={"aggregations": ["sum", "count"]},
             canonical_version="sha256-rfc8785-v1",
-            schema_contract=_create_test_schema_contract(),
         )
 
         # Register multiple aggregation nodes
@@ -325,7 +323,6 @@ class TestAggregationRecoveryIntegration:
         run = factory.run_lifecycle.begin_run(
             config={"test": "order_preservation"},
             canonical_version="sha256-rfc8785-v1",
-            schema_contract=_create_test_schema_contract(),
         )
 
         self._register_nodes_raw(db, run.run_id)
@@ -385,7 +382,6 @@ class TestAggregationRecoveryIntegration:
         run = factory.run_lifecycle.begin_run(
             config={"test": "retry_validation"},
             canonical_version="sha256-rfc8785-v1",
-            schema_contract=_create_test_schema_contract(),
         )
 
         self._register_nodes_raw(db, run.run_id)
@@ -536,7 +532,6 @@ class TestAggregationRecoveryIntegration:
         run = factory.run_lifecycle.begin_run(
             config={"aggregation": {"trigger": {"timeout_seconds": 60}}},
             canonical_version="sha256-rfc8785-v1",
-            schema_contract=_create_test_schema_contract(),
         )
 
         self._register_nodes_raw(db, run.run_id)

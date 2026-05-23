@@ -4,8 +4,8 @@ This module contains pure functions that write run-setup records to the
 Landscape audit trail:
 - register_nodes with the data-flow repository for every node in the execution
   graph (resolving plugin metadata, schema config, output contract per node)
-- record_schema_contract: persist the source schema contract at run and
-  source-node level and expose it to transforms via the plugin context
+- record_schema_contract: persist the source schema contract at source-node
+  level and expose it to transforms via the plugin context
 
 All functions operate on external state passed via parameters - they don't
 maintain internal state. This follows the same pattern as aggregation.py and
@@ -152,6 +152,9 @@ def record_schema_contract(
         return False
 
     # Update source-scoped resume metadata before row processing can fail.
+    # Per ADR-025 §3 Decision 5 (G6), ``run_sources.schema_contract_json`` is
+    # the single authoritative writer/reader for resume contracts. Do not also
+    # write the legacy run-level singleton surface.
     factory.run_lifecycle.update_run_source_contract(
         run_id=run_id,
         source_node_id=source_id,
@@ -159,11 +162,6 @@ def record_schema_contract(
     )
     # Update source node's output_contract (was NULL at registration)
     factory.data_flow.update_node_output_contract(run_id, source_id, schema_contract)
-    # Preserve the legacy run-level singleton for single-source consumers,
-    # but never let it block later source-scoped contracts in multi-source
-    # runs. Per-source run_sources records are authoritative for resume.
-    if factory.run_lifecycle.get_run_contract(run_id) is None:
-        factory.run_lifecycle.update_run_contract(run_id, schema_contract)
     # Make contract available to transforms via context
     ctx.contract = schema_contract
     return True

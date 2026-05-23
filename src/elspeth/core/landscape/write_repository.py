@@ -100,8 +100,6 @@ class LandscapeWriteRepository:
                         exported_at=None,
                         export_format=None,
                         export_sink=None,
-                        schema_contract_json=None,
-                        schema_contract_hash=None,
                         runtime_val_manifest_json=None,
                         llm_call_count=llm_call_count,
                         seeded_from_cache=seeded_from_cache,

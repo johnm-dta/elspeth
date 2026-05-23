@@ -177,8 +177,6 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
@@ -809,8 +807,6 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
@@ -1052,8 +1048,6 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
@@ -1280,8 +1274,6 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
@@ -1508,8 +1500,6 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
@@ -1729,8 +1719,6 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
@@ -2554,15 +2542,14 @@ class TestMultiSourceResumeContractDispatch:
         self,
         resume_test_env: dict[str, Any],
     ) -> None:
-        """Single-source resume still works after structural change.
+        """Single-source resume still works after the singleton deletion.
 
-        Regression guard: ADR-025 deletes the singular ResumeState field,
-        but legitimate single-source pipelines must keep resuming. This
-        test builds a single-source FAILED run via the pre-RC6 legacy
-        writer (only ``runs.contract_json``, no ``run_sources``) and
-        asserts the resume reconstruction returns a single-entry
-        ``schema_contracts_by_source`` keyed by the source NodeID
-        observed on the recovered rows.
+        Regression guard: ADR-025 §3 Decision 5 (G6) deletes the run-level
+        singleton contract columns; schema contracts now live exclusively
+        in ``run_sources``. A legitimate single-source pipeline writes
+        exactly one ``run_sources`` row and the resume reconstruction must
+        return a single-entry ``schema_contracts_by_source`` keyed by the
+        source NodeID observed on the recovered rows.
         """
         db = resume_test_env["db"]
         checkpoint_mgr = resume_test_env["checkpoint_manager"]
@@ -2601,8 +2588,6 @@ class TestMultiSourceResumeContractDispatch:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=contract_json,
-                    schema_contract_hash=contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
@@ -2625,6 +2610,21 @@ class TestMultiSourceResumeContractDispatch:
                         registered_at=now,
                     )
                 )
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="source-only",
+                    source_name="source",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=contract_json,
+                    schema_contract_hash=contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
             conn.execute(
                 edges_table.insert().values(
                     edge_id="e-only",
@@ -2680,8 +2680,8 @@ class TestMultiSourceResumeContractDispatch:
             payload_store,
         )
 
-        # The single-source path constructs the per-source map from the
-        # legacy run_contract keyed under the rows' shared source NodeID.
+        # The per-source resume path returns a single-entry map keyed by
+        # the only source NodeID observed in the recovered rows.
         assert set(state.schema_contracts_by_source) == {source_node_id}
         assert state.schema_contracts_by_source[source_node_id].version_hash() == contract_hash
         assert len(state.unprocessed_rows) == 1

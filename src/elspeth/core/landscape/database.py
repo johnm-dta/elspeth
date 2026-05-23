@@ -94,9 +94,6 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("node_states", "success_reason_json"),
     # Operation call linkage - enables source/sink call tracking
     ("calls", "operation_id"),
-    # Phase 5: Schema contract audit trail - captures contracts in effect for run
-    ("runs", "schema_contract_json"),
-    ("runs", "schema_contract_hash"),
     # Phase 5: Plugin contract audit trail - captures input/output contracts per node
     ("nodes", "input_contract_json"),
     ("nodes", "output_contract_json"),

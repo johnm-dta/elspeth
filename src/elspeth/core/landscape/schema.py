@@ -121,10 +121,6 @@ runs_table = Table(
     Column("exported_at", DateTime(timezone=True)),  # When export completed
     Column("export_format", String(16)),  # csv, json
     Column("export_sink", String(128)),  # Sink name used for export
-    # Schema contract for audit trail (Phase 5: Unified Schema Contracts)
-    # Stores the run-level schema contract with field resolution and types
-    Column("schema_contract_json", Text),  # Full contract with field resolution and types
-    Column("schema_contract_hash", String(16)),  # version_hash for integrity verification
     # Runtime-VAL manifest for audit trail (ADR-010 §Decision 3 M3).
     # Captures the set of DeclarationContract and Tier-1 error classes
     # registered at bootstrap, serialized as canonical JSON. Enables auditor

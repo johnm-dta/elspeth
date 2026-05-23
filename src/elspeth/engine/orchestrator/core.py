@@ -1032,23 +1032,27 @@ class Orchestrator:
         try:
             self._events.emit(PhaseStarted(phase=PipelinePhase.DATABASE, action=PhaseAction.CONNECTING))
 
-            # Legacy run-level source schema for resume type restoration.
-            # Per-source run_sources records are authoritative for RC6+.
-            # This enables proper type coercion (datetime/Decimal) when resuming from JSON payloads
-            # SourceProtocol requires output_schema - all sources have schemas (even dynamic ones)
-            first_source = next(iter(config.sources.values()))
+            # Serialize the first source's schema for resume type restoration.
+            # This enables proper type coercion (datetime/Decimal) when resuming
+            # from JSON payloads. Per-source schema contracts live exclusively in
+            # ``run_sources`` (one row per declared source), populated by
+            # ``_run_main_processing_loop`` as each source iterates — this is the
+            # G6 (elspeth-2e2f2184ab) contract. The run-level ``schema_contract``
+            # singleton was deleted because writers and the integrity verifier
+            # disagreed about which surface was authoritative.
+            # ``runs.source_schema_json`` remains as the first source's typed-
+            # resume header (single-source legacy shape) and is scheduled for
+            # deletion when G6 (elspeth-2e2f2184ab) lands; multi-source resume
+            # already reads per-source schemas from ``run_sources.schema_json``.
+            first_source_name = next(iter(config.sources))
+            first_source = config.sources[first_source_name]
             source_schema_json = json.dumps(first_source.output_schema.model_json_schema())
-
-            # Get source schema contract for resume PipelineRow wrapping
-            # This enables proper contract propagation when resuming from stored payloads
-            source_contract = first_source.get_schema_contract()
 
             factory = RecorderFactory(self._db, payload_store=payload_store)
             run = factory.run_lifecycle.begin_run(
                 config=config.config,
                 canonical_version=self._canonical_version,
                 source_schema_json=source_schema_json,
-                schema_contract=source_contract,
                 run_id=run_id,
                 initiated_by_user_id=initiated_by_user_id,
                 auth_provider_type=auth_provider_type,
@@ -2759,124 +2763,39 @@ class Orchestrator:
         unprocessed_rows: Sequence[ResumedRow]
         schema_contracts_by_source: dict[NodeID, SchemaContract]
 
-        # ADR-025 §3: schema contracts are plural-by-source. RC6 audit DBs
-        # populate ``run_sources`` with one record per declared source;
-        # pre-RC6 single-source DBs carry the contract only in
-        # ``runs.contract_json``. Both shapes feed into the same plural
-        # surface — the singular ``ResumeState.schema_contract`` field
-        # that previously absorbed an arbitrary ``next(iter(...))`` pick
-        # has been deleted.
+        # ADR-025 §3 Decision 5 (G6): schema contracts are plural-by-source
+        # and live exclusively in ``run_sources``. The legacy single-source
+        # fallback that read ``runs.schema_contract_json`` was deleted along
+        # with the column itself — readers and writers are now symmetric on
+        # ``run_sources``. ``verify_contract_integrity`` (called via
+        # ``can_resume`` → ``get_resume_point`` before this method runs)
+        # already raises ``EmptyResumeStateError`` when ``run_sources`` is
+        # empty, so by the time we land here every declared source has a
+        # contract record. We still assert the postcondition defensively
+        # against future call-path changes: an empty map at resume time is
+        # Tier-1 audit corruption.
         source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
-        if source_records:
-            source_schema_classes: dict[NodeID, type[Any]] = {}
-            schema_contracts_by_source = {}
-            for raw_source_node_id, source_record in source_records.items():
-                source_node_id = NodeID(str(raw_source_node_id))
-                schema_dict = json.loads(source_record.source_schema_json)
-                source_schema_classes[source_node_id] = reconstruct_schema_from_json(schema_dict)
-                schema_contracts_by_source[source_node_id] = source_record.schema_contract
-
-            unprocessed_rows = recovery.get_unprocessed_row_data_by_source(
-                run_id,
-                payload_store,
-                source_schema_classes=source_schema_classes,
-            )
-        else:
-            # Pre-RC6 audit DB: no ``run_sources`` records, single source.
-            # TYPE FIDELITY: Retrieve source schema from audit trail for type restoration
-            # Resume must use the ORIGINAL run's schema, not the current source's schema
-            # This enables proper type coercion (datetime/Decimal) from JSON payload strings
-            source_schema_json = factory.run_lifecycle.get_source_schema(run_id)
-
-            # Deserialize schema and recreate Pydantic model class with full type fidelity
-            # Call module function directly (no wrapper method)
-            schema_dict = json.loads(source_schema_json)
-            source_schema_class = reconstruct_schema_from_json(schema_dict)
-
-            # PIPELINEROW MIGRATION: Retrieve contract from audit trail for row wrapping
-            # During resume, we need to wrap plain dicts in PipelineRow with contract
-            # This ensures type fidelity and maintains the same data structures as main run
-            legacy_schema_contract = factory.run_lifecycle.get_run_contract(run_id)
-            if legacy_schema_contract is None:
-                # ``schema_contract_json`` is written as NULL at row creation
-                # (run_lifecycle_repository.py:86) and populated by a separate
-                # ``update_run_contract`` UPDATE. If ``on_start`` fails before
-                # that UPDATE executes, the runs row exists but contract_json
-                # is NULL — this is precisely one of the three scenarios
-                # ``EmptyResumeStateError`` was introduced to handle (see its
-                # docstring at contracts/errors.py:786-792).
-                #
-                # Per ADR-025 §3, raising the typed empty-state error here
-                # gives the CLI handler an exit path that produces a clean,
-                # operator-interpretable message rather than a Tier-1
-                # invariant traceback for a real, recoverable scenario.
-                # ``EmptyResumeStateError`` is a subclass of
-                # ``OrchestrationInvariantError`` so any existing
-                # ``except OrchestrationInvariantError`` catch still matches.
-                raise EmptyResumeStateError(
-                    run_id=run_id,
-                    message=(
-                        f"Cannot resume run {run_id!r}: schema contract was never written "
-                        "to the audit trail. The run likely failed during on_start before "
-                        "source initialisation completed. Start a fresh run."
-                    ),
-                )
-            unprocessed_rows = recovery.get_unprocessed_row_data(
-                run_id,
-                payload_store,
-                source_schema_class=source_schema_class,
-            )
-            # Build the per-source map from the single legacy contract by
-            # keying it under the source NodeID(s) observed on the
-            # unprocessed rows. Every row in the rows table carries a
-            # NOT-NULL ``source_node_id``; for a legacy single-source run
-            # all rows must share one source NodeID. If they don't (e.g.,
-            # a multi-source RC6 run that somehow lost its ``run_sources``
-            # records), the legacy fallback cannot guarantee per-source
-            # contracts and must refuse the resume rather than misvalidate.
-            distinct_source_ids = {row.source_node_id for row in unprocessed_rows}
-            if not distinct_source_ids:
-                # No unprocessed rows AND no ``run_sources`` records: there
-                # is no source NodeID to key the legacy contract under.
-                # ADR-025 §3 demands a non-empty
-                # ``schema_contracts_by_source`` map; fabricating a
-                # synthetic key for a contract that has nothing to
-                # validate would just dress the empty case up as a full
-                # one. The truthful outcome — and the only one that
-                # preserves the audit-integrity invariant — is to refuse
-                # the resume entirely with the typed error so the upstream
-                # caller can present "this run is not resumable, start
-                # fresh" without crashing.
-                schema_contracts_by_source = {}
-            elif len(distinct_source_ids) != 1:
-                raise OrchestrationInvariantError(
-                    f"Cannot resume run '{run_id}': legacy single-source resume path observed "
-                    f"{len(distinct_source_ids)} distinct source_node_ids on unprocessed rows "
-                    f"({sorted(distinct_source_ids)}) but the audit trail has no ``run_sources`` "
-                    "records to disambiguate their schema contracts. The audit data is "
-                    "inconsistent: either ``run_sources`` was lost or a multi-source pipeline "
-                    "wrote rows under the legacy single-contract writer (ADR-025 §3)."
-                )
-            else:
-                legacy_source_id = next(iter(distinct_source_ids))
-                schema_contracts_by_source = {legacy_source_id: legacy_schema_contract}
-
-        # ADR-025 §3: refuse to resume rather than pick or fabricate. The
-        # audit DB recorded no source contracts — either the run failed
-        # before any row was committed (``on_start`` failure, source-level
-        # abort, infrastructure crash before first row) or the audit DB
-        # is from an earlier schema that carried no multi-source surface
-        # at all. Either way, resume has no contract to validate against.
-        # Raise the typed error so the upstream caller (CLI ``elspeth
-        # resume``) can present a clean operator-facing outcome instead
-        # of a Tier-1 invariant traceback.
-        if not schema_contracts_by_source:
+        if not source_records:
             raise EmptyResumeStateError(run_id=run_id)
 
         # F1 fix: pre-compute incomplete child tokens so the resume loop can dispatch
         # partial-fork/expand/coalesce rows via mid-DAG continuation rather than
         # whole-row restart (which would re-emit already-completed branches).
         incomplete_by_row = recovery.get_incomplete_tokens_by_row(run_id)
+
+        source_schema_classes: dict[NodeID, type[Any]] = {}
+        schema_contracts_by_source = {}
+        for raw_source_node_id, source_record in source_records.items():
+            source_node_id = NodeID(str(raw_source_node_id))
+            schema_dict = json.loads(source_record.source_schema_json)
+            source_schema_classes[source_node_id] = reconstruct_schema_from_json(schema_dict)
+            schema_contracts_by_source[source_node_id] = source_record.schema_contract
+
+        unprocessed_rows = recovery.get_unprocessed_row_data_by_source(
+            run_id,
+            payload_store,
+            source_schema_classes=source_schema_classes,
+        )
 
         return ResumeState(
             factory=factory,

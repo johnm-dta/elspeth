@@ -9,23 +9,20 @@ chain-of-thought.
 from __future__ import annotations
 
 import threading
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Literal, Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-if TYPE_CHECKING:
-    pass
+from elspeth.contracts.composer_progress import ComposerProgressReason, ComposerProgressSink
+from elspeth.web.composer.tools import is_discovery_tool
 
 __all__ = [
     "COMPOSER_PROGRESS_MAX_EVIDENCE",
     "NON_TERMINAL_PROGRESS_PHASES",
     "ComposerProgressEvent",
     "ComposerProgressPhase",
-    "ComposerProgressReason",
     "ComposerProgressRegistry",
-    "ComposerProgressSink",
     "ComposerProgressSnapshot",
     "_emit_progress",
     "_is_schema_or_catalog_tool",
@@ -68,48 +65,12 @@ NON_TERMINAL_PROGRESS_PHASES: frozenset[ComposerProgressPhase] = frozenset(
     }
 )
 
-# Stable machine-readable reason codes for composer progress events.
-#
-# Public taxonomy distinct from ComposerConvergenceError.budget_exhausted —
-# the exception models which budget tripped (a private engine concept), this
-# Literal is the public-facing UX/observability discriminator. They map but
-# they are not the same enum: the convergence error contributes three of
-# these codes; the others come from sibling exception classes or from
-# success/idle sentinels.
-#
-# Required when phase == "failed" (enforced by the model_validator on
-# ComposerProgressEvent below) so a new failure site cannot ship without
-# carrying a stable code. The frontend, structured logs, and the 422
-# response body all branch on this value.
-type ComposerProgressReason = Literal[
-    # Convergence sub-causes — split out from the single
-    # ComposerConvergenceError class via its budget_exhausted discriminator.
-    "convergence_composition_budget",
-    "convergence_discovery_budget",
-    "convergence_wall_clock_timeout",
-    "tool_call_cap_exceeded",
-    # Provider-side failures — LiteLLM exception families.
-    "provider_auth_failed",
-    "provider_unavailable",
-    # Server-side plugin bug escaping execute_tool.
-    "plugin_crash",
-    # Runtime preflight failure (cached path-1 or post-compose path-2 —
-    # users cannot act on the path distinction, so a single code).
-    "runtime_preflight_failed",
-    # Generic ComposerServiceError — prompt prep / availability / catch-all.
-    "service_setup_failed",
-    # Client closed the HTTP connection or operator cancelled the request
-    # before the composer returned. Distinct from convergence_wall_clock_timeout
-    # (server budget exceeded) so dashboards and audit can tell apart "the
-    # client gave up" from "the server gave up". Required when phase ==
-    # "cancelled" by the same model_validator that requires it on "failed".
-    "client_cancelled",
-    # Non-failure sentinels — every snapshot carries a code so observability
-    # and the SPA never have to special-case None.
-    "composer_idle",
-    "composer_complete",
-]
-type ComposerProgressSink = Callable[["ComposerProgressEvent"], Awaitable[None]]
+# `ComposerProgressReason` (the failure-code discriminator Literal) and
+# `ComposerProgressSink` (the async event-emission callable shape) are
+# defined at L0 in `elspeth.contracts.composer_progress` so that
+# `web/composer/protocol.py` can reference them without forming a cycle
+# back through `web/composer/tools.py`. See that module for the taxonomy
+# rationale and the per-code semantics.
 
 
 class _StrictProgressModel(BaseModel):
@@ -392,10 +353,6 @@ def _clean_required_text(value: str, *, field_name: str) -> str:
 # ---------------------------------------------------------------------------
 # Progress event factories — co-located with ComposerProgressEvent so the
 # per-phase headline / evidence / likely_next copy lives in one place.
-#
-# These import is_discovery_tool lazily inside each function to avoid an
-# import cycle (tools.py does not import progress.py today, but a top-level
-# import would create one if any tool ever imports a progress helper).
 # ---------------------------------------------------------------------------
 
 
@@ -423,10 +380,6 @@ def _model_call_progress_event(message: str) -> ComposerProgressEvent:
 
 
 def _tool_batch_progress_event(tool_names: tuple[str, ...]) -> ComposerProgressEvent:
-    # Lazy import: progress.py is imported by composer.protocol, which is
-    # imported by composer.tools — a module-top import here would cycle.
-    from elspeth.web.composer.tools import is_discovery_tool
-
     if any(_is_schema_or_catalog_tool(name) for name in tool_names):
         return ComposerProgressEvent(
             phase="using_tools",
@@ -464,9 +417,6 @@ def _tool_batch_progress_event(tool_names: tuple[str, ...]) -> ComposerProgressE
 
 
 def _tool_started_progress_event(tool_name: str) -> ComposerProgressEvent:
-    # Lazy import (see _tool_batch_progress_event docstring for cycle rationale).
-    from elspeth.web.composer.tools import is_discovery_tool
-
     if _is_schema_or_catalog_tool(tool_name):
         return ComposerProgressEvent(
             phase="using_tools",
@@ -497,9 +447,6 @@ def _tool_started_progress_event(tool_name: str) -> ComposerProgressEvent:
 
 
 def _tool_completed_progress_event(tool_name: str, success: bool) -> ComposerProgressEvent:
-    # Lazy import (see _tool_batch_progress_event docstring for cycle rationale).
-    from elspeth.web.composer.tools import is_discovery_tool
-
     if not success:
         return ComposerProgressEvent(
             phase="using_tools",

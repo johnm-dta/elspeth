@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall
+from elspeth.contracts.composer_progress import ComposerProgressReason, ComposerProgressSink
 from elspeth.contracts.errors import FailedTurnMetadata
-from elspeth.web.composer.progress import ComposerProgressReason, ComposerProgressSink
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import ValidationResult
 

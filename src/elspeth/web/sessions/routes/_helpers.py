@@ -36,6 +36,7 @@ from elspeth.contracts.composer_llm_audit import (
     ComposerChatTurnStatus,
     ComposerLLMCall,
 )
+from elspeth.contracts.composer_progress import ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
@@ -103,7 +104,6 @@ from elspeth.web.composer.implicit_decisions import merge_implicit_decisions_met
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
     ComposerProgressRegistry,
-    ComposerProgressSink,
     ComposerProgressSnapshot,
     client_cancelled_progress_event,
     convergence_progress_event,

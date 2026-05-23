@@ -14,13 +14,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Row
 
 from elspeth.contracts import (
     Checkpoint,
     PayloadNotFoundError,
     PayloadStore,
+    PipelineRow,
     PluginSchema,
     ResumeCheck,
     ResumedRow,
@@ -39,6 +40,7 @@ from elspeth.core.checkpoint.serialization import checkpoint_loads
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import (
+    node_states_table,
     rows_table,
     runs_table,
     token_outcomes_table,
@@ -57,10 +59,47 @@ _RESUMABLE_RUN_STATUSES = frozenset({RunStatus.FAILED, RunStatus.INTERRUPTED})
 _CheckpointStateCacheKey = tuple[str, str | None, str | None]
 
 __all__ = [
+    "IncompleteTokenSpec",
     "RecoveryManager",
     "ResumeCheck",  # Re-exported from contracts for convenience
     "ResumePoint",  # Re-exported from contracts for convenience
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class IncompleteTokenSpec:
+    """A non-delegation child token that lacks a terminal outcome on a resumed run.
+
+    Identity fields read directly from persisted columns (Tier-1: no defaults,
+    no coercion). ``token_data_ref`` is NULL for fork children and set for
+    expand children and post-coalesce merged tokens.
+    """
+
+    token_id: str
+    row_id: str
+    branch_name: str | None
+    fork_group_id: str | None
+    join_group_id: str | None
+    expand_group_id: str | None
+    token_data_ref: str | None
+    step_in_pipeline: int | None
+    max_attempt: int
+
+    def __post_init__(self) -> None:
+        """Validate Tier-1 identity invariants at construction time."""
+        for field_name in ("token_id", "row_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str):
+                raise TypeError(f"IncompleteTokenSpec.{field_name} must be str, got {type(value).__name__}: {value!r}")
+            if not value:
+                raise ValueError(f"IncompleteTokenSpec.{field_name} must not be empty")
+        for field_name in ("branch_name", "fork_group_id", "join_group_id", "expand_group_id", "token_data_ref"):
+            value = getattr(self, field_name)
+            if value is not None:
+                if not isinstance(value, str):
+                    raise TypeError(f"IncompleteTokenSpec.{field_name} must be str or None, got {type(value).__name__}: {value!r}")
+                if not value:
+                    raise ValueError(f"IncompleteTokenSpec.{field_name} must be None or non-empty string, got {value!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -599,6 +638,104 @@ class RecoveryManager:
             unprocessed = filtered_rows
 
         return unprocessed
+
+    def get_incomplete_tokens_by_row(self, run_id: str) -> dict[str, list[IncompleteTokenSpec]]:
+        """Return incomplete non-delegation child tokens, grouped by row_id.
+
+        A token is incomplete when it is not a delegation marker and has no
+        completed terminal outcome. Tokens restored from checkpoint aggregation
+        or coalesce state are excluded because those are flushed from restored
+        executor state rather than re-driven from source.
+        """
+        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
+        buffered_token_ids = self._get_buffered_checkpoint_token_ids(checkpoint) if checkpoint is not None else set()
+
+        with self._db.engine.connect() as conn:
+            delegation_tokens = (
+                select(token_outcomes_table.c.token_id)
+                .where(token_outcomes_table.c.run_id == run_id)
+                .where(token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
+            ).scalar_subquery()
+            terminal_tokens = (
+                select(token_outcomes_table.c.token_id)
+                .where(token_outcomes_table.c.run_id == run_id)
+                .where(token_outcomes_table.c.completed == 1)
+                .where(~token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
+            ).scalar_subquery()
+            max_attempt_sq = (
+                select(func.max(node_states_table.c.attempt))
+                .where(node_states_table.c.token_id == tokens_table.c.token_id)
+                .where(node_states_table.c.run_id == run_id)
+                .correlate(tokens_table)
+                .scalar_subquery()
+            )
+            query = (
+                select(
+                    tokens_table.c.token_id,
+                    tokens_table.c.row_id,
+                    tokens_table.c.branch_name,
+                    tokens_table.c.fork_group_id,
+                    tokens_table.c.join_group_id,
+                    tokens_table.c.expand_group_id,
+                    tokens_table.c.token_data_ref,
+                    tokens_table.c.step_in_pipeline,
+                    max_attempt_sq.label("max_attempt"),
+                )
+                .where(tokens_table.c.run_id == run_id)
+                .where(~tokens_table.c.token_id.in_(delegation_tokens))
+                .where(~tokens_table.c.token_id.in_(terminal_tokens))
+                .order_by(tokens_table.c.step_in_pipeline, tokens_table.c.token_id)
+            )
+            rows = conn.execute(query).fetchall()
+
+        by_row: dict[str, list[IncompleteTokenSpec]] = {}
+        for row in rows:
+            if row.token_id in buffered_token_ids:
+                continue
+            by_row.setdefault(row.row_id, []).append(
+                IncompleteTokenSpec(
+                    token_id=row.token_id,
+                    row_id=row.row_id,
+                    branch_name=row.branch_name,
+                    fork_group_id=row.fork_group_id,
+                    join_group_id=row.join_group_id,
+                    expand_group_id=row.expand_group_id,
+                    token_data_ref=row.token_data_ref,
+                    step_in_pipeline=row.step_in_pipeline,
+                    max_attempt=-1 if row.max_attempt is None else int(row.max_attempt),
+                )
+            )
+        return by_row
+
+    def reconstruct_token_row(
+        self,
+        spec: IncompleteTokenSpec,
+        run_id: str,
+        source_row: PipelineRow,
+        payload_store: PayloadStore,
+    ) -> PipelineRow:
+        """Build the PipelineRow to re-drive an incomplete token with."""
+        if spec.token_data_ref is None:
+            return source_row
+
+        try:
+            payload_bytes = payload_store.retrieve(spec.token_data_ref)
+        except PayloadNotFoundError as exc:
+            raise ValueError(
+                f"Incomplete token {spec.token_id} (run {run_id}) payload purged "
+                f"(token_data_ref={spec.token_data_ref!r}) — cannot resume; re-run instead."
+            ) from exc
+
+        envelope = checkpoint_loads(payload_bytes.decode("utf-8"))
+        if not isinstance(envelope, dict) or "data" not in envelope or "contract" not in envelope:
+            raise AuditIntegrityError(
+                f"token_data_ref payload for token {spec.token_id} (run {run_id}) is not a "
+                f"valid {{data, contract}} envelope — audit data corruption (Tier-1 violation). "
+                f"Got type={type(envelope).__name__!r}."
+            )
+
+        contract = SchemaContract.from_checkpoint(envelope["contract"])
+        return PipelineRow(envelope["data"], contract)
 
     def _get_buffered_checkpoint_token_ids(self, checkpoint: Checkpoint) -> set[str]:
         """Collect token IDs restored from checkpoint state."""

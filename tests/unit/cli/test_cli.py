@@ -6,6 +6,7 @@ Tests that require LandscapeDB, Orchestrator, or real file I/O with
 verify_audit_trail are deferred to integration tier.
 """
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -1145,6 +1146,55 @@ sinks:
         assert "Cannot resume run" in result.output
         assert "already completed" in result.output
         assert "Traceback" not in result.output
+
+    def test_resume_emits_not_resumable_event_when_can_resume_raises_empty_state(self, tmp_path: Path) -> None:
+        """Regression test for elspeth-241608388f — CLI-side handler.
+
+        When ``recovery_manager.can_resume()`` raises
+        :class:`EmptyResumeStateError` (the recovery-side fix: empty
+        ``run_sources`` rows means "nothing to resume, start fresh"),
+        the CLI's outer ``try`` block must catch the typed exception
+        and emit the operator-facing JSON event:
+
+            {"event": "not_resumable",
+             "run_id": "...",
+             "reason": "no_recorded_work",
+             "message": "..."}
+
+        Previously the recovery side raised ``CheckpointCorruptionError``
+        and the CLI's outer try (with only a ``finally:`` clause)
+        bubbled the unhandled traceback to the operator, falsely
+        suggesting audit corruption for a benign outcome. The fix
+        added a typed handler at the outer level and changed the
+        recovery side to raise the typed ``EmptyResumeStateError``.
+
+        Companion test: the recovery-side fix is covered by
+        ``test_unit/core/checkpoint/test_recovery.py::test_verify_contract_integrity_raises_empty_resume_state_when_no_sources_recorded``.
+        """
+        from unittest.mock import patch
+
+        from elspeth.cli import app
+        from elspeth.contracts.errors import EmptyResumeStateError
+
+        settings_file, _db_path = self._make_settings_with_landscape_db(tmp_path)
+        run_id = "run-no-sources-241608388f"
+
+        with patch("elspeth.core.checkpoint.RecoveryManager") as MockRecovery:
+            MockRecovery.return_value.can_resume.side_effect = EmptyResumeStateError(run_id=run_id)
+            result = runner.invoke(app, ["resume", run_id, "-s", str(settings_file), "--format", "json"])
+
+        assert result.exit_code == 1, f"Expected exit 1, got {result.exit_code}; output={result.output!r}; exception={result.exception!r}"
+        assert "Traceback" not in result.output
+
+        # CliRunner combines stdout+stderr in result.output by default.
+        event_lines = [line for line in result.output.splitlines() if '"event"' in line]
+        assert event_lines, f"Expected a JSON event with 'event' key in output; got {result.output!r}"
+        event = json.loads(event_lines[0])
+        assert event["event"] == "not_resumable"
+        assert event["run_id"] == run_id
+        assert event["reason"] == "no_recorded_work"
+        assert "message" in event
+        assert run_id in event["message"]
 
     def test_resume_rejects_missing_payload_directory(self, tmp_path: Path) -> None:
         """resume --execute exits cleanly when payload directory doesn't exist.

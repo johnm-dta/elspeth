@@ -31,7 +31,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
 from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, EmptyResumeStateError
 from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, IncompatibleCheckpointError
@@ -719,18 +719,28 @@ class RecoveryManager:
             ) from e
 
         if not source_records:
-            # TIER-1 AUDIT INTEGRITY: A run with no ``run_sources`` rows cannot
-            # be resumed safely. After ADR-025 §3 Decision 5 every declared
-            # source is recorded as a ``run_sources`` row before any of its
-            # rows enter the pipeline, so absence here is corruption.
-            raise CheckpointCorruptionError(
-                f"Schema contract is missing from audit trail for run '{run_id}'. "
-                f"This indicates either:\n"
-                f"  1. The audit database is corrupt or incomplete (no run_sources rows)\n"
-                f"  2. The run was started with a version that didn't record per-source contracts\n"
-                f"Resume cannot proceed safely without the schema contract. "
-                f"The audit trail must be complete and trustworthy."
-            )
+            # ADR-025 §3: a run with no ``run_sources`` rows reflects the
+            # "nothing to resume, start fresh" outcome — typically an
+            # ``on_start`` failure, a source-level abort before the first
+            # ingest, or an infrastructure crash before any row was
+            # persisted. The audit DB is intact and truthfully records
+            # that the run did no work; it is NOT Tier-1 corruption.
+            #
+            # Raising ``EmptyResumeStateError`` here lets the CLI present
+            # a clean "this run is not resumable; start a fresh run"
+            # message rather than the audit-corruption traceback the
+            # legacy ``CheckpointCorruptionError`` produced — that was
+            # the reachability gap reported by elspeth-241608388f, where
+            # the CLI's outer ``try`` lacked any handler for the
+            # corruption-typed bubble and the operator saw a misleading
+            # invariant traceback for a benign outcome.
+            #
+            # ``EmptyResumeStateError`` is a subclass of
+            # ``OrchestrationInvariantError`` so any existing
+            # ``except OrchestrationInvariantError`` catch still
+            # matches it by type; the CLI catches the typed exception
+            # explicitly before the broader Tier-1 handler.
+            raise EmptyResumeStateError(run_id=run_id)
 
         # Deterministic single-source return for the legacy caller surface.
         # Multi-source callers should reach into ``get_run_source_resume_records``

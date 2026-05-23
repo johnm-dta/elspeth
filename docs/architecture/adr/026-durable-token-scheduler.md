@@ -1,7 +1,10 @@
 # ADR-026: Durable Token Scheduler
 
 **Date:** 2026-05-23
-**Status:** Accepted
+**Status:** Accepted with stated preconditions (see *RC6
+Preconditions*; an N>1 deployment additionally requires the
+separate deployment-shape ADR per Precondition #9, which is
+not yet authored)
 **Deciders:** John Morrissey, Claude Opus
 **Tags:** scheduler, checkpoint, resume, leases, cas, audit-integrity,
           embedded-database, rc6, multi-source-token-scheduler
@@ -223,17 +226,30 @@ it.
    payload store with its own retention policy. This is consistent
    with the payload-store separation principle in CLAUDE.md.
 
-10. **Multi-worker is an RC6 deliverable.** RC6 ships concurrent
-    token execution across N>1 workers as a stated outcome, on
-    equal footing with multi-source ingestion. The scheduler
-    primitive is the soundness layer that makes N>1 sound — its
-    load-bearing invariants (CAS on every state-changing
+10. **The scheduler primitive is multi-worker-sound by
+    construction; whether RC6 actually ships N>1 workers is a
+    separate decision whose preconditions are enumerated below.**
+    The load-bearing invariants (CAS on every state-changing
     transition, deterministic `work_item_id`, deterministic claim
     ordering, `caller_owner`-aware lease recovery) are written
     for the multi-worker case; N=1 is a degenerate execution of
-    the same contract, not the target. The scheduler column
-    shape is final; what remains to deliver RC6 is enumerated
-    under *RC6 Preconditions* below.
+    the same contract. The scheduler column shape is final.
+
+    **Honest framing — scope history.** The original
+    `feat/multi-source-token-scheduler` branch name does not
+    mention multi-worker, and G27 (the primary multi-worker
+    correctness blocker) was found during the branch review on
+    2026-05-22, not during original implementation. Multi-worker
+    capability was retrofitted onto a primitive designed for
+    multi-source. This ADR records the post-review contract; it
+    does not assert that multi-worker was the original target.
+    What remains to deliver an RC6 with N>1 workers is split into
+    two precondition lists below: *scheduler-correctness gates
+    required at any N≥1* and *multi-worker-specific gates
+    required only if N>1 ships*. The deployment-shape
+    decision (worker process lifecycle) is itself a precondition,
+    not an Open Question — see *Deployment-shape precondition*
+    below.
 
 ### Schema columns of note
 
@@ -377,71 +393,148 @@ it.
 
 ### RC6 Preconditions
 
-Multi-worker concurrent token execution is in scope for RC6.
-The scheduler primitive's design is final; the items below
+The scheduler primitive's design is final. The items below
 are the gates between the present `feat/multi-source-token-
-scheduler` branch and RC6 publish-readiness, in the order a
-reviewer should expect them resolved:
+scheduler` branch and RC6 publish-readiness. They are split
+into two lists because conflating them inflates the apparent
+cost of multi-worker and hides that several gates are
+correctness requirements at *any* worker count.
+
+#### A. Scheduler-correctness preconditions (required at any N≥1)
+
+These gates apply regardless of whether RC6 ships N=1 or
+N>1 workers. Several are correctness claims under SQLite
+WAL even with a single worker (the connection pool may
+serve more than one connection per process). A future
+session that chooses to ship N=1 still owes every item in
+this list.
 
 1. **Lease ownership semantics (G1 / elspeth-941f1508f5,
    commit `3025168b2`). Done.** `recover_expired_leases`
-   filters `lease_owner != caller_owner` — makes
-   `caller_owner` a true identity under N>1.
+   filters `lease_owner != caller_owner`. At N=1 this
+   prevents a worker stealing its own in-flight lease back
+   on the next drain iteration when an LLM call exceeds
+   the lease window.
 
 2. **PENDING_SINK drain isolation (G3 / elspeth-5c5e88b071,
    commit `3dcebe9ec`). Done.** Resume converges in one
-   `_drain_scheduler_claims` invocation — a single
-   surviving worker can take over after a fleet event.
+   `_drain_scheduler_claims` invocation regardless of how
+   many tokens crashed mid-sink. Required for crash
+   recovery at any N.
 
 3. **Per-source schema-contract resume (G2 /
    elspeth-01942858c3). Pending.** Lands with the ADR-025
-   structural fix; required so any worker reading
-   `run_sources` reconstructs the same schema_contract
-   regardless of process or claim order.
+   structural fix; required so resume reconstructs the
+   same `schema_contract` regardless of which source's
+   row is consulted first. Multi-source correctness at any
+   worker count.
 
 4. **CAS race fix on `claim_ready` and `claim_pending_sink`
-   (G27 / elspeth-4678a5aa73). Required for RC6.** The
+   (G27 / elspeth-4678a5aa73). Required.** The
    SELECT-then-UPDATE pattern across separate
-   statements/transactions is racy under SQLite WAL — a
-   correctness claim even at N=1 if the engine pool ever
-   serves a second connection, and the primary load-bearing
-   multi-worker gap. The fix folds the two statements into
-   a single CAS UPDATE (UPDATE … RETURNING `work_item_id`
-   with a single-row predicate, or the two-statement form
-   inside `BEGIN IMMEDIATE`).
+   statements/transactions is racy under SQLite WAL even
+   at N=1 if the engine pool serves a second connection.
+   The fix folds the two statements into a single CAS
+   UPDATE (UPDATE … RETURNING `work_item_id` with a
+   single-row predicate, or the two-statement form inside
+   `BEGIN IMMEDIATE`). Genuinely sharper under N>1, but
+   the *correctness* claim does not depend on N.
 
 5. **PRAGMA discipline on scheduler-bearing connections
-   (G28 / elspeth-8536552dcb). Required for RC6.** Probe-
-   and-assert that every worker has `journal_mode=WAL`,
+   (G28 / elspeth-8536552dcb). Required.** Probe-and-
+   assert that every connection has `journal_mode=WAL`,
    the agreed `busy_timeout`, and `foreign_keys=ON` —
-   crash if not (probe path elspeth-97f8509b35). Without
-   uniformity, worker behaviour under contention diverges
-   per worker.
+   crash if not (probe path elspeth-97f8509b35). At N=1
+   uniformity is needed across connections within the
+   process; at N>1 across processes too.
 
 6. **Scheduler state transitions in Landscape audit (G29 /
-   elspeth-2b608abbd3). Required for RC6.** Multi-worker
-   without audited lease-ownership transitions is
-   forensically blind — the auditor's "which worker held
-   this lease and when did it expire?" gets *current* row
-   state, not the timeline. Audit primacy is broken in the
-   multi-worker case without it. Remediation: a
-   `scheduler_events` table (or equivalent) written on
-   every transition.
+   elspeth-2b608abbd3). Required.** Audit-primacy gap at
+   any N. The auditor's question "when did this row's
+   lease expire?" reads `token_work_items` final state,
+   not a timeline. Remediation: a `scheduler_events`
+   table (or equivalent) written on every transition.
+   Schema design is *blocked on Precondition #9* below
+   (worker identity column shape).
 
-7. **Multi-worker isolation tests (G25b /
-   elspeth-6116873e3b) and chaos coverage (G25h /
-   elspeth-7bb7124e8f). Required for RC6.** CAS-loser,
-   lease-expiry, claim-ordering, and barrier-
-   terminalization paths exercised under N>1 with ChaosLLM
-   / ChaosWeb / ChaosEngine wired against the scheduler.
-   Without these, the multi-worker claim is unproved.
-
-8. **Runbook for lease recovery (G19 /
-   elspeth-559bce3459). Required for RC6 publish.** First-
+7. **Runbook for lease recovery (G19 /
+   elspeth-559bce3459). Required for publish.** First-
    operator-incident artifact: stuck lease, over-aggressive
-   expiry, fleet event. Multi-worker amplifies the
-   incident surface — "is this worker dead or just slow?"
-   becomes a frequent question.
+   expiry, crashed worker. Required at N=1 (every "did the
+   worker crash or is the LLM slow?" question lands here).
+   Authoring is *blocked on Precondition #9* — the incident
+   surface differs between single-binary co-tenants and
+   separate `elspeth run --worker` processes.
+
+#### B. Multi-worker-specific preconditions (required only if N>1 ships)
+
+These gates exist only because RC6 might ship N>1
+workers. If a future session decides RC6 ships at N=1, the
+items here become post-RC6 follow-ups rather than RC6
+gates. Listing them honestly distinguishes scheduler
+correctness from multi-worker capability.
+
+8. **Multi-worker isolation tests (G25b /
+   elspeth-6116873e3b) and chaos coverage (G25h /
+   elspeth-7bb7124e8f). Required if N>1.** CAS-loser,
+   lease-expiry, claim-ordering, and barrier-
+   terminalization paths exercised under N>1 with
+   ChaosLLM / ChaosWeb / ChaosEngine wired against the
+   scheduler. Without these the multi-worker claim is
+   unproved. At N=1 the same surfaces are covered by the
+   existing single-worker suite.
+
+9. **Deployment-shape decision (worker process
+   lifecycle). Required if N>1; required as a separate
+   ADR.** The *shape* of multi-worker deployment is not
+   decided — co-tenants inside a single-binary
+   `elspeth run`, separate `elspeth run --worker`
+   invocations on the same host, or both. Each option
+   implies a different spawn/supervise pattern, a
+   different lease-owner-identity story, and a different
+   shutdown protocol. This is *not* deferrable like a
+   typical Open Question because four downstream items
+   depend on it being settled:
+
+    - **G29's `scheduler_events` schema** (Precondition
+      #6 above) needs to know whether the audited
+      identity is `(host, pid, uuid)` or
+      `(worker_id, run_id)` or some other shape.
+    - **G19's runbook** (Precondition #7) cannot describe
+      "is this worker dead or just slow?" without
+      knowing how a worker is spawned and supervised.
+    - **Coordinated worker shutdown semantics.** On run
+      cancellation or drain, do workers cooperate
+      (stop claiming, finish in-flight leases, exit) or
+      does each worker stop claiming and the run
+      completes when leases expire? CAS supports either
+      shape, but the runbook and the operator
+      cancellation UX both pin on one choice.
+    - **`pending_items` cache scope under N>1.** The
+      in-memory `pending_items` list is per-`RowProcessor`.
+      Under N>1 a worker may claim entries already
+      leased by another worker between drains; the CAS
+      rejects (no corruption) but the wasted-claim cost
+      depends on whether the worker pool is co-tenant
+      (same process, easy cross-worker advisory locks)
+      or separate processes (no shared memory, only the
+      durable row mediates).
+
+    **Required artifact:** a separate ADR (or formal
+    amendment to this one) that fixes the deployment
+    shape, defines worker identity, decides shutdown
+    semantics, and resolves the `pending_items`
+    cross-worker question. Per the *Honest framing —
+    scope history* note above, the deployment shape was
+    not part of the original scheduler design; promoting
+    it to a precondition rather than an Open Question
+    is the honest record of what this ADR's RC6
+    multi-worker claim actually depends on.
+
+    **Until this ADR exists, RC6 cannot ship N>1.** The
+    scheduler primitive is sound for multi-worker by
+    construction; what is undecided is how multiple
+    workers come to exist in the operator's deployment.
 
 ## Alternatives Considered
 
@@ -575,31 +668,41 @@ token and broken audit identity.
 
 ### RC6 preconditions covered by this ADR
 
-These tickets are *gates*, not follow-ups: RC6 publish-readiness
-depends on each. See *RC6 Preconditions* above for the ordered
-rationale.
+These tickets are *gates*, not follow-ups. Grouping mirrors
+the §A / §B split in *RC6 Preconditions* above.
+
+**§A — scheduler correctness (required at any N≥1):**
 
 - **G27 / elspeth-4678a5aa73** — `claim_ready` /
-  `claim_pending_sink` SELECT-then-UPDATE CAS-race fix. Multi-
-  worker correctness blocker, and a correctness claim under
-  WAL regardless of worker count.
+  `claim_pending_sink` SELECT-then-UPDATE CAS-race fix.
+  Correctness claim under WAL regardless of worker count;
+  sharper at N>1 but the gate is not multi-worker-specific.
 - **G28 / elspeth-8536552dcb** — PRAGMA discipline on
   scheduler-bearing connections (probe-and-assert
   elspeth-97f8509b35, test coverage elspeth-addd3dc41f,
-  type-enforce elspeth-34d83daedc). Under multi-worker,
-  non-uniformity becomes a divergence risk.
+  type-enforce elspeth-34d83daedc). Uniformity required
+  within-process at N=1, cross-process at N>1.
 - **G29 / elspeth-2b608abbd3** — scheduler state transitions
-  into Landscape audit trail. Without this, multi-worker is
-  forensically blind. The `scheduler_events` remediation
-  referenced in *Negative Consequences*.
+  into Landscape audit trail. Audit-primacy gap at any N.
+  Schema column shape blocked on Precondition #9.
+- **G19 / elspeth-559bce3459** — runbook for lease recovery.
+  Required at N=1; incident surface broadens at N>1.
+  Authoring blocked on Precondition #9. (Also listed under
+  *Documentation / governance* — same ticket.)
+
+**§B — multi-worker-specific (required only if N>1 ships):**
+
 - **G25b / elspeth-6116873e3b** — multi-worker isolation
   tests (CAS-loser, lease-expiry, claim-ordering, barrier
   terminalization under N>1).
 - **G25h / elspeth-7bb7124e8f** — chaos fixtures (ChaosLLM,
-  ChaosWeb, ChaosEngine) wired against the scheduler.
-- **G19 / elspeth-559bce3459** — runbook for lease recovery,
-  authored against the multi-worker incident surface. (Also
-  listed under *Documentation / governance* — same ticket.)
+  ChaosWeb, ChaosEngine) wired against the scheduler under N>1.
+- **Deployment-shape ADR (Precondition #9) — ticket not yet
+  filed.** Required artifact before RC6 ships N>1. Defines
+  worker process lifecycle, worker identity, shutdown
+  semantics, and `pending_items` cross-worker behaviour.
+  Filing this ticket is itself an action item out of this
+  ADR revision; surfaced here rather than buried.
 
 ### Architecturally anchors (post-RC6 follow-up)
 
@@ -646,66 +749,40 @@ rationale.
 
 ## Open questions / future work
 
-- **Scheduler-event audit table.** G29's remediation is the
-  next durability gap; the schema design (event table vs
-  append-only column journal vs `node_states` extension) is
-  intentionally not committed here. The decision is its own
-  follow-up ADR-amend or a new ADR if the answer is
-  structural.
-- **Worker process lifecycle.** The *shape* of multi-worker
-  deployment is not yet decided — co-tenants inside a
-  single-binary `elspeth run`, separate `elspeth run
-  --worker` invocations on the same host, or both. Each
-  option implies a different spawn/supervise pattern and
-  lease-owner-identity story. Likely a separate ADR — surface
-  before the runbook (G19) lands.
-- **Coordinated worker shutdown semantics.** On run
-  cancellation or drain, do workers cooperate on graceful
-  termination (stop claiming, finish in-flight leases,
-  exit), or does each worker stop claiming and the run
-  completes when leases expire? CAS supports either;
-  policy is open.
-- **Telemetry per worker_id.** Lease owner is
-  `row-processor:<run_id>:<uuid>`. Is the uuid the identity
-  Landscape should record for G29, or does multi-worker
-  want a stable `worker_id` (e.g. a host-process-spawn-
-  index) alongside? Stable IDs help operator dashboards;
-  uuid is sufficient for correctness. Decide before G29's
-  `scheduler_events` schema lands.
-- **Still-active prior-worker lease semantics.** The G3
-  fix's `processor.py` comment documents a "stranded prior
-  worker lease" case. Under single-worker the strand is
-  benign (prior worker is dead but not yet timed out);
-  under multi-worker the prior worker may still be *alive*
-  and the strand is correct — that distinction is
-  load-bearing for the recovery contract. CAS already
-  handles this; the open question is whether the comment
-  needs updating for the multi-worker case. Re-read
-  alongside G27.
-- **`pending_items` cache scope under N>1.** The
-  in-memory `pending_items` list (`processor.py` drain
-  loop) is a per-`RowProcessor` cache of `READY` rows the
-  *current* worker plans to claim next. Under multi-worker
-  each worker carries its own `pending_items`; the durable
-  `token_work_items` table is the only shared truth. The
-  SCREAM invariant ("non-empty `pending_items` with no
-  matching durable rows") is per-worker by construction.
-  Open question: do we need a worker-local guard that
-  rejects `pending_items` entries already leased by
-  *another* worker between the worker's last drain and the
-  current iteration (the CAS will reject, but the cache
-  becomes a wasted-claim source), or is the wasted-claim
-  cost acceptable? Decide alongside G27.
+This section lists genuinely deferrable decisions —
+choices that can be made after RC6 publishes without
+invalidating any of the ADR's correctness arguments. The
+load-bearing items previously listed here (worker process
+lifecycle, coordinated worker shutdown semantics,
+telemetry per worker_id, `pending_items` cache scope
+under N>1) were retrofitted-as-Open-Questions and have
+been promoted to *RC6 Preconditions §B item 9 —
+Deployment-shape decision* above. See *Revision history*
+for the move.
+
+- **Scheduler-event audit table schema shape.** G29's
+  remediation is required (Precondition #6); the
+  *schema* (event table vs append-only column journal
+  vs `node_states` extension) is intentionally not
+  committed here. The audited-identity columns within
+  that schema are blocked on Precondition #9; the
+  table-shape choice is independently deferrable.
+- **Still-active prior-worker lease semantics — comment
+  audit.** The G3 fix's `processor.py` comment documents
+  a "stranded prior worker lease" case framed for
+  single-worker. CAS already handles the multi-worker
+  case correctly; the question is comment hygiene, not
+  correctness. Re-read alongside G27.
 - **Retention of terminalized scheduler rows.** Today
   `TERMINAL` and `FAILED` rows remain forever (with
   scrubbed payloads). A purge cadence aligned with the
-  existing `elspeth purge --retention-days N` CLI command
-  is a follow-up; ticket not yet filed.
+  existing `elspeth purge --retention-days N` CLI
+  command is a follow-up; ticket not yet filed.
 - **Coalesce cursor representation in `token_work_items`.**
   The branch carries `coalesce_node_id` and `coalesce_name`
   on every row; whether the coalesce *state* (which fork
-  paths have arrived) belongs on the work-item row or in a
-  separate barrier table is open. Current pattern uses
+  paths have arrived) belongs on the work-item row or in
+  a separate barrier table is open. Current pattern uses
   BLOCKED rows + `mark_blocked_barrier_terminal`; this is
   serviceable and not under review.
 - **Postgres backend.** If the project ever needs a non-
@@ -714,6 +791,66 @@ rationale.
   Postgres. The decision to remain SQLite-only at the
   v1 layer (memory `project_phase9_sqlite_only`) is
   preserved here.
+
+## Revision history
+
+- **2026-05-23** — ADR accepted. Initial structure listed
+  "Worker process lifecycle", "Coordinated worker shutdown
+  semantics", "Telemetry per worker_id", and "`pending_items`
+  cache scope under N>1" under *Open questions / future
+  work*, while *Decision* point (10) framed multi-worker as
+  "an RC6 deliverable" and the *RC6 Preconditions* list was
+  presented as eight ordered, independent gates.
+- **2026-05-23** — *Related Decisions* updated to resolve the
+  ADR-001 amendment contradiction (commit `9c3bfe85d1`,
+  elspeth-d678a718fd). Source-iteration axis preserved by
+  ADR-025; worker-execution axis amended by this ADR; ADR-001
+  *Amendments* section is canonical.
+- **2026-05-24** — Restructure following sme-review
+  elspeth-3997769b6b. Three changes recorded together to
+  preserve the audit trail of why each entry moved:
+    - *Decision* point (10) softened from "multi-worker is an
+      RC6 deliverable" to "the scheduler primitive is
+      multi-worker-sound by construction; whether RC6 actually
+      ships N>1 is a separate decision." A *Honest framing —
+      scope history* paragraph was added recording that
+      multi-worker was retrofitted onto a branch named
+      `feat/multi-source-token-scheduler` and that G27 was
+      found during the 2026-05-22 branch review, not during
+      original implementation. The original framing presented
+      retrofitted scope as settled deliverable; the new
+      framing records the actual scope history.
+    - *RC6 Preconditions* split into §A (scheduler-correctness
+      preconditions required at any N≥1) and §B
+      (multi-worker-specific preconditions required only if
+      N>1 ships). G1, G2, G3, G27, G28, G29, G19 moved to §A;
+      G25b and G25h remained as multi-worker-specific in §B.
+      Rationale: G27 is admitted as a correctness claim under
+      WAL even at N=1; G28's PRAGMA discipline applies
+      within-process; G29's audit-primacy gap is a Tier-1
+      requirement at any N; G19 covers single-worker
+      incidents too. Listing all eight as "multi-worker
+      preconditions" inflated apparent cost and conflated
+      correctness with capability.
+    - *Open questions* entry "Worker process lifecycle"
+      promoted to a new *RC6 Preconditions §B* item (#9 —
+      *Deployment-shape decision*) with explicit dependency
+      arrows to Preconditions #6 (G29 schema) and #7 (G19
+      runbook). "Coordinated worker shutdown semantics",
+      "Telemetry per worker_id" (renamed in-place to "worker
+      identity column shape"), and "`pending_items` cache
+      scope under N>1" were absorbed into the same item as
+      sub-bullets. Rationale: each was framed as deferrable
+      ("policy is open", "decide alongside G27") but four
+      RC6-precondition tickets (G19, G29, G27 follow-ups)
+      cannot be discharged without a settled answer. Calling
+      a precondition an Open Question hides risk in the
+      wrong section.
+- A reader sweeping the post-revision text should find: no
+  load-bearing decisions hidden under *Open questions*; a
+  Status line that honestly states the precondition surface;
+  and a *Decision* §10 that records the post-review framing
+  rather than asserting retrofitted scope as original intent.
 
 ## Related Decisions
 

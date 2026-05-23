@@ -1540,6 +1540,164 @@ def test_scheduler_recover_expired_leases_skips_caller_owned_leases() -> None:
     assert prior_attempt == prior_claim.attempt + 1
 
 
+def test_scheduler_recover_expired_leases_skips_pending_sink_row_with_fresh_lease() -> None:
+    """Regression: ``recover_expired_leases`` must not clobber a peer's fresh lease
+    on a PENDING_SINK row across the SELECT → per-row UPDATE window.
+
+    PENDING_SINK-recovery keeps the row's existing ``work_item_id`` (unlike
+    READY-recovery, which rotates the id when bumping the attempt). Without a
+    ``lease_expires_at < now`` predicate on the UPDATE, a peer reaper that
+    returns the row to PENDING_SINK followed by a peer claimant that re-leases
+    it between the caller's SELECT and UPDATE would have its fresh lease
+    silently overwritten with ``lease_owner=NULL`` and a regressed status.
+
+    The race is simulated with ``before_cursor_execute``: between the caller's
+    SELECT (which observed the expired row) and the per-row UPDATE, a peer
+    transitions the same row to ``LEASED`` with a fresh ``lease_expires_at``
+    and a different ``lease_owner``. With the symmetric predicate on the
+    UPDATE, the UPDATE matches 0 rows and ``recovered`` returns 0; without the
+    fix, ``recovered`` returns 1 and the peer's lease is destroyed.
+
+    Filigree elspeth-28aaa36a62 (G1 P2).
+    """
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = repo.serialize_row_payload(PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True)))
+    _insert_scheduler_owner_records(engine, token_specs=(("token-1", "row-1", 0),), node_ids=("normalize",))
+    item = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+    # Worker-a leases the row, then its lease expires.
+    first_claim = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
+    assert first_claim is not None
+    # Promote the row to a PENDING_SINK-shaped state with an expired lease so
+    # the recovery sweep's SELECT will observe it as a PENDING_SINK candidate.
+    sweep_time = now + timedelta(seconds=120)
+    with engine.begin() as conn:
+        conn.execute(
+            token_work_items_table.update()
+            .where(token_work_items_table.c.work_item_id == item.work_item_id)
+            .values(
+                pending_sink_name="default",
+                pending_outcome="success",
+                pending_path="continue",
+                lease_expires_at=now + timedelta(seconds=30),  # expired by sweep_time
+            )
+        )
+
+    raced = False
+    fresh_expires_at = sweep_time + timedelta(seconds=300)
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def peer_re_leases_between_select_and_update(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]
+        nonlocal raced
+        compiled_statement = getattr(getattr(context, "compiled", None), "statement", None)
+        if raced or getattr(compiled_statement, "__visit_name__", None) != "update":
+            return
+        if getattr(getattr(compiled_statement, "table", None), "name", None) != token_work_items_table.name:
+            return
+        raced = True
+        # Simulate: peer reaper has already returned the row to PENDING_SINK
+        # and peer claimant has re-leased it with a fresh lease window.
+        cursor.execute(
+            "UPDATE token_work_items SET status = ?, lease_owner = ?, lease_expires_at = ?, updated_at = ? WHERE work_item_id = ?",
+            (
+                TokenWorkStatus.LEASED.value,
+                "peer-claimant",
+                fresh_expires_at.isoformat(sep=" "),
+                sweep_time.isoformat(sep=" "),
+                item.work_item_id,
+            ),
+        )
+
+    recovered = repo.recover_expired_leases(run_id="run-1", now=sweep_time, caller_owner="worker-sweeper")
+    assert raced is True
+    # With the fix, the UPDATE's ``lease_expires_at < now`` predicate spots the
+    # peer's fresh lease and matches zero rows; without it, ``recovered`` would
+    # be 1 and the row below would show ``lease_owner=NULL`` (clobbered).
+    assert recovered == 0
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                token_work_items_table.c.status,
+                token_work_items_table.c.lease_owner,
+                token_work_items_table.c.lease_expires_at,
+            ).where(token_work_items_table.c.work_item_id == item.work_item_id)
+        ).one()
+    assert row.status == TokenWorkStatus.LEASED.value
+    assert row.lease_owner == "peer-claimant"
+    # Compare via .replace(tzinfo=...) because SQLite stores naive ISO strings.
+    assert row.lease_expires_at.replace(tzinfo=UTC) == fresh_expires_at
+
+
+def test_scheduler_recover_expired_leases_reaps_null_owner_wedged_row() -> None:
+    """Regression: ``lease_owner IS NULL`` rows with expired leases must be reaped.
+
+    SQLite three-valued logic makes ``NULL != 'caller_owner'`` evaluate to NULL
+    (not TRUE), so a row wedged with ``status=LEASED`` and ``lease_owner=NULL``
+    is invisible to a sweep that only filters on ``lease_owner != caller_owner``.
+    Such rows represent a Tier-1 invariant violation we want to *recover from*,
+    not leak. The OR-NULL predicate makes them recoverable.
+
+    Filigree elspeth-28aaa36a62 (G1 P2, adjacent embedded-database-reviewer fix).
+    """
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = repo.serialize_row_payload(PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True)))
+    _insert_scheduler_owner_records(engine, token_specs=(("token-1", "row-1", 0),), node_ids=("normalize",))
+    item = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+    # Forge an invariant-violating wedge: status=LEASED but lease_owner=NULL.
+    with engine.begin() as conn:
+        conn.execute(
+            token_work_items_table.update()
+            .where(token_work_items_table.c.work_item_id == item.work_item_id)
+            .values(
+                status=TokenWorkStatus.LEASED.value,
+                lease_owner=None,
+                lease_expires_at=now + timedelta(seconds=30),
+            )
+        )
+
+    recovered = repo.recover_expired_leases(
+        run_id="run-1",
+        now=now + timedelta(seconds=120),
+        caller_owner="worker-sweeper",
+    )
+    assert recovered == 1
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(token_work_items_table.c.run_id == "run-1")
+        ).one()
+    assert row.status == TokenWorkStatus.READY.value
+    assert row.lease_owner is None
+
+
 @pytest.mark.parametrize("transition", ["waiting", "blocked", "terminal", "failed"])
 def test_scheduler_claimed_transition_rejects_stale_lease_owner_after_reclaim(transition: _SchedulerTransition) -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract

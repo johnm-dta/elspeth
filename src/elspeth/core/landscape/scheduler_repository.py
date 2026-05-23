@@ -12,7 +12,7 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Engine, and_, func, select, update
+from sqlalchemy import Engine, and_, func, or_, select, update
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
@@ -571,13 +571,40 @@ class TokenSchedulerRepository:
         future a peer worker), not the caller's own work. See
         filigree elspeth-941f1508f5.
         """
+        # Predicate symmetric across the SELECT and UPDATE to close two
+        # multi-worker race classes (filigree elspeth-28aaa36a62, G1 P2):
+        #
+        # 1. PENDING_SINK ABA window. ``next_work_item_id`` for the
+        #    PENDING_SINK-recovery branch is the row's existing
+        #    ``work_item_id`` (see below — ``pending_sink_name is not None``
+        #    keeps the work-item identity stable). Between this SELECT and
+        #    the per-row UPDATE, a peer reaper may have already returned the
+        #    row to PENDING_SINK and a peer claimant may have leased it
+        #    again with a fresh ``lease_expires_at``. Without the
+        #    ``lease_expires_at < now`` predicate on the UPDATE, the caller
+        #    would clobber the peer's live lease. The READY-recovery branch
+        #    is incidentally protected by ``work_item_id`` rotation at the
+        #    next-attempt bump, but symmetry costs nothing and survives the
+        #    G27 connection-fan-out transition.
+        #
+        # 2. ``lease_owner`` NULL-blindness. SQLite three-valued logic
+        #    makes ``NULL != caller_owner`` evaluate to NULL (not TRUE),
+        #    so a row wedged with ``status=LEASED`` and ``lease_owner=NULL``
+        #    (a Tier-1 invariant violation we want to recover from, not
+        #    leak) would be invisible to the sweep. ``(lease_owner IS NULL
+        #    OR lease_owner != caller_owner)`` recovers those rows while
+        #    still excluding the caller's own active leases.
+        lease_owner_not_caller = or_(
+            token_work_items_table.c.lease_owner.is_(None),
+            token_work_items_table.c.lease_owner != caller_owner,
+        )
         with self._engine.begin() as conn:
             expired = conn.execute(
                 select(token_work_items_table)
                 .where(token_work_items_table.c.run_id == run_id)
                 .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
                 .where(token_work_items_table.c.lease_expires_at < now)
-                .where(token_work_items_table.c.lease_owner != caller_owner)
+                .where(lease_owner_not_caller)
                 .order_by(token_work_items_table.c.ingest_sequence, token_work_items_table.c.step_index)
             ).mappings()
             recovered = 0
@@ -595,7 +622,13 @@ class TokenSchedulerRepository:
                     .where(token_work_items_table.c.work_item_id == row["work_item_id"])
                     .where(token_work_items_table.c.run_id == run_id)
                     .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
-                    .where(token_work_items_table.c.lease_owner != caller_owner)
+                    .where(token_work_items_table.c.lease_expires_at < now)
+                    .where(
+                        or_(
+                            token_work_items_table.c.lease_owner.is_(None),
+                            token_work_items_table.c.lease_owner != caller_owner,
+                        )
+                    )
                     .values(
                         work_item_id=next_work_item_id,
                         attempt=next_attempt,

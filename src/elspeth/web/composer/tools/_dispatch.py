@@ -22,6 +22,8 @@ from elspeth.web.composer.tools._common import (
     ToolHandler,
     ToolResult,
     _failure_result,
+    build_plugin_schemas_for_failure,
+    should_augment_with_plugin_schemas,
 )
 from elspeth.web.composer.tools.blobs import (
     _execute_create_blob,
@@ -103,8 +105,9 @@ def get_tool_definitions() -> list[dict[str, Any]]:
     ``ComposerServiceImpl._get_litellm_tools``.
 
     The skill at ``src/elspeth/web/composer/skills/pipeline_composer.md``
-    enumerates the same tool set in its Step-0 section. The drift gate
-    ``TestComposerToolNameDrift::test_skill_step0_matches_get_tool_definitions``
+    enumerates the same tool set in its Foundation-knowledge section
+    (under "## CRITICAL: Tool Schema Availability"). The drift gate
+    ``TestComposerToolNameDrift::test_skill_tool_inventory_matches_get_tool_definitions``
     in ``tests/unit/web/composer/test_skill_drift.py`` enforces equality
     between the runtime list returned here and the skill's bulleted
     categories — adding a tool without updating both sides fails CI.
@@ -1269,6 +1272,37 @@ def _inject_prior_validation(
 _ALL_MUTATION_TOOL_NAMES: Final[frozenset[str]] = _MUTATION_TOOL_NAMES | _BLOB_MUTATION_TOOL_NAMES | _SECRET_MUTATION_TOOL_NAMES
 
 
+def _augment_with_plugin_schemas(
+    result: ToolResult,
+    tool_name: str,
+    catalog: CatalogService,
+) -> ToolResult:
+    """Attach inline ``plugin_schemas`` to a failed option-shape rejection.
+
+    For the mutation tools listed in
+    ``_PLUGIN_SCHEMA_AUGMENTATION_TOOLS``, scan ``result.validation.errors``
+    for ``Invalid options for <kind> '<plugin>'`` messages and embed the
+    full ``get_plugin_schema`` payload for every named plugin. Eliminates
+    the second round-trip the LLM would otherwise burn calling
+    ``get_plugin_schema`` after each rejection (see composer session
+    47cfbb5e on staging: 13 tool calls + 18 LLM rounds to converge a
+    4-plugin pipeline because the model never preloaded schemas).
+
+    No-op when the mutation succeeded, when no error message matches the
+    option-shape pattern, when the result already carries
+    ``plugin_schemas`` (handler set it directly), or when ``tool_name`` is
+    not one of the augmentation-eligible tools.
+    """
+    if not should_augment_with_plugin_schemas(tool_name):
+        return result
+    if result.success or result.plugin_schemas is not None:
+        return result
+    schemas = build_plugin_schemas_for_failure(result, catalog)
+    if schemas is None:
+        return result
+    return replace(result, plugin_schemas=schemas)
+
+
 def execute_tool(
     tool_name: str,
     arguments: dict[str, Any],
@@ -1364,8 +1398,16 @@ def execute_tool(
     if tool_name in _ALL_MUTATION_TOOL_NAMES:
         prior = prior_validation if prior_validation is not None else state.validate()
         result = handler(arguments, state, context)
-        return _inject_prior_validation(result, prior)
-    return handler(arguments, state, context)
+        result = _inject_prior_validation(result, prior)
+    else:
+        result = handler(arguments, state, context)
+
+    # Failure-response augmentation: when an option-shape mutation rejects,
+    # embed the get_plugin_schema payloads for every plugin named in the
+    # validation errors so the LLM avoids a follow-up discovery round-trip.
+    # No-op for non-augmentation-eligible tools or successful results
+    # (gated inside ``_augment_with_plugin_schemas``).
+    return _augment_with_plugin_schemas(result, tool_name, catalog)
 
 
 # Module-level assertions — F-18 dual-registry invariant enforcement.

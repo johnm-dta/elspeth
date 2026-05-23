@@ -341,7 +341,13 @@ def _execute_set_pipeline(
     # original intent for the repair-hint branch.  The semantic-validation
     # branch (file-sink collision policy, path allowlist) still runs on
     # the validated dict.
-    raw_outputs = args.get("outputs") if isinstance(args, Mapping) else None
+    # ``args`` is typed ``dict[str, Any]`` per the function signature
+    # (raw LLM tool-call payload). The Tier-3 LLM-boundary read is
+    # ``args.get("outputs")`` — the value may be absent, present-as-list,
+    # or present-as-some-other-shape; downstream isinstance checks
+    # narrow the value. A pre-isinstance on ``args`` itself is
+    # redundant (the type system already proves it is a Mapping).
+    raw_outputs = args.get("outputs")
     for index, output in enumerate(validated.outputs):
         out_name = output.sink_name
         out_plugin = output.plugin
@@ -642,8 +648,16 @@ def _assert_affected_llm_node(
             expected="id of a node whose plugin is 'llm'",
             actual_type=f"node {affected_node_id!r} has plugin={plugin!r}",
         )
+    # ``node.options`` is typed ``Mapping[str, Any]`` (NodeSpec deep-
+    # frozen invariant) — fall back to an empty dict when falsy so the
+    # downstream ``.get`` is always defined. The redundant ``isinstance
+    # (options, Mapping)`` guard that used to wrap this read is removed:
+    # the type system already proves it. The ``.get("prompt_template")``
+    # IS still a Tier-3 LLM-boundary read (the *value* at that key is
+    # LLM-authored ``Any``) and the ``isinstance(prompt_template, str)``
+    # narrow that follows is the actual boundary check.
     options = node.options if node.options else {}
-    prompt_template = options.get("prompt_template") if isinstance(options, Mapping) else None
+    prompt_template = options.get("prompt_template")
     if not isinstance(prompt_template, str) or not prompt_template:
         raise ToolArgumentError(
             argument="affected_node_id",

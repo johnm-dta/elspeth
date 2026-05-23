@@ -16,7 +16,13 @@
    Chat Bubble Base Styles
    --------------------------------------------------------------------------- */
 .bubble {
-  max-width: 85%;
+  /* Fallback measure cap for any bubble that does NOT compose
+     .message-bubble-content (currently only .bubble-system, which then
+     overrides to 100%). The runtime cap for user and assistant bubbles
+     lives on .message-bubble-content below — placed there because that
+     selector has equal specificity to .bubble but appears later in
+     source order and would otherwise silently win. */
+  max-width: min(85%, 68ch);
   padding: var(--space-md) var(--space-lg);
   border-radius: var(--radius-lg);
   word-break: break-word;
@@ -47,6 +53,18 @@
   margin-bottom: var(--space-md);
 }
 
+/* Re-assert the loose-list mitigation from common.css at bubble-context
+   specificity. Commit 5dc0e7c89 raised .bubble .markdown-body p margins to
+   var(--space-md) for paragraph-break legibility; that rule wins the cascade
+   over common.css's `.markdown-body li > p { margin: 0 }` (equal specificity,
+   later source order), which silently restored loose-list compounding inside
+   bubbles. By scoping the mitigation to .bubble and placing it AFTER the
+   paragraph-margin rule, we keep both fixes: prose paragraphs get a 12px
+   break, but loose-list <li><p>...</p></li> items render tight. */
+.bubble .markdown-body li > p {
+  margin: 0;
+}
+
 .bubble-user {
   align-self: flex-end;
   background-color: var(--color-bubble-user);
@@ -57,11 +75,17 @@
   align-self: flex-start;
   background-color: var(--color-bubble-assistant);
   border: 1px solid var(--color-bubble-assistant-border);
+  /* Left-edge accent: lifts the assistant bubble's visual containment without
+     touching its background saturation or the user-bubble visual weight. The
+     2px accent reads as "system attestation" against the workspace canvas
+     where the 18%-alpha border alone fell to ~2:1 and was barely visible. */
+  border-left: 2px solid var(--color-border-strong);
 }
 
 .bubble-system {
   align-self: center;
   width: 100%;
+  max-width: 100%;   /* belt-and-braces: keep system notices full-width regardless of any future change to the .bubble fallback cap */
   text-align: center;
   background-color: var(--color-bubble-system);
   color: var(--color-text-muted);
@@ -637,7 +661,14 @@
 }
 
 .message-bubble-content {
-  max-width: 80%;
+  /* Cap measure at ~68ch (Bringhurst's upper range) so wide windows do
+     not stretch the bubble to a 120-char measure that hurts eye-return
+     on long assistant summaries. Small windows keep the 80% behaviour
+     via min(). This is the LIVE cap — .bubble has the same cap as a
+     defense-in-depth fallback, but .message-bubble-content has equal
+     specificity to .bubble and appears later in source order, so this
+     rule wins for every user and assistant bubble. */
+  max-width: min(80%, 68ch);
   font-size: var(--font-size-base);
   /* Was --line-height-normal (1.5). .message-bubble-content has the same
      specificity as .bubble but appears later in source, so it overrides
@@ -926,17 +957,100 @@
   font-size: var(--font-size-xs);
 }
 
-.tool-call-ribbon-icon {
+/* Tool-call info trigger + tooltip.
+   The trigger replaces the previous decorative .tool-call-ribbon-icon span:
+   it's a real <button> so keyboard users can focus it. Tooltip body shows
+   on hover or focus-visible via CSS only (no JS state). */
+.tool-call-info {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.tool-call-info-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 16px;
   height: 16px;
+  margin: 0;
+  padding: 0;
   border: 1px solid var(--color-border-strong);
   border-radius: 50%;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
   font-size: var(--font-size-3xs);
   font-weight: 700;
+  cursor: help;
+  /* The trigger is a button so it gets the global :focus-visible ring. */
+}
+
+.tool-call-info-trigger:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.tool-call-info-bubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: var(--z-popover);
+  min-width: 220px;
+  max-width: 320px;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-snug);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  /* Hidden until the trigger is hovered or focused. visibility +
+     opacity transition together so the bubble can fade in but still be
+     pointer-event-inert until visible. */
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease, visibility 0s linear 0.12s;
+}
+
+/* Hover-bridge: invisible 6px hit-zone that fills the visual gap between
+   the trigger button and the bubble. Without it, the cursor briefly leaves
+   .tool-call-info while crossing the 6px gap and the bubble flickers off
+   mid-traversal, making its content unreachable for mouse users. The
+   pseudo-element is part of the bubble's DOM subtree, so :hover on the
+   bubble (and therefore on .tool-call-info) stays true during the cross.
+   Visual gap unchanged — bubble's `bottom: calc(100% + 6px)` still leaves
+   6px of empty space; the pseudo just extends the hit area into it. */
+.tool-call-info-bubble::before {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
+  height: 6px;
+}
+
+.tool-call-info-bubble-name {
+  display: block;
+  margin-bottom: 2px;
   color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+}
+
+.tool-call-info-bubble-body {
+  display: block;
+}
+
+.tool-call-info:hover .tool-call-info-bubble,
+.tool-call-info-trigger:focus-visible ~ .tool-call-info-bubble,
+.tool-call-info-trigger:focus-visible + .tool-call-info-bubble {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity 0.12s ease, visibility 0s linear 0s;
 }
 
 .tool-call-card {

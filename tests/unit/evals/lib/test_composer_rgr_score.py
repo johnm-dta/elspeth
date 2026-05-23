@@ -537,3 +537,304 @@ class TestOutputOptionAsserters:
         )
         assert result["verdict"] == "AMBER"
         assert any("write_mode" in r for r in result["amber_reasons"])
+
+
+# --------------------------------------------------------------------------
+# Tool-sequence asserters (gov-pages-rate-cool scenario, 2026-05-23)
+# --------------------------------------------------------------------------
+
+
+import json as _json  # noqa: E402  -- after all baseline imports
+
+
+def _tool_call(call_id: str, name: str, **arguments: Any) -> dict[str, Any]:
+    """Build a LiteLLM-shape ToolCall dict for tests."""
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": _json.dumps(arguments)},
+    }
+
+
+def _assistant_with_calls(*calls: dict[str, Any]) -> dict[str, Any]:
+    """Assistant message row carrying one or more tool_calls."""
+    return {"role": "assistant", "content": "", "tool_calls": list(calls)}
+
+
+def _tool_row(call_id: str, *, success: bool, content_extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """role=tool message row carrying a ToolResult-shaped JSON content blob."""
+    payload: dict[str, Any] = {"success": success}
+    if content_extra:
+        payload.update(content_extra)
+    return {"role": "tool", "tool_call_id": call_id, "content": _json.dumps(payload)}
+
+
+class TestMaxPersistedToolCalls:
+    """red_criteria.max_persisted_tool_calls — trajectory length cap."""
+
+    def test_green_when_under_cap(self) -> None:
+        messages = [
+            _msg("user", "hi"),
+            _assistant_with_calls(_tool_call("c1", "list_sources")),
+            _tool_row("c1", success=True),
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(red={"max_persisted_tool_calls": 8}),
+            messages=messages,
+            state=_state_valid(),
+        )
+        assert result["verdict"] == "GREEN", result["red_reasons"]
+
+    def test_green_at_exact_cap(self) -> None:
+        # 3 calls, cap = 3 — boundary inclusive
+        messages = [
+            _msg("user", "hi"),
+            _assistant_with_calls(
+                _tool_call("c1", "list_sources"),
+                _tool_call("c2", "list_transforms"),
+                _tool_call("c3", "list_sinks"),
+            ),
+            _tool_row("c1", success=True),
+            _tool_row("c2", success=True),
+            _tool_row("c3", success=True),
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(red={"max_persisted_tool_calls": 3}),
+            messages=messages,
+            state=_state_valid(),
+        )
+        assert result["verdict"] == "GREEN"
+
+    def test_red_when_over_cap(self) -> None:
+        calls = [_tool_call(f"c{i}", "list_sources") for i in range(5)]
+        messages = [
+            _msg("user", "hi"),
+            _assistant_with_calls(*calls),
+            *[_tool_row(f"c{i}", success=True) for i in range(5)],
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(red={"max_persisted_tool_calls": 3}),
+            messages=messages,
+            state=_state_valid(),
+        )
+        assert result["verdict"] == "RED"
+        assert any("persisted 5 tool calls" in r for r in result["red_reasons"])
+
+    def test_cap_absent_means_no_check(self) -> None:
+        calls = [_tool_call(f"c{i}", "list_sources") for i in range(20)]
+        messages = [_assistant_with_calls(*calls), _msg("assistant", "done")]
+        result = score(
+            scenario=_scenario(),
+            messages=messages,
+            state=_state_valid(),
+        )
+        # No max_persisted_tool_calls in scenario -> baseline scoring,
+        # GREEN despite 20 calls.
+        assert result["verdict"] == "GREEN", result["red_reasons"]
+
+
+class TestSetPipelineRejectionWithoutSuccess:
+    """red_criteria.set_pipeline_rejection_without_success — convergence failure."""
+
+    def test_red_when_only_rejections(self) -> None:
+        messages = [
+            _msg("user", "hi"),
+            _assistant_with_calls(_tool_call("c1", "set_pipeline"), _tool_call("c2", "set_pipeline")),
+            _tool_row("c1", success=False),
+            _tool_row("c2", success=False),
+            _msg("assistant", "I tried."),
+        ]
+        result = score(
+            scenario=_scenario(red={"set_pipeline_rejection_without_success": True}),
+            messages=messages,
+            state=_state_valid(is_valid=False),
+        )
+        assert result["verdict"] == "RED"
+        assert any("set_pipeline" in r and "0 successful" in r for r in result["red_reasons"])
+
+    def test_green_when_eventual_success(self) -> None:
+        # Two rejections, then one success — convergence achieved.
+        messages = [
+            _msg("user", "hi"),
+            _assistant_with_calls(_tool_call("c1", "set_pipeline")),
+            _tool_row("c1", success=False),
+            _assistant_with_calls(_tool_call("c2", "set_pipeline")),
+            _tool_row("c2", success=False),
+            _assistant_with_calls(_tool_call("c3", "set_pipeline")),
+            _tool_row("c3", success=True),
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(red={"set_pipeline_rejection_without_success": True}),
+            messages=messages,
+            state=_state_valid(),
+        )
+        # Some rejections + one success => rule does not fire.
+        assert result["verdict"] == "GREEN", result["red_reasons"]
+
+    def test_green_when_no_attempts(self) -> None:
+        # Passivity case — no set_pipeline at all. This rule is silent;
+        # other rules (passivity_phrases / must_be_valid) own the verdict.
+        messages = [_msg("user", "hi"), _msg("assistant", "Sure, what do you want?")]
+        result = score(
+            scenario=_scenario(red={"set_pipeline_rejection_without_success": True}),
+            messages=messages,
+            state=_state_valid(),
+        )
+        # No set_pipeline rejections -> rule does NOT fire. Other red signals
+        # still apply via the baseline rules.
+        assert result["verdict"] == "GREEN", result["red_reasons"]
+
+    def test_rule_disabled_when_flag_absent(self) -> None:
+        messages = [
+            _assistant_with_calls(_tool_call("c1", "set_pipeline")),
+            _tool_row("c1", success=False),
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(),  # no set_pipeline_rejection_without_success
+            messages=messages,
+            state=_state_valid(),
+        )
+        assert result["verdict"] == "GREEN"
+
+    def test_malformed_tool_row_does_not_count(self) -> None:
+        # Tool row content not parseable as JSON dict -> result_unknown,
+        # rule does not fire.
+        messages = [
+            _assistant_with_calls(_tool_call("c1", "set_pipeline")),
+            {"role": "tool", "tool_call_id": "c1", "content": "not json"},
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(red={"set_pipeline_rejection_without_success": True}),
+            messages=messages,
+            state=_state_valid(),
+        )
+        assert result["verdict"] == "GREEN"
+
+
+class TestDiscoverBeforeMutation:
+    """green_criteria.must_discover_schema_before_first_mutation — discover-first."""
+
+    def test_green_when_schema_precedes_mutation(self) -> None:
+        messages = [
+            _msg("user", "hi"),
+            _assistant_with_calls(_tool_call("c1", "get_plugin_schema")),
+            _tool_row("c1", success=True),
+            _assistant_with_calls(_tool_call("c2", "set_pipeline")),
+            _tool_row("c2", success=True),
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(green={"must_discover_schema_before_first_mutation": True}),
+            messages=messages,
+            state=_state_valid(),
+        )
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
+
+    def test_amber_when_mutation_precedes_schema(self) -> None:
+        # Schema-after-rejection pattern: model tried set_pipeline first,
+        # got rejected, then looked up the schema. That doesn't satisfy
+        # the discover-first contract.
+        messages = [
+            _msg("user", "hi"),
+            _assistant_with_calls(_tool_call("c1", "set_pipeline")),
+            _tool_row("c1", success=False),
+            _assistant_with_calls(_tool_call("c2", "get_plugin_schema")),
+            _tool_row("c2", success=True),
+            _assistant_with_calls(_tool_call("c3", "set_pipeline")),
+            _tool_row("c3", success=True),
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(green={"must_discover_schema_before_first_mutation": True}),
+            messages=messages,
+            state=_state_valid(),
+        )
+        assert result["verdict"] == "AMBER"
+        assert any("discovery" in r and "post-rejection" in r for r in result["amber_reasons"])
+
+    def test_amber_when_no_schema_at_all(self) -> None:
+        messages = [
+            _msg("user", "hi"),
+            _assistant_with_calls(_tool_call("c1", "set_pipeline")),
+            _tool_row("c1", success=True),
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(green={"must_discover_schema_before_first_mutation": True}),
+            messages=messages,
+            state=_state_valid(),
+        )
+        assert result["verdict"] == "AMBER"
+        assert any("not preceded by any get_plugin_schema" in r for r in result["amber_reasons"])
+
+    def test_vacuously_green_when_no_mutations(self) -> None:
+        # Nothing mutated -> rule is vacuously satisfied. The empty
+        # pipeline is caught by must_be_valid, not this rule.
+        messages = [
+            _msg("user", "hi"),
+            _assistant_with_calls(_tool_call("c1", "list_sources")),
+            _tool_row("c1", success=True),
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(green={"must_discover_schema_before_first_mutation": True}),
+            messages=messages,
+            state=_state_valid(),
+        )
+        assert result["verdict"] == "GREEN"
+
+    def test_rule_disabled_when_flag_absent(self) -> None:
+        messages = [
+            _assistant_with_calls(_tool_call("c1", "set_pipeline")),
+            _tool_row("c1", success=True),
+            _msg("assistant", "done"),
+        ]
+        result = score(
+            scenario=_scenario(),  # no flag
+            messages=messages,
+            state=_state_valid(),
+        )
+        assert result["verdict"] == "GREEN"
+
+    def test_mutation_recognises_full_mutating_set(self) -> None:
+        # Any of the mutating tool names triggers the check.
+        for mutating in ("set_source", "upsert_node", "set_output", "set_source_from_blob", "apply_pipeline_recipe", "patch_node_options"):
+            messages = [
+                _assistant_with_calls(_tool_call("c1", mutating)),
+                _tool_row("c1", success=True),
+                _msg("assistant", "done"),
+            ]
+            result = score(
+                scenario=_scenario(green={"must_discover_schema_before_first_mutation": True}),
+                messages=messages,
+                state=_state_valid(),
+            )
+            assert result["verdict"] == "AMBER", f"expected AMBER for first-call mutation {mutating}, got {result}"
+
+
+class TestPersistedToolCallCountStat:
+    """Stats: persisted_tool_call_count surfaced for diagnostic use."""
+
+    def test_stat_counts_assistant_tool_calls(self) -> None:
+        messages = [
+            _msg("user", "hi"),
+            _assistant_with_calls(_tool_call("c1", "list_sources"), _tool_call("c2", "list_sinks")),
+            _tool_row("c1", success=True),
+            _tool_row("c2", success=True),
+            _assistant_with_calls(_tool_call("c3", "set_pipeline")),
+            _tool_row("c3", success=True),
+            _msg("assistant", "done"),
+        ]
+        result = score(scenario=_scenario(), messages=messages, state=_state_valid())
+        assert result["stats"]["persisted_tool_call_count"] == 3
+
+    def test_stat_zero_on_passivity(self) -> None:
+        messages = [_msg("user", "hi"), _msg("assistant", "what do you want?")]
+        result = score(scenario=_scenario(), messages=messages, state=_state_valid())
+        assert result["stats"]["persisted_tool_call_count"] == 0

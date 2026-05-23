@@ -70,9 +70,15 @@ HTTP_CODE=$(curl -sS -X POST "$ELSPETH_EVAL_BASE_URL/api/sessions/$SID/messages"
 END=$(date +%s)
 log "POST /messages -> HTTP $HTTP_CODE (elapsed: $((END-START))s)"
 
-log "fetch full message history"
+log "fetch full message history (with audit-grade tool rows for tool-sequence scoring)"
+# include_tool_rows=true: persisted role=tool rows carry the tool-result envelope
+# (success/false on set_pipeline rejection lives here). include_raw_content=true:
+# surfaces the model's pre-synthesis prose for assistant turns intercepted by the
+# empty-state synthesizer. limit=500 raised from default 100 so trajectories
+# longer than a default page (the gov-pages-rate-cool scenario specifically
+# scores >12-call trajectories) are not silently truncated.
 curl -sS -H "Authorization: Bearer $JWT" \
-    "$ELSPETH_EVAL_BASE_URL/api/sessions/$SID/messages" \
+    "$ELSPETH_EVAL_BASE_URL/api/sessions/$SID/messages?include_tool_rows=true&include_raw_content=true&limit=500" \
     -o "$RUN_DIR/messages.json"
 
 log "fetch final composition state"

@@ -308,6 +308,14 @@ class TierModelVisitor(ast.NodeVisitor):
             {
                 "_cached_runtime_preflight",
                 "_compose_loop",
+                # _dispatch_tool_batch was extracted from _compose_loop on
+                # 2026-05-23 (compose-loop-decomp refactor). The Tier-3
+                # boundary that validates the LLM's tool_call.function.arguments
+                # against the dict-shape contract — `if not isinstance(
+                # decoded_arguments, dict):` — moved with the code. Same
+                # semantics, same boundary, new method name: this is a
+                # 1:1 successor inclusion, not a list extension.
+                "_dispatch_tool_batch",
                 "_first_response_message",
                 "_json_safe_provider_artifact",
                 "_litellm_completion_supports_param",

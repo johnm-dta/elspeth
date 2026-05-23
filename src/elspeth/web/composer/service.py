@@ -28,7 +28,6 @@ from uuid import UUID
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
     from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
-    from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, _ToolOutcome
     from elspeth.web.sessions.protocol import SessionServiceProtocol
     from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
@@ -47,6 +46,13 @@ from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import yaml_generator
+from elspeth.web.composer._compose_loop_carriers import (
+    _CallModelOutcome,
+    _ClassifyOutcome,
+    _DispatchOutcome,
+    _PersistOutcome,
+    _TerminateOutcome,
+)
 from elspeth.web.composer._required_paths_validator import (
     _TOOL_REQUIRED_PATHS,
     _find_missing_required_paths,
@@ -135,6 +141,7 @@ from elspeth.web.interpretation_state import (
     INTERPRETATION_REVIEW_PENDING_CODE,
     interpretation_sites,
 )
+from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, _ToolOutcome
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
 
@@ -911,6 +918,18 @@ class ComposerServiceImpl:
         # per service instance. Subsequent compose() calls observe the
         # flag set and skip the upsert.
         self._skill_markdown_history_upserted: bool = False
+        # Per-session set of ``(kind, plugin_name)`` pairs for which
+        # ``get_plugin_schema`` has returned successfully in this service
+        # instance. Surfaced in the per-turn system context as
+        # ``schemas_loaded_this_session`` so the LLM can see at a glance
+        # which plugins it has already introspected and which schemas it
+        # still needs to read before constructing a config (see
+        # ``prompts.build_context_string``). A new session_id transparently
+        # gets an empty set on first access; in-memory only because the
+        # tracker is convergence guidance, not auditable state.
+        # Concurrency: a single session is driven serially through one
+        # compose() call at a time; a plain dict is sufficient.
+        self._schemas_loaded_by_session: dict[str, set[tuple[str, str]]] = {}
 
     async def _run_one_turn_for_test(
         self,
@@ -1928,6 +1947,1756 @@ class ComposerServiceImpl:
             llm_calls=(),
         )
 
+    async def _call_model_turn(
+        self,
+        *,
+        llm_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        state: CompositionState,
+        initial_version: int,
+        deadline: float,
+        recorder: BufferingRecorder,
+        progress: ComposerProgressSink | None,
+        message: str,
+        composition_turns_used: int,
+        discovery_turns_used: int,
+    ) -> _CallModelOutcome:
+        """Phase P1 of the compose loop — one LLM call with cap enforcement.
+
+        Emits the model-call progress event, calls the provider before the
+        cooperative deadline, and enforces ``_max_tool_calls_per_turn``.
+        A cap breach raises :class:`ComposerConvergenceError` with the
+        ``tool_call_cap_exceeded`` reason directly; no carrier is returned
+        in that case.
+        """
+        await _emit_progress(progress, _model_call_progress_event(message))
+        response = await self._call_llm_before_deadline(
+            llm_messages,
+            tools,
+            state,
+            initial_version,
+            deadline,
+            recorder=recorder,
+        )
+        assistant_message = response.choices[0].message
+        raw_assistant_content = assistant_message.content
+        assistant_tool_calls = assistant_message.tool_calls or ()
+        if len(assistant_tool_calls) > self._max_tool_calls_per_turn:
+            self._telemetry.tool_call_cap_exceeded_total.add(1)
+            raise ComposerConvergenceError.capture(
+                max_turns=composition_turns_used + discovery_turns_used,
+                budget_exhausted="composition",
+                state=state,
+                initial_version=initial_version,
+                tool_invocations=recorder.invocations,
+                llm_calls=recorder.llm_calls,
+                reason="tool_call_cap_exceeded",
+                evidence={
+                    "observed": len(assistant_tool_calls),
+                    "cap": self._max_tool_calls_per_turn,
+                },
+            )
+        return _CallModelOutcome(
+            response=response,
+            assistant_message=assistant_message,
+            raw_assistant_content=raw_assistant_content,
+            assistant_tool_calls=tuple(assistant_tool_calls),
+            has_tool_calls=bool(assistant_message.tool_calls),
+        )
+
+    async def _persist_turn_audit(
+        self,
+        *,
+        tool_outcomes: tuple[_ToolOutcome, ...],
+        decoded_args_by_call_id: Mapping[str, Mapping[str, Any]],
+        assistant_message: Any,
+        raw_assistant_content: str | None,
+        assistant_tool_calls: tuple[Any, ...],
+        plugin_crash: ComposerPluginCrashError | None,
+        session_id: str | None,
+        current_state_id: str | None,
+        persisted_tool_call_turn: bool,
+        persisted_assistant_message_id: str | None,
+    ) -> _PersistOutcome:
+        """Phase P4 of the compose loop — redact then persist the turn audit.
+
+        Two sub-steps that share an invariant (a mid-step raise must leave
+        the DB in its pre-step shape):
+
+        1. **Redaction (pure / async).** Walks ``tool_outcomes`` via the
+           redaction manifest and builds the immutable
+           ``redacted_assistant_tool_calls`` / ``redacted_tool_rows`` shapes
+           the persister expects.
+        2. **Persistence.** Calls
+           ``sessions_service.persist_compose_turn_async`` exactly once
+           when ``session_id`` is set. The AuditIntegrityError catch
+           stamps ``failed_turn`` with ``tool_responses_persisted=0`` and
+           re-raises so the route handler sees the partial-write story.
+           Unwind-audit invariants are checked after the persist returns;
+           failures raise additional AuditIntegrityError(s).
+
+        Plugin-crash propagation (the post-persist re-raise of a
+        ``ComposerPluginCrashError`` captured in P3) is intentionally
+        *not* in this helper: the driver decides whether to raise based
+        on ``dispatch.plugin_crash is not None`` so the carrier never
+        carries a "post-crash" disposition.
+        """
+        from pydantic import ValidationError as PydanticValidationError
+
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_arguments
+
+        phase3_self = cast(Any, self)
+        redaction_telemetry = phase3_self._redaction_telemetry
+        redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...] = ()
+        for tool_outcome in tool_outcomes:
+            tc = tool_outcome.call
+            decoded_args: dict[str, Any]
+            if tc.id in decoded_args_by_call_id:
+                # deep_thaw restores plain dict/list types from any
+                # MappingProxyType / tuple introduced by the carrier's
+                # freeze_fields contract. redact_tool_call_arguments has a
+                # ``dict[str, Any]`` signature and json.dumps cannot serialise
+                # MappingProxyType, so the thaw here is load-bearing once
+                # _DispatchOutcome carries frozen args.
+                decoded_args = deep_thaw(decoded_args_by_call_id[tc.id])
+            elif tool_outcome.error_class is not None:
+                decoded_args = {
+                    "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+                    "error_class": tool_outcome.error_class,
+                }
+            else:
+                decoded_args = {"_raw_arguments": tc.function.arguments}
+            if tc.function.name in MANIFEST:
+                try:
+                    persisted_arguments = redact_tool_call_arguments(
+                        tc.function.name,
+                        decoded_args,
+                        telemetry=redaction_telemetry,
+                    )
+                except PydanticValidationError:
+                    if tool_outcome.error_class is None:
+                        raise
+                    persisted_arguments = {
+                        "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+                        "error_class": tool_outcome.error_class,
+                    }
+            else:
+                # Unknown tool names are Tier-3 LLM hallucinations handled
+                # by execute_tool as a semantic failure ToolResult. The
+                # manifest is intentionally closed, so do not call the
+                # walker for names it cannot know about.
+                persisted_arguments = decoded_args
+            redacted_assistant_tool_calls = (
+                *redacted_assistant_tool_calls,
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": json.dumps(persisted_arguments),
+                    },
+                },
+            )
+        redacted_tool_rows = tuple(
+            RedactedToolRow(
+                tool_call_id=tool_outcome.call.id,
+                content=phase3_self._serialize_response_via_walker(tool_outcome, telemetry=redaction_telemetry),
+                composition_state_payload=(
+                    phase3_self._state_payload_for_compose_turn_for_test(tool_outcome.response)
+                    if tool_outcome.post_version > tool_outcome.pre_version
+                    else None
+                ),
+            )
+            for tool_outcome in tool_outcomes
+        )
+        self._phase3_last_redacted_assistant_tool_calls = redacted_assistant_tool_calls
+        self._phase3_last_redacted_tool_rows = redacted_tool_rows
+        failed_turn: FailedTurnMetadata | None = None
+        if session_id is not None:
+            sessions_service = self._require_sessions_service()
+            try:
+                audit_outcome = await sessions_service.persist_compose_turn_async(
+                    session_id=session_id,
+                    assistant_content=assistant_message.content or "",
+                    raw_content=raw_assistant_content,
+                    redacted_assistant_tool_calls=redacted_assistant_tool_calls,
+                    redacted_tool_rows=redacted_tool_rows,
+                    parent_composition_state_id=current_state_id,
+                    expected_current_state_id=current_state_id,
+                    writer_principal="compose_loop",
+                    plugin_crash_pending=plugin_crash is not None,
+                )
+            except AuditIntegrityError as exc:
+                exc.failed_turn = FailedTurnMetadata(
+                    assistant_message_id=None,
+                    tool_calls_attempted=len(assistant_tool_calls),
+                    tool_responses_persisted=0,
+                )
+                raise
+            self._phase3_last_audit_outcome = audit_outcome
+            current_state_id = audit_outcome.current_state_id
+            failed_turn = FailedTurnMetadata(
+                assistant_message_id=audit_outcome.assistant_id,
+                tool_calls_attempted=len(assistant_tool_calls),
+            )
+            if audit_outcome.assistant_id is None and plugin_crash is None:
+                raise AuditIntegrityError(
+                    "persist_compose_turn_async returned unwind_audit_failed without an in-flight plugin crash",
+                    failed_turn=failed_turn,
+                )
+            if audit_outcome.assistant_id is None and not audit_outcome.unwind_audit_failed:
+                raise AuditIntegrityError(
+                    "persist_compose_turn_async returned no assistant id without the unwind-audit-failed disposition",
+                    failed_turn=failed_turn,
+                )
+            persisted_assistant_message_id = audit_outcome.assistant_id
+            persisted_tool_call_turn = True
+        return _PersistOutcome(
+            current_state_id=current_state_id,
+            persisted_assistant_message_id=persisted_assistant_message_id,
+            persisted_tool_call_turn=persisted_tool_call_turn,
+            failed_turn=failed_turn,
+        )
+
+    async def _dispatch_tool_batch(
+        self,
+        *,
+        call_model: _CallModelOutcome,
+        state: CompositionState,
+        last_validation: ValidationSummary | None,
+        last_runtime_preflight: ValidationResult | None,
+        llm_messages: list[dict[str, Any]],
+        recorder: BufferingRecorder,
+        anti_anchor: AntiAnchorTracker,
+        discovery_cache: dict[str, _CachedDiscoveryPayload],
+        runtime_preflight_cache: _RuntimePreflightCache,
+        session_id: str | None,
+        user_id: str | None,
+        user_message_id: str | None,
+        current_state_id: str | None,
+        actor: str,
+        initial_version: int,
+        deadline: float,
+        progress: ComposerProgressSink | None,
+        session_scope: str,
+        advisor_calls_used: int,
+    ) -> tuple[_DispatchOutcome, int]:
+        """Phase P3 of the compose loop — dispatch one tool batch.
+
+        Executes every tool call on the assistant message, accumulating
+        immutable :class:`_ToolOutcome` records in
+        :class:`_DispatchOutcome` plus the rebound ``state`` /
+        ``last_validation`` / ``last_runtime_preflight`` values. Returns
+        the carrier *and* the updated ``advisor_calls_used`` counter (the
+        driver owns it across iterations).
+
+        The per-tool sub-dispatch arms share an ordering invariant — for
+        every arm:
+
+            recorder.record(finish_*)   # audit envelope closes
+            _append_tool_outcome(...)   # immutable record into the batch
+            anti_anchor.record_*(...)   # §7.7 tracker update (advisor
+                                        # budget-exhaustion + advisor
+                                        # disabled-tool branches skip
+                                        # this — see comments in body)
+            llm_messages.append(...)    # role=tool message for next turn
+
+        Several arms raise instead of returning:
+
+        * Pre-dispatch convergence on advisor compose-deadline (two
+          arms) — :class:`ComposerConvergenceError.capture`.
+        * Too many pending proposals — :class:`ComposerServiceError`.
+        * Preview-pipeline preflight failure —
+          :class:`ComposerRuntimePreflightError.capture`.
+        * Narrow-class plugin crashes (AssertionError, MemoryError,
+          RecursionError, SystemError) — re-raised after
+          ``dispatch_with_audit`` records PLUGIN_CRASH.
+        * AuditIntegrityError — propagated unwrapped.
+
+        A general ``Exception`` from the tool worker is captured into
+        ``plugin_crash`` and the dispatch loop ``break``s; the carrier
+        carries the crash, and the driver propagates it after P4.
+        """
+        assistant_message = call_model.assistant_message
+        raw_assistant_content = call_model.raw_assistant_content
+        assistant_tool_calls = call_model.assistant_tool_calls
+        response = call_model.response
+
+        await _emit_progress(
+            progress,
+            _tool_batch_progress_event(
+                tuple(tool_call.function.name for tool_call in assistant_message.tool_calls),
+            ),
+        )
+
+        # Append the assistant message (with tool_calls metadata)
+        llm_messages.append(
+            {
+                "role": "assistant",
+                "content": assistant_message.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in assistant_message.tool_calls
+                ],
+            }
+        )
+
+        # Execute each tool call, tracking whether this turn has
+        # budgeted discovery or mutation work. Advisor-only turns are
+        # intentionally neither: they spend the advisor-specific budget,
+        # not the generic discovery/composition turn budgets.
+        turn_has_mutation = False
+        turn_has_discovery = False
+        all_cache_hits = True
+        # Step 1 — execute tool calls in async land while accumulating
+        # immutable _ToolOutcome records. Step 2 (in _persist_turn_audit)
+        # performs audit writes from this list; cancellation before Step 2
+        # leaves the DB unchanged for the current assistant response.
+        tool_outcomes: list[_ToolOutcome] = []
+        plugin_crash: ComposerPluginCrashError | None = None
+        plugin_crash_cause: BaseException | None = None
+        pre_state_id: str | None = current_state_id
+        self._phase3_last_expected_current_state_id = pre_state_id
+        decoded_args_by_call_id: dict[str, dict[str, Any]] = {}
+        turn_sessions_service = self._require_sessions_service() if session_id is not None else None
+        turn_session_uuid = UUID(session_id) if session_id is not None else None
+        turn_preferences = (
+            await turn_sessions_service.get_composer_preferences(turn_session_uuid)
+            if turn_sessions_service is not None and turn_session_uuid is not None
+            else None
+        )
+        proposals_this_turn = 0
+        mutation_success_observed = False
+
+        for tool_call in assistant_message.tool_calls:
+            tool_name = tool_call.function.name
+            pre_version = state.version
+
+            def _append_tool_outcome(
+                *,
+                response: Any,
+                error_class: str | None,
+                error_message: str | None,
+                post_version: int,
+                _tool_outcomes: list[_ToolOutcome] = tool_outcomes,
+                _tool_call: Any = tool_call,
+                _pre_version: int = pre_version,
+            ) -> None:
+                _tool_outcomes.append(
+                    _ToolOutcome(
+                        call=_tool_call,
+                        response=response,
+                        error_class=error_class,
+                        error_message=error_message,
+                        pre_version=_pre_version,
+                        post_version=post_version,
+                    )
+                )
+
+            try:
+                decoded_arguments = json.loads(tool_call.function.arguments)
+            except (json.JSONDecodeError, TypeError) as exc:
+                # Track budget class even when args are unparseable.
+                if is_discovery_tool(tool_name):
+                    turn_has_discovery = True
+                else:
+                    turn_has_mutation = True
+                # ARG_ERROR pre-dispatch site (1/3): JSON-decode failure.
+                # Open the audit envelope with the raw (pre-parse) string
+                # so the trail records what the LLM tried, even when it
+                # wasn't valid JSON. ``error_message`` is class-name only
+                # because ``str(exc)`` for JSONDecodeError can echo column
+                # offsets that reference the un-truncated raw bytes.
+                audit = begin_dispatch(
+                    tool_call.id,
+                    tool_name,
+                    tool_call.function.arguments,
+                    version_before=state.version,
+                    actor=actor,
+                )
+                error_payload = {"error": f"Invalid JSON in arguments: {exc}"}
+                recorder.record(
+                    finish_arg_error(
+                        audit,
+                        error_class=type(exc).__name__,
+                        error_message=type(exc).__name__,
+                        error_payload=error_payload,
+                    )
+                )
+                _append_tool_outcome(
+                    response=None,
+                    error_class=type(exc).__name__,
+                    error_message=type(exc).__name__,
+                    post_version=state.version,
+                )
+                anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                llm_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(error_payload),
+                    }
+                )
+                all_cache_hits = False
+                continue
+
+            if not isinstance(decoded_arguments, dict):
+                if is_discovery_tool(tool_name):
+                    turn_has_discovery = True
+                else:
+                    turn_has_mutation = True
+                # ARG_ERROR pre-dispatch site (2/3): non-dict arguments.
+                # The LLM produced valid JSON but not a JSON object. The
+                # canonicalized record wraps the (possibly scalar/list)
+                # value under ``_decoded_non_object`` so the audit trail
+                # captures it deterministically.
+                audit, canonicalization_failed = begin_dispatch_or_arg_error(
+                    tool_call.id,
+                    tool_name,
+                    {"_decoded_non_object": decoded_arguments},
+                    version_before=state.version,
+                    actor=actor,
+                )
+                if canonicalization_failed is None:
+                    err_msg = f"Tool '{tool_name}' arguments must be a JSON object, got {type(decoded_arguments).__name__}."
+                    error_class = "TypeError"
+                    error_message = f"non-object arguments ({type(decoded_arguments).__name__})"
+                else:
+                    err_msg = f"Tool '{tool_name}' arguments are not canonical JSON ({type(canonicalization_failed).__name__})."
+                    error_class = type(canonicalization_failed).__name__
+                    error_message = type(canonicalization_failed).__name__
+                error_payload = {"error": err_msg}
+                recorder.record(
+                    finish_arg_error(
+                        audit,
+                        error_class=error_class,
+                        error_message=error_message,
+                        error_payload=error_payload,
+                    )
+                )
+                _append_tool_outcome(
+                    response=None,
+                    error_class=error_class,
+                    error_message=error_message,
+                    post_version=state.version,
+                )
+                anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                llm_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(error_payload),
+                    }
+                )
+                all_cache_hits = False
+                continue
+
+            arguments = cast(dict[str, Any], decoded_arguments)
+            decoded_args_by_call_id[tool_call.id] = arguments
+
+            # Open the audit envelope ONCE per dispatch — the cache,
+            # required-paths, ToolArgumentError, plugin-crash, and
+            # success branches below all read from this envelope so
+            # ``started_at``/``arguments_canonical``/``version_before``
+            # are consistent regardless of which branch fires.
+            audit, canonicalization_failed = begin_dispatch_or_arg_error(
+                tool_call.id,
+                tool_name,
+                arguments,
+                version_before=state.version,
+                actor=actor,
+            )
+            if canonicalization_failed is not None:
+                if is_discovery_tool(tool_name):
+                    turn_has_discovery = True
+                else:
+                    turn_has_mutation = True
+                error_payload = {
+                    "error": f"Tool '{tool_name}' arguments are not canonical JSON ({type(canonicalization_failed).__name__})."
+                }
+                recorder.record(
+                    finish_arg_error(
+                        audit,
+                        error_class=type(canonicalization_failed).__name__,
+                        error_message=type(canonicalization_failed).__name__,
+                        error_payload=error_payload,
+                    )
+                )
+                _append_tool_outcome(
+                    response=None,
+                    error_class=type(canonicalization_failed).__name__,
+                    error_message=type(canonicalization_failed).__name__,
+                    post_version=state.version,
+                )
+                anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                llm_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(error_payload),
+                    }
+                )
+                all_cache_hits = False
+                continue
+
+            # Check discovery cache before executing
+            if is_cacheable_discovery_tool(tool_name):
+                cache_key = _make_cache_key(tool_name, arguments)
+                if cache_key in discovery_cache:
+                    # Cache hit — return cached result, no budget charge.
+                    # Audit-recorded with cache_hit=True so the trail
+                    # captures every LLM decision-point, even those
+                    # served from cache without re-running the handler.
+                    await _emit_progress(
+                        progress,
+                        ComposerProgressEvent(
+                            phase="using_tools",
+                            headline="I'm reusing recently checked tool information.",
+                            evidence=("The same discovery request was already answered for this compose step.",),
+                            likely_next="ELSPETH will continue from the cached tool result.",
+                        ),
+                    )
+                    cached_result = _result_from_cached_discovery_payload(
+                        state,
+                        discovery_cache[cache_key],
+                    )
+                    cached_payload = {
+                        "success": cached_result.success,
+                        "data": cached_result.data,
+                        "cache_hit": True,
+                    }
+                    recorder.record(
+                        finish_success(
+                            audit,
+                            result_payload=cached_payload,
+                            version_after=state.version,
+                            cache_hit=True,
+                        )
+                    )
+                    _append_tool_outcome(
+                        response=cached_result,
+                        error_class=None,
+                        error_message=None,
+                        post_version=state.version,
+                    )
+                    # Cache hits are exclusively for discovery tools
+                    # (`is_cacheable_discovery_tool` gates above). A
+                    # discovery success is an *observation* — the model
+                    # gained schema knowledge but did not change state.
+                    # The §7.7 anchor is broken only by mutation
+                    # progress, so tracker stays untouched here.
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": _serialize_tool_result(cached_result),
+                        }
+                    )
+                    continue
+
+            all_cache_hits = False
+
+            # Validate schema-declared required arguments at the
+            # Tier 3 boundary BEFORE entering tool handler code.
+            # This walks nested object/array schemas, so malformed
+            # set_pipeline payloads like source.plugin omissions are
+            # caught here; any KeyError that still escapes
+            # execute_tool() is an internal bug and must crash.
+            # Unknown tool names skip validation — execute_tool()
+            # handles them with a failure result downstream.
+            required_paths = _TOOL_REQUIRED_PATHS[tool_name] if tool_name in _TOOL_REQUIRED_PATHS else ()
+            missing = _find_missing_required_paths(arguments, required_paths)
+            if missing:
+                if is_discovery_tool(tool_name):
+                    turn_has_discovery = True
+                else:
+                    turn_has_mutation = True
+                # ARG_ERROR pre-dispatch site (3/3): schema-required
+                # paths missing. ``missing`` is a list of dotted/indexed
+                # path strings — operator-controlled schema field names,
+                # safe to echo verbatim.
+                err_msg = f"Tool '{tool_name}' missing required argument(s): {', '.join(missing)}"
+                error_payload = {"error": err_msg}
+                recorder.record(
+                    finish_arg_error(
+                        audit,
+                        error_class="MissingRequiredPaths",
+                        error_message=f"missing: {', '.join(missing)}",
+                        error_payload=error_payload,
+                    )
+                )
+                _append_tool_outcome(
+                    response=None,
+                    error_class="MissingRequiredPaths",
+                    error_message=f"missing: {', '.join(missing)}",
+                    post_version=state.version,
+                )
+                anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                llm_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(error_payload),
+                    }
+                )
+                continue
+
+            if (
+                turn_sessions_service is not None
+                and turn_session_uuid is not None
+                and turn_preferences is not None
+                and turn_preferences.trust_mode == "explicit_approve"
+                and is_mutation_tool(tool_name)
+                # Blob-store side-effect tools (create_blob, update_blob,
+                # delete_blob) cannot be intercepted as proposals: they
+                # never advance CompositionState.version, but the accept
+                # endpoint requires a version advance, so an intercepted
+                # proposal would be structurally unacceptable. Their
+                # composition-affecting reference points (set_pipeline,
+                # set_source_from_blob, apply_pipeline_recipe) ARE
+                # intercepted and carry the meaningful operator approval.
+                and not is_blob_store_only_mutation_tool(tool_name)
+            ):
+                if proposals_this_turn >= _MAX_PENDING_PROPOSALS_PER_TURN:
+                    raise ComposerServiceError(
+                        f"Composer produced too many pending tool proposals in one turn ({_MAX_PENDING_PROPOSALS_PER_TURN} maximum)."
+                    )
+
+                from pydantic import ValidationError as PydanticValidationError
+
+                from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_arguments
+
+                # The LLM may produce arguments that fail the redaction
+                # MANIFEST's argument_model — most commonly a misplaced
+                # field like ``nodes[*].schema`` belonging at
+                # ``nodes[*].options.schema``. The runtime validator
+                # would reject these the same way. On redaction
+                # ValidationError we fall through to normal dispatch:
+                # execute_tool emits a clean ToolArgumentError, the
+                # existing post-dispatch arg-error handling records
+                # the failure for audit (with the
+                # ``_redaction_status: invalid_tool_arguments`` marker),
+                # and the compose loop continues so the model can
+                # self-correct. The previous behaviour — letting the
+                # ValidationError propagate — crashed the compose
+                # request with HTTP 500 (session 100dc5cb… 2026-05-14:
+                # frontend rendered a generic ApiError as a bare
+                # "retry" button with no diagnostic).
+                redacted_arguments: Mapping[str, Any] | None
+                if tool_name in MANIFEST:
+                    try:
+                        redacted_arguments = redact_tool_call_arguments(
+                            tool_name,
+                            arguments,
+                            telemetry=self._redaction_telemetry,
+                        )
+                    except PydanticValidationError:
+                        redacted_arguments = None
+                else:
+                    redacted_arguments = arguments
+
+                if redacted_arguments is not None:
+                    proposal_summary = build_tool_proposal_summary(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        redacted_arguments=redacted_arguments,
+                    )
+                    proposal = await turn_sessions_service.create_composition_proposal(
+                        session_id=turn_session_uuid,
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_name,
+                        summary=proposal_summary.summary,
+                        rationale=proposal_summary.rationale,
+                        affects=proposal_summary.affects,
+                        arguments_json=arguments,
+                        arguments_redacted_json=proposal_summary.arguments_redacted_json,
+                        base_state_id=UUID(current_state_id) if current_state_id is not None else None,
+                        actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
+                        user_message_id=UUID(user_message_id) if user_message_id is not None else None,
+                    )
+                    proposals_this_turn += 1
+                    proposal_payload = {
+                        "success": True,
+                        "status": "APPROVAL_REQUIRED",
+                        "proposal_id": str(proposal.id),
+                        "tool_name": tool_name,
+                        "summary": proposal.summary,
+                        "message": "The requested pipeline change is pending human approval and has not been applied.",
+                    }
+                    proposal_result = ToolResult(
+                        success=True,
+                        updated_state=state,
+                        validation=last_validation if last_validation is not None else state.validate(),
+                        affected_nodes=(),
+                        data=proposal_payload,
+                    )
+                    recorder.record(
+                        finish_success(
+                            audit,
+                            result_payload=proposal_result.to_dict(),
+                            version_after=state.version,
+                        )
+                    )
+                    _append_tool_outcome(
+                        response=proposal_result,
+                        error_class=None,
+                        error_message=None,
+                        post_version=state.version,
+                    )
+                    anti_anchor.record_success()
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": _serialize_tool_result(proposal_result),
+                        }
+                    )
+                    turn_has_mutation = True
+                    continue
+                # redacted_arguments is None → invalid LLM arguments;
+                # fall through to normal dispatch, which will emit a
+                # ToolArgumentError through the standard arg-error path.
+
+            await _emit_progress(progress, _tool_started_progress_event(tool_name))
+
+            # Advisor escape-hatch interception. The request_advisor_hint
+            # tool is intercepted here BEFORE execute_tool() because the
+            # action is an async LiteLLM call to a frontier model rather
+            # than a sync state mutation. The tool is not registered in
+            # _DISCOVERY_TOOLS or _MUTATION_TOOLS, so execute_tool() would
+            # return "Unknown tool" if this branch did not handle it.
+            #
+            # Audit envelope was already opened above by
+            # begin_dispatch_or_arg_error; this branch closes it with the
+            # truthful dispatch status: ARG_ERROR for local advisor-argument
+            # rejection, SUCCESS for completed policy/provider outcomes
+            # whose semantic status is encoded in result_payload. The inner
+            # LLM call is recorded separately via _call_advisor_with_audit
+            # firing a ComposerLLMCall record.
+            if tool_name == "request_advisor_hint":
+                # Successful advisor guidance is governed solely by the
+                # advisor budget so the composer can read it. Advisor
+                # policy/error feedback with no usable guidance is still
+                # a non-mutating correction turn, so it consumes discovery
+                # budget before the loop asks the primary model again.
+                if not self._settings.composer_advisor_enabled:
+                    # Defense-in-depth: the tool was filtered out of
+                    # _get_litellm_tools() but the LLM somehow named it
+                    # anyway (replayed transcript, stale state, prompt
+                    # injection). Fail without making any outbound call.
+                    error_payload = {
+                        "error": "request_advisor_hint is disabled on this deployment.",
+                    }
+                    recorder.record(
+                        finish_success(
+                            audit,
+                            result_payload=error_payload,
+                            version_after=state.version,
+                        )
+                    )
+                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps(error_payload),
+                        }
+                    )
+                    turn_has_discovery = True
+                    continue
+
+                budget = self._settings.composer_advisor_max_calls_per_compose
+                if advisor_calls_used >= budget:
+                    budget_payload = {
+                        "status": "BUDGET_EXHAUSTED",
+                        "budget_used": advisor_calls_used,
+                        "budget_remaining": 0,
+                        "guidance": (
+                            f"Advisor budget exhausted ({advisor_calls_used}/{budget} calls "
+                            "used this compose request). Return to the validator output and "
+                            "the recovery cheat sheet — no more frontier hints are available "
+                            "until the operator raises the budget or the next compose request."
+                        ),
+                    }
+                    recorder.record(
+                        finish_success(
+                            audit,
+                            result_payload=budget_payload,
+                            version_after=state.version,
+                        )
+                    )
+                    # Budget exhaustion is a structural signal back to
+                    # the LLM, not a tool-failure pattern — do NOT count
+                    # it for §7.7 anchor tracking, since the issue isn't
+                    # the LLM repeating an identical request, it's the
+                    # operator's policy refusing further hints.
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps(budget_payload),
+                        }
+                    )
+                    turn_has_discovery = True
+                    continue
+
+                # F3: validate argument types and total prompt size at the
+                # Tier-3 trust boundary. _TOOL_REQUIRED_PATHS only checks
+                # key presence, not value shape. Without this check the
+                # LLM could send a non-list (silently iterated char-by-
+                # char) or a megabyte-scale value (unbounded provider
+                # cost). ARG_ERRORs do NOT consume advisor budget — no
+                # outbound call is made — but anti-anchor counts them
+                # so repeated identical bad-arg calls trigger the §7.7
+                # structural hint.
+                advisor_arg_error = self._validate_advisor_arguments(arguments)
+                if advisor_arg_error is not None:
+                    recorder.record(
+                        finish_arg_error(
+                            audit,
+                            error_class=str(advisor_arg_error["error_class"]),
+                            error_message=str(advisor_arg_error["error"]),
+                            error_payload=advisor_arg_error,
+                        )
+                    )
+                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps(advisor_arg_error),
+                        }
+                    )
+                    turn_has_discovery = True
+                    continue
+
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    timeout_payload: dict[str, Any] = {
+                        "status": "COMPOSE_TIMEOUT",
+                        "error": "Advisor call exceeded the remaining compose deadline.",
+                        "error_class": "TimeoutError",
+                        "budget_used": advisor_calls_used,
+                        "budget_remaining": budget - advisor_calls_used,
+                    }
+                    recorder.record(
+                        finish_success(
+                            audit,
+                            result_payload=timeout_payload,
+                            version_after=state.version,
+                        )
+                    )
+                    raise ComposerConvergenceError.capture(
+                        max_turns=0,
+                        budget_exhausted="timeout",
+                        state=state,
+                        initial_version=initial_version,
+                        tool_invocations=recorder.invocations,
+                        llm_calls=recorder.llm_calls,
+                    )
+
+                advisor_timeout = self._settings.composer_advisor_timeout_seconds
+                effective_advisor_timeout = min(advisor_timeout, remaining)
+                advisor_deadline_limited = remaining <= advisor_timeout
+
+                # F2: consume budget BEFORE the outbound call, not after.
+                # The cost guard's purpose is to bound outbound LiteLLM
+                # calls regardless of outcome. Counting only successes
+                # would let a flaky provider rack up unlimited failed
+                # outbound calls until anti-anchor or the discovery-
+                # turn limit fired. ARG_ERROR (above) and pre-call compose
+                # timeout (above) do NOT consume advisor budget because no
+                # outbound advisor call is made.
+                advisor_calls_used += 1
+
+                try:
+                    guidance, advisor_meta = await self._call_advisor_with_audit(
+                        arguments,
+                        recorder=recorder,
+                        timeout=effective_advisor_timeout,
+                    )
+                except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                    # Lifecycle exceptions: do not absorb. Propagate so
+                    # cancellation and shutdown work normally; the inner
+                    # ComposerLLMCall record was already fired by the
+                    # advisor method's finally block, so the audit trail
+                    # captures the cancelled call regardless.
+                    raise
+                except TimeoutError as advisor_exc:
+                    if advisor_deadline_limited:
+                        timeout_payload = {
+                            "status": "COMPOSE_TIMEOUT",
+                            "error": "Advisor call exceeded the remaining compose deadline.",
+                            "error_class": "TimeoutError",
+                            "budget_used": advisor_calls_used,
+                            "budget_remaining": budget - advisor_calls_used,
+                        }
+                        recorder.record(
+                            finish_success(
+                                audit,
+                                result_payload=timeout_payload,
+                                version_after=state.version,
+                            )
+                        )
+                        raise ComposerConvergenceError.capture(
+                            max_turns=0,
+                            budget_exhausted="timeout",
+                            state=state,
+                            initial_version=initial_version,
+                            tool_invocations=recorder.invocations,
+                            llm_calls=recorder.llm_calls,
+                        ) from None
+                    # Advisor-specific timeout with compose budget still
+                    # remaining: return structured tool feedback so the
+                    # composer can continue within its global deadline.
+                    advisor_error_payload = {
+                        "status": "ADVISOR_ERROR",
+                        "error": "Advisor call failed; no guidance returned.",
+                        "error_class": type(advisor_exc).__name__,
+                        "budget_used": advisor_calls_used,
+                        "budget_remaining": budget - advisor_calls_used,
+                    }
+                    recorder.record(
+                        finish_success(
+                            audit,
+                            result_payload=advisor_error_payload,
+                            version_after=state.version,
+                        )
+                    )
+                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps(advisor_error_payload),
+                        }
+                    )
+                    turn_has_discovery = True
+                    continue
+                except Exception as advisor_exc:
+                    # Tier 3 boundary: outbound LLM call failed. Convert
+                    # to a structured tool-result error so the composer
+                    # LLM gets feedback rather than a silent stall. The
+                    # inner ComposerLLMCall record was already fired by
+                    # _call_advisor_with_audit's finally block, so the
+                    # audit trail captures the failure mode regardless.
+                    # Budget was already consumed above (F2) — the
+                    # outbound call attempt counts whether or not it
+                    # produced guidance.
+                    advisor_error_payload = {
+                        "status": "ADVISOR_ERROR",
+                        "error": "Advisor call failed; no guidance returned.",
+                        "error_class": type(advisor_exc).__name__,
+                        "budget_used": advisor_calls_used,
+                        "budget_remaining": budget - advisor_calls_used,
+                    }
+                    recorder.record(
+                        finish_success(
+                            audit,
+                            result_payload=advisor_error_payload,
+                            version_after=state.version,
+                        )
+                    )
+                    # Advisor failure IS counted for §7.7 anchor
+                    # tracking — repeated identical failed advisor
+                    # calls indicate the LLM is spamming a broken
+                    # prompt, exactly the pattern the tracker exists
+                    # to break.
+                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                    llm_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps(advisor_error_payload),
+                        }
+                    )
+                    turn_has_discovery = True
+                    continue
+
+                success_payload = {
+                    "status": "SUCCESS",
+                    "guidance": guidance,
+                    "model": advisor_meta["model"],
+                    "prompt_tokens": advisor_meta["prompt_tokens"],
+                    "completion_tokens": advisor_meta["completion_tokens"],
+                    "cached_prompt_tokens": advisor_meta["cached_prompt_tokens"],
+                    "advisor_latency_ms": advisor_meta["latency_ms"],
+                    "budget_used": advisor_calls_used,
+                    "budget_remaining": budget - advisor_calls_used,
+                    "note": (
+                        "ADVICE only — call the appropriate mutation tool to "
+                        "apply any change. Do not echo this guidance back as "
+                        "configuration without verifying it against the schema."
+                    ),
+                }
+                recorder.record(
+                    finish_success(
+                        audit,
+                        result_payload=success_payload,
+                        version_after=state.version,
+                    )
+                )
+                # Successful advisor call is progress, not a failure —
+                # the §7.7 tracker is reset for this tool name so a
+                # subsequent set_pipeline failure does not inherit a
+                # stale advisor anchor count.
+                anti_anchor.record_success()
+                llm_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(success_payload),
+                    }
+                )
+                continue
+
+            # Session-aware async tool dispatch.
+            #
+            # ``_SESSION_AWARE_TOOL_HANDLERS`` holds handlers that AWAIT
+            # session-service writers/readers; they cannot be dispatched
+            # through the sync ``run_sync_in_worker(execute_tool, ...)``
+            # path because execute_tool() is sync. The compose loop
+            # intercepts these tool names BEFORE the generic dispatch
+            # and awaits the handler directly, then routes the result
+            # through the same audit envelope discipline as the sync
+            # path (finish_success / finish_arg_error / finish_plugin_crash).
+            #
+            # Currently registered: ``request_interpretation_review``.
+            # Adding another session-aware tool extends
+            # ``_SESSION_AWARE_TOOL_HANDLERS`` and the per-tool
+            # kwarg-build dict below; no new dispatch branch is needed.
+            if is_session_aware_tool(tool_name):
+                session_aware_outcome = await self._dispatch_session_aware_tool(
+                    tool_name=tool_name,
+                    tool_call_id=tool_call.id,
+                    arguments=arguments,
+                    state=state,
+                    audit=audit,
+                    recorder=recorder,
+                    session_id=session_id,
+                    current_state_id=current_state_id,
+                    response=response,
+                    llm_messages=llm_messages,
+                    anti_anchor=anti_anchor,
+                )
+                if session_aware_outcome.is_discovery:
+                    turn_has_discovery = True
+                else:
+                    turn_has_mutation = True
+                if session_aware_outcome.result is not None:
+                    state = session_aware_outcome.result.updated_state
+                    last_validation = session_aware_outcome.result.validation
+                continue
+
+            # Precompute runtime preflight for preview_pipeline outside
+            # the general side-effectful tool worker. This keeps
+            # execute_tool() synchronous and bounds the async I/O cost
+            # before it enters the worker thread pool.
+            runtime_preflight_callback: RuntimePreflight | None = None
+            if tool_name == "preview_pipeline":
+                try:
+                    preview_preflight = await self._cached_runtime_preflight(
+                        state,
+                        user_id=user_id,
+                        cache=runtime_preflight_cache,
+                        initial_version=initial_version,
+                        session_scope=session_scope,
+                        llm_calls=recorder.llm_calls,
+                    )
+                except ComposerRuntimePreflightError as preflight_exc:
+                    recorder.record(finish_plugin_crash(audit, exc=preflight_exc.original_exc))
+                    raise ComposerRuntimePreflightError.capture(
+                        preflight_exc.original_exc,
+                        state=state,
+                        initial_version=initial_version,
+                        tool_invocations=recorder.invocations,
+                        llm_calls=recorder.llm_calls,
+                    ) from preflight_exc.original_exc
+
+                def _make_preflight_callback(
+                    _result: ValidationResult = preview_preflight,
+                ) -> RuntimePreflight:
+                    def _callback(_state: CompositionState) -> ValidationResult:
+                        return _result
+
+                    return _callback
+
+                runtime_preflight_callback = _make_preflight_callback()
+
+            # All tool calls are offloaded to a worker to avoid blocking
+            # the event loop.
+            # Blob and secret tools perform synchronous filesystem
+            # writes and SQLAlchemy transactions that would otherwise
+            # stall the single-process web server for all concurrent
+            # requests (rate-limit checks, websocket heartbeats,
+            # progress broadcasts).
+            #
+            # Cancel-safety: tool calls are NOT wrapped in
+            # asyncio.wait_for — they always run to completion.
+            # The cooperative deadline is checked BETWEEN operations
+            # (before LLM calls, after tool batches), so side effects
+            # and state publication are never split.  LLM calls use
+            # per-call wait_for because they are pure network I/O
+            # with no side effects.
+            #
+            # Tool handlers raise ToolArgumentError at Tier-3 boundaries
+            # (LLM supplied wrong types, semantically invalid values,
+            # or malformed encodings that cannot be coerced).  The
+            # compose loop catches ONLY that class and feeds the error
+            # back to the LLM for retry.
+            #
+            # Any other exception — TypeError, ValueError, UnicodeError,
+            # KeyError, AttributeError — escaping execute_tool() is a
+            # plugin bug (Tier 1/2) and MUST crash.  Per CLAUDE.md,
+            # silently laundering a plugin bug as an LLM-argument error
+            # is worse than crashing: it pollutes the audit trail with
+            # a confident but wrong Tier-3 story, and the LLM's "retry"
+            # cannot correct a fault in our own code.
+            # Dispatch under the structural audit envelope. The helper
+            # records exactly one ComposerToolInvocation before this
+            # await returns or raises, on every path:
+            #   SUCCESS         → finish_success (with sentinel-canonical
+            #                     fallback if canonical_json raises)
+            #   ARG_ERROR       → finish_arg_error (caller's except block
+            #                     below builds the LLM message)
+            #   PLUGIN_CRASH (narrow re-raise) → finish_plugin_crash, then
+            #                     re-raised so the outer compose loop exits
+            #   PLUGIN_CRASH (general) → finish_plugin_crash, then the
+            #                     caller's except block below wraps with
+            #                     ComposerPluginCrashError.capture()
+            #
+            # Closes panel-review blockers B1 (canonical_json failure on
+            # success path silently bypassed audit) and B2 (narrow
+            # re-raise exited the loop unrecorded).
+            # Bind loop-locals as default arguments so the closures
+            # capture this iteration's values. The compose loop
+            # awaits the helper synchronously inside the same
+            # iteration, so late binding would not actually misfire
+            # — but `B023 do not let function definitions reference
+            # late-bound loop variables` is the project's structural
+            # safeguard against future refactors that batch
+            # iterations or introduce concurrency. Same pattern the
+            # adjacent `_make_preflight_callback` already uses for
+            # ``preview_preflight``.
+            async def _do_dispatch(
+                _tool_name: str = tool_name,
+                _arguments: dict[str, Any] = arguments,
+                _state: CompositionState = state,
+                _last_validation: ValidationSummary | None = last_validation,
+                _runtime_preflight_callback: RuntimePreflight | None = runtime_preflight_callback,
+                _user_message_id: str | None = user_message_id,
+            ) -> Any:
+                return await run_sync_in_worker(
+                    execute_tool,
+                    _tool_name,
+                    _arguments,
+                    _state,
+                    self._catalog,
+                    data_dir=self._data_dir,
+                    session_engine=self._session_engine,
+                    session_id=session_id,
+                    secret_service=self._secret_service,
+                    user_id=user_id,
+                    prior_validation=_last_validation,
+                    runtime_preflight=_runtime_preflight_callback,
+                    max_blob_storage_per_session_bytes=self._settings.max_blob_storage_per_session_bytes,
+                    user_message_id=_user_message_id,
+                )
+
+            # ``_arg_error_payload`` is a module-level helper (F2 — testable
+            # without spinning up the full compose loop). The nested
+            # factory below binds ``tool_name`` to match the dispatch
+            # ``arg_error_payload_factory`` signature. Default-arg binding
+            # captures the loop-local ``tool_name`` at definition time.
+            def _arg_error_payload_factory(
+                _exc: ToolArgumentError,
+                _tool_name: str = tool_name,
+            ) -> Mapping[str, Any]:
+                return _arg_error_payload(_exc, _tool_name)
+
+            def _version_after(_result: Any) -> int:
+                # The handler's ToolResult carries the new state on
+                # ``updated_state``. Read here so the helper records
+                # the post-mutation version inside the recorder call.
+                return cast(int, _result.updated_state.version)
+
+            try:
+                outcome = await dispatch_with_audit(
+                    recorder=recorder,
+                    audit=audit,
+                    do_dispatch=_do_dispatch,
+                    version_after_provider=_version_after,
+                    arg_error_payload_factory=_arg_error_payload_factory,
+                )
+            except ToolArgumentError as exc:
+                # The audit record was already written by the helper.
+                # Build the LLM-facing tool message and continue.
+                if is_discovery_tool(tool_name):
+                    turn_has_discovery = True
+                else:
+                    turn_has_mutation = True
+                # Trust-boundary redaction: the echoed message reaches the
+                # LLM API and (via audit) the Landscape. ToolArgumentError
+                # is structurally safe by construction — the keyword-only
+                # constructor accepts (argument, expected, actual_type)
+                # and composes args[0] from those fields alone, so the
+                # message cannot carry a raw LLM-supplied value. Belt-
+                # and-suspenders: read ``exc.args[0]`` rather than
+                # ``str(exc)`` so a future subclass that overrides
+                # ``__str__`` to embed ``__cause__`` context (which may
+                # carry DB URLs, filesystem paths, or secret fragments
+                # from deeper layers) cannot leak through this path.
+                # Handlers that use
+                # ``raise ToolArgumentError(...) from exc`` get the
+                # cause preserved on ``__cause__`` for debug/audit but
+                # NOT echoed to the LLM.
+                await _emit_progress(
+                    progress,
+                    ComposerProgressEvent(
+                        phase="using_tools",
+                        headline="A tool request needed correction.",
+                        evidence=("The tool rejected the request shape without exposing raw values.",),
+                        likely_next="ELSPETH will ask the model to adjust the visible tool request.",
+                    ),
+                )
+                arg_error_payload = _arg_error_payload(exc, tool_name)
+                _append_tool_outcome(
+                    response=None,
+                    error_class="ToolArgumentError",
+                    error_message=str(exc.args[0] if exc.args else "ToolArgumentError"),
+                    post_version=state.version,
+                )
+                anti_anchor.record_failure(tool_name, audit.arguments_hash)
+                llm_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(arg_error_payload),
+                    }
+                )
+                continue
+            except (AssertionError, MemoryError, RecursionError, SystemError):
+                # CLAUDE.md policy exception — DOCUMENTED DIVERGENCE.
+                #
+                # CLAUDE.md "Plugin Ownership" says a defective plugin
+                # MUST crash rather than be wrapped and laundered as a
+                # recoverable error.  The web server relaxes this for
+                # ordinary exception classes (see the wider except
+                # Exception below) because crashing the whole ASGI
+                # process on one bad request would take down every
+                # other concurrent session.
+                #
+                # The exceptions listed on this handler are NOT
+                # relaxed: they represent states where the interpreter
+                # or our own Tier-1 invariants are compromised and any
+                # subsequent work — including the partial-state
+                # persistence inside ``ComposerPluginCrashError.capture``
+                # — would be operating on potentially-poisoned memory
+                # or data.
+                #
+                # - AssertionError: a plain ``assert`` fired inside
+                #   plugin code.  Asserts encode Tier-1 invariants
+                #   (CLAUDE.md: "crash on any anomaly").  Writing the
+                #   composition_states row after an invariant failure
+                #   would persist data the invariant said was
+                #   impossible.
+                # - MemoryError / RecursionError: interpreter-level
+                #   resource exhaustion.  The subsequent DB write may
+                #   itself fail or corrupt state; better to unwind.
+                # - SystemError: CPython internal invariant breach.
+                #
+                # ``BaseException``-only classes (SystemExit,
+                # KeyboardInterrupt, GeneratorExit) already propagate
+                # through ``except Exception`` below without any
+                # handling here.
+                #
+                # Audit-record-then-raise discipline: ``dispatch_with_audit``
+                # writes a ``PLUGIN_CRASH`` invocation BEFORE the
+                # narrow-class exception leaves the helper. Building the
+                # invocation reads only pre-captured scalars from the
+                # frozen :class:`DispatchAudit` envelope plus
+                # ``type(exc).__name__`` — no poisoned memory work.
+                # Closes blocker B2 from the panel review (2026-05-04).
+                raise
+            except AuditIntegrityError:
+                # Tier-1 audit invariant. Do not let the plugin-bug
+                # catch-all below launder it into ComposerPluginCrashError.
+                raise
+            except Exception as tool_exc:
+                # Plugin-bug path: any exception class OTHER than
+                # ToolArgumentError escaping execute_tool() is a plugin
+                # bug (CLAUDE.md tier 1/2). Capture the loop-local
+                # ``state`` — which has been rebound to
+                # result.updated_state on every successful prior
+                # iteration — so the route layer can persist the
+                # accumulated mutations into composition_states before
+                # returning the 500. Without this, any tool call that
+                # successfully mutated state prior to the crash would
+                # be silently dropped from the state history.
+                #
+                # Web-server policy exception: CLAUDE.md says a
+                # defective plugin must crash.  In the pipeline engine
+                # (single-shot CLI process) that is straightforward —
+                # abort the run.  In the web server a single malformed
+                # request reaching a buggy tool handler would take the
+                # ASGI worker down and abort every other concurrent
+                # session, including audit writes, websocket progress
+                # streams, and unrelated users.  We wrap the exception
+                # into a typed ComposerPluginCrashError that surfaces
+                # to the operator as an HTTP 500 with
+                # ``type(exc).__name__`` in the structured log, and
+                # preserves the original on ``__cause__`` for the ASGI
+                # error machinery.  The handler directly above
+                # re-raises the narrow set of exception classes that
+                # MUST NOT be laundered, so the concession below is
+                # bounded.
+                #
+                # Wrap narrow-scope: only exceptions from the
+                # execute_tool call are wrapped here. Bugs in
+                # _call_llm_before_deadline / _build_messages surface
+                # through their own exception classes
+                # (ComposerServiceError, ComposerConvergenceError).
+                # Record PLUGIN_CRASH BEFORE raising — done structurally
+                # by ``dispatch_with_audit``. The ``capture()`` helper
+                # takes the recorder buffer (including the helper's
+                # final crash record) so the route handler's
+                # ``_handle_plugin_crash`` gets the complete sequence.
+                _append_tool_outcome(
+                    response=None,
+                    error_class=type(tool_exc).__name__,
+                    error_message=str(tool_exc),
+                    post_version=state.version,
+                )
+                plugin_crash = ComposerPluginCrashError.capture(
+                    tool_exc,
+                    state=state,
+                    initial_version=initial_version,
+                    tool_invocations=recorder.invocations,
+                    llm_calls=recorder.llm_calls,
+                )
+                plugin_crash_cause = tool_exc
+                break
+
+            # SUCCESS path — the helper already recorded
+            # ComposerToolStatus.SUCCESS via finish_success (with the
+            # sentinel-canonical fallback for non-finite floats /
+            # non-serializable result types). Update loop-local state
+            # from outcome.result and continue with the LLM-message
+            # append.
+            version_before_tool = state.version
+            result = outcome.result
+            state = result.updated_state
+            last_validation = result.validation
+            last_runtime_preflight = result.runtime_preflight or last_runtime_preflight
+            # Mark the (plugin_type, plugin_name) pair as
+            # schema-loaded for this session when a get_plugin_schema
+            # call returned a discovery success. The per-turn system
+            # context renders this set as
+            # ``composer_progress.schemas_loaded_this_session`` so
+            # the model can compute its own schemas_gap without
+            # re-introspecting plugins it has already seen. See
+            # ``ComposerServiceImpl._mark_plugin_schema_loaded`` and
+            # ``prompts.build_context_string``.
+            #
+            # Lifted from the prior inline compose-loop body into the
+            # extracted ``_dispatch_tool_batch`` helper as part of the
+            # parallel decomposition (commit f918f4269). The RC5.2
+            # commit that introduced this tracker explicitly anticipated
+            # the lift in its message: "the single line that will need
+            # lift-and-shift into ``dispatch_tools`` when the parallel
+            # ``_compose_loop`` decomposition lands".
+            if tool_name == "get_plugin_schema" and result.success:
+                self._mark_plugin_schema_loaded(
+                    session_id,
+                    str(arguments["plugin_type"]),
+                    str(arguments["name"]),
+                )
+            # §7.7 anchor tracking. ``finish_success`` records the audit
+            # invocation regardless of ``result.success`` — the dispatch
+            # itself ran without raising. But for anchor purposes we look
+            # at ToolResult.success: a set_pipeline that returned a
+            # validation-rejected state is the dominant anchor pattern
+            # observed in the Tier 1 RED, and indistinguishable from a
+            # ToolArgumentError as far as the LLM's retry loop is concerned.
+            #
+            # Successes only break the anchor when they are MUTATION
+            # successes. Discovery successes (get_plugin_schema, list_*,
+            # get_pipeline_state) are observations — empirically the model
+            # interleaves them between failed mutation retries (see the
+            # smoke session 55895523-... where 4 set_pipeline failures
+            # were broken up by 1 get_pipeline_state and 1 get_plugin_schema,
+            # both successful, both irrelevant to whether the model has
+            # progressed on the anchored mutation).
+            #
+            # Mutation means a CompositionState version advance here.
+            # Blob-store side effects such as create_blob/update_blob are
+            # useful work, but they do not make an empty pipeline exist.
+            if result.success:
+                if _tool_result_mutated_composition_state(version_before=version_before_tool, result=result):
+                    mutation_success_observed = True
+                    anti_anchor.record_success()
+            else:
+                anti_anchor.record_failure(tool_name, audit.arguments_hash)
+            result_json = _serialize_tool_result(result)
+            await _emit_progress(progress, _tool_completed_progress_event(tool_name, result.success))
+            _append_tool_outcome(
+                response=result,
+                error_class=None,
+                error_message=None,
+                post_version=state.version,
+            )
+
+            # Cache cacheable discovery results
+            if is_cacheable_discovery_tool(tool_name):
+                cache_key = _make_cache_key(tool_name, arguments)
+                discovery_cache[cache_key] = _cached_discovery_payload(result)
+
+            llm_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result_json,
+                }
+            )
+
+            if not is_discovery_tool(tool_name):
+                turn_has_mutation = True
+            else:
+                turn_has_discovery = True
+
+        dispatch = _DispatchOutcome(
+            state=state,
+            last_validation=last_validation,
+            last_runtime_preflight=last_runtime_preflight,
+            tool_outcomes=tuple(tool_outcomes),
+            decoded_args_by_call_id=decoded_args_by_call_id,
+            turn_has_mutation=turn_has_mutation,
+            turn_has_discovery=turn_has_discovery,
+            all_cache_hits=all_cache_hits,
+            plugin_crash=plugin_crash,
+            plugin_crash_cause=plugin_crash_cause,
+            assistant_message=assistant_message,
+            raw_assistant_content=raw_assistant_content,
+            assistant_tool_calls=assistant_tool_calls,
+            mutation_success_observed=mutation_success_observed,
+            pre_state_id=pre_state_id,
+        )
+        return dispatch, advisor_calls_used
+
+    async def _classify_and_budget_turn(
+        self,
+        *,
+        dispatch: _DispatchOutcome,
+        persist: _PersistOutcome,
+        llm_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        recorder: BufferingRecorder,
+        anti_anchor: AntiAnchorTracker,
+        progress: ComposerProgressSink | None,
+        message: str,
+        initial_version: int,
+        deadline: float,
+        runtime_preflight_cache: _RuntimePreflightCache,
+        session_scope: str,
+        user_id: str | None,
+        mutation_success_seen: bool,
+        composition_turns_used: int,
+        discovery_turns_used: int,
+    ) -> _ClassifyOutcome:
+        """Phase P5 of the compose loop — anti-anchor + budget classify.
+
+        Three concerns share this phase because their decision flow is
+        sequential:
+
+        1. **Anti-anchor hint (§7.7).** When the last three failed tool
+           calls share the same (tool_name, arguments_hash), inject a
+           role="user" hint into ``llm_messages`` so the model breaks
+           the anchored retry. The hint is persisted via the normal
+           ``chat_messages`` path.
+        2. **Cache-hit short-circuit.** When every tool call this turn
+           was a discovery cache hit, no budget charge: continue.
+        3. **Budget classify.** Charge the composition counter (with
+           the B-4D-3 last-chance LLM call on exhaustion) or the
+           discovery counter (no bonus call). Advisor-only turns are
+           neither — return to the driver without charging.
+
+        Returns:
+            ``_ClassifyOutcome(action="continue", composition_turns_delta=...,
+            discovery_turns_delta=...)`` on the normal path, or
+            ``_ClassifyOutcome(action="return", result=...)`` when the
+            B-4D-3 bonus call terminated the loop. Convergence raises
+            (composition / discovery budget exhausted without bonus
+            success) leave through the exception channel.
+        """
+        state = dispatch.state
+        last_runtime_preflight = dispatch.last_runtime_preflight
+        turn_has_mutation = dispatch.turn_has_mutation
+        turn_has_discovery = dispatch.turn_has_discovery
+        all_cache_hits = dispatch.all_cache_hits
+        persisted_tool_call_turn = persist.persisted_tool_call_turn
+        persisted_assistant_message_id = persist.persisted_assistant_message_id
+        failed_turn = persist.failed_turn
+
+        # §7.7 anti-anchor hint: if the last 3 failed tool calls share the
+        # same (tool_name, arguments_hash), the model has stopped reading
+        # validator feedback. Inject a synthetic role="user" hint before
+        # the next LLM turn so the model breaks the anchor. consume_fire()
+        # clears the deque so the hint cannot re-fire on the same anchor.
+        # Persisted via the normal llm_messages → chat_messages path; the
+        # operator-visible audit row carries the [ELSPETH-SYSTEM-HINT]
+        # marker so its system origin is unambiguous.
+        if anti_anchor.should_fire():
+            hint_text = anti_anchor.build_hint()
+            anti_anchor.consume_fire()
+            llm_messages.append({"role": "user", "content": hint_text})
+            await _emit_progress(
+                progress,
+                ComposerProgressEvent(
+                    phase="using_tools",
+                    headline="ELSPETH detected an anchored retry pattern.",
+                    evidence=(
+                        "The last 3 tool calls used identical arguments and produced the same error.",
+                        "A structural hint was injected to help the model converge.",
+                    ),
+                    likely_next="The model will see the hint and try a different argument shape.",
+                ),
+            )
+
+        # If ALL tool calls in this turn were cache hits, no budget
+        # charge — continue to next turn without incrementing.
+        if all_cache_hits:
+            return _ClassifyOutcome(action="continue")
+
+        # Classify turn and charge the appropriate budget.
+        # The current turn has already been executed (tool results
+        # are in the message history). We increment first, then
+        # check whether the budget is now exhausted. If so, we give
+        # the LLM one last chance (B-4D-3) for composition, or
+        # raise immediately for discovery (discovery exhaustion
+        # doesn't benefit from a bonus call — no state was mutated).
+        if turn_has_mutation:
+            new_composition_turns_used = composition_turns_used + 1
+            if new_composition_turns_used >= self._max_composition_turns:
+                # B-4D-3 fix: give the LLM one last chance to see the
+                # tool results and produce a text response.
+                await _emit_progress(progress, _model_call_progress_event(message))
+                response = await self._call_llm_before_deadline(
+                    llm_messages,
+                    tools,
+                    state,
+                    initial_version,
+                    deadline,
+                    recorder=recorder,
+                )
+                assistant_message = response.choices[0].message
+                if not assistant_message.tool_calls:
+                    await _emit_progress(
+                        progress,
+                        ComposerProgressEvent(
+                            phase="complete",
+                            headline="The composer response is ready.",
+                            evidence=("The model stopped requesting pipeline tools.",),
+                            likely_next="ELSPETH will save any accepted pipeline update.",
+                            reason="composer_complete",
+                        ),
+                    )
+                    result = await self._finalize_no_tool_response(
+                        content=assistant_message.content or "",
+                        state=state,
+                        initial_version=initial_version,
+                        user_id=user_id,
+                        last_runtime_preflight=last_runtime_preflight,
+                        runtime_preflight_cache=runtime_preflight_cache,
+                        session_scope=session_scope,
+                        user_message=message,
+                        mutation_success_seen=mutation_success_seen,
+                        tool_invocations=recorder.invocations,
+                        llm_calls=recorder.llm_calls,
+                    )
+                    threaded = replace(
+                        result,
+                        persisted_assistant_message_id=persisted_assistant_message_id,
+                        persisted_tool_call_turn=persisted_tool_call_turn,
+                    )
+                    return _ClassifyOutcome(
+                        action="return",
+                        result=threaded,
+                        composition_turns_delta=1,
+                    )
+                raise ComposerConvergenceError.capture(
+                    max_turns=new_composition_turns_used + discovery_turns_used,
+                    budget_exhausted="composition",
+                    state=state,
+                    initial_version=initial_version,
+                    tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
+                    llm_calls=recorder.llm_calls,
+                    failed_turn=failed_turn,
+                )
+            return _ClassifyOutcome(action="continue", composition_turns_delta=1)
+        if turn_has_discovery:
+            new_discovery_turns_used = discovery_turns_used + 1
+            if new_discovery_turns_used >= self._max_discovery_turns:
+                raise ComposerConvergenceError.capture(
+                    max_turns=composition_turns_used + new_discovery_turns_used,
+                    budget_exhausted="discovery",
+                    state=state,
+                    initial_version=initial_version,
+                    tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
+                    llm_calls=recorder.llm_calls,
+                    failed_turn=failed_turn,
+                )
+            return _ClassifyOutcome(action="continue", discovery_turns_delta=1)
+        # The only non-cache tool currently handled outside the
+        # discovery/mutation registries is request_advisor_hint. It
+        # has its own per-compose budget above, so give the primary
+        # model the returned guidance instead of charging discovery.
+        return _ClassifyOutcome(action="continue")
+
+    async def _try_terminate_no_tools(
+        self,
+        *,
+        assistant_message: Any,
+        message: str,
+        llm_messages: list[dict[str, Any]],
+        state: CompositionState,
+        session_id: str | None,
+        initial_version: int,
+        user_id: str | None,
+        last_runtime_preflight: ValidationResult | None,
+        runtime_preflight_cache: _RuntimePreflightCache,
+        session_scope: str,
+        mutation_success_seen: bool,
+        recorder: BufferingRecorder,
+        progress: ComposerProgressSink | None,
+        repair_turns_used: int,
+        persisted_assistant_message_id: str | None,
+        persisted_tool_call_turn: bool,
+    ) -> _TerminateOutcome:
+        """Phase P2 of the compose loop — handle the no-tool-calls branch.
+
+        Called only when the assistant emitted no tool calls. Either:
+
+        * Appends a repair-prompt to ``llm_messages`` and returns a
+          ``_TerminateOutcome(action="continue", repair_turns_delta=1)``,
+          asking the driver to bump its repair counter and re-enter P1.
+        * Or finalizes the response via ``_finalize_no_tool_response`` and
+          returns ``_TerminateOutcome(action="return", result=...)``. The
+          ``result`` is already threaded with ``repair_turns_used``,
+          ``persisted_assistant_message_id`` and ``persisted_tool_call_turn``
+          so the driver only has to ``return outcome.result``.
+        """
+        if (
+            repair_turns_used < _MAX_REPAIR_TURNS
+            and _user_request_expects_pipeline_mutation(message)
+            and _state_is_structurally_empty(state)
+            and _last_failure_was_pre_state_interpretation_review(recorder.invocations)
+        ):
+            llm_messages.append(
+                {
+                    "role": "user",
+                    "content": _pre_state_interpretation_review_repair_message(
+                        next_turn=repair_turns_used + 1,
+                    ),
+                }
+            )
+            return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        if repair_turns_used < _MAX_REPAIR_TURNS:
+            missing_interpretation_sites = await self._missing_pending_interpretation_review_sites(
+                state,
+                session_id=session_id,
+            )
+            if missing_interpretation_sites:
+                llm_messages.append(
+                    {
+                        "role": "user",
+                        "content": _pending_interpretation_review_repair_message(
+                            missing_interpretation_sites,
+                            next_turn=repair_turns_used + 1,
+                        ),
+                    }
+                )
+                return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        if await self._attempt_empty_state_uploaded_blob_repair(
+            state=state,
+            llm_messages=llm_messages,
+            session_id=session_id,
+            repair_turns_used=repair_turns_used,
+        ):
+            return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        # Forced-repair gate: when the model claims completion but
+        # the proof step still has blocking diagnostics, inject a
+        # repair message and continue. Capped at _MAX_REPAIR_TURNS so
+        # the loop can never spin indefinitely. NEVER catches plugin
+        # exceptions — only repairs configurations.
+        #
+        # The gate fires whenever the proof step is applicable —
+        # i.e. there is a blob-backed source to inspect. The earlier
+        # ``state.version > initial_version`` guard skipped the gate
+        # on the first compose turn of a resumed session whose
+        # blob-backed source was bound on a prior turn (state already
+        # carries the source, no mutation this turn). That is exactly
+        # the cross-turn scenario the gate exists to catch (e.g.
+        # ``csv_fixed_schema_omits_observed_columns`` blockers
+        # surviving session resume). For chat-only turns where the
+        # source is absent or not blob-backed, ``_attempt_proof_repair``
+        # short-circuits cheaply via ``compute_proof_diagnostics``'s
+        # own early return.
+        if _proof_repair_is_applicable(state) and self._attempt_proof_repair(
+            state=state,
+            llm_messages=llm_messages,
+            session_id=session_id,
+            repair_turns_used=repair_turns_used,
+        ):
+            return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        await _emit_progress(
+            progress,
+            ComposerProgressEvent(
+                phase="complete",
+                headline="The composer response is ready.",
+                evidence=("The model did not request any more pipeline tools.",),
+                likely_next="ELSPETH will save any accepted pipeline update.",
+                reason="composer_complete",
+            ),
+        )
+        result = await self._finalize_no_tool_response(
+            content=assistant_message.content or "",
+            state=state,
+            initial_version=initial_version,
+            user_id=user_id,
+            last_runtime_preflight=last_runtime_preflight,
+            runtime_preflight_cache=runtime_preflight_cache,
+            session_scope=session_scope,
+            user_message=message,
+            mutation_success_seen=mutation_success_seen,
+            tool_invocations=recorder.invocations,
+            llm_calls=recorder.llm_calls,
+        )
+        # Thread repair_turns_used through to the result so the
+        # route handler can persist it onto the new
+        # ``composition_states.composer_meta`` row (and the API state
+        # response can surface ``composer_meta.repair_turns_used``)
+        # — see web/sessions/routes.py::_state_data_from_composer_state
+        # call sites in the compose / recompose paths.
+        threaded = replace(
+            result,
+            repair_turns_used=repair_turns_used,
+            persisted_assistant_message_id=persisted_assistant_message_id,
+            persisted_tool_call_turn=persisted_tool_call_turn,
+        )
+        return _TerminateOutcome(action="return", result=threaded)
+
     async def _compose_loop(
         self,
         message: str,
@@ -1942,6 +3711,21 @@ class ComposerServiceImpl:
         user_message_id: str | None = None,
     ) -> ComposerResult:
         """Inner composition loop with dual-counter budget tracking.
+
+        The loop body is decomposed into five phases (see the carrier
+        module ``_compose_loop_carriers`` for the dataclasses that
+        thread state between them):
+
+        * P1 :meth:`_call_model_turn`        — one LLM call, cap check
+        * P2 :meth:`_try_terminate_no_tools` — handle the no-tool-calls
+          branch (repair injections or finalize-and-return)
+        * P3 :meth:`_dispatch_tool_batch`    — execute every tool call,
+          accumulate ``_ToolOutcome`` records, rebind ``state``
+        * P4 :meth:`_persist_turn_audit`     — redact, persist the turn
+          audit row, raise plugin-crash propagation if applicable
+        * P5 :meth:`_classify_and_budget_turn` — anti-anchor hint,
+          cache-hit short-circuit, dual-counter budget classify,
+          B-4D-3 last-chance LLM call
 
         Uses cooperative timeout: the deadline is checked at safe
         checkpoints (before LLM calls, after tool batches) rather
@@ -1968,7 +3752,7 @@ class ComposerServiceImpl:
         # still gate behind a per-instance flag so steady-state compose()
         # calls don't churn the connection pool.
         await self._maybe_upsert_skill_markdown_history()
-        llm_messages = self._build_messages(messages, state, message, guided_terminal)
+        llm_messages = self._build_messages(messages, state, message, guided_terminal, session_id=session_id)
         tools = self._get_litellm_tools()
         # Per-call audit recorder. Surfaced on ComposerResult and on
         # the three partial-state-carrier exceptions so the route handler
@@ -2047,1502 +3831,138 @@ class ComposerServiceImpl:
             # The compose-loop audit path captures the state id observed
             # before the provider call and passes this exact value to
             # persist_compose_turn_async as expected_current_state_id.
-            await _emit_progress(progress, _model_call_progress_event(message))
-            response = await self._call_llm_before_deadline(
-                llm_messages,
-                tools,
-                state,
-                initial_version,
-                deadline,
+            call_model = await self._call_model_turn(
+                llm_messages=llm_messages,
+                tools=tools,
+                state=state,
+                initial_version=initial_version,
+                deadline=deadline,
                 recorder=recorder,
+                progress=progress,
+                message=message,
+                composition_turns_used=composition_turns_used,
+                discovery_turns_used=discovery_turns_used,
             )
-            assistant_message = response.choices[0].message
-            raw_assistant_content = assistant_message.content
-            assistant_tool_calls = assistant_message.tool_calls or ()
-            if len(assistant_tool_calls) > self._max_tool_calls_per_turn:
-                self._telemetry.tool_call_cap_exceeded_total.add(1)
-                raise ComposerConvergenceError.capture(
-                    max_turns=composition_turns_used + discovery_turns_used,
-                    budget_exhausted="composition",
-                    state=state,
-                    initial_version=initial_version,
-                    tool_invocations=recorder.invocations,
-                    llm_calls=recorder.llm_calls,
-                    reason="tool_call_cap_exceeded",
-                    evidence={
-                        "observed": len(assistant_tool_calls),
-                        "cap": self._max_tool_calls_per_turn,
-                    },
-                )
-
             # If no tool calls, the LLM is done — apply the final gate and return
-            if not assistant_message.tool_calls:
-                if (
-                    repair_turns_used < _MAX_REPAIR_TURNS
-                    and _user_request_expects_pipeline_mutation(message)
-                    and _state_is_structurally_empty(state)
-                    and _last_failure_was_pre_state_interpretation_review(recorder.invocations)
-                ):
-                    llm_messages.append(
-                        {
-                            "role": "user",
-                            "content": _pre_state_interpretation_review_repair_message(
-                                next_turn=repair_turns_used + 1,
-                            ),
-                        }
-                    )
-                    repair_turns_used += 1
-                    continue
-
-                if repair_turns_used < _MAX_REPAIR_TURNS:
-                    missing_interpretation_sites = await self._missing_pending_interpretation_review_sites(
-                        state,
-                        session_id=session_id,
-                    )
-                    if missing_interpretation_sites:
-                        llm_messages.append(
-                            {
-                                "role": "user",
-                                "content": _pending_interpretation_review_repair_message(
-                                    missing_interpretation_sites,
-                                    next_turn=repair_turns_used + 1,
-                                ),
-                            }
-                        )
-                        repair_turns_used += 1
-                        continue
-
-                if await self._attempt_empty_state_uploaded_blob_repair(
-                    state=state,
+            if not call_model.has_tool_calls:
+                terminate = await self._try_terminate_no_tools(
+                    assistant_message=call_model.assistant_message,
+                    message=message,
                     llm_messages=llm_messages,
-                    session_id=session_id,
-                    repair_turns_used=repair_turns_used,
-                ):
-                    repair_turns_used += 1
-                    continue
-
-                # Forced-repair gate: when the model claims completion but
-                # the proof step still has blocking diagnostics, inject a
-                # repair message and continue. Capped at _MAX_REPAIR_TURNS so
-                # the loop can never spin indefinitely. NEVER catches plugin
-                # exceptions — only repairs configurations.
-                #
-                # The gate fires whenever the proof step is applicable —
-                # i.e. there is a blob-backed source to inspect. The earlier
-                # ``state.version > initial_version`` guard skipped the gate
-                # on the first compose turn of a resumed session whose
-                # blob-backed source was bound on a prior turn (state already
-                # carries the source, no mutation this turn). That is exactly
-                # the cross-turn scenario the gate exists to catch (e.g.
-                # ``csv_fixed_schema_omits_observed_columns`` blockers
-                # surviving session resume). For chat-only turns where the
-                # source is absent or not blob-backed, ``_attempt_proof_repair``
-                # short-circuits cheaply via ``compute_proof_diagnostics``'s
-                # own early return.
-                if _proof_repair_is_applicable(state) and self._attempt_proof_repair(
                     state=state,
-                    llm_messages=llm_messages,
                     session_id=session_id,
-                    repair_turns_used=repair_turns_used,
-                ):
-                    repair_turns_used += 1
-                    continue
-
-                await _emit_progress(
-                    progress,
-                    ComposerProgressEvent(
-                        phase="complete",
-                        headline="The composer response is ready.",
-                        evidence=("The model did not request any more pipeline tools.",),
-                        likely_next="ELSPETH will save any accepted pipeline update.",
-                        reason="composer_complete",
-                    ),
-                )
-                result = await self._finalize_no_tool_response(
-                    content=assistant_message.content or "",
-                    state=state,
                     initial_version=initial_version,
                     user_id=user_id,
                     last_runtime_preflight=last_runtime_preflight,
                     runtime_preflight_cache=runtime_preflight_cache,
                     session_scope=session_scope,
-                    user_message=message,
                     mutation_success_seen=mutation_success_seen,
-                    tool_invocations=recorder.invocations,
-                    llm_calls=recorder.llm_calls,
-                )
-                # Thread repair_turns_used through to the result so the
-                # route handler can persist it onto the new
-                # ``composition_states.composer_meta`` row (and the API state
-                # response can surface ``composer_meta.repair_turns_used``)
-                # — see web/sessions/routes.py::_state_data_from_composer_state
-                # call sites in the compose / recompose paths.
-                return replace(
-                    result,
+                    recorder=recorder,
+                    progress=progress,
                     repair_turns_used=repair_turns_used,
                     persisted_assistant_message_id=persisted_assistant_message_id,
                     persisted_tool_call_turn=persisted_tool_call_turn,
                 )
+                if terminate.action == "return":
+                    assert terminate.result is not None
+                    return terminate.result
+                repair_turns_used += terminate.repair_turns_delta
+                continue
 
-            await _emit_progress(
-                progress,
-                _tool_batch_progress_event(
-                    tuple(tool_call.function.name for tool_call in assistant_message.tool_calls),
-                ),
+            dispatch, advisor_calls_used = await self._dispatch_tool_batch(
+                call_model=call_model,
+                state=state,
+                last_validation=last_validation,
+                last_runtime_preflight=last_runtime_preflight,
+                llm_messages=llm_messages,
+                recorder=recorder,
+                anti_anchor=anti_anchor,
+                discovery_cache=discovery_cache,
+                runtime_preflight_cache=runtime_preflight_cache,
+                session_id=session_id,
+                user_id=user_id,
+                user_message_id=user_message_id,
+                current_state_id=current_state_id,
+                actor=actor,
+                initial_version=initial_version,
+                deadline=deadline,
+                progress=progress,
+                session_scope=session_scope,
+                advisor_calls_used=advisor_calls_used,
             )
-
-            # Append the assistant message (with tool_calls metadata)
-            llm_messages.append(
-                {
-                    "role": "assistant",
-                    "content": assistant_message.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in assistant_message.tool_calls
-                    ],
-                }
+            # State the driver still owns across iterations updates from
+            # the dispatch carrier; persist + classify consume the rest
+            # of the dispatch fields directly.
+            state = dispatch.state
+            last_validation = dispatch.last_validation
+            last_runtime_preflight = dispatch.last_runtime_preflight
+            if dispatch.mutation_success_observed:
+                mutation_success_seen = True
+            self._phase3_last_tool_outcomes = dispatch.tool_outcomes
+            persist = await self._persist_turn_audit(
+                tool_outcomes=dispatch.tool_outcomes,
+                decoded_args_by_call_id=dispatch.decoded_args_by_call_id,
+                assistant_message=dispatch.assistant_message,
+                raw_assistant_content=dispatch.raw_assistant_content,
+                assistant_tool_calls=dispatch.assistant_tool_calls,
+                plugin_crash=dispatch.plugin_crash,
+                session_id=session_id,
+                current_state_id=current_state_id,
+                persisted_tool_call_turn=persisted_tool_call_turn,
+                persisted_assistant_message_id=persisted_assistant_message_id,
             )
-
-            # Execute each tool call, tracking whether this turn has
-            # budgeted discovery or mutation work. Advisor-only turns are
-            # intentionally neither: they spend the advisor-specific budget,
-            # not the generic discovery/composition turn budgets.
-            turn_has_mutation = False
-            turn_has_discovery = False
-            all_cache_hits = True
-            # Step 1 — execute tool calls in async land while accumulating
-            # immutable _ToolOutcome records. Step 2 performs audit writes
-            # from this list; cancellation before Step 2 leaves the DB
-            # unchanged for the current assistant response.
-            from elspeth.web.sessions._persist_payload import _ToolOutcome
-
-            tool_outcomes: list[_ToolOutcome] = []
-            plugin_crash: ComposerPluginCrashError | None = None
-            plugin_crash_cause: Exception | None = None
-            pre_state_id: str | None = current_state_id
-            self._phase3_last_expected_current_state_id = pre_state_id
-            decoded_args_by_call_id: dict[str, dict[str, Any]] = {}
-            turn_sessions_service = self._require_sessions_service() if session_id is not None else None
-            turn_session_uuid = UUID(session_id) if session_id is not None else None
-            turn_preferences = (
-                await turn_sessions_service.get_composer_preferences(turn_session_uuid)
-                if turn_sessions_service is not None and turn_session_uuid is not None
-                else None
-            )
-            proposals_this_turn = 0
-
-            for tool_call in assistant_message.tool_calls:
-                tool_name = tool_call.function.name
-                pre_version = state.version
-
-                def _append_tool_outcome(
-                    *,
-                    response: Any,
-                    error_class: str | None,
-                    error_message: str | None,
-                    post_version: int,
-                    _tool_outcomes: list[_ToolOutcome] = tool_outcomes,
-                    _tool_call: Any = tool_call,
-                    _pre_version: int = pre_version,
-                ) -> None:
-                    _tool_outcomes.append(
-                        _ToolOutcome(
-                            call=_tool_call,
-                            response=response,
-                            error_class=error_class,
-                            error_message=error_message,
-                            pre_version=_pre_version,
-                            post_version=post_version,
-                        )
-                    )
-
-                try:
-                    decoded_arguments = json.loads(tool_call.function.arguments)
-                except (json.JSONDecodeError, TypeError) as exc:
-                    # Track budget class even when args are unparseable.
-                    if is_discovery_tool(tool_name):
-                        turn_has_discovery = True
-                    else:
-                        turn_has_mutation = True
-                    # ARG_ERROR pre-dispatch site (1/3): JSON-decode failure.
-                    # Open the audit envelope with the raw (pre-parse) string
-                    # so the trail records what the LLM tried, even when it
-                    # wasn't valid JSON. ``error_message`` is class-name only
-                    # because ``str(exc)`` for JSONDecodeError can echo column
-                    # offsets that reference the un-truncated raw bytes.
-                    audit = begin_dispatch(
-                        tool_call.id,
-                        tool_name,
-                        tool_call.function.arguments,
-                        version_before=state.version,
-                        actor=actor,
-                    )
-                    error_payload = {"error": f"Invalid JSON in arguments: {exc}"}
-                    recorder.record(
-                        finish_arg_error(
-                            audit,
-                            error_class=type(exc).__name__,
-                            error_message=type(exc).__name__,
-                            error_payload=error_payload,
-                        )
-                    )
-                    _append_tool_outcome(
-                        response=None,
-                        error_class=type(exc).__name__,
-                        error_message=type(exc).__name__,
-                        post_version=state.version,
-                    )
-                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                    llm_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps(error_payload),
-                        }
-                    )
-                    all_cache_hits = False
-                    continue
-
-                if not isinstance(decoded_arguments, dict):
-                    if is_discovery_tool(tool_name):
-                        turn_has_discovery = True
-                    else:
-                        turn_has_mutation = True
-                    # ARG_ERROR pre-dispatch site (2/3): non-dict arguments.
-                    # The LLM produced valid JSON but not a JSON object. The
-                    # canonicalized record wraps the (possibly scalar/list)
-                    # value under ``_decoded_non_object`` so the audit trail
-                    # captures it deterministically.
-                    audit, canonicalization_failed = begin_dispatch_or_arg_error(
-                        tool_call.id,
-                        tool_name,
-                        {"_decoded_non_object": decoded_arguments},
-                        version_before=state.version,
-                        actor=actor,
-                    )
-                    if canonicalization_failed is None:
-                        err_msg = f"Tool '{tool_name}' arguments must be a JSON object, got {type(decoded_arguments).__name__}."
-                        error_class = "TypeError"
-                        error_message = f"non-object arguments ({type(decoded_arguments).__name__})"
-                    else:
-                        err_msg = f"Tool '{tool_name}' arguments are not canonical JSON ({type(canonicalization_failed).__name__})."
-                        error_class = type(canonicalization_failed).__name__
-                        error_message = type(canonicalization_failed).__name__
-                    error_payload = {"error": err_msg}
-                    recorder.record(
-                        finish_arg_error(
-                            audit,
-                            error_class=error_class,
-                            error_message=error_message,
-                            error_payload=error_payload,
-                        )
-                    )
-                    _append_tool_outcome(
-                        response=None,
-                        error_class=error_class,
-                        error_message=error_message,
-                        post_version=state.version,
-                    )
-                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                    llm_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps(error_payload),
-                        }
-                    )
-                    all_cache_hits = False
-                    continue
-
-                arguments = cast(dict[str, Any], decoded_arguments)
-                decoded_args_by_call_id[tool_call.id] = arguments
-
-                # Open the audit envelope ONCE per dispatch — the cache,
-                # required-paths, ToolArgumentError, plugin-crash, and
-                # success branches below all read from this envelope so
-                # ``started_at``/``arguments_canonical``/``version_before``
-                # are consistent regardless of which branch fires.
-                audit, canonicalization_failed = begin_dispatch_or_arg_error(
-                    tool_call.id,
-                    tool_name,
-                    arguments,
-                    version_before=state.version,
-                    actor=actor,
-                )
-                if canonicalization_failed is not None:
-                    if is_discovery_tool(tool_name):
-                        turn_has_discovery = True
-                    else:
-                        turn_has_mutation = True
-                    error_payload = {
-                        "error": f"Tool '{tool_name}' arguments are not canonical JSON ({type(canonicalization_failed).__name__})."
-                    }
-                    recorder.record(
-                        finish_arg_error(
-                            audit,
-                            error_class=type(canonicalization_failed).__name__,
-                            error_message=type(canonicalization_failed).__name__,
-                            error_payload=error_payload,
-                        )
-                    )
-                    _append_tool_outcome(
-                        response=None,
-                        error_class=type(canonicalization_failed).__name__,
-                        error_message=type(canonicalization_failed).__name__,
-                        post_version=state.version,
-                    )
-                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                    llm_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps(error_payload),
-                        }
-                    )
-                    all_cache_hits = False
-                    continue
-
-                # Check discovery cache before executing
-                if is_cacheable_discovery_tool(tool_name):
-                    cache_key = _make_cache_key(tool_name, arguments)
-                    if cache_key in discovery_cache:
-                        # Cache hit — return cached result, no budget charge.
-                        # Audit-recorded with cache_hit=True so the trail
-                        # captures every LLM decision-point, even those
-                        # served from cache without re-running the handler.
-                        await _emit_progress(
-                            progress,
-                            ComposerProgressEvent(
-                                phase="using_tools",
-                                headline="I'm reusing recently checked tool information.",
-                                evidence=("The same discovery request was already answered for this compose step.",),
-                                likely_next="ELSPETH will continue from the cached tool result.",
-                            ),
-                        )
-                        cached_result = _result_from_cached_discovery_payload(
-                            state,
-                            discovery_cache[cache_key],
-                        )
-                        cached_payload = {
-                            "success": cached_result.success,
-                            "data": cached_result.data,
-                            "cache_hit": True,
-                        }
-                        recorder.record(
-                            finish_success(
-                                audit,
-                                result_payload=cached_payload,
-                                version_after=state.version,
-                                cache_hit=True,
-                            )
-                        )
-                        _append_tool_outcome(
-                            response=cached_result,
-                            error_class=None,
-                            error_message=None,
-                            post_version=state.version,
-                        )
-                        # Cache hits are exclusively for discovery tools
-                        # (`is_cacheable_discovery_tool` gates above). A
-                        # discovery success is an *observation* — the model
-                        # gained schema knowledge but did not change state.
-                        # The §7.7 anchor is broken only by mutation
-                        # progress, so tracker stays untouched here.
-                        llm_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": _serialize_tool_result(cached_result),
-                            }
-                        )
-                        continue
-
-                all_cache_hits = False
-
-                # Validate schema-declared required arguments at the
-                # Tier 3 boundary BEFORE entering tool handler code.
-                # This walks nested object/array schemas, so malformed
-                # set_pipeline payloads like source.plugin omissions are
-                # caught here; any KeyError that still escapes
-                # execute_tool() is an internal bug and must crash.
-                # Unknown tool names skip validation — execute_tool()
-                # handles them with a failure result downstream.
-                required_paths = _TOOL_REQUIRED_PATHS[tool_name] if tool_name in _TOOL_REQUIRED_PATHS else ()
-                missing = _find_missing_required_paths(arguments, required_paths)
-                if missing:
-                    if is_discovery_tool(tool_name):
-                        turn_has_discovery = True
-                    else:
-                        turn_has_mutation = True
-                    # ARG_ERROR pre-dispatch site (3/3): schema-required
-                    # paths missing. ``missing`` is a list of dotted/indexed
-                    # path strings — operator-controlled schema field names,
-                    # safe to echo verbatim.
-                    err_msg = f"Tool '{tool_name}' missing required argument(s): {', '.join(missing)}"
-                    error_payload = {"error": err_msg}
-                    recorder.record(
-                        finish_arg_error(
-                            audit,
-                            error_class="MissingRequiredPaths",
-                            error_message=f"missing: {', '.join(missing)}",
-                            error_payload=error_payload,
-                        )
-                    )
-                    _append_tool_outcome(
-                        response=None,
-                        error_class="MissingRequiredPaths",
-                        error_message=f"missing: {', '.join(missing)}",
-                        post_version=state.version,
-                    )
-                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                    llm_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps(error_payload),
-                        }
-                    )
-                    continue
-
-                if (
-                    turn_sessions_service is not None
-                    and turn_session_uuid is not None
-                    and turn_preferences is not None
-                    and turn_preferences.trust_mode == "explicit_approve"
-                    and is_mutation_tool(tool_name)
-                    # Blob-store side-effect tools (create_blob, update_blob,
-                    # delete_blob) cannot be intercepted as proposals: they
-                    # never advance CompositionState.version, but the accept
-                    # endpoint requires a version advance, so an intercepted
-                    # proposal would be structurally unacceptable. Their
-                    # composition-affecting reference points (set_pipeline,
-                    # set_source_from_blob, apply_pipeline_recipe) ARE
-                    # intercepted and carry the meaningful operator approval.
-                    and not is_blob_store_only_mutation_tool(tool_name)
-                ):
-                    if proposals_this_turn >= _MAX_PENDING_PROPOSALS_PER_TURN:
-                        raise ComposerServiceError(
-                            f"Composer produced too many pending tool proposals in one turn ({_MAX_PENDING_PROPOSALS_PER_TURN} maximum)."
-                        )
-
-                    from pydantic import ValidationError as PydanticValidationError
-
-                    from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_arguments
-
-                    # The LLM may produce arguments that fail the redaction
-                    # MANIFEST's argument_model — most commonly a misplaced
-                    # field like ``nodes[*].schema`` belonging at
-                    # ``nodes[*].options.schema``. The runtime validator
-                    # would reject these the same way. On redaction
-                    # ValidationError we fall through to normal dispatch:
-                    # execute_tool emits a clean ToolArgumentError, the
-                    # existing post-dispatch arg-error handling records
-                    # the failure for audit (with the
-                    # ``_redaction_status: invalid_tool_arguments`` marker),
-                    # and the compose loop continues so the model can
-                    # self-correct. The previous behaviour — letting the
-                    # ValidationError propagate — crashed the compose
-                    # request with HTTP 500 (session 100dc5cb… 2026-05-14:
-                    # frontend rendered a generic ApiError as a bare
-                    # "retry" button with no diagnostic).
-                    redacted_arguments: Mapping[str, Any] | None
-                    if tool_name in MANIFEST:
-                        try:
-                            redacted_arguments = redact_tool_call_arguments(
-                                tool_name,
-                                arguments,
-                                telemetry=self._redaction_telemetry,
-                            )
-                        except PydanticValidationError:
-                            redacted_arguments = None
-                    else:
-                        redacted_arguments = arguments
-
-                    if redacted_arguments is not None:
-                        proposal_summary = build_tool_proposal_summary(
-                            tool_name=tool_name,
-                            arguments=arguments,
-                            redacted_arguments=redacted_arguments,
-                        )
-                        proposal = await turn_sessions_service.create_composition_proposal(
-                            session_id=turn_session_uuid,
-                            tool_call_id=tool_call.id,
-                            tool_name=tool_name,
-                            summary=proposal_summary.summary,
-                            rationale=proposal_summary.rationale,
-                            affects=proposal_summary.affects,
-                            arguments_json=arguments,
-                            arguments_redacted_json=proposal_summary.arguments_redacted_json,
-                            base_state_id=UUID(current_state_id) if current_state_id is not None else None,
-                            actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
-                            user_message_id=UUID(user_message_id) if user_message_id is not None else None,
-                        )
-                        proposals_this_turn += 1
-                        proposal_payload = {
-                            "success": True,
-                            "status": "APPROVAL_REQUIRED",
-                            "proposal_id": str(proposal.id),
-                            "tool_name": tool_name,
-                            "summary": proposal.summary,
-                            "message": "The requested pipeline change is pending human approval and has not been applied.",
-                        }
-                        proposal_result = ToolResult(
-                            success=True,
-                            updated_state=state,
-                            validation=last_validation if last_validation is not None else state.validate(),
-                            affected_nodes=(),
-                            data=proposal_payload,
-                        )
-                        recorder.record(
-                            finish_success(
-                                audit,
-                                result_payload=proposal_result.to_dict(),
-                                version_after=state.version,
-                            )
-                        )
-                        _append_tool_outcome(
-                            response=proposal_result,
-                            error_class=None,
-                            error_message=None,
-                            post_version=state.version,
-                        )
-                        anti_anchor.record_success()
-                        llm_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": _serialize_tool_result(proposal_result),
-                            }
-                        )
-                        turn_has_mutation = True
-                        continue
-                    # redacted_arguments is None → invalid LLM arguments;
-                    # fall through to normal dispatch, which will emit a
-                    # ToolArgumentError through the standard arg-error path.
-
-                await _emit_progress(progress, _tool_started_progress_event(tool_name))
-
-                # Advisor escape-hatch interception. The request_advisor_hint
-                # tool is intercepted here BEFORE execute_tool() because the
-                # action is an async LiteLLM call to a frontier model rather
-                # than a sync state mutation. The tool is not registered in
-                # _DISCOVERY_TOOLS or _MUTATION_TOOLS, so execute_tool() would
-                # return "Unknown tool" if this branch did not handle it.
-                #
-                # Audit envelope was already opened above by
-                # begin_dispatch_or_arg_error; this branch closes it with the
-                # truthful dispatch status: ARG_ERROR for local advisor-argument
-                # rejection, SUCCESS for completed policy/provider outcomes
-                # whose semantic status is encoded in result_payload. The inner
-                # LLM call is recorded separately via _call_advisor_with_audit
-                # firing a ComposerLLMCall record.
-                if tool_name == "request_advisor_hint":
-                    # Successful advisor guidance is governed solely by the
-                    # advisor budget so the composer can read it. Advisor
-                    # policy/error feedback with no usable guidance is still
-                    # a non-mutating correction turn, so it consumes discovery
-                    # budget before the loop asks the primary model again.
-                    if not self._settings.composer_advisor_enabled:
-                        # Defense-in-depth: the tool was filtered out of
-                        # _get_litellm_tools() but the LLM somehow named it
-                        # anyway (replayed transcript, stale state, prompt
-                        # injection). Fail without making any outbound call.
-                        error_payload = {
-                            "error": "request_advisor_hint is disabled on this deployment.",
-                        }
-                        recorder.record(
-                            finish_success(
-                                audit,
-                                result_payload=error_payload,
-                                version_after=state.version,
-                            )
-                        )
-                        anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                        llm_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": json.dumps(error_payload),
-                            }
-                        )
-                        turn_has_discovery = True
-                        continue
-
-                    budget = self._settings.composer_advisor_max_calls_per_compose
-                    if advisor_calls_used >= budget:
-                        budget_payload = {
-                            "status": "BUDGET_EXHAUSTED",
-                            "budget_used": advisor_calls_used,
-                            "budget_remaining": 0,
-                            "guidance": (
-                                f"Advisor budget exhausted ({advisor_calls_used}/{budget} calls "
-                                "used this compose request). Return to the validator output and "
-                                "the recovery cheat sheet — no more frontier hints are available "
-                                "until the operator raises the budget or the next compose request."
-                            ),
-                        }
-                        recorder.record(
-                            finish_success(
-                                audit,
-                                result_payload=budget_payload,
-                                version_after=state.version,
-                            )
-                        )
-                        # Budget exhaustion is a structural signal back to
-                        # the LLM, not a tool-failure pattern — do NOT count
-                        # it for §7.7 anchor tracking, since the issue isn't
-                        # the LLM repeating an identical request, it's the
-                        # operator's policy refusing further hints.
-                        llm_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": json.dumps(budget_payload),
-                            }
-                        )
-                        turn_has_discovery = True
-                        continue
-
-                    # F3: validate argument types and total prompt size at the
-                    # Tier-3 trust boundary. _TOOL_REQUIRED_PATHS only checks
-                    # key presence, not value shape. Without this check the
-                    # LLM could send a non-list (silently iterated char-by-
-                    # char) or a megabyte-scale value (unbounded provider
-                    # cost). ARG_ERRORs do NOT consume advisor budget — no
-                    # outbound call is made — but anti-anchor counts them
-                    # so repeated identical bad-arg calls trigger the §7.7
-                    # structural hint.
-                    advisor_arg_error = self._validate_advisor_arguments(arguments)
-                    if advisor_arg_error is not None:
-                        recorder.record(
-                            finish_arg_error(
-                                audit,
-                                error_class=str(advisor_arg_error["error_class"]),
-                                error_message=str(advisor_arg_error["error"]),
-                                error_payload=advisor_arg_error,
-                            )
-                        )
-                        anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                        llm_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": json.dumps(advisor_arg_error),
-                            }
-                        )
-                        turn_has_discovery = True
-                        continue
-
-                    remaining = deadline - asyncio.get_event_loop().time()
-                    if remaining <= 0:
-                        timeout_payload: dict[str, Any] = {
-                            "status": "COMPOSE_TIMEOUT",
-                            "error": "Advisor call exceeded the remaining compose deadline.",
-                            "error_class": "TimeoutError",
-                            "budget_used": advisor_calls_used,
-                            "budget_remaining": budget - advisor_calls_used,
-                        }
-                        recorder.record(
-                            finish_success(
-                                audit,
-                                result_payload=timeout_payload,
-                                version_after=state.version,
-                            )
-                        )
-                        raise ComposerConvergenceError.capture(
-                            max_turns=0,
-                            budget_exhausted="timeout",
-                            state=state,
-                            initial_version=initial_version,
-                            tool_invocations=recorder.invocations,
-                            llm_calls=recorder.llm_calls,
-                        )
-
-                    advisor_timeout = self._settings.composer_advisor_timeout_seconds
-                    effective_advisor_timeout = min(advisor_timeout, remaining)
-                    advisor_deadline_limited = remaining <= advisor_timeout
-
-                    # F2: consume budget BEFORE the outbound call, not after.
-                    # The cost guard's purpose is to bound outbound LiteLLM
-                    # calls regardless of outcome. Counting only successes
-                    # would let a flaky provider rack up unlimited failed
-                    # outbound calls until anti-anchor or the discovery-
-                    # turn limit fired. ARG_ERROR (above) and pre-call compose
-                    # timeout (above) do NOT consume advisor budget because no
-                    # outbound advisor call is made.
-                    advisor_calls_used += 1
-
-                    try:
-                        guidance, advisor_meta = await self._call_advisor_with_audit(
-                            arguments,
-                            recorder=recorder,
-                            timeout=effective_advisor_timeout,
-                        )
-                    except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
-                        # Lifecycle exceptions: do not absorb. Propagate so
-                        # cancellation and shutdown work normally; the inner
-                        # ComposerLLMCall record was already fired by the
-                        # advisor method's finally block, so the audit trail
-                        # captures the cancelled call regardless.
-                        raise
-                    except TimeoutError as advisor_exc:
-                        if advisor_deadline_limited:
-                            timeout_payload = {
-                                "status": "COMPOSE_TIMEOUT",
-                                "error": "Advisor call exceeded the remaining compose deadline.",
-                                "error_class": "TimeoutError",
-                                "budget_used": advisor_calls_used,
-                                "budget_remaining": budget - advisor_calls_used,
-                            }
-                            recorder.record(
-                                finish_success(
-                                    audit,
-                                    result_payload=timeout_payload,
-                                    version_after=state.version,
-                                )
-                            )
-                            raise ComposerConvergenceError.capture(
-                                max_turns=0,
-                                budget_exhausted="timeout",
-                                state=state,
-                                initial_version=initial_version,
-                                tool_invocations=recorder.invocations,
-                                llm_calls=recorder.llm_calls,
-                            ) from None
-                        # Advisor-specific timeout with compose budget still
-                        # remaining: return structured tool feedback so the
-                        # composer can continue within its global deadline.
-                        advisor_error_payload = {
-                            "status": "ADVISOR_ERROR",
-                            "error": "Advisor call failed; no guidance returned.",
-                            "error_class": type(advisor_exc).__name__,
-                            "budget_used": advisor_calls_used,
-                            "budget_remaining": budget - advisor_calls_used,
-                        }
-                        recorder.record(
-                            finish_success(
-                                audit,
-                                result_payload=advisor_error_payload,
-                                version_after=state.version,
-                            )
-                        )
-                        anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                        llm_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": json.dumps(advisor_error_payload),
-                            }
-                        )
-                        turn_has_discovery = True
-                        continue
-                    except Exception as advisor_exc:
-                        # Tier 3 boundary: outbound LLM call failed. Convert
-                        # to a structured tool-result error so the composer
-                        # LLM gets feedback rather than a silent stall. The
-                        # inner ComposerLLMCall record was already fired by
-                        # _call_advisor_with_audit's finally block, so the
-                        # audit trail captures the failure mode regardless.
-                        # Budget was already consumed above (F2) — the
-                        # outbound call attempt counts whether or not it
-                        # produced guidance.
-                        advisor_error_payload = {
-                            "status": "ADVISOR_ERROR",
-                            "error": "Advisor call failed; no guidance returned.",
-                            "error_class": type(advisor_exc).__name__,
-                            "budget_used": advisor_calls_used,
-                            "budget_remaining": budget - advisor_calls_used,
-                        }
-                        recorder.record(
-                            finish_success(
-                                audit,
-                                result_payload=advisor_error_payload,
-                                version_after=state.version,
-                            )
-                        )
-                        # Advisor failure IS counted for §7.7 anchor
-                        # tracking — repeated identical failed advisor
-                        # calls indicate the LLM is spamming a broken
-                        # prompt, exactly the pattern the tracker exists
-                        # to break.
-                        anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                        llm_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": json.dumps(advisor_error_payload),
-                            }
-                        )
-                        turn_has_discovery = True
-                        continue
-
-                    success_payload = {
-                        "status": "SUCCESS",
-                        "guidance": guidance,
-                        "model": advisor_meta["model"],
-                        "prompt_tokens": advisor_meta["prompt_tokens"],
-                        "completion_tokens": advisor_meta["completion_tokens"],
-                        "cached_prompt_tokens": advisor_meta["cached_prompt_tokens"],
-                        "advisor_latency_ms": advisor_meta["latency_ms"],
-                        "budget_used": advisor_calls_used,
-                        "budget_remaining": budget - advisor_calls_used,
-                        "note": (
-                            "ADVICE only — call the appropriate mutation tool to "
-                            "apply any change. Do not echo this guidance back as "
-                            "configuration without verifying it against the schema."
-                        ),
-                    }
-                    recorder.record(
-                        finish_success(
-                            audit,
-                            result_payload=success_payload,
-                            version_after=state.version,
-                        )
-                    )
-                    # Successful advisor call is progress, not a failure —
-                    # the §7.7 tracker is reset for this tool name so a
-                    # subsequent set_pipeline failure does not inherit a
-                    # stale advisor anchor count.
-                    anti_anchor.record_success()
-                    llm_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps(success_payload),
-                        }
-                    )
-                    continue
-
-                # Session-aware async tool dispatch.
-                #
-                # ``_SESSION_AWARE_TOOL_HANDLERS`` holds handlers that AWAIT
-                # session-service writers/readers; they cannot be dispatched
-                # through the sync ``run_sync_in_worker(execute_tool, ...)``
-                # path because execute_tool() is sync. The compose loop
-                # intercepts these tool names BEFORE the generic dispatch
-                # and awaits the handler directly, then routes the result
-                # through the same audit envelope discipline as the sync
-                # path (finish_success / finish_arg_error / finish_plugin_crash).
-                #
-                # Currently registered: ``request_interpretation_review``.
-                # Adding another session-aware tool extends
-                # ``_SESSION_AWARE_TOOL_HANDLERS`` and the per-tool
-                # kwarg-build dict below; no new dispatch branch is needed.
-                if is_session_aware_tool(tool_name):
-                    session_aware_outcome = await self._dispatch_session_aware_tool(
-                        tool_name=tool_name,
-                        tool_call_id=tool_call.id,
-                        arguments=arguments,
-                        state=state,
-                        audit=audit,
-                        recorder=recorder,
-                        session_id=session_id,
-                        current_state_id=current_state_id,
-                        response=response,
-                        llm_messages=llm_messages,
-                        anti_anchor=anti_anchor,
-                    )
-                    if session_aware_outcome.is_discovery:
-                        turn_has_discovery = True
-                    else:
-                        turn_has_mutation = True
-                    if session_aware_outcome.result is not None:
-                        state = session_aware_outcome.result.updated_state
-                        last_validation = session_aware_outcome.result.validation
-                    continue
-
-                # Precompute runtime preflight for preview_pipeline outside
-                # the general side-effectful tool worker. This keeps
-                # execute_tool() synchronous and bounds the async I/O cost
-                # before it enters the worker thread pool.
-                runtime_preflight_callback: RuntimePreflight | None = None
-                if tool_name == "preview_pipeline":
-                    try:
-                        preview_preflight = await self._cached_runtime_preflight(
-                            state,
-                            user_id=user_id,
-                            cache=runtime_preflight_cache,
-                            initial_version=initial_version,
-                            session_scope=session_scope,
-                            llm_calls=recorder.llm_calls,
-                        )
-                    except ComposerRuntimePreflightError as preflight_exc:
-                        recorder.record(finish_plugin_crash(audit, exc=preflight_exc.original_exc))
-                        raise ComposerRuntimePreflightError.capture(
-                            preflight_exc.original_exc,
-                            state=state,
-                            initial_version=initial_version,
-                            tool_invocations=recorder.invocations,
-                            llm_calls=recorder.llm_calls,
-                        ) from preflight_exc.original_exc
-
-                    def _make_preflight_callback(
-                        _result: ValidationResult = preview_preflight,
-                    ) -> RuntimePreflight:
-                        def _callback(_state: CompositionState) -> ValidationResult:
-                            return _result
-
-                        return _callback
-
-                    runtime_preflight_callback = _make_preflight_callback()
-
-                # All tool calls are offloaded to a worker to avoid blocking
-                # the event loop.
-                # Blob and secret tools perform synchronous filesystem
-                # writes and SQLAlchemy transactions that would otherwise
-                # stall the single-process web server for all concurrent
-                # requests (rate-limit checks, websocket heartbeats,
-                # progress broadcasts).
-                #
-                # Cancel-safety: tool calls are NOT wrapped in
-                # asyncio.wait_for — they always run to completion.
-                # The cooperative deadline is checked BETWEEN operations
-                # (before LLM calls, after tool batches), so side effects
-                # and state publication are never split.  LLM calls use
-                # per-call wait_for because they are pure network I/O
-                # with no side effects.
-                #
-                # Tool handlers raise ToolArgumentError at Tier-3 boundaries
-                # (LLM supplied wrong types, semantically invalid values,
-                # or malformed encodings that cannot be coerced).  The
-                # compose loop catches ONLY that class and feeds the error
-                # back to the LLM for retry.
-                #
-                # Any other exception — TypeError, ValueError, UnicodeError,
-                # KeyError, AttributeError — escaping execute_tool() is a
-                # plugin bug (Tier 1/2) and MUST crash.  Per CLAUDE.md,
-                # silently laundering a plugin bug as an LLM-argument error
-                # is worse than crashing: it pollutes the audit trail with
-                # a confident but wrong Tier-3 story, and the LLM's "retry"
-                # cannot correct a fault in our own code.
-                # Dispatch under the structural audit envelope. The helper
-                # records exactly one ComposerToolInvocation before this
-                # await returns or raises, on every path:
-                #   SUCCESS         → finish_success (with sentinel-canonical
-                #                     fallback if canonical_json raises)
-                #   ARG_ERROR       → finish_arg_error (caller's except block
-                #                     below builds the LLM message)
-                #   PLUGIN_CRASH (narrow re-raise) → finish_plugin_crash, then
-                #                     re-raised so the outer compose loop exits
-                #   PLUGIN_CRASH (general) → finish_plugin_crash, then the
-                #                     caller's except block below wraps with
-                #                     ComposerPluginCrashError.capture()
-                #
-                # Closes panel-review blockers B1 (canonical_json failure on
-                # success path silently bypassed audit) and B2 (narrow
-                # re-raise exited the loop unrecorded).
-                # Bind loop-locals as default arguments so the closures
-                # capture this iteration's values. The compose loop
-                # awaits the helper synchronously inside the same
-                # iteration, so late binding would not actually misfire
-                # — but `B023 do not let function definitions reference
-                # late-bound loop variables` is the project's structural
-                # safeguard against future refactors that batch
-                # iterations or introduce concurrency. Same pattern the
-                # adjacent `_make_preflight_callback` already uses for
-                # ``preview_preflight``.
-                async def _do_dispatch(
-                    _tool_name: str = tool_name,
-                    _arguments: dict[str, Any] = arguments,
-                    _state: CompositionState = state,
-                    _last_validation: ValidationSummary | None = last_validation,
-                    _runtime_preflight_callback: RuntimePreflight | None = runtime_preflight_callback,
-                    _user_message_id: str | None = user_message_id,
-                ) -> Any:
-                    return await run_sync_in_worker(
-                        execute_tool,
-                        _tool_name,
-                        _arguments,
-                        _state,
-                        self._catalog,
-                        data_dir=self._data_dir,
-                        session_engine=self._session_engine,
-                        session_id=session_id,
-                        secret_service=self._secret_service,
-                        user_id=user_id,
-                        prior_validation=_last_validation,
-                        runtime_preflight=_runtime_preflight_callback,
-                        max_blob_storage_per_session_bytes=self._settings.max_blob_storage_per_session_bytes,
-                        user_message_id=_user_message_id,
-                    )
-
-                # ``_arg_error_payload`` is a module-level helper (F2 — testable
-                # without spinning up the full compose loop). The nested
-                # factory below binds ``tool_name`` to match the dispatch
-                # ``arg_error_payload_factory`` signature. Default-arg binding
-                # captures the loop-local ``tool_name`` at definition time.
-                def _arg_error_payload_factory(
-                    _exc: ToolArgumentError,
-                    _tool_name: str = tool_name,
-                ) -> Mapping[str, Any]:
-                    return _arg_error_payload(_exc, _tool_name)
-
-                def _version_after(_result: Any) -> int:
-                    # The handler's ToolResult carries the new state on
-                    # ``updated_state``. Read here so the helper records
-                    # the post-mutation version inside the recorder call.
-                    return cast(int, _result.updated_state.version)
-
-                try:
-                    outcome = await dispatch_with_audit(
-                        recorder=recorder,
-                        audit=audit,
-                        do_dispatch=_do_dispatch,
-                        version_after_provider=_version_after,
-                        arg_error_payload_factory=_arg_error_payload_factory,
-                    )
-                except ToolArgumentError as exc:
-                    # The audit record was already written by the helper.
-                    # Build the LLM-facing tool message and continue.
-                    if is_discovery_tool(tool_name):
-                        turn_has_discovery = True
-                    else:
-                        turn_has_mutation = True
-                    # Trust-boundary redaction: the echoed message reaches the
-                    # LLM API and (via audit) the Landscape. ToolArgumentError
-                    # is structurally safe by construction — the keyword-only
-                    # constructor accepts (argument, expected, actual_type)
-                    # and composes args[0] from those fields alone, so the
-                    # message cannot carry a raw LLM-supplied value. Belt-
-                    # and-suspenders: read ``exc.args[0]`` rather than
-                    # ``str(exc)`` so a future subclass that overrides
-                    # ``__str__`` to embed ``__cause__`` context (which may
-                    # carry DB URLs, filesystem paths, or secret fragments
-                    # from deeper layers) cannot leak through this path.
-                    # Handlers that use
-                    # ``raise ToolArgumentError(...) from exc`` get the
-                    # cause preserved on ``__cause__`` for debug/audit but
-                    # NOT echoed to the LLM.
-                    await _emit_progress(
-                        progress,
-                        ComposerProgressEvent(
-                            phase="using_tools",
-                            headline="A tool request needed correction.",
-                            evidence=("The tool rejected the request shape without exposing raw values.",),
-                            likely_next="ELSPETH will ask the model to adjust the visible tool request.",
-                        ),
-                    )
-                    arg_error_payload = _arg_error_payload(exc, tool_name)
-                    _append_tool_outcome(
-                        response=None,
-                        error_class="ToolArgumentError",
-                        error_message=str(exc.args[0] if exc.args else "ToolArgumentError"),
-                        post_version=state.version,
-                    )
-                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                    llm_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps(arg_error_payload),
-                        }
-                    )
-                    continue
-                except (AssertionError, MemoryError, RecursionError, SystemError):
-                    # CLAUDE.md policy exception — DOCUMENTED DIVERGENCE.
-                    #
-                    # CLAUDE.md "Plugin Ownership" says a defective plugin
-                    # MUST crash rather than be wrapped and laundered as a
-                    # recoverable error.  The web server relaxes this for
-                    # ordinary exception classes (see the wider except
-                    # Exception below) because crashing the whole ASGI
-                    # process on one bad request would take down every
-                    # other concurrent session.
-                    #
-                    # The exceptions listed on this handler are NOT
-                    # relaxed: they represent states where the interpreter
-                    # or our own Tier-1 invariants are compromised and any
-                    # subsequent work — including the partial-state
-                    # persistence inside ``ComposerPluginCrashError.capture``
-                    # — would be operating on potentially-poisoned memory
-                    # or data.
-                    #
-                    # - AssertionError: a plain ``assert`` fired inside
-                    #   plugin code.  Asserts encode Tier-1 invariants
-                    #   (CLAUDE.md: "crash on any anomaly").  Writing the
-                    #   composition_states row after an invariant failure
-                    #   would persist data the invariant said was
-                    #   impossible.
-                    # - MemoryError / RecursionError: interpreter-level
-                    #   resource exhaustion.  The subsequent DB write may
-                    #   itself fail or corrupt state; better to unwind.
-                    # - SystemError: CPython internal invariant breach.
-                    #
-                    # ``BaseException``-only classes (SystemExit,
-                    # KeyboardInterrupt, GeneratorExit) already propagate
-                    # through ``except Exception`` below without any
-                    # handling here.
-                    #
-                    # Audit-record-then-raise discipline: ``dispatch_with_audit``
-                    # writes a ``PLUGIN_CRASH`` invocation BEFORE the
-                    # narrow-class exception leaves the helper. Building the
-                    # invocation reads only pre-captured scalars from the
-                    # frozen :class:`DispatchAudit` envelope plus
-                    # ``type(exc).__name__`` — no poisoned memory work.
-                    # Closes blocker B2 from the panel review (2026-05-04).
-                    raise
-                except AuditIntegrityError:
-                    # Tier-1 audit invariant. Do not let the plugin-bug
-                    # catch-all below launder it into ComposerPluginCrashError.
-                    raise
-                except Exception as tool_exc:
-                    # Plugin-bug path: any exception class OTHER than
-                    # ToolArgumentError escaping execute_tool() is a plugin
-                    # bug (CLAUDE.md tier 1/2). Capture the loop-local
-                    # ``state`` — which has been rebound to
-                    # result.updated_state on every successful prior
-                    # iteration — so the route layer can persist the
-                    # accumulated mutations into composition_states before
-                    # returning the 500. Without this, any tool call that
-                    # successfully mutated state prior to the crash would
-                    # be silently dropped from the state history.
-                    #
-                    # Web-server policy exception: CLAUDE.md says a
-                    # defective plugin must crash.  In the pipeline engine
-                    # (single-shot CLI process) that is straightforward —
-                    # abort the run.  In the web server a single malformed
-                    # request reaching a buggy tool handler would take the
-                    # ASGI worker down and abort every other concurrent
-                    # session, including audit writes, websocket progress
-                    # streams, and unrelated users.  We wrap the exception
-                    # into a typed ComposerPluginCrashError that surfaces
-                    # to the operator as an HTTP 500 with
-                    # ``type(exc).__name__`` in the structured log, and
-                    # preserves the original on ``__cause__`` for the ASGI
-                    # error machinery.  The handler directly above
-                    # re-raises the narrow set of exception classes that
-                    # MUST NOT be laundered, so the concession below is
-                    # bounded.
-                    #
-                    # Wrap narrow-scope: only exceptions from the
-                    # execute_tool call are wrapped here. Bugs in
-                    # _call_llm_before_deadline / _build_messages surface
-                    # through their own exception classes
-                    # (ComposerServiceError, ComposerConvergenceError).
-                    # Record PLUGIN_CRASH BEFORE raising — done structurally
-                    # by ``dispatch_with_audit``. The ``capture()`` helper
-                    # takes the recorder buffer (including the helper's
-                    # final crash record) so the route handler's
-                    # ``_handle_plugin_crash`` gets the complete sequence.
-                    _append_tool_outcome(
-                        response=None,
-                        error_class=type(tool_exc).__name__,
-                        error_message=str(tool_exc),
-                        post_version=state.version,
-                    )
-                    plugin_crash = ComposerPluginCrashError.capture(
-                        tool_exc,
-                        state=state,
-                        initial_version=initial_version,
-                        tool_invocations=recorder.invocations,
-                        llm_calls=recorder.llm_calls,
-                    )
-                    plugin_crash_cause = tool_exc
-                    break
-
-                # SUCCESS path — the helper already recorded
-                # ComposerToolStatus.SUCCESS via finish_success (with the
-                # sentinel-canonical fallback for non-finite floats /
-                # non-serializable result types). Update loop-local state
-                # from outcome.result and continue with the LLM-message
-                # append.
-                version_before_tool = state.version
-                result = outcome.result
-                state = result.updated_state
-                last_validation = result.validation
-                last_runtime_preflight = result.runtime_preflight or last_runtime_preflight
-                # §7.7 anchor tracking. ``finish_success`` records the audit
-                # invocation regardless of ``result.success`` — the dispatch
-                # itself ran without raising. But for anchor purposes we look
-                # at ToolResult.success: a set_pipeline that returned a
-                # validation-rejected state is the dominant anchor pattern
-                # observed in the Tier 1 RED, and indistinguishable from a
-                # ToolArgumentError as far as the LLM's retry loop is concerned.
-                #
-                # Successes only break the anchor when they are MUTATION
-                # successes. Discovery successes (get_plugin_schema, list_*,
-                # get_pipeline_state) are observations — empirically the model
-                # interleaves them between failed mutation retries (see the
-                # smoke session 55895523-... where 4 set_pipeline failures
-                # were broken up by 1 get_pipeline_state and 1 get_plugin_schema,
-                # both successful, both irrelevant to whether the model has
-                # progressed on the anchored mutation).
-                #
-                # Mutation means a CompositionState version advance here.
-                # Blob-store side effects such as create_blob/update_blob are
-                # useful work, but they do not make an empty pipeline exist.
-                if result.success:
-                    if _tool_result_mutated_composition_state(version_before=version_before_tool, result=result):
-                        mutation_success_seen = True
-                        anti_anchor.record_success()
-                else:
-                    anti_anchor.record_failure(tool_name, audit.arguments_hash)
-                result_json = _serialize_tool_result(result)
-                await _emit_progress(progress, _tool_completed_progress_event(tool_name, result.success))
-                _append_tool_outcome(
-                    response=result,
-                    error_class=None,
-                    error_message=None,
-                    post_version=state.version,
-                )
-
-                # Cache cacheable discovery results
-                if is_cacheable_discovery_tool(tool_name):
-                    cache_key = _make_cache_key(tool_name, arguments)
-                    discovery_cache[cache_key] = _cached_discovery_payload(result)
-
-                llm_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": result_json,
-                    }
-                )
-
-                if not is_discovery_tool(tool_name):
-                    turn_has_mutation = True
-                else:
-                    turn_has_discovery = True
-
-            self._phase3_last_tool_outcomes = tuple(tool_outcomes)
-            # Step 2a — redact in async land. The walkers are pure and
-            # non-blocking; building this payload before the sync persistence
-            # dispatch keeps the eventual worker transaction narrow.
-            from pydantic import ValidationError as PydanticValidationError
-
-            from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_arguments
-            from elspeth.web.sessions._persist_payload import RedactedToolRow
-
-            phase3_self = cast(Any, self)
-            redaction_telemetry = phase3_self._redaction_telemetry
-            redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...] = ()
-            for tool_outcome in tool_outcomes:
-                tc = tool_outcome.call
-                if tc.id in decoded_args_by_call_id:
-                    decoded_args = decoded_args_by_call_id[tc.id]
-                elif tool_outcome.error_class is not None:
-                    decoded_args = {
-                        "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
-                        "error_class": tool_outcome.error_class,
-                    }
-                else:
-                    decoded_args = {"_raw_arguments": tc.function.arguments}
-                if tc.function.name in MANIFEST:
-                    try:
-                        persisted_arguments = redact_tool_call_arguments(
-                            tc.function.name,
-                            decoded_args,
-                            telemetry=redaction_telemetry,
-                        )
-                    except PydanticValidationError:
-                        if tool_outcome.error_class is None:
-                            raise
-                        persisted_arguments = {
-                            "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
-                            "error_class": tool_outcome.error_class,
-                        }
-                else:
-                    # Unknown tool names are Tier-3 LLM hallucinations handled
-                    # by execute_tool as a semantic failure ToolResult. The
-                    # manifest is intentionally closed, so do not call the
-                    # walker for names it cannot know about.
-                    persisted_arguments = decoded_args
-                redacted_assistant_tool_calls = (
-                    *redacted_assistant_tool_calls,
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": json.dumps(persisted_arguments),
-                        },
-                    },
-                )
-            redacted_tool_rows = tuple(
-                RedactedToolRow(
-                    tool_call_id=tool_outcome.call.id,
-                    content=phase3_self._serialize_response_via_walker(tool_outcome, telemetry=redaction_telemetry),
-                    composition_state_payload=(
-                        phase3_self._state_payload_for_compose_turn_for_test(tool_outcome.response)
-                        if tool_outcome.post_version > tool_outcome.pre_version
-                        else None
-                    ),
-                )
-                for tool_outcome in tool_outcomes
-            )
-            self._phase3_last_redacted_assistant_tool_calls = redacted_assistant_tool_calls
-            self._phase3_last_redacted_tool_rows = redacted_tool_rows
-            if session_id is not None:
-                sessions_service = self._require_sessions_service()
-                try:
-                    audit_outcome = await sessions_service.persist_compose_turn_async(
-                        session_id=session_id,
-                        assistant_content=assistant_message.content or "",
-                        raw_content=raw_assistant_content,
-                        redacted_assistant_tool_calls=redacted_assistant_tool_calls,
-                        redacted_tool_rows=redacted_tool_rows,
-                        parent_composition_state_id=current_state_id,
-                        expected_current_state_id=current_state_id,
-                        writer_principal="compose_loop",
-                        plugin_crash_pending=plugin_crash is not None,
-                    )
-                except AuditIntegrityError as exc:
-                    exc.failed_turn = FailedTurnMetadata(
-                        assistant_message_id=None,
-                        tool_calls_attempted=len(assistant_tool_calls),
-                        tool_responses_persisted=0,
-                    )
-                    raise
-                self._phase3_last_audit_outcome = audit_outcome
-                current_state_id = audit_outcome.current_state_id
-                failed_turn = FailedTurnMetadata(
-                    assistant_message_id=audit_outcome.assistant_id,
-                    tool_calls_attempted=len(assistant_tool_calls),
-                )
-                if audit_outcome.assistant_id is None and plugin_crash is None:
-                    raise AuditIntegrityError(
-                        "persist_compose_turn_async returned unwind_audit_failed without an in-flight plugin crash",
-                        failed_turn=failed_turn,
-                    )
-                if audit_outcome.assistant_id is None and not audit_outcome.unwind_audit_failed:
-                    raise AuditIntegrityError(
-                        "persist_compose_turn_async returned no assistant id without the unwind-audit-failed disposition",
-                        failed_turn=failed_turn,
-                    )
-                persisted_assistant_message_id = audit_outcome.assistant_id
-                persisted_tool_call_turn = True
-            if plugin_crash is not None:
+            current_state_id = persist.current_state_id
+            persisted_assistant_message_id = persist.persisted_assistant_message_id
+            persisted_tool_call_turn = persist.persisted_tool_call_turn
+            failed_turn = persist.failed_turn
+            if dispatch.plugin_crash is not None:
+                # Plugin-crash propagation discipline (plan §5.7): the
+                # capture in P3 already snapshotted `state` after every
+                # prior successful tool-call mutation. If persistence
+                # succeeded, re-capture with the post-persist failed_turn
+                # so the route layer's _handle_plugin_crash sees the
+                # complete partial-state story; otherwise raise the
+                # original capture as-is.
                 if persisted_tool_call_turn:
                     persisted_plugin_crash = ComposerPluginCrashError.capture(
-                        plugin_crash.original_exc,
+                        dispatch.plugin_crash.original_exc,
                         state=state,
                         initial_version=initial_version,
                         tool_invocations=(),
                         llm_calls=recorder.llm_calls,
                         failed_turn=failed_turn,
                     )
-                    if plugin_crash_cause is None:
+                    if dispatch.plugin_crash_cause is None:
                         raise persisted_plugin_crash
-                    raise persisted_plugin_crash from plugin_crash_cause
-                if plugin_crash_cause is None:
-                    raise plugin_crash
-                raise plugin_crash from plugin_crash_cause
+                    raise persisted_plugin_crash from dispatch.plugin_crash_cause
+                if dispatch.plugin_crash_cause is None:
+                    raise dispatch.plugin_crash
+                raise dispatch.plugin_crash from dispatch.plugin_crash_cause
 
-            # §7.7 anti-anchor hint: if the last 3 failed tool calls share the
-            # same (tool_name, arguments_hash), the model has stopped reading
-            # validator feedback. Inject a synthetic role="user" hint before
-            # the next LLM turn so the model breaks the anchor. consume_fire()
-            # clears the deque so the hint cannot re-fire on the same anchor.
-            # Persisted via the normal llm_messages → chat_messages path; the
-            # operator-visible audit row carries the [ELSPETH-SYSTEM-HINT]
-            # marker so its system origin is unambiguous.
-            if anti_anchor.should_fire():
-                hint_text = anti_anchor.build_hint()
-                anti_anchor.consume_fire()
-                llm_messages.append({"role": "user", "content": hint_text})
-                await _emit_progress(
-                    progress,
-                    ComposerProgressEvent(
-                        phase="using_tools",
-                        headline="ELSPETH detected an anchored retry pattern.",
-                        evidence=(
-                            "The last 3 tool calls used identical arguments and produced the same error.",
-                            "A structural hint was injected to help the model converge.",
-                        ),
-                        likely_next="The model will see the hint and try a different argument shape.",
-                    ),
-                )
-
-            # If ALL tool calls in this turn were cache hits, no budget
-            # charge — continue to next turn without incrementing.
-            if all_cache_hits:
-                continue
-
-            # Classify turn and charge the appropriate budget.
-            # The current turn has already been executed (tool results
-            # are in the message history). We increment first, then
-            # check whether the budget is now exhausted. If so, we give
-            # the LLM one last chance (B-4D-3) for composition, or
-            # raise immediately for discovery (discovery exhaustion
-            # doesn't benefit from a bonus call — no state was mutated).
-            if turn_has_mutation:
-                composition_turns_used += 1
-                if composition_turns_used >= self._max_composition_turns:
-                    # B-4D-3 fix: give the LLM one last chance to see the
-                    # tool results and produce a text response.
-                    await _emit_progress(progress, _model_call_progress_event(message))
-                    response = await self._call_llm_before_deadline(
-                        llm_messages,
-                        tools,
-                        state,
-                        initial_version,
-                        deadline,
-                        recorder=recorder,
-                    )
-                    assistant_message = response.choices[0].message
-                    if not assistant_message.tool_calls:
-                        await _emit_progress(
-                            progress,
-                            ComposerProgressEvent(
-                                phase="complete",
-                                headline="The composer response is ready.",
-                                evidence=("The model stopped requesting pipeline tools.",),
-                                likely_next="ELSPETH will save any accepted pipeline update.",
-                                reason="composer_complete",
-                            ),
-                        )
-                        result = await self._finalize_no_tool_response(
-                            content=assistant_message.content or "",
-                            state=state,
-                            initial_version=initial_version,
-                            user_id=user_id,
-                            last_runtime_preflight=last_runtime_preflight,
-                            runtime_preflight_cache=runtime_preflight_cache,
-                            session_scope=session_scope,
-                            user_message=message,
-                            mutation_success_seen=mutation_success_seen,
-                            tool_invocations=recorder.invocations,
-                            llm_calls=recorder.llm_calls,
-                        )
-                        return replace(
-                            result,
-                            persisted_assistant_message_id=persisted_assistant_message_id,
-                            persisted_tool_call_turn=persisted_tool_call_turn,
-                        )
-                    raise ComposerConvergenceError.capture(
-                        max_turns=composition_turns_used + discovery_turns_used,
-                        budget_exhausted="composition",
-                        state=state,
-                        initial_version=initial_version,
-                        tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
-                        llm_calls=recorder.llm_calls,
-                        failed_turn=failed_turn,
-                    )
-            elif turn_has_discovery:
-                discovery_turns_used += 1
-                if discovery_turns_used >= self._max_discovery_turns:
-                    raise ComposerConvergenceError.capture(
-                        max_turns=composition_turns_used + discovery_turns_used,
-                        budget_exhausted="discovery",
-                        state=state,
-                        initial_version=initial_version,
-                        tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
-                        llm_calls=recorder.llm_calls,
-                        failed_turn=failed_turn,
-                    )
-            else:
-                # The only non-cache tool currently handled outside the
-                # discovery/mutation registries is request_advisor_hint. It
-                # has its own per-compose budget above, so give the primary
-                # model the returned guidance instead of charging discovery.
-                continue
+            classify = await self._classify_and_budget_turn(
+                dispatch=dispatch,
+                persist=persist,
+                llm_messages=llm_messages,
+                tools=tools,
+                recorder=recorder,
+                anti_anchor=anti_anchor,
+                progress=progress,
+                message=message,
+                initial_version=initial_version,
+                deadline=deadline,
+                runtime_preflight_cache=runtime_preflight_cache,
+                session_scope=session_scope,
+                user_id=user_id,
+                mutation_success_seen=mutation_success_seen,
+                composition_turns_used=composition_turns_used,
+                discovery_turns_used=discovery_turns_used,
+            )
+            composition_turns_used += classify.composition_turns_delta
+            discovery_turns_used += classify.discovery_turns_delta
+            if classify.action == "return":
+                assert classify.result is not None
+                return classify.result
+            continue
 
     def _persist_crashed_session(self, session_id: str) -> None:
         """Best-effort timestamp bump to mark that a compose session crashed.
@@ -3581,12 +4001,46 @@ class ComposerServiceImpl:
         with self._session_engine.begin() as conn:
             conn.execute(update(sessions_table).where(sessions_table.c.id == session_id).values(updated_at=now))
 
+    def _schemas_loaded_for_session(self, session_id: str | None) -> frozenset[tuple[str, str]]:
+        """Return the immutable view of plugins whose schema has loaded.
+
+        Returns an empty frozenset when ``session_id`` is None (the
+        unsaved-session fast path) or when no ``get_plugin_schema`` call
+        has yet succeeded for this session. The returned frozenset is a
+        snapshot — subsequent ``_mark_plugin_schema_loaded`` calls do not
+        mutate it.
+        """
+        if session_id is None:
+            return frozenset()
+        if session_id not in self._schemas_loaded_by_session:
+            return frozenset()
+        return frozenset(self._schemas_loaded_by_session[session_id])
+
+    def _mark_plugin_schema_loaded(
+        self,
+        session_id: str | None,
+        plugin_type: str,
+        plugin_name: str,
+    ) -> None:
+        """Record that ``get_plugin_schema`` returned successfully for this plugin.
+
+        No-op when ``session_id`` is None (unsaved sessions have no
+        persistent identity for the tracker; the next turn would not see
+        the marking anyway).
+        """
+        if session_id is None:
+            return
+        if session_id not in self._schemas_loaded_by_session:
+            self._schemas_loaded_by_session[session_id] = set()
+        self._schemas_loaded_by_session[session_id].add((plugin_type, plugin_name))
+
     def _build_messages(
         self,
         chat_history: list[dict[str, Any]],
         state: CompositionState,
         user_message: str,
         guided_terminal: TerminalState | None = None,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the message list. Returns a NEW list on every call.
 
@@ -3623,6 +4077,7 @@ class ComposerServiceImpl:
                 data_dir=self._data_dir,
                 advisor_enabled=self._settings.composer_advisor_enabled,
                 guided_terminal=guided_terminal,
+                schemas_loaded=self._schemas_loaded_for_session(session_id),
             )
         except OSError as exc:
             raise ComposerServiceError(f"Failed to load deployment skill ({type(exc).__name__})") from exc

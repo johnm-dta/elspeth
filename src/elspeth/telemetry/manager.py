@@ -25,6 +25,7 @@ Thread Safety:
 
 import queue
 import threading
+from collections import defaultdict
 from typing import TypedDict
 
 import structlog
@@ -127,7 +128,7 @@ class TelemetryManager:
         # Health metrics
         self._events_emitted = 0
         self._events_dropped = 0
-        self._exporter_failures: dict[str, int] = {}
+        self._exporter_failures: defaultdict[str, int] = defaultdict(int)
         self._last_logged_drop_count: int = 0
 
         # Track whether we've already disabled telemetry
@@ -230,7 +231,7 @@ class TelemetryManager:
                 if result is False:
                     breaker.record_failure()
                     failures += 1
-                    self._exporter_failures[exporter.name] = self._exporter_failures.get(exporter.name, 0) + 1
+                    self._exporter_failures[exporter.name] += 1
                     logger.warning(
                         "Telemetry exporter reported handled failure",
                         exporter=exporter.name,
@@ -247,7 +248,7 @@ class TelemetryManager:
 
                 breaker.record_failure()
                 failures += 1
-                self._exporter_failures[exporter.name] = self._exporter_failures.get(exporter.name, 0) + 1
+                self._exporter_failures[exporter.name] += 1
                 logger.warning(
                     "Telemetry exporter failed",
                     exporter=exporter.name,
@@ -491,7 +492,7 @@ class TelemetryManager:
         return {
             "events_emitted": self._events_emitted,
             "events_dropped": events_dropped,
-            "exporter_failures": self._exporter_failures.copy(),
+            "exporter_failures": dict(self._exporter_failures),
             "consecutive_total_failures": self._consecutive_total_failures,
             "queue_depth": self._queue.qsize(),
             "queue_maxsize": self._queue.maxsize,
@@ -534,7 +535,7 @@ class TelemetryManager:
                 if result is False:
                     breaker = self._circuit_breakers[id(exporter)]
                     breaker.record_failure()
-                    self._exporter_failures[exporter.name] = self._exporter_failures.get(exporter.name, 0) + 1
+                    self._exporter_failures[exporter.name] += 1
                     logger.warning(
                         "Exporter reported handled flush failure",
                         exporter=exporter.name,

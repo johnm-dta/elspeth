@@ -644,6 +644,24 @@ allowed_dict_patterns:
   - "src/elspeth/web/sessions/service.py:_patch_structured_interpretation_prompt:return"
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # WEB COMPOSER — Compose-loop helpers (Tier 3 LiteLLM API shapes)
+  # The compose-loop decomposition (P1-P4 + Steps 6-7, RC5.2 commits
+  # 424953783, 2a8f5d92d, db462b547, 3ba3e617b, 39d55fddd, 6d63f6075) extracted
+  # helpers from compose() that thread the LiteLLM messages/tools payloads.
+  # Both list[dict[str, Any]] surfaces are external-API contracts owned by
+  # LiteLLM, not internal data; the dict shape is fixed by the LLM provider
+  # API, not by our codebase. Unmasked by the contracts-whitelist path-remap
+  # in commit 1e7e42d7a; listed here as part of the rearchitect merge into
+  # RC5.2 (pre-existing on RC5.2 from the listed commits).
+  # ═══════════════════════════════════════════════════════════════════════════
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_model_turn:llm_messages (list)"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_model_turn:tools (list)"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._dispatch_tool_batch:llm_messages (list)"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._classify_and_budget_turn:llm_messages (list)"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._classify_and_budget_turn:tools (list)"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._try_terminate_no_tools:llm_messages (list)"
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # WEB COMPOSER — Tool executor (Tier 3 LLM tool call arguments)
   # args dicts come from json.loads(tool_call.function.arguments) in the
   # LLM tool-use loop. Tool JSON schemas define optional fields.

@@ -75,8 +75,16 @@
 }
 
 .app-header-brand {
-  font-weight: 600;
-  letter-spacing: 0.05em;
+  /* Use the mono face with wider tracking for the wordmark. The body of the
+     app stays Inter (DTA Foundation typeface) — this is a 1-element exception
+     that gives the brand mark a distinct register without breaking AGDS
+     register elsewhere. JetBrains Mono reads as "audit/forensic" which
+     matches the product positioning. */
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: var(--font-size-sm);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
 }
 
 .app-header-separator {

@@ -126,7 +126,7 @@ class TestResumeComprehensive:
         now = datetime.now(UTC)
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -354,7 +354,7 @@ class TestResumeComprehensive:
         # Build graph manually
         resume_graph = ExecutionGraph()
         schema_config = {"schema": strict_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -441,7 +441,7 @@ class TestResumeComprehensive:
         )
         resume_graph = ExecutionGraph()
         schema_config = {"schema": strict_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -696,7 +696,7 @@ class TestResumeComprehensive:
 
         resume_graph = ExecutionGraph()
         schema_config = {"schema": strict_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -786,7 +786,7 @@ class TestResumeComprehensive:
         # Create graph
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -942,7 +942,9 @@ class TestResumeComprehensive:
 
         resume_graph = ExecutionGraph()
         resume_schema_config: dict[str, Any] = {"schema": resume_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
+        )
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=resume_schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -1023,7 +1025,7 @@ class TestResumeComprehensive:
         # Create graph
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -1169,7 +1171,9 @@ class TestResumeComprehensive:
 
         resume_graph = ExecutionGraph()
         resume_schema_config: dict[str, Any] = {"schema": resume_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
+        )
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=resume_schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -1246,7 +1250,7 @@ class TestResumeComprehensive:
         # Create graph
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -1395,7 +1399,7 @@ class TestResumeComprehensive:
 
         resume_graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -1471,7 +1475,7 @@ class TestResumeComprehensive:
         # Create graph
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -1620,7 +1624,7 @@ class TestResumeComprehensive:
 
         resume_graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -1686,7 +1690,7 @@ class TestResumeComprehensive:
         # Create graph
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -1823,7 +1827,7 @@ class TestResumeComprehensive:
 
         resume_graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="json", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -1948,7 +1952,9 @@ class TestResumeComprehensive:
         )
         resume_graph = ExecutionGraph()
         resume_schema_config: dict[str, Any] = {"schema": resume_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
+        )
         resume_graph.add_node(
             "xform",
             node_type=NodeType.TRANSFORM,
@@ -2127,7 +2133,9 @@ class TestResumeComprehensive:
         )
         resume_graph = ExecutionGraph()
         resume_schema_config: dict[str, Any] = {"schema": resume_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
+        )
         resume_graph.add_node(
             "xform",
             node_type=NodeType.TRANSFORM,

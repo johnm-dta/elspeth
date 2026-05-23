@@ -198,6 +198,11 @@
   --z-panel-controls:  10;   /* floating panel controls */
   --z-catalog-backdrop: 38;  /* catalog drawer backdrop */
   --z-catalog:         40;   /* catalog drawer panel */
+  /* Tooltip/popover layer — sits above panel-controls (10) and below the
+     overlay/dialog stack (100+). Consumed by .tool-call-info-bubble and
+     any future hover-revealed help bubbles that must clear inline chrome
+     without competing with modal layers. */
+  --z-popover:         50;
   --z-overlay-backdrop: 99;  /* full-screen overlay backdrop */
   --z-overlay:         100;  /* full-screen overlay panels, dropdowns */
   --z-dialog-backdrop: 200;  /* modal dialog backdrop */

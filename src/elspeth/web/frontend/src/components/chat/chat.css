@@ -995,7 +995,7 @@
   position: absolute;
   bottom: calc(100% + 6px);
   left: 0;
-  z-index: var(--z-popover, 50);
+  z-index: var(--z-popover);
   min-width: 220px;
   max-width: 320px;
   padding: var(--space-sm) var(--space-md);
@@ -1013,6 +1013,23 @@
   visibility: hidden;
   pointer-events: none;
   transition: opacity 0.12s ease, visibility 0s linear 0.12s;
+}
+
+/* Hover-bridge: invisible 6px hit-zone that fills the visual gap between
+   the trigger button and the bubble. Without it, the cursor briefly leaves
+   .tool-call-info while crossing the 6px gap and the bubble flickers off
+   mid-traversal, making its content unreachable for mouse users. The
+   pseudo-element is part of the bubble's DOM subtree, so :hover on the
+   bubble (and therefore on .tool-call-info) stays true during the cross.
+   Visual gap unchanged — bubble's `bottom: calc(100% + 6px)` still leaves
+   6px of empty space; the pseudo just extends the hit area into it. */
+.tool-call-info-bubble::before {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
+  height: 6px;
 }
 
 .tool-call-info-bubble-name {

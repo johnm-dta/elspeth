@@ -162,10 +162,54 @@ class ReauditReport:
 # =========================================================================
 
 
-# Only ``trust_tier.tier_model`` is supported in the prototype. Adding a
-# new rule package means wiring its scanner in ``_scan_findings_for_file``;
-# the public surface (``--rule``) is the operator-facing selector.
-_SUPPORTED_RULES: frozenset[str] = frozenset({"trust_tier.tier_model"})
+# Rules a per-rule reaudit sweep is allowed to target via ``--rule``.
+#
+# Originally this set was ``frozenset({"trust_tier.tier_model"})`` (the
+# prototype's single supported rule). Convergent panel finding C2 flagged
+# the artificial restriction: judge gating tier_model entries while
+# leaving the other twelve ``enforce_*`` allowlist surfaces ungated creates
+# a friction-displacement loop — new suppression activity routes to the
+# unguarded rules, tier_model's metric goes green while aggregate debt
+# grows.
+#
+# The expanded set is derived from ``BUILTIN_RULES`` so additions stay in
+# lockstep with the registered rule catalogue. Exclusions are explicit
+# and load-bearing:
+#
+# * ``audit_evidence.nominal_base`` keeps a private allowlist format
+#   (``allow_classes:`` consumed by ``ClassAllowlist``) that is NOT the
+#   standard ``AllowlistEntry`` shape ``load_allowlist`` parses. Its
+#   entries carry no ``judge_*`` fields by construction; reaudit has
+#   nothing to re-judge until the format migrates.
+# * ``meta.no-new-bespoke-cicd-enforcer`` is a project-policy gate, not
+#   a code-pattern lint. It does not emit per-site findings with the
+#   key shape reaudit can dispatch against.
+#
+# Adding a new rule package: ensure its YAML files use ``entries:`` (not
+# a private legacy format) and that ``Rule.analyze`` produces findings
+# whose ``canonical_key`` matches the entry key shape. Listing in
+# ``_EXCLUDED_FROM_REAUDIT`` is the only place a rule needs to be
+# carved out.
+_EXCLUDED_FROM_REAUDIT: frozenset[str] = frozenset(
+    {
+        "audit_evidence.nominal_base",
+        "meta.no-new-bespoke-cicd-enforcer",
+    }
+)
+
+
+def _supported_rules() -> frozenset[str]:
+    """Return the set of rule ids reaudit will accept via ``--rule``.
+
+    Lazily computed: importing ``BUILTIN_RULES`` is non-trivial (each
+    rule package's ``__init__`` runs), so this is called by
+    ``reaudit_entries`` once per invocation rather than at module
+    import time. The result is stable per-process: the rule registry
+    is immutable for the lifetime of the interpreter.
+    """
+    from elspeth_lints.rules import BUILTIN_RULES
+
+    return frozenset(rule.id for rule in BUILTIN_RULES) - _EXCLUDED_FROM_REAUDIT
 
 
 class ReauditError(RuntimeError):
@@ -214,24 +258,27 @@ def reaudit_entries(
     the judge runs and the response is classified against the entry's
     stored verdict.
     """
-    if rule_filter not in _SUPPORTED_RULES:
+    supported = _supported_rules()
+    if rule_filter not in supported:
         raise ReauditError(
             f"--rule {rule_filter!r} is not supported by reaudit. "
-            f"Supported: {sorted(_SUPPORTED_RULES)}. "
-            "(Multi-rule reaudit lands when additional rule packages "
-            "wire scanners into the reaudit orchestrator.)"
+            f"Supported: {sorted(supported)}. "
+            f"(Excluded rules: {sorted(_EXCLUDED_FROM_REAUDIT)}; see "
+            "_EXCLUDED_FROM_REAUDIT in reaudit.py for the rationale "
+            "behind each exclusion.)"
         )
     if not allowlist_dir.is_dir():
         raise ReauditError(f"--allowlist-dir {allowlist_dir} is not a directory")
     if not root.is_dir():
         raise ReauditError(f"--root {root} is not a directory")
 
-    # The valid-rule-id collection here is the set of sub-rule ids the
-    # tier_model scanner can produce. Loading with a too-narrow set
-    # would crash on per_file_rules that reference rules outside it —
-    # we pass a broad set covering R1-R7, TC, and the layer-import rule
-    # names the rule emits.
-    valid_rule_ids = _tier_model_rule_ids()
+    # ``valid_rule_ids`` gates ``per_file_rules`` validation inside
+    # ``load_allowlist``. Reaudit only iterates ``allowlist.entries``,
+    # but the directory's YAML files may carry sibling ``per_file_rules``
+    # sections whose sub-rule ids must be recognised by the loader. The
+    # dispatch returns the sub-rule vocabulary for the rule package
+    # named by ``rule_filter``.
+    valid_rule_ids = _valid_rule_ids_for(rule_filter)
     allowlist = load_allowlist(allowlist_dir, valid_rule_ids=valid_rule_ids)
 
     filtered = _apply_filters(
@@ -245,12 +292,16 @@ def reaudit_entries(
     # Cache scanned-file findings keyed by file_path so we don't re-run
     # the scanner for every entry on a file that has many entries
     # (web/composer/tools/* clusters dozens of entries per file).
+    # ``rule_filter`` is closure-captured by ``_scan_findings_for_file``
+    # via the cache; one ``rule_filter`` is active per ``reaudit_entries``
+    # call so a single-keyed cache suffices.
     findings_cache: dict[str, list[Any]] = {}
 
     for entry in filtered:
         outcome = _reaudit_one_entry(
             entry=entry,
             root=root,
+            rule_filter=rule_filter,
             findings_cache=findings_cache,
         )
         outcomes.append(outcome)
@@ -282,6 +333,7 @@ def _reaudit_one_entry(
     *,
     entry: AllowlistEntry,
     root: Path,
+    rule_filter: str,
     findings_cache: dict[str, list[Any]],
 ) -> ReauditOutcome:
     """Classify one entry, calling the judge unless the entry is obsolete."""
@@ -316,7 +368,12 @@ def _reaudit_one_entry(
             code_snapshot=f"<source file {file_path!r} no longer exists>",
         )
 
-    findings = _scan_findings_for_file(target_file=target_file, root=root, cache=findings_cache)
+    findings = _scan_findings_for_file(
+        target_file=target_file,
+        root=root,
+        rule_filter=rule_filter,
+        cache=findings_cache,
+    )
     matching_finding = _find_matching_finding(findings=findings, entry_key=entry.key)
 
     if matching_finding is None:
@@ -415,10 +472,7 @@ def _classify_divergence(
         # judge_model_verdict is None on overrides is a schema
         # inconsistency the loader should already have rejected; if
         # it slips through, crash rather than guess.
-        raise ReauditError(
-            f"override entry has unexpected judge_model_verdict={entry_model_verdict!r}; "
-            "expected ACCEPTED or BLOCKED"
-        )
+        raise ReauditError(f"override entry has unexpected judge_model_verdict={entry_model_verdict!r}; expected ACCEPTED or BLOCKED")
 
     raise ReauditError(f"unknown entry_verdict={entry_verdict!r}")
 
@@ -465,21 +519,51 @@ def _scan_findings_for_file(
     *,
     target_file: Path,
     root: Path,
+    rule_filter: str,
     cache: dict[str, list[Any]],
 ) -> list[Any]:
-    """Re-run both tier_model scanners against ``target_file``.
+    """Re-run the scanner for ``rule_filter`` against ``target_file``.
 
     Cached by ``str(target_file)`` so a directory with many entries on
-    one file scans that file once. Mirrors the merge that
-    ``cli._scan_single_file_findings`` does, so reaudit sees the same
-    finding set the CI run would see.
+    one file scans that file once. The cache is owned by a single
+    ``reaudit_entries`` invocation, which carries one ``rule_filter``
+    end-to-end; one rule per cache means the cache key is the file
+    path alone.
+
+    Two scanner shapes exist. ``trust_tier.tier_model`` has bespoke
+    ``scan_file`` + ``scan_layer_imports_file`` entry points (layer
+    imports cross file boundaries in a way ``Rule.analyze`` does not
+    model; the merge mirrors ``cli._scan_single_file_findings`` so
+    reaudit sees the same finding set the CI run would see). Every
+    other supported rule uses the standard ``Rule.analyze`` protocol;
+    ``_scan_via_rule_analyze`` dispatches to the matching
+    ``BUILTIN_RULES`` entry.
     """
     cache_key = str(target_file)
     if cache_key in cache:
         return cache[cache_key]
-    # Lazy import: tier_model is heavy, and importing it at module
-    # scope would slow every ``elspeth-lints --help`` invocation. The
-    # justify subcommand uses the same lazy-import pattern.
+
+    if rule_filter == "trust_tier.tier_model":
+        findings = _scan_tier_model(target_file=target_file, root=root)
+    else:
+        findings = _scan_via_rule_analyze(
+            rule_filter=rule_filter,
+            target_file=target_file,
+            root=root,
+        )
+
+    cache[cache_key] = findings
+    return findings
+
+
+def _scan_tier_model(*, target_file: Path, root: Path) -> list[Any]:
+    """Run tier_model's bespoke scanners (R1-R7, TC, L1) against ``target_file``.
+
+    Mirrors ``cli._scan_single_file_findings`` so the reaudit finding
+    set matches the CI finding set on the same file. Lazy import:
+    tier_model is heavy and importing it at module scope would slow
+    every ``elspeth-lints --help`` invocation.
+    """
     from elspeth_lints.rules.trust_tier.tier_model.rule import (
         scan_file,
         scan_layer_imports_file,
@@ -489,8 +573,54 @@ def _scan_findings_for_file(
     layer_violations, layer_tc = scan_layer_imports_file(target_file, root)
     findings.extend(layer_violations)
     findings.extend(layer_tc)
-    cache[cache_key] = findings
     return findings
+
+
+def _scan_via_rule_analyze(
+    *,
+    rule_filter: str,
+    target_file: Path,
+    root: Path,
+) -> list[Any]:
+    """Run the ``BUILTIN_RULES`` entry whose ``.id == rule_filter`` against ``target_file``.
+
+    The generic path for every supported rule except tier_model. The
+    standard ``Rule.analyze(tree, file_path, context)`` protocol returns
+    findings with a ``canonical_key`` shape that matches the entry key
+    format reaudit's ``_find_matching_finding`` compares against.
+
+    Syntax errors in the source surface as zero findings (the matching
+    finding will be ``None``, classified ``ENTRY_OBSOLETE``). This is
+    consistent with the CI run's behaviour: a file that doesn't parse
+    can't be analysed; we don't pretend its prior findings are still
+    valid.
+    """
+    from elspeth_lints.core.ast_walker import (
+        ParsedPythonFile,
+        PythonSyntaxError,
+        parse_python_file,
+    )
+    from elspeth_lints.core.protocols import RuleContext
+    from elspeth_lints.rules import BUILTIN_RULES
+
+    rule = next((r for r in BUILTIN_RULES if r.id == rule_filter), None)
+    if rule is None:
+        # Should never happen: ``rule_filter`` was already validated
+        # against ``_supported_rules()`` (which derives from
+        # ``BUILTIN_RULES``). A mismatch here means the registry was
+        # mutated mid-run or ``_EXCLUDED_FROM_REAUDIT`` is stale.
+        raise ReauditError(
+            f"Rule {rule_filter!r} passed _supported_rules() but is not registered in BUILTIN_RULES. Registry drift detected."
+        )
+
+    parsed = parse_python_file(target_file)
+    if isinstance(parsed, PythonSyntaxError):
+        return []
+    if not isinstance(parsed, ParsedPythonFile):  # narrow for type checker
+        raise ReauditError(f"parse_python_file returned unexpected type {type(parsed).__name__}")
+
+    context = RuleContext(root=root)
+    return list(rule.analyze(parsed.tree, parsed.path, context))
 
 
 def _find_matching_finding(*, findings: Sequence[Any], entry_key: str) -> Any | None:
@@ -523,16 +653,158 @@ def _extract_surrounding_code(target_file: Path, line: int, *, context_lines: in
     return "\n".join(out)
 
 
-def _tier_model_rule_ids() -> frozenset[str]:
-    """Return the set of rule ids tier_model emits, for allowlist loading.
+def _valid_rule_ids_for(rule_filter: str) -> frozenset[str]:
+    """Return the sub-rule vocabulary for ``rule_filter``.
 
-    ``load_allowlist`` validates per_file_rules' ``rules`` lists
-    against this set; we pass the full tier_model rule vocabulary so
-    every legitimate per_file_rule loads.
+    ``load_allowlist`` validates the ``rules:`` lists inside
+    ``per_file_rules`` entries against this set. Reaudit itself only
+    iterates ``allowlist.entries`` (not ``per_file_rules``), but the
+    allowlist directory's YAML files commonly carry both shapes
+    side-by-side, and the loader fails on unknown sub-rule ids.
+
+    Each branch reads the rule's emission-vocabulary constant lazily
+    via :func:`_lookup_module_attr` (so the import cost of one rule
+    doesn't leak into reaudit invocations targeting a different
+    rule). Constants vary in shape:
+
+    * ``RULES`` — a ``dict[str, ...]`` whose keys are the sub-rule ids
+      (tier_model, freeze_guards, frozen_annotations pattern).
+    * ``RULE_ID`` — a single ``str`` (single-emission rules).
+    * ``LEGACY_RULE_ID`` — single-emission rules ported from the
+      pre-elspeth-lints CI scripts; the shared.py modules expose them.
+
+    The ``getattr``-based lookup sidesteps strict-``__all__``
+    enforcement in static type checkers — these constants are
+    private-by-convention to each rule package and not all of them
+    are surfaced via ``__all__``. The lookup is offensive: a missing
+    constant raises ``AttributeError`` (clear "you renamed the
+    constant" diagnostic) rather than silently substituting an
+    empty vocabulary.
+
+    Adding a new rule: register a branch here and the rule becomes
+    immediately reaudit-targetable. Forgetting to register means the
+    rule passes ``_supported_rules()`` (which is derived from
+    ``BUILTIN_RULES``) but ``reaudit_entries`` fails with a clear
+    "no vocabulary registered" error, not silent miscounting.
     """
-    from elspeth_lints.rules.trust_tier.tier_model.rule import RULES
+    if rule_filter == "trust_tier.tier_model":
+        rules_dict: dict[str, Any] = _lookup_module_attr("elspeth_lints.rules.trust_tier.tier_model.rule", "RULES")
+        return frozenset(rules_dict.keys())
+    if rule_filter == "immutability.freeze_guards":
+        rules_dict = _lookup_module_attr("elspeth_lints.rules.immutability.freeze_guards.rule", "RULES")
+        return frozenset(rules_dict.keys())
+    if rule_filter == "immutability.frozen_annotations":
+        return frozenset(
+            {
+                _lookup_module_attr(
+                    "elspeth_lints.rules.immutability.frozen_annotations.rule",
+                    "RULE_ID",
+                )
+            }
+        )
+    if rule_filter == "audit_evidence.guard_symmetry":
+        return frozenset(
+            {
+                _lookup_module_attr(
+                    "elspeth_lints.rules.audit_evidence.guard_symmetry.rule",
+                    "LEGACY_RULE_ID",
+                )
+            }
+        )
+    if rule_filter == "audit_evidence.gve_attribution":
+        return frozenset(
+            {
+                _lookup_module_attr(
+                    "elspeth_lints.rules.audit_evidence.gve_attribution.rule",
+                    "LEGACY_RULE_ID",
+                )
+            }
+        )
+    if rule_filter == "audit_evidence.tier_1_decoration":
+        # tier_1_decoration emits two sub-rule ids (TDE1, TDE2); the
+        # constants live in the rule's metadata module.
+        module = "elspeth_lints.rules.audit_evidence.tier_1_decoration.metadata"
+        return frozenset(
+            {
+                _lookup_module_attr(module, "RULE_TDE1"),
+                _lookup_module_attr(module, "RULE_TDE2"),
+            }
+        )
+    if rule_filter == "plugin_contract.component_type":
+        return frozenset(
+            {
+                _lookup_module_attr(
+                    "elspeth_lints.rules.plugin_contract.component_type.rule",
+                    "LEGACY_RULE_ID",
+                )
+            }
+        )
+    if rule_filter == "plugin_contract.options_metadata":
+        return frozenset(
+            {
+                _lookup_module_attr(
+                    "elspeth_lints.rules.plugin_contract.options_metadata.rule",
+                    "RULE_ID",
+                )
+            }
+        )
+    if rule_filter == "plugin_contract.plugin_hashes":
+        return frozenset(
+            {
+                _lookup_module_attr(
+                    "elspeth_lints.rules.plugin_contract.plugin_hashes.rule",
+                    "RULE_ID",
+                )
+            }
+        )
+    if rule_filter == "composer.catch_order":
+        return frozenset({_lookup_module_attr("elspeth_lints.rules.composer.catch_order.rule", "RULE_ID")})
+    if rule_filter == "composer.exception_channel":
+        return frozenset({_lookup_module_attr("elspeth_lints.rules.composer.exception_channel.rule", "RULE_ID")})
+    if rule_filter == "manifest.contract_manifest":
+        return frozenset({_lookup_module_attr("elspeth_lints.rules.manifest.contract_manifest.rule", "RULE_ID")})
+    if rule_filter == "manifest.symbol_inventory":
+        return frozenset({_lookup_module_attr("elspeth_lints.rules.manifest.symbol_inventory.rule", "RULE_ID")})
+    if rule_filter == "manifest.test_to_source_mapping":
+        return frozenset(
+            {
+                _lookup_module_attr(
+                    "elspeth_lints.rules.manifest.test_to_source_mapping.rule",
+                    "RULE_ID",
+                )
+            }
+        )
+    if rule_filter == "trust_boundary.tests":
+        return frozenset({_lookup_module_attr("elspeth_lints.rules.trust_boundary.tests.rule", "RULE_ID")})
+    if rule_filter == "trust_boundary.scope":
+        return frozenset({_lookup_module_attr("elspeth_lints.rules.trust_boundary.scope.rule", "RULE_ID")})
+    if rule_filter == "trust_boundary.tier":
+        return frozenset({_lookup_module_attr("elspeth_lints.rules.trust_boundary.tier.rule", "RULE_ID")})
 
-    return frozenset(RULES.keys())
+    raise ReauditError(
+        f"No sub-rule vocabulary is registered for rule {rule_filter!r}. "
+        "Add a branch to _valid_rule_ids_for() so load_allowlist can "
+        "validate per_file_rules entries that reference this rule's "
+        "sub-rule ids."
+    )
+
+
+def _lookup_module_attr(module_path: str, attr_name: str) -> Any:
+    """Import ``module_path`` and return ``getattr(module, attr_name)``.
+
+    Offensive lookup: a missing attribute raises ``AttributeError``
+    naming both the module and the constant, surfacing "you renamed
+    the rule's vocabulary constant" as a clear diagnostic. The
+    ``getattr`` here is not defensive (no default supplied) — it is
+    a dynamic lookup of a constant whose name is known but whose
+    static import would force mypy to inspect each rule package's
+    ``__all__``, requiring per-rule edits that are out of scope for
+    this gate.
+    """
+    import importlib
+
+    module = importlib.import_module(module_path)
+    return getattr(module, attr_name)
 
 
 # =========================================================================
@@ -578,9 +850,7 @@ def render_report_json(report: ReauditReport) -> str:
                 "original_model_verdict": _verdict_value(outcome.original_model_verdict),
                 "fresh_verdict": _verdict_value(outcome.fresh_verdict),
                 "fresh_rationale": outcome.fresh_rationale,
-                "fresh_recorded_at": (
-                    outcome.fresh_recorded_at.isoformat() if outcome.fresh_recorded_at is not None else None
-                ),
+                "fresh_recorded_at": (outcome.fresh_recorded_at.isoformat() if outcome.fresh_recorded_at is not None else None),
                 "divergence": outcome.divergence.value,
                 "code_snapshot": outcome.code_snapshot,
             }
@@ -597,9 +867,7 @@ def _entry_to_json(entry: AllowlistEntry) -> dict[str, Any]:
     raw["judge_verdict"] = _verdict_value(entry.judge_verdict)
     raw["judge_model_verdict"] = _verdict_value(entry.judge_model_verdict)
     raw["expires"] = entry.expires.isoformat() if entry.expires is not None else None
-    raw["judge_recorded_at"] = (
-        entry.judge_recorded_at.isoformat() if entry.judge_recorded_at is not None else None
-    )
+    raw["judge_recorded_at"] = entry.judge_recorded_at.isoformat() if entry.judge_recorded_at is not None else None
     return raw
 
 

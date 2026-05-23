@@ -1,6 +1,22 @@
 # cicd-judge-cli prototype — feature map
 
-**Status:** prototype-in-flight (worktree: `.worktrees/cicd-judge-cli`, branch `feat/cicd-judge-cli-prototype`). Slice 1 (rotate replacement) is implemented and awaiting commit. Slices 2–3 designed but not built. Slice 4 (`@trust_boundary` decorator) is a separately-scoped follow-on — out of prototype scope, documented here so the structural endgame is visible while the prototype's surface area is decided.
+**Status:** prototype + convergent-findings remediation landed. Slice 1 (rotate), Slice 2 (judge gate), Slice 3 (reaudit decay-sweep), and the three structural CI gates (judge-coverage on PRs, override-rate threshold, multi-rule reaudit dispatch) ship on `feat/cicd-judge-cli-prototype`. Slice 4 (`@trust_boundary` decorator) ships alongside Slices 1–3 (3 honesty-gate rules plus the L0 decorator).
+
+## Delivered vs Enforced
+
+What ships as code (operator-runnable surfaces) and what fails CI now are not the same set. The table below distinguishes them so a reader does not infer mechanical enforcement from feature presence.
+
+| Surface | Delivered (runnable) | Enforced (CI fails on violation) |
+| --- | --- | --- |
+| Slice 1 — `elspeth-lints rotate` | ✓ | n/a (rotation is mechanical, not a gate) |
+| Slice 2 — `elspeth-lints justify` (judge gate at write time) | ✓ | n/a directly — the judge writes recorded metadata; the metadata is what CI checks |
+| Slice 3 — `elspeth-lints reaudit` (decay sweep) | ✓ across all 17 supported rule packages | n/a (operator-paced sweep, not CI-blocking) |
+| Slice 4 — `@trust_boundary` decorator + 3 honesty-gate rules | ✓ | ✓ via `trust_boundary.tests`, `trust_boundary.scope`, `trust_boundary.tier` |
+| **C1 — Judge-coverage gate** (new-entry quartet required) | ✓ via `elspeth-lints check-judge-coverage` | ✓ via `.github/workflows/enforce-allowlist-judge-gates.yaml` (PR-only; rotation-grandfathered) |
+| **C2 — Multi-rule reaudit dispatch** (no more single-rule artificial restriction) | ✓ via expanded `_supported_rules()` (17 of 19 BUILTIN_RULES) | n/a — same enforcement surface as Slice 3 (reaudit is sweep, not gate) |
+| **C3 — Override-rate gate** (rolling-30d threshold) | ✓ via `elspeth-lints check-override-rate` | ✓ via the same workflow file (push + PR; insufficient-data passes with notice) |
+
+Sequencing note for the convergent findings: C1 + C3 together make judge enforcement *architectural* — Pillar A no longer relies on social norms or self-discipline. C2 closes the friction-displacement loop by extending reaudit's reach to all rule packages, so suppression debt cannot route to ungated rules.
 
 This document maps the two pillars of the audit-trail-integrity thesis driving the prototype:
 
@@ -37,7 +53,7 @@ Single CLI surface (`elspeth-lints justify`) that becomes the mandatory path for
 
 - **Agent** writes the proposed entry, supplies a rationale, names the trust boundary or pattern.
 - **Judge (Opus)** evaluates: does the rationale match the code? Is the suppressed rule legitimately a boundary concern at this site? Is this entry a duplicate of one a per-file rule should cover instead?
-- **Judge does NOT fix.** A BLOCKED verdict returns the failure mode to the agent; the agent figures out the remediation (refactor, broaden a per-file rule, move under a decorator, abandon the suppression). This is the operator-stated constraint: "the judge doesn't have to fix the problem, it just blocks the change to the whitelist and tells the agent to figure it out."
+- **Judge does NOT write code fixes.** A BLOCKED verdict returns the failure mode to the agent; the agent figures out the remediation (refactor, broaden a per-file rule, move under a decorator, abandon the suppression). This is the operator-stated constraint: "the judge doesn't have to fix the problem, it just blocks the change to the whitelist and tells the agent to figure it out." The judge MAY name a structural alternative — concretely the `@trust_boundary` decorator — when a finding fits the decorator's preconditions; this is naming, not fixing.
 - **Operator** can issue `OVERRIDDEN_BY_OPERATOR` — distinct from `ACCEPTED`. This is the audit signal that a human used their authority to bypass the judge; rotation rate of this verdict is itself a metric to watch (operator memory: "or it tells us that the operator is breaking his own rules to get something out the door which is a different signal but still worth catching").
 
 ### Output the judge produces
@@ -61,6 +77,12 @@ The judge's rationale is the new audit primitive. It is independently re-readabl
 ### Decay sweep (Slice 3 of prototype)
 
 `elspeth-lints reaudit` re-runs the judge across existing entries. Used at allowlist-renewal time (when an `expires:` is bumped). Decisions to keep an entry must survive a fresh judge pass. This closes the loop on the "self-attestation never re-reviewed" failure mode.
+
+**Rule coverage (post-C2):** the dispatch now supports every rule in `BUILTIN_RULES` except two explicit exclusions — `audit_evidence.nominal_base` (uses the legacy `allow_classes:` shape, not `allow_hits:`) and `meta.no-new-bespoke-cicd-enforcer` (project-policy gate, not a code-pattern lint). 17 of 19 rules are reaudit-targetable. Adding a new rule to `BUILTIN_RULES` makes it reaudit-targetable automatically (modulo registering its sub-rule vocabulary in `_valid_rule_ids_for`).
+
+### Override-rate gate (convergent finding C3)
+
+`elspeth-lints check-override-rate` measures the rolling-window ratio of `OVERRIDDEN_BY_OPERATOR` verdicts against the population of judged entries. Window default 30 days, threshold default 10%, minimum-samples default 10 (small-N windows pass with an "insufficient data" notice — naive rate gates trip mechanically on a 3-entry corpus with one override). Wired into `enforce-allowlist-judge-gates.yaml` on push + PR. The threshold is policy: changes land via ADR, not by editing the workflow file.
 
 ### Out-of-scope for the prototype
 

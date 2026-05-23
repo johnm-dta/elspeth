@@ -58,6 +58,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_justify(args)
     if args.command == "reaudit":
         return _run_reaudit(args)
+    if args.command == "check-judge-coverage":
+        return _run_check_judge_coverage(args)
+    if args.command == "check-override-rate":
+        return _run_check_override_rate(args)
     sys.stderr.write(f"Unknown command {args.command!r}\n")
     return 2
 
@@ -204,10 +208,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     reaudit = subparsers.add_parser(
         "reaudit",
-        help=(
-            "Re-run the cicd-judge across existing allowlist entries to "
-            "detect decay (read-only on YAML; emits a triage report)"
-        ),
+        help=("Re-run the cicd-judge across existing allowlist entries to detect decay (read-only on YAML; emits a triage report)"),
     )
     reaudit.add_argument(
         "--root",
@@ -225,10 +226,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--rule",
         type=str,
         default="trust_tier.tier_model",
-        help=(
-            "Rule-package selector (controls which scanner re-derives findings). "
-            "Currently only 'trust_tier.tier_model' is supported."
-        ),
+        help=("Rule-package selector (controls which scanner re-derives findings). Currently only 'trust_tier.tier_model' is supported."),
     )
     reaudit.add_argument(
         "--since",
@@ -283,6 +281,103 @@ def _build_parser() -> argparse.ArgumentParser:
     dump_edges.add_argument("--no-collapse", dest="collapse_to_subsystem", action="store_false")
     dump_edges.add_argument("--no-timestamp", action="store_true", default=False)
     dump_edges.add_argument("--exclude", action="append", default=[])
+
+    # CI gate: every new ``allow_hits`` entry in this PR must carry the
+    # atomic judge metadata quartet. See ``judge_coverage.py`` docstring
+    # for the convergent finding C1 context, the rotation-grandfather
+    # policy, and the scope boundary (only ``allow_hits:`` shape; other
+    # legacy YAML shapes are out of scope).
+    check_coverage = subparsers.add_parser(
+        "check-judge-coverage",
+        help=(
+            "Fail if any new allowlist entry in this PR is missing judge metadata. "
+            "Diffs HEAD against --baseline-ref; entries present in baseline (modulo "
+            "fingerprint rotation) are grandfathered."
+        ),
+    )
+    check_coverage.add_argument(
+        "--baseline-ref",
+        required=True,
+        help=(
+            "Git ref to diff HEAD against. CI sets this to the PR's merge-base "
+            "(${{ github.event.pull_request.base.sha }}); local devs typically use "
+            "origin/main. The ref is consumed by 'git ls-tree' and 'git show'; "
+            "any rev-spec git can resolve is acceptable."
+        ),
+    )
+    check_coverage.add_argument(
+        "--allowlist-root",
+        type=Path,
+        default=Path("config/cicd"),
+        help=(
+            "Directory whose 'enforce_*' subdirectories are checked. Default: "
+            "config/cicd. Subdirectories that use legacy YAML shapes (no "
+            "'allow_hits:' block) are silently skipped."
+        ),
+    )
+    check_coverage.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help=(
+            "Repository working tree root. Required for git commands. Defaults to "
+            "the current working directory (the repo root in standard CI usage)."
+        ),
+    )
+
+    # CI gate: override-rate drift (convergent finding C3).
+    check_overrides = subparsers.add_parser(
+        "check-override-rate",
+        help=(
+            "Fail if the rolling-window OVERRIDDEN_BY_OPERATOR rate across all "
+            "allowlists exceeds --max-rate. Insufficient-data windows pass with a "
+            "notice; see override_rate.py docstring for the small-sample policy."
+        ),
+    )
+    check_overrides.add_argument(
+        "--allowlist-root",
+        type=Path,
+        default=Path("config/cicd"),
+        help="Directory whose 'enforce_*' subdirectories are aggregated.",
+    )
+    check_overrides.add_argument(
+        "--window-days",
+        type=int,
+        default=30,
+        help="Rolling-window length in days (default: 30).",
+    )
+    check_overrides.add_argument(
+        "--min-samples",
+        type=int,
+        default=10,
+        help=(
+            "Pass the gate when fewer than this many judge-recorded entries fall "
+            "inside the window (default: 10). Prevents small-N noise from "
+            "tripping the rate threshold during the first weeks of operation."
+        ),
+    )
+    check_overrides.add_argument(
+        "--max-rate",
+        type=float,
+        default=0.10,
+        help=(
+            "Maximum tolerated override rate as a fraction in [0.0, 1.0] "
+            "(default: 0.10 = 10%%). Computed as "
+            "OVERRIDDEN_BY_OPERATOR / (ACCEPTED + OVERRIDDEN_BY_OPERATOR) "
+            "across the window."
+        ),
+    )
+    check_overrides.add_argument(
+        "--reference-time",
+        type=str,
+        default=None,
+        help=(
+            "Window anchor as a timezone-aware ISO-8601 timestamp (e.g. "
+            "'2026-05-23T00:00:00Z'). Defaults to current UTC; override for "
+            "reproducibility in CI replays."
+        ),
+    )
+
     return parser
 
 
@@ -436,10 +531,7 @@ def _run_rotate(args: argparse.Namespace) -> int:
         import json
 
         payload = {
-            "rotations": [
-                {"old_key": r.old_key, "new_key": r.new_key, "source_file": r.entry_source_file}
-                for r in plan.rotations
-            ],
+            "rotations": [{"old_key": r.old_key, "new_key": r.new_key, "source_file": r.entry_source_file} for r in plan.rotations],
             "ambiguous": [
                 {
                     "prefix": g.prefix,
@@ -451,13 +543,9 @@ def _run_rotate(args: argparse.Namespace) -> int:
                 for g in plan.ambiguous
             ],
             "stale_entries": [
-                {"key": s.key, "source_file": s.source_file, "owner": s.owner, "reason": s.reason}
-                for s in plan.stale_entries
+                {"key": s.key, "source_file": s.source_file, "owner": s.owner, "reason": s.reason} for s in plan.stale_entries
             ],
-            "todo_entries": [
-                {"key": s.key, "source_file": s.source_file, "owner": s.owner, "reason": s.reason}
-                for s in plan.todo_entries
-            ],
+            "todo_entries": [{"key": s.key, "source_file": s.source_file, "owner": s.owner, "reason": s.reason} for s in plan.todo_entries],
             "new_findings": [
                 {
                     "canonical_key": nf.canonical_key,
@@ -543,10 +631,7 @@ def _emit_rotation_text_summary(plan: RotationPlan) -> None:
     if plan.ambiguous:
         sys.stdout.write("\nAmbiguous groups (manual resolution required):\n")
         for group in plan.ambiguous:
-            sys.stdout.write(
-                f"  prefix={group.prefix}  ({group.finding_count} finding(s), "
-                f"{group.entry_count} entry/entries)\n"
-            )
+            sys.stdout.write(f"  prefix={group.prefix}  ({group.finding_count} finding(s), {group.entry_count} entry/entries)\n")
     if plan.stale_entries:
         sys.stdout.write("\nStale entries (operator-confirmed cleanup, not auto-removed):\n")
         for stale in plan.stale_entries:
@@ -653,7 +738,9 @@ def _run_justify(args: argparse.Namespace) -> int:
         return 2
 
     symbol_tuple = _parse_symbol(args.symbol)
-    findings = _scan_single_file_findings(target_file=target_file, root=root, scan_file=scan_file, scan_layer_imports_file=scan_layer_imports_file)
+    findings = _scan_single_file_findings(
+        target_file=target_file, root=root, scan_file=scan_file, scan_layer_imports_file=scan_layer_imports_file
+    )
     matching = [f for f in findings if _finding_symbol_matches(f, symbol_tuple)]
 
     if not matching:
@@ -1041,10 +1128,7 @@ def _emit_justify_output(
         f"Cache:            prompt_tokens={judge_response.prompt_tokens_total} "
         f"cached={judge_response.prompt_tokens_cached if judge_response.prompt_tokens_cached is not None else 'n/a'}"
     )
-    if (
-        judge_response.prompt_tokens_cached is not None
-        and judge_response.prompt_tokens_total > 0
-    ):
+    if judge_response.prompt_tokens_cached is not None and judge_response.prompt_tokens_total > 0:
         ratio = judge_response.prompt_tokens_cached / judge_response.prompt_tokens_total
         sys.stdout.write(f" ({ratio:.0%} hit)")
     sys.stdout.write("\n")
@@ -1108,9 +1192,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
     if args.since is not None:
         since = _parse_since(args.since)
         if since is None:
-            sys.stderr.write(
-                f"--since: {args.since!r} is not a valid ISO-8601 date or timestamp\n"
-            )
+            sys.stderr.write(f"--since: {args.since!r} is not a valid ISO-8601 date or timestamp\n")
             return 2
 
     try:
@@ -1173,6 +1255,152 @@ def _parse_since(value: str) -> Any:
     if parsed_dt.tzinfo is None:
         return None
     return parsed_dt
+
+
+def _run_check_judge_coverage(args: argparse.Namespace) -> int:
+    """Handle ``elspeth-lints check-judge-coverage`` — convergent finding C1.
+
+    Lazy-imports ``judge_coverage`` so other subcommands don't pay the
+    yaml + subprocess import cost. The exit-code contract:
+
+    * 0 — every new entry in this PR carries the judge metadata
+      quartet (or this PR introduced no new entries at all).
+    * 1 — at least one new entry is missing one or more required
+      judge fields; the report is printed to stdout for the CI log.
+    * 2 — the check itself could not run (missing baseline ref,
+      ``allowlist-root`` not a directory, etc.). Distinct exit code
+      so CI distinguishes "gate fired" from "gate broken".
+    """
+    from elspeth_lints.core.judge_coverage import (
+        JudgeCoverageError,
+        check_judge_coverage,
+    )
+
+    try:
+        reports = check_judge_coverage(
+            allowlist_root=args.allowlist_root,
+            baseline_ref=args.baseline_ref,
+            repo_root=args.repo_root,
+        )
+    except JudgeCoverageError as exc:
+        sys.stderr.write(f"check-judge-coverage: cannot run: {exc}\n")
+        return 2
+
+    total_head = sum(r.head_entry_count for r in reports.values())
+    total_new = sum(r.new_entry_count for r in reports.values())
+    total_grandfathered = sum(r.grandfathered_count for r in reports.values())
+    total_violations = sum(len(r.violations) for r in reports.values())
+
+    sys.stdout.write(
+        f"check-judge-coverage: {len(reports)} directory(ies) inspected, "
+        f"{total_head} entries at HEAD ({total_grandfathered} grandfathered, "
+        f"{total_new} new); {total_violations} violation(s).\n"
+    )
+
+    if total_violations == 0:
+        return 0
+
+    sys.stdout.write("\nNew entries missing required judge metadata:\n")
+    for dir_name in sorted(reports):
+        report = reports[dir_name]
+        if not report.violations:
+            continue
+        sys.stdout.write(f"\n  {dir_name}/:\n")
+        for violation in report.violations:
+            sys.stdout.write(f"    {violation.source_file} :: {violation.entry_key}\n")
+            sys.stdout.write(f"      missing: {', '.join(violation.missing_fields)}\n")
+
+    sys.stdout.write(
+        "\nResolve by running 'elspeth-lints justify' on each new "
+        "entry to obtain an LLM-judged verdict, or '--operator-override' "
+        "to record an OVERRIDDEN_BY_OPERATOR verdict if the judge would "
+        "BLOCK incorrectly.\n"
+    )
+    return 1
+
+
+def _run_check_override_rate(args: argparse.Namespace) -> int:
+    """Handle ``elspeth-lints check-override-rate`` — convergent finding C3.
+
+    Exit-code contract:
+
+    * 0 — rate within budget OR insufficient data inside the window.
+    * 1 — rate exceeds ``--max-rate``; the contributing overrides are
+      listed for triage.
+    * 2 — the check itself could not run (root not a directory,
+      bad ``--reference-time`` shape, etc.).
+    """
+    from datetime import datetime as _datetime
+
+    from elspeth_lints.core.override_rate import (
+        OverrideRateError,
+        compute_override_rate,
+    )
+
+    reference_time = None
+    if args.reference_time is not None:
+        try:
+            reference_time = _datetime.fromisoformat(args.reference_time)
+        except ValueError as exc:
+            sys.stderr.write(f"check-override-rate: --reference-time must be ISO-8601 (got {args.reference_time!r}): {exc}\n")
+            return 2
+
+    try:
+        detail = compute_override_rate(
+            allowlist_root=args.allowlist_root,
+            window_days=args.window_days,
+            min_samples=args.min_samples,
+            max_rate=args.max_rate,
+            reference_time=reference_time,
+        )
+    except OverrideRateError as exc:
+        sys.stderr.write(f"check-override-rate: cannot run: {exc}\n")
+        return 2
+
+    report = detail.report
+    pct = report.rate * 100.0
+    max_pct = report.max_rate * 100.0
+
+    sys.stdout.write(
+        f"check-override-rate: window={report.window_days}d, "
+        f"reference={report.reference_time.isoformat()}, "
+        f"judged_in_window={report.judged_in_window}, "
+        f"overrides_in_window={report.overrides_in_window}, "
+        f"rate={pct:.2f}% (max {max_pct:.2f}%)\n"
+    )
+
+    if report.insufficient_data:
+        sys.stdout.write(
+            f"PASS: insufficient data (denominator={report.judged_in_window} < "
+            f"min_samples={report.min_samples}). Override-rate gate cannot "
+            "produce a stable signal at this sample size; treat the result as "
+            "informational until the denominator grows.\n"
+        )
+        return 0
+
+    if report.passes:
+        sys.stdout.write("PASS: override rate within budget.\n")
+        return 0
+
+    sys.stdout.write(
+        f"FAIL: override rate {pct:.2f}% exceeds budget {max_pct:.2f}%.\n"
+        f"\n{len(detail.override_entries)} OVERRIDDEN_BY_OPERATOR entries "
+        "in window:\n"
+    )
+    for record in sorted(
+        detail.override_entries,
+        key=lambda r: (r.judge_recorded_at, r.entry_key),
+    ):
+        sys.stdout.write(f"  {record.judge_recorded_at.isoformat()}  {record.source_file} :: {record.entry_key}\n")
+    sys.stdout.write(
+        "\nResolution paths:\n"
+        "  1. Run 'elspeth-lints reaudit' against the override-heavy "
+        "directories; entries classified WAS_ACCEPTED_NOW_BLOCKED can be "
+        "actioned (refactor away the suppression).\n"
+        "  2. If overrides are legitimate, the operator must adjust "
+        "--max-rate via an ADR — the threshold is policy, not a quota.\n"
+    )
+    return 1
 
 
 if __name__ == "__main__":

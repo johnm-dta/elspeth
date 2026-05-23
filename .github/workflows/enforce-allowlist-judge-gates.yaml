@@ -1,0 +1,141 @@
+# CI gates for the convergent panel findings on the cicd-judge-cli prototype.
+#
+# Two gates run here, both load-bearing per the audit-trail thesis:
+#
+#   C1 (check-judge-coverage): on PRs touching any 'enforce_*' allowlist
+#     directory, every new 'allow_hits' entry MUST carry the atomic judge
+#     metadata quartet (judge_verdict + judge_recorded_at + judge_model +
+#     judge_rationale). Pre-judge entries grandfathered. The grandfathering
+#     is rotation-stable: an entry whose fingerprint shifted because of an
+#     upstream AST refactor still matches its baseline counterpart, so
+#     refactors are not penalised by demanding fresh judge runs.
+#
+#   C3 (check-override-rate): on every PR and push, the rolling-30d
+#     OVERRIDDEN_BY_OPERATOR rate is checked against --max-rate (default
+#     10%). Insufficient-data windows pass with a notice; the gate
+#     produces stable signal only once the denominator grows past
+#     --min-samples (default 10). Converts the override-rate metric from
+#     informational to enforcing.
+#
+# Both gates are implemented as elspeth-lints subcommands; the workflow
+# orchestrates checkout (full history, needed for C1's git-show baseline
+# diff) and invocation.
+#
+# Spec: notes/cicd-judge-cli-prototype-plan.md + the convergent-findings
+# remediation diff that introduced this workflow.
+
+name: enforce-allowlist-judge-gates
+
+on:
+  push:
+    branches: [main, master, "RC*"]
+  pull_request:
+    branches: [main, master, "RC*"]
+
+permissions:
+  contents: read
+
+# Public-repository guardrail mirrors ci.yaml: fork PRs stay on
+# GitHub-hosted runners; trusted pushes and same-repository PRs use
+# nyx. Both gates are I/O-light (no compilation, no tests); a small
+# hosted runner is sufficient if nyx is busy.
+jobs:
+  check-judge-coverage:
+    name: New-entry judge-coverage gate (C1)
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ fromJSON((github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    container:
+      image: python:3.13-bookworm
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-judge-coverage
+    steps:
+      - name: Checkout PR head with full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          path: ${{ env.CI_CHECKOUT_PATH }}
+          # Full history so 'git ls-tree' / 'git show' can resolve the
+          # PR's merge-base. Without this the gate would silently
+          # treat every entry as new on shallow clones.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        with:
+          version: "0.5"
+
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
+      - name: Install dependencies (elspeth-lints only — fast)
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        # The gate imports yaml + the elspeth_lints.core surface; the
+        # full extras matrix is not required. uv sync gives us a
+        # deterministic environment shared with the rest of CI.
+        run: uv sync --frozen --no-install-project
+
+      - name: Mark repo path as safe for git
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        # Containerised runners do not inherit the host's safe.directory
+        # list; without this 'git ls-tree' inside the gate's subprocess
+        # rejects the checkout as "dubious ownership".
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH"
+
+      - name: Resolve baseline ref (PR merge-base)
+        id: baseline
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        # The gate accepts any rev-spec git can resolve; the PR base SHA
+        # is the canonical "what HEAD diverged from" anchor.
+        run: |
+          set -euo pipefail
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          echo "Using baseline-ref: ${base_sha}"
+          echo "ref=${base_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Run check-judge-coverage
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        env:
+          BASELINE_REF: ${{ steps.baseline.outputs.ref }}
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli \
+            check-judge-coverage \
+            --baseline-ref "$BASELINE_REF" \
+            --allowlist-root config/cicd \
+            --repo-root .
+
+  check-override-rate:
+    name: Override-rate drift gate (C3)
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    container:
+      image: python:3.13-bookworm
+    env:
+      CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-override-rate
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          path: ${{ env.CI_CHECKOUT_PATH }}
+          # Shallow clone is fine; the gate reads HEAD content only.
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@e4db8464a088ece1b920f60402e813ea4de65b8f
+        with:
+          version: "0.5"
+
+      - name: Use checkout-local uv cache
+        run: echo "UV_CACHE_DIR=$GITHUB_WORKSPACE/$CI_CHECKOUT_PATH/.uv-cache" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: uv sync --frozen --no-install-project
+
+      - name: Run check-override-rate
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        # Defaults: --window-days 30, --min-samples 10, --max-rate 0.10.
+        # Insufficient-data windows pass with a notice; the gate is
+        # informational until the denominator grows past min-samples.
+        # Threshold changes are policy decisions and must land via ADR,
+        # not by editing this workflow.
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli \
+            check-override-rate \
+            --allowlist-root config/cicd

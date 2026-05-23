@@ -1736,28 +1736,28 @@ allow_hits:
   safety: Malformed data returns structured HTTP errors or preserves the primary exception;
     recovery catches are narrow and record class-name-only diagnostics.
   expires: '2026-08-20'
-- key: web/composer/tools.py:R6:_execute_update_blob:fp=af75d747b0c32c3d
+- key: web/composer/tools/blobs.py:R6:_execute_update_blob:fp=346027a1e2a489dc
   owner: web-composer
   reason: Tier 3 composer tool boundary; blob/catalog/config helper failures are converted
     to structured tool results only at reviewed recovery points.
   safety: The handler returns explicit failure payloads or ToolArgumentError; unexpected
     programmer bugs continue to propagate.
   expires: null
-- key: web/composer/tools.py:R6:_execute_delete_blob:fp=3bfbb13eea799486
+- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=302de45b445253d6
   owner: web-composer
   reason: Tier 3 composer tool boundary; blob/catalog/config helper failures are converted
     to structured tool results only at reviewed recovery points.
   safety: The handler returns explicit failure payloads or ToolArgumentError; unexpected
     programmer bugs continue to propagate.
   expires: null
-- key: web/composer/tools.py:R6:_execute_inspect_source:fp=edb14a8ba9a1c8cf
+- key: web/composer/tools/sources.py:R6:_execute_inspect_source:fp=948d1b6adfb8742d
   owner: web-composer
   reason: Tier 3 composer tool boundary; blob/catalog/config helper failures are converted
     to structured tool results only at reviewed recovery points.
   safety: The handler returns explicit failure payloads or ToolArgumentError; unexpected
     programmer bugs continue to propagate.
   expires: null
-- key: web/composer/tools.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=28f982beb7d836fe
+- key: web/composer/tools/generation.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=a195de2ec58be4ab
   owner: web-composer
   reason: Tier 3 composer tool boundary; blob/catalog/config helper failures are converted
     to structured tool results only at reviewed recovery points.
@@ -1991,7 +1991,7 @@ per_file_rules:
     writes blobs or mutates guided state.
   expires: null
   max_hits: 12
-- pattern: web/composer/tools.py
+- pattern: web/composer/tools/*.py
   rules:
   - R1
   - R5

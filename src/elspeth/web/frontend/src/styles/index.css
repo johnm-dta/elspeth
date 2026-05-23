@@ -32,6 +32,7 @@
 @import "../components/settings/settings.css";
 @import "../components/execution/execution.css";
 @import "../components/blobs/blobs.css";
+@import "../components/composer/composer.css";
 @import "../components/chat/chat.css";
 @import "../components/chat/guided/guided.css";
 

@@ -12,7 +12,7 @@
 //     IDs would collide
 //   - Visible labels (htmlFor / button text) ARE the accessible name; do not add
 //     redundant aria-label that overrides what sighted users see
-//   - CSS via App.css class names with design tokens; no hardcoded colours
+//   - CSS via components/chat/guided/guided.css class names with design tokens; no hardcoded colours
 //
 // SHAPE NOTE for Tasks 7.3-7.7:
 // The chip-group structure (<fieldset>+<legend>+chip-button-group) applies to

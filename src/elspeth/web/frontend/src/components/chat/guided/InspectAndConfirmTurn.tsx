@@ -10,7 +10,7 @@
 //     GuidedHistory (Task 7.9) and element IDs would collide without per-instance scoping
 //   - Visible labels (htmlFor / button text) ARE the accessible name; do not add
 //     redundant aria-label that overrides what sighted users see
-//   - CSS via App.css class names with design tokens; no hardcoded colours
+//   - CSS via components/chat/guided/guided.css class names with design tokens; no hardcoded colours
 //
 // SHAPE NOTE (differs from chip-group widgets):
 // This widget does NOT use <fieldset>+<legend> or chip buttons.

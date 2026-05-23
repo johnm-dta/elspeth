@@ -2,7 +2,17 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-const appCss = readFileSync("src/App.css", "utf8");
+// Concatenate the global stylesheets that this test inspects:
+//   - tokens.css holds the :root (dark) and [data-theme="light"] token blocks
+//   - shared.css holds .btn, .btn-compact, .btn-primary, .btn-danger rules
+//   - themes.css holds the @media (forced-colors: active) overrides
+// Order matches styles/index.css barrel order so concatenation reproduces
+// the cascade view of these three files.
+const appCss = [
+  readFileSync("src/styles/tokens.css", "utf8"),
+  readFileSync("src/styles/shared.css", "utf8"),
+  readFileSync("src/styles/themes.css", "utf8"),
+].join("\n");
 
 function extractForcedColorsBlock(): string {
   const start = appCss.indexOf("@media (forced-colors: active)");
@@ -17,7 +27,7 @@ function extractForcedColorsBlock(): string {
 function extractRootToken(tokenName: string): string {
   const blockMatch = /^:root\s*\{([\s\S]*?)\n\}/m.exec(appCss);
   if (!blockMatch) {
-    throw new Error("Could not find root token block in App.css");
+    throw new Error("Could not find root token block in styles/tokens.css");
   }
 
   return extractTokenFromBlock(tokenName, blockMatch[1], "root");
@@ -26,7 +36,7 @@ function extractRootToken(tokenName: string): string {
 function extractLightThemeToken(tokenName: string): string {
   const blockMatch = /\[data-theme="light"\]\s*\{([\s\S]*?)\n\}/.exec(appCss);
   if (!blockMatch) {
-    throw new Error("Could not find light theme token block in App.css");
+    throw new Error("Could not find light theme token block in styles/tokens.css");
   }
 
   return extractTokenFromBlock(tokenName, blockMatch[1], "light theme");

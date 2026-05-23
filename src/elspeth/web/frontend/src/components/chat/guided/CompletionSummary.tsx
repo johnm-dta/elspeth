@@ -14,7 +14,7 @@
 //     validation.
 //   - useTheme() for Prism theme-awareness, matching YamlView.tsx:164.
 //   - <button type="button"> (never <div onClick>).
-//   - CSS via App.css guided-completion-* classes with design tokens.
+//   - CSS via components/chat/guided/guided.css guided-completion-* classes with design tokens.
 //   - No auto-focus on mount.
 
 import { useId } from "react";

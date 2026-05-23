@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import "./App.css";
+import "./styles/index.css";
 import * as api from "./api/client";
 import { AuthGuard } from "./components/common/AuthGuard";
 import { AppHeader } from "./components/common/AppHeader";

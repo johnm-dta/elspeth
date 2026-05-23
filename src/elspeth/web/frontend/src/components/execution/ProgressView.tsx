@@ -2,7 +2,7 @@
 // ProgressView
 //
 // Live progress display for an active execution run. Shows:
-// - Indeterminate progress bar (using .progress-bar CSS classes from App.css)
+// - Indeterminate progress bar (using .progress-bar CSS classes from styles/animations.css)
 // - Explicit source/token counters
 // - Recent errors list (scrolling, newest first, capped at 50)
 // - Cancel button (disabled once run reaches terminal state)

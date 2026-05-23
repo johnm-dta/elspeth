@@ -139,7 +139,7 @@ function heuristicWorkingView(
 /**
  * Animated three-dot composing indicator shown while the backend
  * is processing the LLM tool-use loop. Uses the .composing-dot CSS
- * class from App.css for staggered bounce animation.
+ * class from styles/animations.css for staggered bounce animation.
  * Screen-reader announcements are handled by the parent ChatPanel live region.
  */
 export function ComposingIndicator({

@@ -350,7 +350,7 @@ describe("GraphView", () => {
   });
 
   it("bridges React Flow CSS variables to the Elspeth theme tokens", () => {
-    const appCss = readFileSync("src/App.css", "utf8");
+    const appCss = readFileSync("src/components/inspector/inspector.css", "utf8");
 
     expect(appCss).toContain("--xy-background-color-default: var(--color-bg);");
     expect(appCss).toContain("--xy-controls-button-background-color-default: var(--color-surface-elevated);");

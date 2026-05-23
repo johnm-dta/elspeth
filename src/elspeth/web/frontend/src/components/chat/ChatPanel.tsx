@@ -1209,8 +1209,8 @@ export function ChatPanel({
       // textarea and send-button cursors flip to `progress` while the compose
       // request is in-flight. The ComposingIndicator block below is the
       // primary affordance; the cursor change reinforces "system is busy"
-      // for users whose pointer is hovering the input area. See App.css
-      // [data-composing="true"] rules.
+      // for users whose pointer is hovering the input area. See
+      // components/chat/chat.css [data-composing="true"] rules.
       data-composing={isComposing ? "true" : undefined}
     >
       {/* Session title header.  The "Switch to guided" affordance lives in

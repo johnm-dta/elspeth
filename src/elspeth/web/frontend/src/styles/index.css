@@ -1,0 +1,36 @@
+/* =============================================================================
+   ELSPETH Web UX — Global Styles barrel.
+   Imports every per-area CSS file in cascade-preserving order.
+   Reordering rules:
+     - tokens / base / animations / shared first (foundation layer).
+     - per-area component files next, ordered so cross-file descendant
+       selectors land after their ancestors.
+     - common.css imports BEFORE catalog.css because catalog has
+       .command-palette-footer descendant selectors.
+     - themes.css imports LAST — it overrides selectors defined in every
+       other file via @media (prefers-contrast: more) and
+       @media (forced-colors: active).
+   ============================================================================= */
+
+@import "./tokens.css";
+@import "./base.css";
+@import "./animations.css";
+@import "./shared.css";
+
+@import "../components/recovery/recovery.css";
+@import "../components/header/header.css";
+@import "../components/sidebar/sidebar.css";
+@import "../components/audit/audit.css";
+@import "../components/tutorial/tutorial.css";
+
+@import "./common.css";
+
+@import "../components/catalog/catalog.css";
+@import "../components/inspector/inspector.css";
+@import "../components/settings/settings.css";
+@import "../components/execution/execution.css";
+@import "../components/blobs/blobs.css";
+@import "../components/chat/chat.css";
+@import "../components/chat/guided/guided.css";
+
+@import "./themes.css";

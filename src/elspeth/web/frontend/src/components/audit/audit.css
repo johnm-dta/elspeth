@@ -1,0 +1,412 @@
+/* audit.css — Audit-readiness panel, explain dialog, readiness-row detail.
+   Owners: .audit-readiness*, .explain-dialog*, .readiness-row-detail*.
+   The .graph-modal-* / .yaml-modal-* rules that were sandwiched inside this
+   region in App.css moved to common.css (modals are shared across audit,
+   sidebar, and inspector). */
+
+/* ---------------------------------------------------------------------------
+   Audit Readiness panel (right-rail slot)
+   TSX: src/components/audit/AuditReadinessPanel.tsx + AuditReadinessRow.tsx.
+   Mounted into the .side-rail's audit-readiness slot.
+
+   Two visible variants:
+     1. Collapsed "Audit ready" pill — single button shown when no rows are
+        actionable (all green). Two-line layout: glyph + label on line 1,
+        freshness meta on line 2. The meta span must be display:block so it
+        does not concatenate inline next to "Audit ready" — that was the
+        operator-visible "weirdly wide and full of text" symptom from the
+        shipped-without-CSS state.
+     2. Expanded panel — header (title + freshness) and an action cluster
+        (Refresh, Explain →, Collapse), followed by six readiness rows.
+
+   Row status accents are a 3px left-edge stripe whose colour reinforces the
+   glyph (✓ ⚠ ✗ —). The glyph stays the primary status channel; the colour
+   is reinforcement so colourblind users are not dependent on hue. */
+.audit-readiness {
+  display: flex;
+  flex-direction: column;
+  margin: var(--space-sm);
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.audit-readiness--collapsed {
+  background-color: var(--color-success-bg);
+  border-color: var(--color-success-border);
+}
+
+.audit-readiness--loading,
+.audit-readiness--error {
+  padding: var(--space-md);
+}
+
+.audit-readiness-live-region {
+  display: block;
+}
+
+.audit-readiness-loading {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.audit-readiness-error {
+  margin: 0 0 var(--space-sm) 0;
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.audit-readiness-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  background: transparent;
+  border: 0;
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.audit-readiness-summary:hover {
+  background-color: var(--color-surface-hover);
+}
+
+.audit-readiness-summary-meta {
+  display: block;
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  color: var(--color-text-muted);
+  line-height: var(--line-height-normal);
+}
+
+.audit-readiness-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+  flex-wrap: wrap;
+}
+
+.audit-readiness-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.audit-readiness-freshness {
+  margin: var(--space-2xs) 0 0 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.audit-readiness-actions {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+/* Compact-and-optionally-ghost overlay for the panel's action buttons.
+   The TSX uses className="btn audit-readiness-action-btn[ --ghost]" so
+   the .btn defaults (hover, :disabled, global :focus-visible) all apply.
+   This rule only re-sizes and (for the ghost modifier) clears the
+   background so Refresh/Collapse read as tertiary next to a primary
+   Explain button. */
+.audit-readiness-action-btn {
+  min-height: var(--size-control-compact);
+  padding: var(--space-2xs) var(--space-sm);
+  font-size: var(--font-size-sm);
+}
+
+.audit-readiness-action-btn--ghost {
+  background-color: transparent;
+}
+
+.audit-readiness-action-btn--ghost:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: var(--color-surface-hover);
+}
+
+.audit-readiness-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.audit-readiness-row {
+  border-bottom: 1px solid var(--color-border);
+  border-left: 3px solid transparent;
+}
+
+.audit-readiness-row:last-child {
+  border-bottom: 0;
+}
+
+.audit-readiness-row--ok {
+  border-left-color: var(--color-success);
+}
+
+.audit-readiness-row--warning {
+  border-left-color: var(--color-warning);
+  background-color: var(--color-warning-bg);
+}
+
+.audit-readiness-row--error {
+  border-left-color: var(--color-error);
+  background-color: var(--color-error-bg);
+}
+
+.audit-readiness-row--not_applicable {
+  border-left-color: var(--color-border-strong);
+}
+
+.audit-readiness-row-btn,
+.audit-readiness-row-static {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  align-items: baseline;
+  column-gap: var(--space-sm);
+  row-gap: var(--space-2xs);
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  background: transparent;
+  border: 0;
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  text-align: left;
+}
+
+.audit-readiness-row-btn {
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.audit-readiness-row-btn:hover {
+  background-color: var(--color-surface-hover);
+}
+
+.audit-readiness-glyph {
+  font-size: var(--font-size-md);
+  line-height: 1;
+  text-align: center;
+}
+
+.audit-readiness-row-label {
+  font-weight: 600;
+}
+
+.audit-readiness-row-summary {
+  grid-column: 2 / -1;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+
+/* ---------------------------------------------------------------------------
+   ExplainDialog — narrative "what this pipeline will record" modal.
+   TSX: src/components/audit/ExplainDialog.tsx.
+   Mirrors the .yaml-modal-* / .graph-modal-* pattern: position: fixed +
+   32px inset for the dialog, backdrop at --z-dialog-backdrop, dialog at
+   --z-dialog. The backdrop and dialog are sibling elements (not nested) per
+   the markup contract documented in ExplainDialog.tsx. */
+.explain-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  z-index: var(--z-dialog-backdrop);
+}
+
+.explain-dialog {
+  position: fixed;
+  inset: 32px;
+  z-index: var(--z-dialog);
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-surface-paper);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.explain-dialog-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.explain-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.explain-dialog-title {
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+.explain-dialog-close {
+  min-width: 36px;
+  min-height: var(--size-control-compact);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.explain-dialog-close:hover {
+  background-color: var(--color-surface-hover);
+}
+
+.explain-dialog-loading,
+.explain-dialog-error,
+.explain-dialog-narrative {
+  margin: 0;
+  padding: var(--space-md);
+  overflow: auto;
+}
+
+.explain-dialog-loading {
+  color: var(--color-text-muted);
+}
+
+.explain-dialog-error {
+  background-color: var(--color-error-bg);
+  border-bottom: 1px solid var(--color-error-border);
+  color: var(--color-text);
+}
+
+.explain-dialog-narrative {
+  flex: 1 1 auto;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  white-space: pre-wrap;
+}
+
+/* ---------------------------------------------------------------------------
+   ReadinessRowDetail — non-modal drawer for one audit-readiness row.
+   TSX: src/components/audit/ReadinessRowDetail.tsx.
+   Deliberately NOT a modal (aria-modal="false", no focus trap, no backdrop).
+   Per the component's design comment, the drawer must remain open after
+   clicking "Jump to <node>" so the user can see the highlighted component
+   in context. Treated as a right-anchored floating panel at --z-overlay
+   (100) — above page content but below true modals (--z-dialog = 201) so
+   that opening the ExplainDialog or any confirm dialog still layers above
+   it correctly. */
+.readiness-row-detail {
+  position: fixed;
+  top: var(--space-xl);
+  right: var(--space-xl);
+  bottom: var(--space-xl);
+  width: min(420px, calc(100vw - 2 * var(--space-xl)));
+  z-index: var(--z-overlay);
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-surface-paper);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.readiness-row-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.readiness-row-detail-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+}
+
+.readiness-row-detail-close {
+  min-width: 36px;
+  min-height: var(--size-control-compact);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.readiness-row-detail-close:hover {
+  background-color: var(--color-surface-hover);
+}
+
+.readiness-row-detail-summary,
+.readiness-row-detail-body {
+  margin: 0;
+  padding: var(--space-md);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.readiness-row-detail-summary {
+  font-weight: 600;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.readiness-row-detail-components {
+  padding: var(--space-md);
+  border-top: 1px solid var(--color-border);
+  overflow: auto;
+}
+
+.readiness-row-detail-components-heading {
+  margin: 0 0 var(--space-sm) 0;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.readiness-row-detail-components-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.readiness-row-detail-jump-btn {
+  width: 100%;
+  justify-content: flex-start;
+  min-height: var(--size-control-compact);
+  padding: var(--space-2xs) var(--space-sm);
+  font-size: var(--font-size-sm);
+}
+
+.readiness-row-detail-component-id {
+  display: inline-block;
+  padding: var(--space-2xs) var(--space-xs);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}

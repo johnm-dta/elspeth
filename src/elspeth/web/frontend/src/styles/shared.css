@@ -1,0 +1,588 @@
+/* shared.css — Cross-cutting primitives used by multiple areas.
+   Owners: .btn family, .tab-strip, .type-badge*, .status-badge*,
+   .validation-banner (base + detailed migrations), .empty-state,
+   .confirm-dialog, .app-layout, .layout-chat, .layout-siderail, .banner,
+   .side-rail (base layer; sidebar.css owns the per-component side-rail rules).
+   Composed from multiple source ranges in App.css — preserves cascade order. */
+
+
+/* ---------------------------------------------------------------------------
+   Component Type Badge Utility Classes
+   --------------------------------------------------------------------------- */
+
+/* Base badge style */
+.type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+/* Source — aqua-green */
+.type-badge-source {
+  background-color: var(--color-badge-source-bg);
+  color: var(--color-badge-source);
+  border: 1px solid var(--color-badge-source-border);
+}
+
+/* Transform — amber */
+.type-badge-transform {
+  background-color: var(--color-badge-transform-bg);
+  color: var(--color-badge-transform);
+  border: 1px solid var(--color-badge-transform-border);
+}
+
+/* Gate — purple */
+.type-badge-gate {
+  background-color: var(--color-badge-gate-bg);
+  color: var(--color-badge-gate);
+  border: 1px solid var(--color-badge-gate-border);
+}
+
+/* Sink — orange-red */
+.type-badge-sink {
+  background-color: var(--color-badge-sink-bg);
+  color: var(--color-badge-sink);
+  border: 1px solid var(--color-badge-sink-border);
+}
+
+.type-badge-aggregation {
+  background-color: var(--color-badge-aggregation-bg);
+  color: var(--color-badge-aggregation);
+  border: 1px solid var(--color-badge-aggregation-border);
+}
+
+.type-badge-coalesce {
+  background-color: var(--color-badge-coalesce-bg);
+  color: var(--color-badge-coalesce);
+  border: 1px solid var(--color-badge-coalesce-border);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Status Badge Utility Classes
+   --------------------------------------------------------------------------- */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.status-badge-pending {
+  background-color: rgba(122, 154, 154, 0.15);
+  color: var(--color-status-pending);
+}
+
+.status-badge-running {
+  background-color: rgba(97, 218, 255, 0.15);
+  color: var(--color-status-running);
+}
+
+.status-badge-completed {
+  background-color: rgba(20, 176, 174, 0.15);
+  color: var(--color-status-completed);
+}
+
+.status-badge-failed {
+  background-color: rgba(232, 86, 83, 0.15);
+  color: var(--color-status-failed);
+}
+
+.status-badge-cancelled {
+  background-color: rgba(227, 132, 68, 0.15);
+  color: var(--color-status-cancelled);
+}
+
+/* Cancel-pending badge — same colour family as cancelled but distinguished
+   by a pulsing glyph that signals "still running, stop requested" rather
+   than "done, was cancelled".  Without this, the only visual distinction
+   between the two states is a 3-character text suffix ("cancelling" vs
+   "cancelled") which is easy to miss in the uppercase 13px badge. */
+.status-badge-cancelling {
+  background-color: rgba(227, 132, 68, 0.15);
+  color: var(--color-status-cancelled);
+}
+
+.status-badge-icon {
+  display: inline-block;
+  line-height: 1;
+}
+
+.status-badge-icon--cancelling {
+  display: inline-block;
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-badge-icon--cancelling {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
+/* Phase 2.2 (elspeth-0de989c56d): widened taxonomy.
+   - completed_with_failures: reuses --color-status-completed (teal) so the
+     run is visually grouped with successful runs, but the warning glyph
+     ⚠ signals "completed, with caveats."  No new color token needed.
+   - empty: a distinct neutral grey (separate from the teal-grey of pending)
+     paired with the empty-set glyph ∅ so an operator can tell at a glance
+     that the run produced zero rows.  Adds one new --color-status-empty
+     custom property to the root theme. */
+.status-badge-completed-with-failures {
+  background-color: rgba(20, 176, 174, 0.15);
+  color: var(--color-status-completed);
+}
+
+.status-badge-empty {
+  background-color: rgba(128, 128, 128, 0.15);
+  color: var(--color-status-empty);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Button Base Styles
+   --------------------------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-lg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  font-weight: 500;
+  min-height: var(--size-control);
+  cursor: pointer;
+  transition: background-color var(--transition-fast),
+    border-color var(--transition-fast);
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border-strong);
+}
+
+/* Disabled state: desaturate via tokenised colour pair rather than opacity:0.4,
+   which silently fails WCAG 1.4.3 contrast against any non-white chrome. We
+   use --color-bg as the background (rather than --color-surface-elevated) so
+   the disabled button reads as "merged into the page" — the muted text on
+   page-background pair passes AA in both themes (dark 4.78:1, light 6.32:1).
+   The border stays at --color-border-strong so the button outline remains
+   distinguishable from the page. aria-disabled gets the same treatment
+   because we use it on the Save-for-review button while validation pends. */
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  background-color: var(--color-bg);
+  color: var(--color-text-muted);
+  border-color: var(--color-border-strong);
+  cursor: not-allowed;
+}
+
+/* Compact variant for chrome-row controls (header buttons, dense toolbars).
+   Composes the same visual identity as .btn but at --size-control-compact
+   (36px). Use this for buttons inside surfaces shorter than 44px (e.g. the
+   40px app header). */
+.btn-compact {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  padding: var(--space-2xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  min-height: var(--size-control-compact);
+  cursor: pointer;
+  transition: background-color var(--transition-fast),
+    border-color var(--transition-fast);
+  white-space: nowrap;
+}
+
+.btn-compact:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border-strong);
+}
+
+.btn-compact:disabled,
+.btn-compact[aria-disabled="true"] {
+  background-color: var(--color-bg);
+  color: var(--color-text-muted);
+  border-color: var(--color-border-strong);
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background-color: var(--color-btn-primary-bg);
+  border-color: var(--color-btn-primary-bg);
+  color: var(--color-text-inverse);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: var(--color-btn-primary-bg-hover);
+  border-color: var(--color-btn-primary-bg-hover);
+}
+
+.btn-danger {
+  background-color: var(--color-btn-danger-bg);
+  border-color: var(--color-btn-danger-bg);
+  color: var(--color-text-inverse);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: var(--color-btn-danger-bg-hover);
+  border-color: var(--color-btn-danger-bg-hover);
+}
+
+/* .btn-small predates .btn-compact and is retained at its existing call sites.
+   New buttons that need a chrome-row size should compose .btn-compact instead. */
+.btn-small {
+  font-size: var(--font-size-xs);
+  padding: var(--space-2xs) var(--space-sm);
+}
+
+/* Layout helper shared by side-rail full-width slots (Execute, Export YAML,
+   Catalog). Extracted from three identical rules; do not re-declare width or
+   margin on side-rail buttons — compose this class instead. The .completion-bar
+   override below reverses these properties when the same components are
+   rendered in a row context. */
+.side-rail-slot-fill {
+  width: calc(100% - (2 * var(--space-sm)));
+  margin: var(--space-sm);
+  justify-content: center;
+}
+
+
+/* ---------------------------------------------------------------------------
+   Tab Strip Styles
+   --------------------------------------------------------------------------- */
+.tab-strip {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tab-strip-tab {
+  padding: var(--space-sm) var(--space-lg);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.tab-strip-tab:hover {
+  color: var(--color-text);
+}
+
+.tab-strip-tab-active {
+  color: var(--color-text);
+  border-bottom-color: var(--color-accent);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Validation Banner
+   --------------------------------------------------------------------------- */
+.validation-banner {
+  padding: var(--space-sm) var(--space-lg);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  margin: var(--space-sm);
+}
+
+.validation-banner-pass {
+  background-color: var(--color-success-bg);
+  border: 1px solid var(--color-success-border);
+  color: var(--color-success);
+}
+
+.validation-banner-fail {
+  background-color: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  color: var(--color-error);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Empty State
+   --------------------------------------------------------------------------- */
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-2xl);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  text-align: center;
+  line-height: var(--line-height-relaxed);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Confirm Dialog (replacement for window.confirm)
+   --------------------------------------------------------------------------- */
+.confirm-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  z-index: var(--z-dialog-backdrop);
+}
+
+.confirm-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: var(--z-dialog);
+  width: 400px;
+  max-width: calc(100vw - 32px);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  padding: var(--space-xl);
+}
+
+.confirm-dialog-title {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.confirm-dialog-message {
+  margin: 0 0 var(--space-xl);
+  font-size: var(--font-size-base);
+  color: var(--color-text-secondary);
+  line-height: var(--line-height-normal);
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+
+.confirm-dialog-btn {
+  min-width: 80px;
+  min-height: var(--size-control);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Layout Grid
+   --------------------------------------------------------------------------- */
+.app-layout {
+  display: grid;
+  grid-template-rows: 100%;
+  grid-template-areas: "chat siderail";
+  height: 100%;
+  min-width: 640px;
+  overflow: hidden;
+}
+
+/* When the side rail is hidden or overlayed, the grid only has chat. */
+.app-layout--overlay {
+  grid-template-areas: "chat";
+}
+
+.layout-chat {
+  grid-area: chat;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-surface);
+}
+
+.layout-siderail {
+  grid-area: siderail;
+  position: relative;
+  border-left: 1px solid var(--color-border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-surface-inspector);
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-lg);
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+}
+
+.banner p {
+  margin: 0;
+}
+
+.banner-info {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+}
+
+.banner-dismiss-btn {
+  min-height: var(--size-control-compact);
+  padding: var(--space-xs) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  flex: 0 0 auto;
+}
+
+.banner-dismiss-btn:hover,
+.banner-dismiss-btn:focus-visible {
+  border-color: var(--color-border-strong);
+  background-color: var(--color-surface-hover);
+}
+
+.banner-dismiss-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.side-rail {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  /* Variable-height slots (AuditReadiness rows, ValidationResult errors,
+     restored SuggestionList) can exceed the rail's bounded height on short
+     viewports. Without overflow-y the lower slots (ExportYaml, Execute) are
+     clipped and unreachable. The parent .layout-siderail still clips
+     horizontal overflow; this rule lets the rail scroll vertically. */
+  overflow-y: auto;
+}
+
+.side-rail-slot:empty {
+  display: none;
+}
+
+.side-rail-validation-banner {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------------------------------------------------------------------------
+   ValidationResult Banner (inline styles migrated)
+   --------------------------------------------------------------------------- */
+.validation-banner-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.validation-banner-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.validation-banner-summary {
+  font-weight: 600;
+}
+
+.validation-banner-checks {
+  margin: 0;
+  padding: 0 0 0 22px;
+  font-size: var(--font-size-xs);
+  color: var(--color-success);
+}
+
+.validation-banner-check-item {
+  margin-bottom: 2px;
+}
+
+.validation-banner-warnings-section {
+  margin-top: 6px;
+}
+
+.validation-banner-warnings-title {
+  font-weight: 600;
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+}
+
+.validation-banner-warnings-list {
+  margin: 2px 0 0;
+  padding: 0 0 0 22px;
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+}
+
+.validation-banner-warn-item {
+  margin-bottom: 2px;
+}
+
+.validation-banner-fail-title {
+  padding: var(--space-sm) var(--space-md);
+  font-weight: 600;
+}
+
+.validation-banner-fail-list {
+  margin: 0;
+  padding: 0 var(--space-md) var(--space-sm) 28px;
+}
+
+.validation-banner-error-item {
+  margin-bottom: var(--space-xs);
+}
+
+.validation-banner-suggestion {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  margin-top: 2px;
+}
+
+.validation-banner-component-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.validation-banner-component-btn--warning {
+  text-decoration-color: var(--color-warning-border);
+}
+
+.validation-banner-component-btn--error {
+  text-decoration-color: var(--color-error-border);
+}

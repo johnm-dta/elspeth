@@ -1,0 +1,199 @@
+/* sidebar.css — Side-rail slots, suggestion buttons, completion bar, graph mini-view.
+   Owners: .side-rail-suggestion-*, .side-rail-execute-btn,
+   .side-rail-export-yaml-btn, .side-rail-catalog-btn, .catalog-reference-*,
+   .completion-bar, .graph-mini*, .side-rail-error-banner.
+   (.side-rail-error-banner was sandwiched into the version-selector block
+   in App.css; moved here under Path B because it is a sidebar concern.) */
+
+/* ---------------------------------------------------------------------------
+   SuggestionList — guided-remediation hints rendered in the SideRail
+   --------------------------------------------------------------------------- */
+.side-rail-suggestion-banner {
+  background-color: var(--color-info-bg);
+  border: 1px solid var(--color-info-border);
+  border-radius: var(--radius-sm);
+  margin: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-sm);
+  overflow: hidden;
+}
+
+.side-rail-suggestion-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--color-info);
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+
+.side-rail-suggestion-header:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: -2px;
+}
+
+.side-rail-suggestion-chevron {
+  font-size: var(--font-size-xs);
+  color: var(--color-info);
+}
+
+.side-rail-suggestion-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--space-sm) var(--space-xs);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.side-rail-suggestion-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  color: var(--color-info);
+}
+
+.side-rail-suggestion-item-text {
+  flex: 1;
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.side-rail-suggestion-apply-btn {
+  background: none;
+  border: 1px solid var(--color-info-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--color-info);
+  font-size: var(--font-size-xs);
+  padding: 2px 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.side-rail-suggestion-apply-btn:hover:not(:disabled) {
+  background-color: var(--color-info-border);
+}
+
+.side-rail-suggestion-apply-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Primary side-rail slot-fill buttons share identical layout. Equivalent to
+   composing .side-rail-slot-fill on each; kept as a comma-grouped selector so
+   the class names remain stable for existing call sites. */
+.side-rail-execute-btn,
+.side-rail-export-yaml-btn {
+  width: calc(100% - (2 * var(--space-sm)));
+  margin: var(--space-sm);
+  justify-content: center;
+}
+
+.side-rail-catalog-btn {
+  width: calc(100% - (2 * var(--space-sm)));
+  min-height: var(--size-control);
+  margin: var(--space-sm);
+  padding: var(--space-sm);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.side-rail-catalog-btn:hover {
+  border-color: var(--color-border-strong);
+  background-color: var(--color-surface-hover);
+}
+
+.side-rail-catalog-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.catalog-reference-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalog-reference-meta {
+  padding: 2px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background-color: var(--color-surface-elevated);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+/* CompletionBar (TSX: src/components/CompletionBar.tsx) mounts Save-for-review
+   (.btn), ExecuteButton (.btn .side-rail-execute-btn), and ExportYamlButton
+   (.btn .side-rail-export-yaml-btn).
+   The earlier horizontal layout clipped Export-YAML: the side rail is 320px
+   wide (Layout.tsx SIDERAIL_WIDTH), the three labels need ~436px of min-content
+   width at --font-size-base with white-space:nowrap, and the row overflowed
+   into .layout-siderail's overflow:hidden region — making the third button
+   invisible. The three-co-equal-verbs intent is preserved by stacking them
+   vertically: each button takes full rail width, all three are visible, no
+   button gets primary emphasis. */
+.completion-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  align-items: stretch;
+}
+
+.completion-bar > *,
+.completion-bar .side-rail-execute-btn,
+.completion-bar .side-rail-export-yaml-btn {
+  width: 100%;
+  margin: 0;
+}
+
+.graph-mini {
+  width: calc(100% - (2 * var(--space-sm)));
+  min-height: 96px;
+  margin: var(--space-sm);
+  padding: var(--space-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.graph-mini:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border-strong);
+}
+
+.graph-mini--empty {
+  cursor: default;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+
+.side-rail-error-banner {
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--font-size-xs);
+}

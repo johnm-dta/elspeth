@@ -13,8 +13,8 @@
 //     GuidedHistory (Task 7.9) and option IDs recur across turns
 //   - Visible labels (htmlFor / button text) ARE the accessible name; do not add
 //     redundant aria-label that overrides what sighted users see
-//   - CSS via App.css class names with design tokens; no hardcoded colours
-//   - Reuses guided-chip-btn / guided-chip-group styles per the App.css convention
+//   - CSS via components/chat/guided/guided.css class names with design tokens; no hardcoded colours
+//   - Reuses guided-chip-btn / guided-chip-group styles per the guided.css convention
 //
 // State encoding (single nullable-free struct per Task 7.3 convention):
 //   selection: { chosen: Set<string>; customs: string[]; pending: string }

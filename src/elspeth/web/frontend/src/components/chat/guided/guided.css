@@ -1,0 +1,1402 @@
+/* guided.css — Guided-mode widget family used by the chat panel.
+   Owners: .guided-* across InspectAndConfirm, MultiSelectWithCustom,
+   SchemaForm, ProposeChain, Recipe, ExitToFreeform, GuidedHistory,
+   CompletionSummary + the trailing @media (prefers-reduced-motion: reduce)
+   that silences guided-* transitions. */
+
+/* ---------------------------------------------------------------------------
+   Guided Mode Turn Widgets
+   Conventions (Tasks 7.2-7.7):
+     - All guided widget classes share the guided-* prefix.
+     - Use CSS custom properties only — no hardcoded colours.
+     - All transitions/animations MUST have a matching
+       @media (prefers-reduced-motion: reduce) rule (see block at end of section).
+     - Shared chip styles (.guided-chip-btn, .guided-chip-group, .guided-chip-item,
+       .guided-chip-hint, .guided-chip-fieldset, .guided-chip-legend) are
+       designed for reuse by multi_select_with_custom and recipe_offer — do not
+       redefine equivalent styles in those widgets' code.
+     - `.guided-chip-btn[aria-pressed="true"]` lights the pressed visual.
+       Only set `aria-pressed` on chips that have toggle semantics
+       (currently only `multi_select_with_custom`); a chip without toggle
+       semantics must NOT carry `aria-pressed` or it will silently inherit
+       the pressed visual state.
+   --------------------------------------------------------------------------- */
+
+.guided-workflow {
+  padding: var(--space-md) var(--space-md) 0;
+}
+
+.guided-workflow-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-xs);
+}
+
+.guided-workflow-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  background-color: var(--color-surface);
+  font-size: var(--font-size-sm);
+}
+
+.guided-workflow-step--complete {
+  color: var(--color-text-secondary);
+  border-color: var(--color-border-strong);
+  background-color: var(--color-surface-elevated);
+}
+
+.guided-workflow-step--current {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+  background-color: var(--color-surface-elevated);
+}
+
+.guided-workflow-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+}
+
+.guided-workflow-label {
+  overflow-wrap: anywhere;
+  line-height: 1.2;
+}
+
+.guided-current-decision,
+.guided-step-chat {
+  margin: var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+}
+
+.guided-current-decision-copy {
+  margin-bottom: var(--space-md);
+}
+
+.guided-current-decision-copy h2,
+.guided-step-chat-heading,
+.guided-history-heading {
+  margin: 0 0 var(--space-xs) 0;
+  font-size: var(--font-size-base);
+  line-height: 1.3;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.guided-current-decision-copy p,
+.guided-current-decision-pending {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.guided-current-decision-pending {
+  margin-top: var(--space-sm);
+}
+
+.guided-step-chat {
+  border-style: dashed;
+  background-color: var(--color-surface-elevated);
+}
+
+/* Base wrapper — each widget is an isolated block in the chat stream */
+.guided-turn {
+  padding: var(--space-md) 0;
+}
+
+/* Chip-group fieldset — strips browser default fieldset chrome */
+.guided-chip-fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.guided-chip-legend {
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  font-weight: 600;
+  margin-bottom: var(--space-xs);
+  padding: 0;
+}
+
+.guided-chip-instruction {
+  margin: 0 0 var(--space-md);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+/* Chip group: horizontal wrapping row of option buttons */
+.guided-chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+/* One option: button + optional hint stacked vertically */
+.guided-chip-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  max-width: 280px;
+}
+
+/* The option button itself */
+.guided-chip-btn {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  text-align: left;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-chip-btn:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-accent);
+}
+
+.guided-chip-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Hint text — muted, associated via aria-describedby */
+.guided-chip-hint {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+/* Custom-input row (allow_custom=true) */
+.guided-custom-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+.guided-custom-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.guided-custom-input {
+  flex: 1;
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control);
+}
+
+.guided-custom-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.guided-custom-submit-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: not-allowed;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control);
+}
+
+.guided-custom-submit-btn:not(:disabled) {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  cursor: pointer;
+}
+
+.guided-custom-submit-btn:not(:disabled):hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-custom-submit-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   InspectAndConfirmTurn (Task 7.3)
+   Classes prefixed guided-inspect-*.  No chip styles — this widget owns
+   a column-table + editor layout, not a chip group.
+   --------------------------------------------------------------------------- */
+
+/* Main table */
+.guided-inspect-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+  margin-bottom: var(--space-md);
+}
+
+.guided-inspect-th {
+  text-align: left;
+  padding: var(--space-xs) var(--space-sm);
+  border-bottom: 2px solid var(--color-border-strong);
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.guided-inspect-tr:nth-child(even) {
+  background-color: var(--color-surface-elevated);
+}
+
+.guided-inspect-td {
+  padding: var(--space-xs) var(--space-sm);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text);
+  vertical-align: top;
+}
+
+/* Warnings aside — announced to screen readers via aria-label */
+.guided-inspect-warnings {
+  background-color: var(--color-surface-elevated);
+  border-left: 3px solid var(--color-warning, var(--color-accent));
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.guided-inspect-warnings-list {
+  margin: 0;
+  padding: 0 0 0 var(--space-md);
+}
+
+.guided-inspect-warning-item {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+/* Inspect-view action buttons */
+.guided-inspect-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+}
+
+.guided-inspect-confirm-btn,
+.guided-inspect-edit-btn {
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-inspect-confirm-btn {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+}
+
+.guided-inspect-confirm-btn:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-inspect-edit-btn {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+}
+
+.guided-inspect-edit-btn:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-accent);
+}
+
+.guided-inspect-confirm-btn:focus-visible,
+.guided-inspect-edit-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Edit view — heading */
+/* Reset browser-default h3 sizing so the semantic heading bump (Task 7.3
+   reviewer M10) doesn't shift visual rank — it remains the same prominent
+   inline label as before, just navigable by screen-reader heading jump. */
+.guided-inspect-edit-heading {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-text);
+  margin: 0 0 var(--space-md) 0;
+}
+
+/* Edit view — column list */
+.guided-inspect-editor-list {
+  list-style: none;
+  margin: 0 0 var(--space-md) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.guided-inspect-editor-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.guided-inspect-editor-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  min-width: 72px;
+}
+
+.guided-inspect-editor-input {
+  flex: 1;
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control-compact);
+}
+
+.guided-inspect-editor-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.guided-inspect-remove-btn {
+  padding: var(--space-xs) var(--space-sm);
+  background-color: transparent;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: var(--size-control-compact);
+  white-space: nowrap;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.guided-inspect-remove-btn:hover {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.guided-inspect-remove-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Edit view — action buttons (Cancel / Apply edits) */
+.guided-inspect-editor-actions {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.guided-inspect-cancel-btn,
+.guided-inspect-apply-btn {
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: var(--size-control);
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-inspect-cancel-btn {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+}
+
+.guided-inspect-cancel-btn:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-accent);
+}
+
+.guided-inspect-apply-btn {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+}
+
+.guided-inspect-apply-btn:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-inspect-cancel-btn:focus-visible,
+.guided-inspect-apply-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   MultiSelectWithCustomTurn (Task 7.4)
+   Reuses guided-chip-btn / guided-chip-group / guided-chip-fieldset /
+   guided-chip-legend / guided-chip-item / guided-chip-hint for the option
+   chips (per the Task 7.2 SHAPE NOTE - chip-group family widgets share
+   the structure). The aria-pressed="true" selector below lights up the
+   pressed visual state - added here rather than in the chip-base block
+   because SingleSelectTurn does not use aria-pressed.
+   --------------------------------------------------------------------------- */
+
+/* Pressed-chip visual state for toggle-button chips. Applies wherever
+   aria-pressed="true" is set on a guided-chip-btn (currently only
+   MultiSelectWithCustomTurn). */
+.guided-chip-btn[aria-pressed="true"] {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border-color: var(--color-accent);
+}
+
+.guided-chip-btn[aria-pressed="true"]:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+  border-color: var(--color-btn-primary-bg-hover);
+}
+
+/* Custom-add row: reuses .guided-custom-label, .guided-custom-input,
+   .guided-custom-submit-btn from the SingleSelectTurn block above. */
+.guided-multi-custom-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+/* Added-customs strip: chip-styled list items with an X removal button. */
+.guided-multi-custom-list {
+  list-style: none;
+  margin: var(--space-sm) 0 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.guided-multi-custom-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.guided-multi-custom-chip-label {
+  line-height: 1;
+}
+
+.guided-multi-custom-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background-color: transparent;
+  color: var(--color-text-muted);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  line-height: 1;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.guided-multi-custom-remove-btn:hover {
+  background-color: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.guided-multi-custom-remove-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Continue button row */
+.guided-multi-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+.guided-multi-continue-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease;
+}
+
+.guided-multi-escape-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control);
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-multi-escape-btn:hover:not(:disabled) {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-accent);
+}
+
+.guided-multi-escape-btn:disabled {
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.guided-multi-escape-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.guided-multi-continue-btn:hover:not(:disabled) {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-multi-continue-btn:disabled {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.guided-multi-continue-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   SchemaFormTurn (Task 7.5)
+   Classes prefixed guided-schema-*. No chip styles -- this widget owns a
+   form-field-per-row layout, not a chip group.
+   --------------------------------------------------------------------------- */
+
+/* One property row: label + control + optional hint/error stacked vertically */
+.guided-schema-field-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+}
+
+/* Field label */
+.guided-schema-label {
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+/* Text / number input */
+.guided-schema-input {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: border-color 0.1s ease;
+}
+
+.guided-schema-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Select dropdown */
+.guided-schema-select {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control);
+  cursor: pointer;
+  transition: border-color 0.1s ease;
+}
+
+.guided-schema-select:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Checkbox row: inline checkbox + label side-by-side */
+.guided-schema-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* Checkbox itself */
+.guided-schema-checkbox {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: var(--color-accent);
+  flex-shrink: 0;
+}
+
+/* JSON-fallback textarea */
+.guided-schema-textarea {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+  resize: vertical;
+  transition: border-color 0.1s ease;
+}
+
+.guided-schema-textarea:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Error state border for JSON textarea */
+.guided-schema-textarea--error {
+  border-color: var(--color-error, var(--color-accent));
+}
+
+/* Hint text -- muted, associated via aria-describedby */
+.guided-schema-hint {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+/* Inline error text for JSON parse failures */
+.guided-schema-error {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-error, var(--color-accent));
+  line-height: 1.4;
+}
+
+/* Required fields section */
+.guided-schema-required-section {
+  margin-bottom: var(--space-sm);
+}
+
+/* Optional fields section (shown when advanced is expanded) */
+.guided-schema-optional-section {
+  margin-top: var(--space-sm);
+}
+
+/* Show / Hide advanced toggle */
+.guided-schema-advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  background-color: transparent;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  cursor: pointer;
+  margin-top: var(--space-xs);
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+
+.guided-schema-advanced-toggle:hover {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.guided-schema-advanced-toggle:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Continue action row */
+.guided-schema-actions {
+  display: flex;
+  margin-top: var(--space-md);
+}
+
+/* Continue button */
+.guided-schema-continue-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease;
+}
+
+.guided-schema-continue-btn:hover:not(:disabled) {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-schema-continue-btn:disabled {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.guided-schema-continue-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   ProposeChainTurn (Task 7.6)
+   Classes prefixed guided-propose-*. Card-list layout -- no chip styles.
+
+   CARD-STYLE REUSE (Task 7.7): .guided-propose-step-card also carries the
+   recipe-decision card chrome. It provides pure card chrome (surface-elevated,
+   border-strong, radius-lg, padding space-md) with no step-list-specific styling.
+   ProposeChainTurn applies it to each <li> in the step list.
+   --------------------------------------------------------------------------- */
+
+/* Overall rationale paragraph shown above the step cards */
+.guided-propose-why {
+  font-size: var(--font-size-base);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-md);
+  line-height: 1.5;
+}
+
+/* Blockers section — only rendered when payload.blockers is non-empty */
+.guided-propose-blockers {
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  margin-bottom: var(--space-md);
+}
+
+.guided-propose-blockers-heading {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-warning);
+  margin-bottom: var(--space-xs);
+}
+
+.guided-propose-blockers-list {
+  margin: 0;
+  padding-left: var(--space-lg);
+}
+
+.guided-propose-blocker-item {
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  margin-bottom: var(--space-xs);
+}
+
+/* Ordered list of step cards — reset list styles; numbers shown by .guided-propose-step-number */
+.guided-propose-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+}
+
+/* Individual step card */
+.guided-propose-step-card {
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-lg);
+  padding: var(--space-md);
+}
+
+/* Card header: step number badge + plugin name */
+.guided-propose-step-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+/* Circular step number badge */
+.guided-propose-step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background-color: var(--color-badge-transform-bg);
+  border: 1px solid var(--color-badge-transform-border);
+  color: var(--color-badge-transform);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* Plugin name -- rendered as <h3> for SR landmark navigation.
+   Reset default <h*> margin so the visual layout matches the prior <span>;
+   font-size is pinned to --font-size-base so the browser's default <h3>
+   sizing does not leak in. */
+.guided-propose-step-plugin {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-text);
+  font-family: var(--font-mono, monospace);
+}
+
+/* Options key-value definition list */
+.guided-propose-options {
+  margin: 0 0 var(--space-sm) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+/* Each option row: key and value side-by-side */
+.guided-propose-option-row {
+  display: flex;
+  gap: var(--space-sm);
+  font-size: var(--font-size-sm);
+}
+
+.guided-propose-option-key {
+  color: var(--color-text-muted);
+  min-width: 120px;
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+.guided-propose-option-val {
+  color: var(--color-text);
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+  margin: 0; /* dd default margin reset */
+}
+
+/* LLM's rationale for this step */
+.guided-propose-step-rationale {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin: 0;
+  line-height: 1.5;
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+/* Action row: Accept proposal button */
+.guided-propose-actions {
+  display: flex;
+  margin-top: var(--space-md);
+}
+
+/* Accept proposal button */
+.guided-propose-accept-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease;
+}
+
+.guided-propose-accept-btn:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-propose-accept-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   Recipe decision header
+   Classes prefixed guided-recipe-*.
+
+   Card chrome reuse: .guided-propose-step-card (Task 7.6, defined earlier in
+   this file in the Propose Chain decision header section) is applied as the
+   outer card shell.  guided-recipe-* rules cover the
+   recipe-specific interior: name heading, slots definition list, alternatives
+   list, and action row with two buttons.
+   --------------------------------------------------------------------------- */
+
+/* Recipe name as <h3> -- reset default <h3> margin and pin font-size to base
+   so the browser's default <h3> sizing does not leak in.  Same pattern as
+   .guided-propose-step-plugin (Task 7.6). */
+.guided-recipe-name {
+  margin: 0 0 var(--space-md) 0;
+  font-size: var(--font-size-base);
+  font-weight: 700;
+  color: var(--color-text);
+  font-family: var(--font-mono, monospace);
+}
+
+/* Slot definition list */
+.guided-recipe-slots {
+  margin: 0 0 var(--space-sm) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+/* Each slot row: key and value side-by-side */
+.guided-recipe-slot-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  font-size: var(--font-size-sm);
+}
+
+.guided-recipe-slot-key {
+  color: var(--color-text-muted);
+  min-width: 120px;
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+.guided-recipe-slot-val {
+  color: var(--color-text);
+  font-family: var(--font-mono, monospace);
+  word-break: break-all;
+  margin: 0; /* dd default margin reset */
+}
+
+/* Alternatives section -- only rendered when payload.alternatives is non-empty */
+.guided-recipe-alternatives {
+  margin-top: var(--space-sm);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.guided-recipe-alternatives-heading {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin: 0 0 var(--space-xs) 0;
+}
+
+.guided-recipe-alternatives-list {
+  margin: 0;
+  padding-left: var(--space-lg);
+}
+
+.guided-recipe-alternative-item {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono, monospace);
+  margin-bottom: var(--space-xs);
+}
+
+.guided-recipe-input-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  margin: var(--space-xs) 0 0 0;
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.guided-recipe-input-warning-icon {
+  display: inline-flex;
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.guided-recipe-input-warning-icon svg {
+  display: block;
+  width: 1rem;
+  height: 1rem;
+  fill: currentColor;
+}
+
+.guided-recipe-slot-row .guided-recipe-input-warning {
+  flex-basis: 100%;
+  margin-left: calc(120px + var(--space-sm));
+}
+
+/* Action row: Apply recipe + Build manually buttons */
+.guided-recipe-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+/* Apply recipe -- primary action */
+.guided-recipe-apply-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease;
+}
+
+.guided-recipe-apply-btn:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-recipe-apply-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Build manually -- secondary action */
+.guided-recipe-build-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-recipe-build-btn:hover {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-accent);
+}
+
+.guided-recipe-build-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   ExitToFreeformButton (Task 7.8)
+   Class: guided-exit-button.
+
+   Secondary / tertiary visual weight -- deliberately quieter than the primary
+   action buttons (accent background) used by individual widgets.  The button
+   must be visible but not compete with the widget's own call-to-action.
+
+   Sized to WCAG 2.5.8 minimum target (min-height: 44px).  Focus ring and
+   hover match the guided-* family convention.
+   --------------------------------------------------------------------------- */
+
+.guided-exit-button {
+  padding: var(--space-sm) var(--space-md);
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease,
+    color 0.1s ease;
+}
+
+.guided-exit-button:hover {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.guided-exit-button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.guided-exit-confirmation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.guided-exit-button--danger {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+.guided-exit-button--danger:hover {
+  background-color: var(--color-error-bg);
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+
+/* ---------------------------------------------------------------------------
+   GuidedHistory (Task 7.9)
+   Classes prefixed guided-history-*.
+
+   Collapsible read-only list of completed wizard steps.  Rendered above the
+   active turn widget so the user can see what was decided in prior steps.
+
+   Visual design:
+     - Muted appearance (secondary text colour) to avoid competing with the
+       active turn widget.
+     - Toggle button matches the ExitToFreeformButton secondary style
+       (transparent background, border, muted text) but is visually lighter.
+     - List items use small text with separator dots between step name,
+       turn type, and emitter.
+
+   Collapsible region contract (Task 7.5 I2):
+     The region is ALWAYS rendered (hidden attribute toggles, not conditional
+     mounting) so the toggle's aria-controls always resolves.  Native browser
+     `[hidden] { display: none; }` handles both visual and AT-tree hiding —
+     no additional CSS required for the hidden state.
+
+   Sized to WCAG 2.5.8 minimum target (min-height: 44px on toggle button).
+   Focus ring and hover match the guided-* family convention.
+   --------------------------------------------------------------------------- */
+
+.guided-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+}
+
+.guided-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.guided-history-item {
+  display: grid;
+  grid-template-columns: minmax(84px, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--space-sm);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.guided-history-step-name {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.guided-history-summary {
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------------------
+   CompletionSummary (Task 7.10)
+   Classes prefixed guided-completion-*.
+
+   Terminal widget rendered when the guided wizard reaches kind="completed"
+   and pipeline_yaml is non-null.  Displays the finalized pipeline YAML in a
+   syntax-highlighted block (prism-react-renderer, vsDark / vsLight) with
+   task-oriented actions:
+     "Open freeform editor" -- continue editing in the freeform composer.
+     "Review YAML"          -- switch to the YAML review tab.
+     "Validate pipeline"    -- run validation for the active session.
+
+   Visual hierarchy:
+     heading     -- "Pipeline ready", h3, muted weight to avoid competing
+                    with surrounding chat layout.
+     yaml block  -- monospace pre inside a scrollable container with an
+                    inset surface to visually contain the code.
+     action row  -- primary freeform handoff plus YAML review and validation.
+
+   Reduced-motion: guided-completion-save-btn and guided-completion-edit-btn
+   both carry transitions; both are silenced in the @media block below.
+   --------------------------------------------------------------------------- */
+
+/* Outer wrapper */
+.guided-completion {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  background-color: var(--color-success-bg);
+  border: 1px solid var(--color-success-border);
+  border-radius: var(--radius-lg);
+}
+
+/* Section heading -- "Pipeline ready" */
+.guided-completion-heading {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--color-success);
+}
+
+/* Scrollable YAML preview container */
+.guided-completion-yaml-container {
+  overflow: auto;
+  max-height: 400px;
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+}
+
+/* <pre> block produced by prism-react-renderer.
+   Reset browser default pre margins; monospace font family to match YamlView. */
+.guided-completion-pre {
+  margin: 0;
+  padding: var(--space-md);
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* Action row: freeform handoff, YAML review, and validation */
+.guided-completion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+/* Primary action: open the freeform editor */
+.guided-completion-save-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease;
+}
+
+.guided-completion-save-btn:hover {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-completion-save-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Secondary action: review generated YAML */
+.guided-completion-edit-btn {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-completion-edit-btn:hover {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-accent);
+}
+
+.guided-completion-edit-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Honour OS-level motion preferences. Any new transition/animation added in
+   the guided-* section above MUST be silenced here. */
+@media (prefers-reduced-motion: reduce) {
+  .guided-chip-btn,
+  .guided-workflow-step,
+  .guided-inspect-confirm-btn,
+  .guided-inspect-edit-btn,
+  .guided-inspect-remove-btn,
+  .guided-inspect-cancel-btn,
+  .guided-inspect-apply-btn,
+  .guided-multi-custom-remove-btn,
+  .guided-multi-escape-btn,
+  .guided-multi-continue-btn,
+  .guided-schema-input,
+  .guided-schema-select,
+  .guided-schema-textarea,
+  .guided-schema-advanced-toggle,
+  .guided-schema-continue-btn,
+  .guided-propose-accept-btn,
+  .guided-recipe-apply-btn,
+  .guided-recipe-build-btn,
+  .guided-exit-button,
+  .guided-completion-save-btn,
+  .guided-completion-edit-btn {
+    transition: none;
+  }
+}

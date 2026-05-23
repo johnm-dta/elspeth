@@ -12,7 +12,7 @@
 //   - DOM IDs prefixed with React 18 useId() -- multiple turn instances coexist in
 //     GuidedHistory (Task 7.9) and element IDs would collide without per-instance scoping
 //   - Visible labels (button text) ARE the accessible name; no redundant aria-label
-//   - CSS via App.css class names with design tokens; no hardcoded colours
+//   - CSS via components/chat/guided/guided.css class names with design tokens; no hardcoded colours
 //
 // SHAPE NOTE (differs from chip-group widgets):
 // propose_chain uses a card-list layout (per Task 7.2 SHAPE NOTE which explicitly

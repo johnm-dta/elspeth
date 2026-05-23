@@ -13,6 +13,7 @@ Ticket: elspeth-ab3ad30e87.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -80,3 +81,25 @@ async def test_explain_run_diagnostics_wraps_litellm_policy_exceptions(
     # Wrap message mirrors the existing ``LLM unavailable ({type})`` pattern.
     assert "LLM unavailable" in str(exc_info.value)
     assert type(exc_factory()).__name__ in str(exc_info.value)
+
+
+@pytest.mark.parametrize("exc_cls", [RuntimeError, ValueError, asyncio.CancelledError])
+@pytest.mark.asyncio
+async def test_unrelated_exceptions_propagate(
+    composer_service_without_sessions_service: ComposerServiceImpl,
+    exc_cls: type[BaseException],
+) -> None:
+    """Widened catch must NOT swallow unrelated exception types.
+
+    Pins the negative side of commit 4dacddfda's widening — RuntimeError,
+    ValueError, asyncio.CancelledError, etc. MUST escape unwrapped so the
+    route layer's normalised error envelope only covers the documented
+    LiteLLM policy-gate set.
+    """
+    service = composer_service_without_sessions_service
+    snapshot: dict[str, object] = {"run_id": "run-x", "status": "failed", "row_count": 0, "rows": []}
+    with (
+        patch.object(service, "_call_text_llm", new=AsyncMock(side_effect=exc_cls("boom"))),
+        pytest.raises(exc_cls),
+    ):
+        await service.explain_run_diagnostics(snapshot)

@@ -3639,19 +3639,28 @@ class Orchestrator:
             # This ensures type fidelity and maintains the same data structures as main run
             legacy_schema_contract = factory.run_lifecycle.get_run_contract(run_id)
             if legacy_schema_contract is None:
-                # TIER-1 AUDIT INTEGRITY: Crash if contract is missing from audit trail
-                # Per CLAUDE.md: "Bad data in the audit trail = crash immediately"
-                # Inferring a contract from row data would:
-                # 1. Mask missing/corrupt audit data (evidence tampering)
-                # 2. Produce incomplete contracts (fields appearing later are omitted)
-                # 3. Violate the NO LEGACY CODE POLICY (no backward compatibility shims)
-                raise OrchestrationInvariantError(
-                    f"Cannot resume run '{run_id}': schema contract is missing from audit trail. "
-                    f"This indicates either:\n"
-                    f"  1. The audit database is corrupt or incomplete\n"
-                    f"  2. The run was started with a version that didn't record contracts\n"
-                    f"Resume cannot proceed safely without the schema contract. "
-                    f"The audit trail must be complete and trustworthy."
+                # ``schema_contract_json`` is written as NULL at row creation
+                # (run_lifecycle_repository.py:86) and populated by a separate
+                # ``update_run_contract`` UPDATE. If ``on_start`` fails before
+                # that UPDATE executes, the runs row exists but contract_json
+                # is NULL — this is precisely one of the three scenarios
+                # ``EmptyResumeStateError`` was introduced to handle (see its
+                # docstring at contracts/errors.py:786-792).
+                #
+                # Per ADR-025 §3, raising the typed empty-state error here
+                # gives the CLI handler an exit path that produces a clean,
+                # operator-interpretable message rather than a Tier-1
+                # invariant traceback for a real, recoverable scenario.
+                # ``EmptyResumeStateError`` is a subclass of
+                # ``OrchestrationInvariantError`` so any existing
+                # ``except OrchestrationInvariantError`` catch still matches.
+                raise EmptyResumeStateError(
+                    run_id=run_id,
+                    message=(
+                        f"Cannot resume run {run_id!r}: schema contract was never written "
+                        "to the audit trail. The run likely failed during on_start before "
+                        "source initialisation completed. Start a fresh run."
+                    ),
                 )
             unprocessed_rows = recovery.get_unprocessed_row_data(
                 run_id,

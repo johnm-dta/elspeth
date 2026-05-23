@@ -4876,7 +4876,14 @@ class ComposerServiceImpl:
                 ) from None
             except LiteLLMAuthError:
                 raise
-            # _BadRequestLLMError intentionally not retried — 400s are not transient.
+            except _BadRequestLLMError:
+                # Bad-request from provider: never retry. 400s are not transient,
+                # and the carrier holds the provider's status code + detail on
+                # dedicated attributes for the outer handler to build the HTTP
+                # detail. The redacted str(exc) intentionally does NOT leak
+                # provider text; only ``expose_provider_error=True`` surfaces
+                # ``provider_detail``/``provider_status_code``.
+                raise
             except LiteLLMAPIError:
                 attempt += 1
                 if attempt >= _LLM_API_MAX_ATTEMPTS:

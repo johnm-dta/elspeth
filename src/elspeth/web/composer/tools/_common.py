@@ -1192,9 +1192,8 @@ class ToolContext:
     ``preview_pipeline`` / ``diff_pipeline`` / ``set_pipeline``) into a
     single frozen dataclass means every handler takes the same shape:
     ``(arguments, state, context) -> ToolResult``. The previous per-registry
-    kwarg gymnastics (``BlobToolHandler`` vs ``SecretToolHandler`` vs the
-    plain ``ToolHandler``) is reduced to "the handler reads what it needs
-    off ``context``".
+    kwarg gymnastics is reduced to "the handler reads what it needs off
+    ``context``".
 
     Fields:
         catalog: The catalog service the tool consults for plugin metadata.

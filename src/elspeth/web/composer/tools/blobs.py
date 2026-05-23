@@ -1,6 +1,6 @@
 """Composer blob-storage plane — session-scoped binary blob handlers.
 
-Extracted from ``_legacy.py``. Hosts:
+Hosts:
 
 - Tool handlers for blob CRUD: ``_execute_create_blob`` / ``_execute_update_blob``
   / ``_execute_delete_blob`` / ``_execute_get_blob_content`` /
@@ -11,17 +11,11 @@ Extracted from ``_legacy.py``. Hosts:
 - Blob DTOs (``BlobToolRecord`` / ``BlobCreatePayload`` / ``_PreparedBlobCreate``)
   and in-transaction signal exceptions (``_BlobQuotaExceededInTxn`` /
   ``_BlobUpdateBlockedByActiveRun``).
-- Policy frozensets used by the registries (``_BLOB_QUOTA_MUTATION_TOOLS`` /
-  ``_BLOB_PROVENANCE_MUTATION_TOOLS`` / ``_BLOB_STORE_ONLY_MUTATION_TOOLS``) and the
-  ``is_blob_store_only_mutation_tool`` predicate.
-
-Not here (yet): the source-from-blob cluster (``_resolve_source_blob`` /
-``_source_blob_payload`` / ``_ResolvedSourceBlob`` / ``SourceBlobPayload`` /
-``_MIME_TO_SOURCE``) — that's source-plane work using blob lookup; it stays in
-``_legacy`` until the ``sources`` plane is extracted. The handler registries
-(``_BLOB_DISCOVERY_TOOLS`` / ``_BLOB_MUTATION_TOOLS``) likewise stay in
-``_legacy`` because their values point at cross-plane handlers; they move to
-``_registry`` once every plane exists.
+- Kwarg-shape frozensets (``_BLOB_QUOTA_MUTATION_TOOLS`` /
+  ``_BLOB_PROVENANCE_MUTATION_TOOLS``) describing which extended kwargs the
+  dispatch path threads into each blob handler. Tool-classification name sets
+  and predicates live in ``elspeth.web.composer.tools.discovery``; the trailing
+  comment in this file points to that module.
 
 Patch-target stability: tests that bind ``_BLOB_QUOTA_BYTES`` /
 ``_check_blob_quota`` / ``_sync_get_blob`` by full dotted path must target this

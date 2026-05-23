@@ -227,7 +227,7 @@ _REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[dict[str, Any]] = {
 def get_tool_definitions() -> list[dict[str, Any]]:
     """Return JSON Schema tool definitions for the LLM.
 
-    Returns 39 tools: 13 discovery + 13 mutation + 9 blob tools + 3 secret
+    Returns 40 tools: 13 discovery + 13 mutation + 9 blob tools + 3 secret
     tools + 1 advisor tool + 1 session-aware interpretation-review tool.
     ``request_advisor_hint`` is filtered out of the LLM-visible list when
     the operator's ``composer_advisor_enabled`` flag is False (the default)

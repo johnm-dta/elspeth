@@ -107,10 +107,8 @@ export function SaveForReviewDialog(): JSX.Element | null {
   }
 
   return (
-    <div
+    <section
       className="save-for-review-dialog"
-      role="dialog"
-      aria-modal="true"
       aria-labelledby="save-for-review-dialog-title"
       data-testid="save-for-review-dialog"
     >
@@ -197,6 +195,6 @@ export function SaveForReviewDialog(): JSX.Element | null {
           </button>
         </footer>
       </div>
-    </div>
+    </section>
   );
 }

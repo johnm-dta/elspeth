@@ -61,7 +61,10 @@ export function ToolCallCard({
       )}
       <details className="tool-call-details">
         <summary>View arguments (JSON)</summary>
-        <pre>{JSON.stringify(proposal.arguments_redacted_json, null, 2)}</pre>
+        <pre
+          tabIndex={0}
+          aria-label="Tool call arguments (scrollable)"
+        >{JSON.stringify(proposal.arguments_redacted_json, null, 2)}</pre>
       </details>
       {isStale && (
         <p className="tool-call-stale">

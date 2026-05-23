@@ -55,7 +55,9 @@
 .save-for-review-url-row input[type="text"] {
   flex: 1 1 auto;
   min-width: 0;
-  padding: var(--space-xs) var(--space-sm);
+  /* Vertical padding raised to --space-sm so the input clears the WCAG 2.5.8
+     24×24 minimum target with comfortable margin. */
+  padding: var(--space-sm) var(--space-sm);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
@@ -67,6 +69,17 @@
 .save-for-review-url-row a {
   flex: 0 0 auto;
   color: var(--color-link);
+  /* Inline-flex with the compact control floor (36px) so the anchor has
+     a real touch target rather than just line-height (~18px). */
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--size-control-compact);
+  padding: 0 var(--space-sm);
+  border-radius: var(--radius-sm);
+}
+
+.save-for-review-url-row a:hover {
+  background: var(--color-surface-hover);
 }
 
 .save-for-review-tip {

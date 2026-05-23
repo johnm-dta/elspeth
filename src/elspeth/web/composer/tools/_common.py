@@ -32,6 +32,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.config import TriggerConfig
 from elspeth.core.secrets import (
     collect_credential_field_violations,
@@ -1302,10 +1303,14 @@ class ToolContext:
             for blob tools to perform synchronous lookups; ``None`` for
             non-session callers.
         session_id: Current session ID. Required for blob tools.
-        secret_service: ``WebSecretService`` instance. Required for secret
-            tools. Typed ``Any`` because the public ``Protocol`` is wired in
-            elsewhere in the package and a typed reference here would create
-            a layer-import cycle. See ticket elspeth-40a47d57e6 B3.
+        secret_service: ``WebSecretResolver`` (L0 protocol from
+            ``elspeth.contracts.secrets``) — the auth-scoped resolver
+            surface composer tools consult.  Production wiring passes
+            ``ScopedSecretResolver`` (``elspeth.web.secrets.service``),
+            which binds the deployment's ``auth_provider_type`` so the
+            composer plane never has to know about it.  Required for
+            secret tools (``list_secret_refs`` / ``validate_secret_ref``
+            / ``wire_secret_ref``); ``None`` for non-secret-aware callers.
         user_id: Current user ID. Required for secret tools.
         baseline: Baseline state for ``diff_pipeline`` comparisons.
         current_validation: Pre-computed validation of the live state, used
@@ -1329,7 +1334,7 @@ class ToolContext:
     data_dir: str | None = None
     session_engine: Engine | None = None
     session_id: str | None = None
-    secret_service: Any = None
+    secret_service: WebSecretResolver | None = None
     user_id: str | None = None
     baseline: CompositionState | None = None
     current_validation: ValidationSummary | None = None

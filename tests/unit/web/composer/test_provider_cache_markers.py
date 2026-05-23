@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.web.composer.service import (
+from elspeth.web.composer.llm_response_parsing import (
     _apply_anthropic_cache_markers,
     _supports_anthropic_prompt_cache_markers,
 )

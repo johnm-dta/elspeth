@@ -22,10 +22,12 @@ from elspeth.web.composer.guided.state_machine import (
     SinkResolved,
     SourceResolved,
 )
-from elspeth.web.composer.service import (
-    _COMPOSER_LLM_TEMPERATURE,
+from elspeth.web.composer.llm_response_parsing import (
     _attach_llm_calls,
     _build_llm_call_record,
+)
+from elspeth.web.composer.service import (
+    _COMPOSER_LLM_TEMPERATURE,
     _composer_llm_seed_for_model,
     _litellm_acompletion,
 )

@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth.contracts import Checkpoint, NodeID, ResumePoint, RoutingMode, RunStatus
+from elspeth.contracts import Checkpoint, NodeID, ResumedRow, ResumePoint, RoutingMode, RunStatus
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenOutcome
 from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
 from elspeth.contracts.enums import NodeType, TerminalOutcome, TerminalPath
@@ -133,7 +133,12 @@ class TestResumeFinalizesAsFailed:
         # Mock RecoveryManager
         mock_recovery = MagicMock()
         mock_recovery.get_unprocessed_row_data.return_value = [
-            ("row-1", 0, {"field": "value"}),
+            ResumedRow(
+                row_id="row-1",
+                row_index=0,
+                source_node_id=NodeID("source-node"),
+                row_data={"field": "value"},
+            ),
         ]
 
         # Make _process_resumed_rows raise a RuntimeError (non-shutdown)
@@ -193,8 +198,15 @@ class TestResumeFinalizesAsFailed:
 
         interrupted = orch._run_resume_processing_loop(
             loop_ctx,
-            unprocessed_rows=(("row-should-not-replay", 0, {"value": 1}),),
-            schema_contract=MagicMock(),
+            unprocessed_rows=(
+                ResumedRow(
+                    row_id="row-should-not-replay",
+                    row_index=0,
+                    source_node_id=NodeID("source"),
+                    row_data={"value": 1},
+                ),
+            ),
+            schema_contracts_by_source={NodeID("source"): MagicMock()},
         )
 
         assert interrupted is False
@@ -234,10 +246,20 @@ class TestResumeFinalizesAsFailed:
             orch._run_resume_processing_loop(
                 loop_ctx,
                 unprocessed_rows=(
-                    ("row-scheduled", 0, {"value": 1}),
-                    ("row-uncovered", 1, {"value": 2}),
+                    ResumedRow(
+                        row_id="row-scheduled",
+                        row_index=0,
+                        source_node_id=NodeID("source"),
+                        row_data={"value": 1},
+                    ),
+                    ResumedRow(
+                        row_id="row-uncovered",
+                        row_index=1,
+                        source_node_id=NodeID("source"),
+                        row_data={"value": 2},
+                    ),
                 ),
-                schema_contract=MagicMock(),
+                schema_contracts_by_source={NodeID("source"): MagicMock()},
             )
 
         processor.drain_scheduled_work.assert_not_called()
@@ -287,11 +309,18 @@ class TestResumeFinalizesAsFailed:
                 "run-with-blocked-work",
                 config,
                 MagicMock(),
-                unprocessed_rows=(("row-should-not-replay", 0, {"value": 1}),),
+                unprocessed_rows=(
+                    ResumedRow(
+                        row_id="row-should-not-replay",
+                        row_index=0,
+                        source_node_id=NodeID("source"),
+                        row_data={"value": 1},
+                    ),
+                ),
                 restored_aggregation_state={},
                 restored_coalesce_state=None,
                 payload_store=MagicMock(),
-                schema_contract=MagicMock(),
+                schema_contracts_by_source={NodeID("source"): MagicMock()},
             )
 
         assert isinstance(exc_info.value.__cause__, OrchestrationInvariantError)
@@ -368,17 +397,25 @@ class TestResumeFinalizesAsFailed:
             coalesce_executor=None,
             coalesce_node_map={},
         )
-        fallback_contract = MagicMock(name="fallback-contract")
         orders_contract = MagicMock(name="orders-contract")
         refunds_contract = MagicMock(name="refunds-contract")
 
         interrupted = orch._run_resume_processing_loop(
             loop_ctx,
             unprocessed_rows=(
-                ("row-orders", 0, NodeID("source-orders"), {"order_id": 1}),
-                ("row-refunds", 1, NodeID("source-refunds"), {"refund_id": "r1"}),
+                ResumedRow(
+                    row_id="row-orders",
+                    row_index=0,
+                    source_node_id=NodeID("source-orders"),
+                    row_data={"order_id": 1},
+                ),
+                ResumedRow(
+                    row_id="row-refunds",
+                    row_index=1,
+                    source_node_id=NodeID("source-refunds"),
+                    row_data={"refund_id": "r1"},
+                ),
             ),
-            schema_contract=fallback_contract,
             schema_contracts_by_source={
                 NodeID("source-orders"): orders_contract,
                 NodeID("source-refunds"): refunds_contract,
@@ -707,8 +744,18 @@ class TestResumeFinalizesAsFailed:
         }
         mock_recovery = MagicMock()
         mock_recovery.get_unprocessed_row_data_by_source.return_value = (
-            ("row-orders", 0, NodeID("source-orders"), {"order_id": 1}),
-            ("row-refunds", 1, NodeID("source-refunds"), {"refund_id": "r1"}),
+            ResumedRow(
+                row_id="row-orders",
+                row_index=0,
+                source_node_id=NodeID("source-orders"),
+                row_data={"order_id": 1},
+            ),
+            ResumedRow(
+                row_id="row-refunds",
+                row_index=1,
+                source_node_id=NodeID("source-refunds"),
+                row_data={"refund_id": "r1"},
+            ),
         )
         orders_schema = MagicMock(name="OrdersSchema")
         refunds_schema = MagicMock(name="RefundsSchema")
@@ -721,8 +768,18 @@ class TestResumeFinalizesAsFailed:
             state = orch._reconstruct_resume_state(resume_point, MockPayloadStore())
 
         assert state.unprocessed_rows == (
-            ("row-orders", 0, NodeID("source-orders"), {"order_id": 1}),
-            ("row-refunds", 1, NodeID("source-refunds"), {"refund_id": "r1"}),
+            ResumedRow(
+                row_id="row-orders",
+                row_index=0,
+                source_node_id=NodeID("source-orders"),
+                row_data={"order_id": 1},
+            ),
+            ResumedRow(
+                row_id="row-refunds",
+                row_index=1,
+                source_node_id=NodeID("source-refunds"),
+                row_data={"refund_id": "r1"},
+            ),
         )
         assert state.schema_contracts_by_source == {
             NodeID("source-orders"): orders_contract,
@@ -768,7 +825,7 @@ class TestResumeFinalizesAsFailed:
             restored_aggregation_state={},
             restored_coalesce_state=empty_coalesce_state,
             unprocessed_rows=(),
-            schema_contract=MagicMock(spec=object),
+            schema_contracts_by_source={NodeID("source"): MagicMock()},
         )
 
         with (
@@ -879,7 +936,7 @@ class TestResumeFinalizesAsFailed:
             restored_aggregation_state={},
             restored_coalesce_state=None,
             unprocessed_rows=(),
-            schema_contract=MagicMock(),
+            schema_contracts_by_source={NodeID("source"): MagicMock()},
         )
 
         with (

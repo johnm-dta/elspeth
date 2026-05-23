@@ -66,7 +66,7 @@ from elspeth.contracts.call_data import (
     LLMCallResponse,
     RawCallPayload,
 )
-from elspeth.contracts.checkpoint import ResumeCheck, ResumePoint
+from elspeth.contracts.checkpoint import ResumeCheck, ResumedRow, ResumePoint
 from elspeth.contracts.cli import ExecutionResult, ProgressEvent
 from elspeth.contracts.coalesce_checkpoint import (
     CoalesceCheckpointState,
@@ -168,6 +168,7 @@ from elspeth.contracts.errors import (
     ContractViolation,
     DependencyFailedError,
     DuplicateDocumentError,
+    EmptyResumeStateError,
     ErrorDetail,
     ExecutionError,
     ExtraFieldViolation,
@@ -309,6 +310,7 @@ __all__ = [  # Grouped by category for readability
     "CommencementGateFailedError",
     "DependencyFailedError",
     "DuplicateDocumentError",
+    "EmptyResumeStateError",
     "FrameworkBugError",
     "GracefulShutdownError",
     "OrchestrationInvariantError",
@@ -419,6 +421,7 @@ __all__ = [  # Grouped by category for readability
     "CoalesceTokenCheckpoint",
     "ResumeCheck",
     "ResumePoint",
+    "ResumedRow",
     # coalesce enums
     "CoalescePolicy",
     "MergeStrategy",

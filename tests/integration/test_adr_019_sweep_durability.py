@@ -220,7 +220,7 @@ def _setup_adr019_failed_resume_run(
 
     from elspeth.contracts.contract_records import ContractAuditRecord
     from elspeth.core.checkpoint import CheckpointManager
-    from elspeth.core.landscape.schema import edges_table, nodes_table, rows_table, runs_table, tokens_table
+    from elspeth.core.landscape.schema import edges_table, nodes_table, rows_table, run_sources_table, runs_table, tokens_table
 
     now = datetime.now(UTC)
     source_data = [{"value": i} for i in range(num_rows)]
@@ -299,6 +299,30 @@ def _setup_adr019_failed_resume_run(
                     created_at=now,
                 )
             )
+        # ADR-025 §3: record run_sources for the single source node so the
+        # RC6 resume path can key the schema contract under the actual
+        # ``source_node_id``. Production code (Orchestrator emits this
+        # via ``_emit_source_loading`` before the first row is persisted)
+        # always writes at least one run_sources record on a real failed
+        # run; reproducing that shape here keeps the fixture realistic
+        # and avoids triggering ``EmptyResumeStateError`` for tests that
+        # legitimately exercise the early-exit path (all rows already
+        # processed) rather than the refuse path (no work persisted).
+        conn.execute(
+            insert(run_sources_table).values(
+                run_id=run_id,
+                source_node_id=source_nid,
+                source_name="source",
+                plugin_name="list_source",
+                lifecycle_state="loaded",
+                config_hash="test",
+                schema_json=json.dumps({"properties": {"value": {"type": "integer"}}, "required": ["value"]}),
+                schema_contract_json=audit_record.to_json(),
+                schema_contract_hash=contract.version_hash(),
+                field_resolution_json=None,
+                recorded_at=now,
+            )
+        )
         for i in range(num_rows):
             row_data = {"value": i}
             ref = payload_store.store(json.dumps(row_data).encode())
@@ -473,7 +497,17 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
     captured: dict[str, str] = {}
     original_loop = Orchestrator._run_main_processing_loop
 
-    def _corrupting_loop(self: Orchestrator, loop_ctx, factory, run_id, source_id, edge_map, *, shutdown_event=None):
+    def _corrupting_loop(
+        self: Orchestrator,
+        loop_ctx,
+        factory,
+        run_id,
+        source_id,
+        edge_map,
+        *,
+        shutdown_event=None,
+        flush_end_of_input=True,
+    ):
         captured["run_id"] = run_id
         sink = factory.data_flow.register_node(
             run_id=run_id,
@@ -542,7 +576,16 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
                 sink_name=DISCARD_SINK_NAME,
                 error_hash=_ERROR_HASH,
             )
-        return original_loop(self, loop_ctx, factory, run_id, source_id, edge_map, shutdown_event=None)
+        return original_loop(
+            self,
+            loop_ctx,
+            factory,
+            run_id,
+            source_id,
+            edge_map,
+            shutdown_event=shutdown_event,
+            flush_end_of_input=flush_end_of_input,
+        )
 
     monkeypatch.setattr(Orchestrator, "_run_main_processing_loop", _corrupting_loop)
     config, graph = _build_minimal_run()

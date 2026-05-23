@@ -24,6 +24,7 @@ from elspeth.contracts import (
     PipelineRow,
     PluginSchema,
     ResumeCheck,
+    ResumedRow,
     ResumePoint,
     RunStatus,
     SchemaContract,
@@ -271,12 +272,18 @@ class RecoveryManager:
         payload_store: PayloadStore,
         *,
         source_schema_class: type[PluginSchema],
-    ) -> list[tuple[str, int, dict[str, Any]]]:
+    ) -> list[ResumedRow]:
         """Get row data for unprocessed rows with type fidelity preservation.
 
         Retrieves actual row data (not just IDs) for rows that need
-        processing during resume. Returns tuples of (row_id, row_index, row_data)
+        processing during resume. Returns ``ResumedRow`` instances
         ordered by row_index for deterministic processing.
+
+        Used on the pre-RC6 single-source resume path where ``run_sources``
+        is empty; every persisted row still carries its originating
+        ``source_node_id`` (NOT NULL per schema), which is preserved on
+        the ResumedRow so downstream consumers can look up the row's
+        schema contract by source node identity (ADR-025 §3).
 
         IMPORTANT: Type Fidelity Preservation (REQUIRED)
         -------------------------------------------------
@@ -300,7 +307,7 @@ class RecoveryManager:
                 The schema must have allow_coercion=True to handle string→typed conversions.
 
         Returns:
-            List of (row_id, row_index, row_data) tuples, ordered by row_index.
+            List of ResumedRow records, ordered by row_index.
             Empty list if run cannot be resumed or all rows were processed.
 
         Raises:
@@ -313,10 +320,15 @@ class RecoveryManager:
         if not row_ids:
             return []
 
-        result: list[tuple[str, int, dict[str, Any]]] = []
+        result: list[ResumedRow] = []
 
         # Batch query: Fetch row metadata in chunks to respect SQLite bind limit.
-        row_metadata: dict[str, tuple[int, str | None]] = {}
+        # ADR-025 §4: source_node_id is now load-bearing on every row, not
+        # just multi-source pipelines. Pre-RC6 audit DBs without
+        # ``run_sources`` records still carry source_node_id on rows
+        # (NOT NULL per schema) and resume must propagate it so downstream
+        # consumers look up the per-row schema contract by source identity.
+        row_metadata: dict[str, tuple[int, NodeID, str | None]] = {}
         with self._db.engine.connect() as conn:
             for i in range(0, len(row_ids), _METADATA_CHUNK_SIZE):
                 chunk = row_ids[i : i + _METADATA_CHUNK_SIZE]
@@ -324,17 +336,18 @@ class RecoveryManager:
                     select(
                         rows_table.c.row_id,
                         rows_table.c.row_index,
+                        rows_table.c.source_node_id,
                         rows_table.c.source_data_ref,
                     ).where(rows_table.c.row_id.in_(chunk))
                 ).fetchall()
                 for r in rows_result:
-                    row_metadata[r.row_id] = (r.row_index, r.source_data_ref)
+                    row_metadata[r.row_id] = (r.row_index, NodeID(r.source_node_id), r.source_data_ref)
 
         for row_id in row_ids:
             if row_id not in row_metadata:
                 raise AuditIntegrityError(f"Row {row_id} not found in database — audit data corruption (Tier 1 violation)")
 
-            row_index, source_data_ref = row_metadata[row_id]
+            row_index, source_node_id, source_data_ref = row_metadata[row_id]
 
             if source_data_ref is None:
                 raise ValueError(
@@ -384,7 +397,14 @@ class RecoveryManager:
                     f"The source plugin's schema must declare fields matching the stored row structure."
                 )
 
-            result.append((row_id, row_index, row_data))
+            result.append(
+                ResumedRow(
+                    row_id=row_id,
+                    row_index=row_index,
+                    source_node_id=source_node_id,
+                    row_data=row_data,
+                )
+            )
 
         return result
 
@@ -394,13 +414,14 @@ class RecoveryManager:
         payload_store: PayloadStore,
         *,
         source_schema_classes: Mapping[NodeID, type[PluginSchema]],
-    ) -> list[tuple[str, int, NodeID, dict[str, Any]]]:
+    ) -> list[ResumedRow]:
         """Get unprocessed row data with source-scoped type restoration.
 
         Multi-source resume cannot validate every persisted payload through a
         single source schema. Rows carry ``source_node_id`` in Landscape, and
         this method uses that node identity to select the schema class that
-        originally ingested the row.
+        originally ingested the row. Returns ``ResumedRow`` instances
+        ordered by ``ingest_sequence`` (ADR-025 §4).
         """
         row_ids = self.get_unprocessed_rows(run_id)
         if not row_ids:
@@ -426,7 +447,7 @@ class RecoveryManager:
             row_ids,
             key=lambda row_id: row_metadata[row_id][1] if row_id in row_metadata else -1,
         )
-        result: list[tuple[str, int, NodeID, dict[str, Any]]] = []
+        result: list[ResumedRow] = []
         for row_id in ordered_row_ids:
             if row_id not in row_metadata:
                 raise AuditIntegrityError(f"Row {row_id} not found in database — audit data corruption (Tier 1 violation)")
@@ -477,7 +498,14 @@ class RecoveryManager:
                     f"The source plugin's schema must declare fields matching the stored row structure."
                 )
 
-            result.append((row_id, row_index, source_node_id, row_data))
+            result.append(
+                ResumedRow(
+                    row_id=row_id,
+                    row_index=row_index,
+                    source_node_id=source_node_id,
+                    row_data=row_data,
+                )
+            )
 
         return result
 

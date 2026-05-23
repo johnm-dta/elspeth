@@ -24,6 +24,7 @@ from elspeth.contracts import ExecutionResult, SecretResolutionInput
 from elspeth.contracts.errors import (
     CommencementGateFailedError,
     DependencyFailedError,
+    EmptyResumeStateError,
     GracefulShutdownError,
 )
 from elspeth.contracts.types import AggregationName
@@ -2088,6 +2089,33 @@ def resume(
                 typer.echo(f"\nResume interrupted after {e.rows_processed} rows.")
                 typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
             raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
+        except EmptyResumeStateError as e:
+            # ADR-025 §3: empty-state resume is the interpretable
+            # "nothing to resume, start fresh" outcome — distinct from
+            # the broader Tier-1 invariant traceback path below. This
+            # catch MUST precede the TIER_1_ERRORS handler because
+            # EmptyResumeStateError is a subclass of
+            # OrchestrationInvariantError (so existing Tier-1 catches
+            # still match it by type) but the operator-facing surface
+            # is a clean stderr message and exit 1, not a fatal
+            # framework-bug traceback.
+            if output_format == "json":
+                import json as json_mod_empty
+
+                typer.echo(
+                    json_mod_empty.dumps(
+                        {
+                            "event": "not_resumable",
+                            "run_id": e.run_id,
+                            "reason": "no_recorded_work",
+                            "message": str(e),
+                        }
+                    ),
+                    err=True,
+                )
+            else:
+                typer.echo(f"\nCannot resume run {e.run_id}: {e}", err=True)
+            raise typer.Exit(1) from e
         except contract_errors.TIER_1_ERRORS as e:
             # Tier 1 violations and framework bugs MUST be clearly distinguishable
             # from config errors — same pattern as the `run` command handler.

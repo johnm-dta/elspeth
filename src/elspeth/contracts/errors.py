@@ -760,6 +760,51 @@ class OrchestrationInvariantError(Exception):
     pass
 
 
+class EmptyResumeStateError(OrchestrationInvariantError):
+    """Raised when resume is attempted for a run with no recorded work.
+
+    ADR-025 §3 declares ``ResumeState.schema_contracts_by_source``
+    non-empty by invariant. The construction-time guard in
+    ``ResumeState.__post_init__`` is the chokepoint that pins the
+    invariant; this exception is the upstream refuse path so callers
+    can distinguish "nothing to resume" from "audit corruption
+    invariant violation" without parsing exception messages.
+
+    Empty-state resume is not an invariant violation in the usual
+    Tier-1 sense — the audit DB is intact, it just records that no
+    rows were committed and no ``run_sources`` records were written
+    before the prior run failed (an ``on_start`` failure, a
+    source-level abort before the first ingest, or an infrastructure
+    crash before the first row was persisted). The audit trail is
+    truthful: the run did no work. The correct operator-facing
+    outcome is "start a fresh run", not a crash dump.
+
+    Inherits from :class:`OrchestrationInvariantError` deliberately so
+    every existing ``except OrchestrationInvariantError`` block
+    continues to catch this case — the type contract is preserved.
+    Code paths that want the *interpretable* outcome (clean exit with
+    operator message rather than a Tier-1 fatal traceback) must catch
+    ``EmptyResumeStateError`` explicitly *before* the broader
+    ``OrchestrationInvariantError`` / ``TIER_1_ERRORS`` handler.
+
+    Carries ``run_id`` so the upstream caller (CLI, orchestrator
+    supervisor) has the identifier for its operator-facing message
+    without having to reconstruct it from the exception text.
+    """
+
+    def __init__(self, run_id: str, message: str | None = None) -> None:
+        self.run_id = run_id
+        super().__init__(
+            message
+            or (
+                f"Resume requested for run {run_id!r}, but no rows were "
+                "committed and no run_sources records were written. The "
+                "run failed before any work was persisted to the audit "
+                "trail. Start a fresh run."
+            )
+        )
+
+
 class DeclaredRequiredInputFieldsPayload(TypedDict):
     """Audit payload for ADR-013 declared-input-field mismatches."""
 

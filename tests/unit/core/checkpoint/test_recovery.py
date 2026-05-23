@@ -15,6 +15,7 @@ from elspeth.contracts import (
     NodeType,
     PayloadStore,
     PluginSchema,
+    ResumedRow,
     RunStatus,
     TerminalOutcome,
     TerminalPath,
@@ -32,6 +33,7 @@ from elspeth.contracts.coalesce_checkpoint import (
 from elspeth.contracts.contract_records import ContractAuditRecord
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint import CheckpointCorruptionError, CheckpointManager, RecoveryManager
 from elspeth.core.checkpoint.manager import IncompatibleCheckpointError
 from elspeth.core.checkpoint.recovery import _DELEGATION_PATHS, IncompleteTokenSpec
@@ -984,7 +986,10 @@ def test_get_unprocessed_row_data_chunked_lookup_and_type_restoration(
     monkeypatch.setattr("elspeth.core.checkpoint.recovery._METADATA_CHUNK_SIZE", 1)
 
     rows = recovery_manager.get_unprocessed_row_data("run-chunked", payload_store, source_schema_class=_SimpleSchema)
-    assert rows == [("row-a", 2, {"id": 1}), ("row-b", 5, {"id": 2})]
+    assert rows == [
+        ResumedRow(row_id="row-a", row_index=2, source_node_id=NodeID("source-node"), row_data={"id": 1}),
+        ResumedRow(row_id="row-b", row_index=5, source_node_id=NodeID("source-node"), row_data={"id": 2}),
+    ]
 
 
 def test_verify_contract_integrity_returns_contract(

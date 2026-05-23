@@ -22,9 +22,9 @@ from __future__ import annotations
 import threading
 from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from elspeth.contracts import PipelineRow
+from elspeth.contracts import PipelineRow, ResumedRow
 from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError
 from elspeth.contracts.types import NodeID
 from elspeth.engine.orchestrator.aggregation import (
@@ -142,10 +142,9 @@ def setup_resume_context(
 
 def run_resume_processing_loop(
     loop_ctx: LoopContext,
-    unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]],
-    schema_contract: SchemaContract,
+    unprocessed_rows: Sequence[ResumedRow],
     *,
-    schema_contracts_by_source: Mapping[NodeID, SchemaContract] | None = None,
+    schema_contracts_by_source: Mapping[NodeID, SchemaContract],
     source_on_success_by_source: Mapping[NodeID, str] | None = None,
     incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]],
     recovery_manager: RecoveryManager,
@@ -175,6 +174,11 @@ def run_resume_processing_loop(
     - Otherwise (never started, or fully linear): whole-row restart from source
       via process_existing_row is correct.
 
+    Per ADR-025 §3, ``schema_contracts_by_source`` is the plural-by-source
+    resume contract surface. Every ``ResumedRow`` carries a non-optional
+    ``source_node_id``; missing entries are audit corruption and resume refuses
+    instead of choosing a default.
+
     Returns:
         True if interrupted by shutdown, False otherwise.
     """
@@ -195,7 +199,7 @@ def run_resume_processing_loop(
     interrupted_by_shutdown = shutdown_event is not None and shutdown_event.is_set()
 
     if not interrupted_by_shutdown and processor.has_scheduled_work():
-        recovered_row_ids = frozenset(row[0] for row in unprocessed_rows)
+        recovered_row_ids = frozenset(row.row_id for row in unprocessed_rows)
         scheduled_row_ids = processor.active_scheduled_row_ids()
         uncovered_row_ids = recovered_row_ids - scheduled_row_ids
         if uncovered_row_ids:
@@ -219,25 +223,24 @@ def run_resume_processing_loop(
     for resumed_row in unprocessed_rows:
         if interrupted_by_shutdown:
             break
-        if len(resumed_row) == 4:
-            row_id, _row_index, source_node_id, row_data = resumed_row
-            if schema_contracts_by_source is None or source_node_id not in schema_contracts_by_source:
-                raise OrchestrationInvariantError(
-                    f"Cannot resume row {row_id!r} from source node {source_node_id!r}: "
-                    "source-scoped schema contract is missing from resume state."
-                )
-            row_contract = schema_contracts_by_source[source_node_id]
-            if source_on_success_by_source is None or source_node_id not in source_on_success_by_source:
-                raise OrchestrationInvariantError(
-                    f"Cannot resume row {row_id!r} from source node {source_node_id!r}: "
-                    "source-scoped on_success routing is missing from resume state."
-                )
-            source_on_success = source_on_success_by_source[source_node_id]
-        else:
-            row_id, _row_index, row_data = resumed_row
-            source_node_id = None
-            row_contract = schema_contract
-            source_on_success = None
+        row_id = resumed_row.row_id
+        source_node_id = resumed_row.source_node_id
+        row_data = resumed_row.row_data
+        if source_node_id not in schema_contracts_by_source:
+            raise OrchestrationInvariantError(
+                f"Cannot resume row {row_id!r} from source node {source_node_id!r}: "
+                "source-scoped schema contract is missing from resume state "
+                f"(available source_node_ids: {sorted(schema_contracts_by_source)}). "
+                "The audit trail recorded the row under a source whose contract was "
+                "not restored; resume refuses rather than validate under an arbitrary contract."
+            )
+        row_contract = schema_contracts_by_source[source_node_id]
+        if source_on_success_by_source is None or source_node_id not in source_on_success_by_source:
+            raise OrchestrationInvariantError(
+                f"Cannot resume row {row_id!r} from source node {source_node_id!r}: "
+                "source-scoped on_success routing is missing from resume state."
+            )
+        source_on_success = source_on_success_by_source[source_node_id]
         counters.rows_processed += 1
 
         # ─────────────────────────────────────────────────────────────────
@@ -254,10 +257,11 @@ def run_resume_processing_loop(
         )
         counters.accumulate_flush_result(timeout_result)
 
-        # Wrap row_data in PipelineRow with contract (PIPELINEROW MIGRATION)
-        # Row data from resume is a plain dict, but process_existing_row expects PipelineRow
+        # Wrap row_data in PipelineRow with contract. ResumedRow.row_data may be
+        # a frozen mapping; PipelineRow intentionally requires a plain dict at
+        # this boundary.
         ctx.contract = row_contract
-        pipeline_row = PipelineRow(data=row_data, contract=row_contract)
+        pipeline_row = PipelineRow(data=dict(row_data), contract=row_contract)
 
         # F1 fix: dispatch on whether this row has incomplete fork/expand/coalesce child tokens.
         #
@@ -311,6 +315,7 @@ def run_resume_processing_loop(
 
         if results:
             loop_ctx.last_token_id = results[-1].token.token_id
+            loop_ctx.last_token_source_id = source_node_id
 
         # Handle all results from this row
         accumulate_row_outcomes(results, counters, pending_tokens)

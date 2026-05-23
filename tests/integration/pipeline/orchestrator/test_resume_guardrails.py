@@ -17,9 +17,10 @@ from unittest.mock import patch
 
 import pytest
 
-from elspeth.contracts import Checkpoint, PluginSchema, ResumePoint, RunStatus
-from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError
+from elspeth.contracts import Checkpoint, PluginSchema, ResumedRow, ResumePoint, RunStatus
+from elspeth.contracts.errors import AuditIntegrityError, EmptyResumeStateError, OrchestrationInvariantError
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+from elspeth.contracts.types import NodeID
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -178,7 +179,14 @@ class TestResumeGuardrails:
         with (
             patch(
                 "elspeth.core.checkpoint.recovery.RecoveryManager.get_unprocessed_row_data",
-                return_value=[("row-1", 0, {"id": 1, "value": "alpha"})],
+                return_value=[
+                    ResumedRow(
+                        row_id="row-1",
+                        row_index=0,
+                        source_node_id=NodeID("source-node"),
+                        row_data={"id": 1, "value": "alpha"},
+                    ),
+                ],
             ),
             pytest.raises(AuditIntegrityError, match="has no edges registered") as exc_info,
         ):
@@ -227,8 +235,36 @@ class TestResumeGuardrails:
         assert run_id in str(exc_info.value)
         assert "contract registry" in str(exc_info.value).lower()
 
-    def test_resume_positive_control_succeeds_with_valid_preconditions(self, resume_test_env: dict[str, Any]) -> None:
-        """Valid setup still resumes successfully (early exit when no rows remain)."""
+    def test_resume_refuses_with_typed_error_when_no_sources_recorded(self, resume_test_env: dict[str, Any]) -> None:
+        """ADR-025 §3: empty resume state is refused with a typed exception.
+
+        Previously framed as a "positive control" for the early-exit
+        path (no rows -> clean completion). Under the strict ADR-025 §3
+        reading, ``ResumeState.schema_contracts_by_source`` is non-empty
+        by invariant: a run that failed before any row was committed
+        AND wrote no ``run_sources`` records has nothing to key a
+        contract under, and there is no honest way to construct a
+        ResumeState. ``_reconstruct_resume_state`` must refuse upstream
+        with :class:`EmptyResumeStateError` so the CLI can present a
+        clean "this run is not resumable, start a fresh run" outcome
+        rather than a Tier-1 invariant traceback.
+
+        Fixture shape: ``_create_failed_run(include_contract=True)``
+        writes ``runs.contract_json`` but does NOT call
+        ``record_run_source``; combined with the mocked
+        ``get_unprocessed_row_data`` returning ``[]``, the legacy
+        single-source resume path observes zero distinct
+        ``source_node_id`` values and therefore produces an empty
+        contract map — the exact precondition that triggers the
+        strict refuse.
+
+        The genuine "early-exit on empty rows" success path is
+        exercised in
+        ``tests/unit/engine/orchestrator/test_resume_failure.py::test_resume_treats_empty_coalesce_checkpoint_as_all_rows_processed``,
+        which constructs ``ResumeState`` directly with a non-empty
+        contract map (the RC6 shape: run_sources records present,
+        unprocessed_rows empty).
+        """
         run_id = _create_failed_run(resume_test_env["factory"], include_contract=True)
         orchestrator = Orchestrator(
             resume_test_env["db"],
@@ -236,28 +272,29 @@ class TestResumeGuardrails:
         )
         config, graph = _build_pipeline()
 
-        with patch(
-            "elspeth.core.checkpoint.recovery.RecoveryManager.get_unprocessed_row_data",
-            return_value=[],
+        with (
+            patch(
+                "elspeth.core.checkpoint.recovery.RecoveryManager.get_unprocessed_row_data",
+                return_value=[],
+            ),
+            pytest.raises(EmptyResumeStateError) as exc_info,
         ):
-            result = orchestrator.resume(
+            orchestrator.resume(
                 resume_point=_make_resume_point(run_id),
                 config=config,
                 graph=graph,
                 payload_store=resume_test_env["payload_store"],
             )
 
-        # Phase 2.2 (elspeth-0de989c56d): the resume's early-exit branch
-        # now derives the truthful terminal status from the audit DB
-        # ``token_outcomes`` instead of writing ``COMPLETED``
-        # unconditionally.  This run was set up via ``_create_failed_run``
-        # with ``status=FAILED`` and zero token_outcomes — the truthful
-        # state is therefore ``EMPTY`` (no row outcomes) rather than the
-        # pre-Phase-2.2 unconditional ``COMPLETED``.  Both the local
-        # ``RunResult`` and the persisted Landscape ``Run`` reflect the
-        # same predicate output.
-        assert result.status == RunStatus.EMPTY
-        assert result.rows_processed == 0
-        run = resume_test_env["factory"].run_lifecycle.get_run(run_id)
-        assert run is not None
-        assert run.status == RunStatus.EMPTY
+        # EmptyResumeStateError carries the run_id directly so the
+        # upstream caller (CLI) can present an operator-facing message
+        # without parsing the exception text.
+        assert exc_info.value.run_id == run_id
+        # The exception message mentions the empty-work shape so an
+        # operator reading stderr understands why resume refused.
+        assert "no rows were committed" in str(exc_info.value).lower()
+        # Subclass relationship is load-bearing: every existing
+        # ``except OrchestrationInvariantError`` catch must still
+        # match this exception so callers without explicit
+        # EmptyResumeStateError handling do not silently miss it.
+        assert isinstance(exc_info.value, OrchestrationInvariantError)

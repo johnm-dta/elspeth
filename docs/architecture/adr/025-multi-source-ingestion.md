@@ -133,14 +133,39 @@ by code**. The singular `source` surface is deleted, not deprecated.
    reserved for legacy checkpoint identity is no longer special.
 
 3. **`ResumeState.schema_contract` is removed.** The replacement is
-   `schema_contracts_by_source: Mapping[NodeID, SchemaContract]`, which
-   is non-optional and never empty (resume rejects rather than picks).
-   Every consumer of `schema_contract` migrates to look up the row's
-   contract by `source_node_id`. The `next(iter(...))` arbitrary-pick
-   at `orchestrator/core.py:3512` is deleted — the single dim2 sentence
+   `schema_contracts_by_source: Mapping[NodeID, SchemaContract]`,
+   which is non-optional and non-empty by invariant. Every consumer
+   of `schema_contract` migrates to look up the row's contract by
+   `source_node_id`. The `next(iter(...))` arbitrary-pick at
+   `orchestrator/core.py:3512` is deleted — the single dim2 sentence
    the reviewers all converged on: *"silently validates rows under the
    wrong schema — Tier 1 evidence tampering, the exact failure mode the
-   trust model exists to prevent."* (Closes G2 / elspeth-01942858c3.)
+   trust model exists to prevent."*
+
+   **Empty is not a representable state.** A run that failed before
+   any row was committed has no `run_sources` records to reconstruct
+   contracts from. Resume of such a run raises
+   `EmptyResumeStateError` (a subclass of
+   `OrchestrationInvariantError`) at the `_reconstruct_resume_state`
+   site, *before* `ResumeState` is constructed. The CLI catches the
+   typed exception specifically and surfaces a clean operator-facing
+   "this run is not resumable; start a fresh run" message at exit-1
+   (not a fatal traceback). `ResumeState.__post_init__` then enforces
+   the unconditional invariant `len(schema_contracts_by_source) >= 1`
+   as a chokepoint guard — hitting it means the upstream refuse path
+   was bypassed by a framework bug, not an operator outcome. Both
+   guards together carry the invariant: graceful refusal upstream,
+   loud chokepoint downstream. (Closes G2 / elspeth-01942858c3.)
+
+   *Doctrine note (2026-05-23): Tier-1 graceful refuse via a typed
+   upstream-interpretable exception is in-scope — the CLAUDE.md
+   doctrine forbids implicit fabrication (e.g., `.get(k, default)`
+   pitching the decision to an untrusted provider), not explicit
+   exception-raising for graceful upstream management. A future
+   refactor (filigree elspeth-4b61252164) may strengthen this to a
+   discriminated-union return type so the empty case becomes
+   literally unrepresentable at the type level rather than
+   runtime-rejected.*
 
 4. **`unprocessed_rows` is a single shape, not a discriminated
    union.** The 3-tuple|4-tuple union at

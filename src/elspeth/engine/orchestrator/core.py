@@ -46,6 +46,7 @@ import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
 from elspeth.contracts import (
     ExportStatus,
     PendingOutcome,
+    ResumedRow,
     RouteDestination,
     RunStatus,
     SchemaContract,
@@ -67,6 +68,7 @@ from elspeth.contracts.declaration_contracts import (
 from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     AuditIntegrityError,
+    EmptyResumeStateError,
     ExecutionError,
     FrameworkBugError,
     GracefulShutdownError,
@@ -2728,10 +2730,16 @@ class Orchestrator:
                 "declaration-contract and Tier-1 registries."
             )
 
-        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]]
-        schema_contract: SchemaContract
+        unprocessed_rows: Sequence[ResumedRow]
         schema_contracts_by_source: dict[NodeID, SchemaContract]
 
+        # ADR-025 §3: schema contracts are plural-by-source. RC6 audit DBs
+        # populate ``run_sources`` with one record per declared source;
+        # pre-RC6 single-source DBs carry the contract only in
+        # ``runs.contract_json``. Both shapes feed into the same plural
+        # surface — the singular ``ResumeState.schema_contract`` field
+        # that previously absorbed an arbitrary ``next(iter(...))`` pick
+        # has been deleted.
         source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
         if source_records:
             source_schema_classes: dict[NodeID, type[Any]] = {}
@@ -2747,8 +2755,8 @@ class Orchestrator:
                 payload_store,
                 source_schema_classes=source_schema_classes,
             )
-            schema_contract = next(iter(schema_contracts_by_source.values()))
         else:
+            # Pre-RC6 audit DB: no ``run_sources`` records, single source.
             # TYPE FIDELITY: Retrieve source schema from audit trail for type restoration
             # Resume must use the ORIGINAL run's schema, not the current source's schema
             # This enables proper type coercion (datetime/Decimal) from JSON payload strings
@@ -2778,9 +2786,57 @@ class Orchestrator:
                     f"Resume cannot proceed safely without the schema contract. "
                     f"The audit trail must be complete and trustworthy."
                 )
-            schema_contract = legacy_schema_contract
-            unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store, source_schema_class=source_schema_class)
-            schema_contracts_by_source = {}
+            unprocessed_rows = recovery.get_unprocessed_row_data(
+                run_id,
+                payload_store,
+                source_schema_class=source_schema_class,
+            )
+            # Build the per-source map from the single legacy contract by
+            # keying it under the source NodeID(s) observed on the
+            # unprocessed rows. Every row in the rows table carries a
+            # NOT-NULL ``source_node_id``; for a legacy single-source run
+            # all rows must share one source NodeID. If they don't (e.g.,
+            # a multi-source RC6 run that somehow lost its ``run_sources``
+            # records), the legacy fallback cannot guarantee per-source
+            # contracts and must refuse the resume rather than misvalidate.
+            distinct_source_ids = {row.source_node_id for row in unprocessed_rows}
+            if not distinct_source_ids:
+                # No unprocessed rows AND no ``run_sources`` records: there
+                # is no source NodeID to key the legacy contract under.
+                # ADR-025 §3 demands a non-empty
+                # ``schema_contracts_by_source`` map; fabricating a
+                # synthetic key for a contract that has nothing to
+                # validate would just dress the empty case up as a full
+                # one. The truthful outcome — and the only one that
+                # preserves the audit-integrity invariant — is to refuse
+                # the resume entirely with the typed error so the upstream
+                # caller can present "this run is not resumable, start
+                # fresh" without crashing.
+                schema_contracts_by_source = {}
+            elif len(distinct_source_ids) != 1:
+                raise OrchestrationInvariantError(
+                    f"Cannot resume run '{run_id}': legacy single-source resume path observed "
+                    f"{len(distinct_source_ids)} distinct source_node_ids on unprocessed rows "
+                    f"({sorted(distinct_source_ids)}) but the audit trail has no ``run_sources`` "
+                    "records to disambiguate their schema contracts. The audit data is "
+                    "inconsistent: either ``run_sources`` was lost or a multi-source pipeline "
+                    "wrote rows under the legacy single-contract writer (ADR-025 §3)."
+                )
+            else:
+                legacy_source_id = next(iter(distinct_source_ids))
+                schema_contracts_by_source = {legacy_source_id: legacy_schema_contract}
+
+        # ADR-025 §3: refuse to resume rather than pick or fabricate. The
+        # audit DB recorded no source contracts — either the run failed
+        # before any row was committed (``on_start`` failure, source-level
+        # abort, infrastructure crash before first row) or the audit DB
+        # is from an earlier schema that carried no multi-source surface
+        # at all. Either way, resume has no contract to validate against.
+        # Raise the typed error so the upstream caller (CLI ``elspeth
+        # resume``) can present a clean operator-facing outcome instead
+        # of a Tier-1 invariant traceback.
+        if not schema_contracts_by_source:
+            raise EmptyResumeStateError(run_id=run_id)
 
         # F1 fix: pre-compute incomplete child tokens so the resume loop can dispatch
         # partial-fork/expand/coalesce rows via mid-DAG continuation rather than
@@ -2793,7 +2849,6 @@ class Orchestrator:
             restored_aggregation_state=restored_state,
             restored_coalesce_state=restored_coalesce_state,
             unprocessed_rows=unprocessed_rows,
-            schema_contract=schema_contract,
             incomplete_by_row=incomplete_by_row,
             recovery_manager=recovery,
             schema_contracts_by_source=schema_contracts_by_source,
@@ -2846,7 +2901,6 @@ class Orchestrator:
         restored_coalesce_state = state.restored_coalesce_state
         if restored_coalesce_state is not None and not restored_coalesce_state.has_resumable_state:
             restored_coalesce_state = None
-        schema_contract = state.schema_contract
         schema_contracts_by_source = state.schema_contracts_by_source
         unprocessed_rows = state.unprocessed_rows
         # F1 fix: pre-computed by _reconstruct_resume_state; forwarded to the loop.
@@ -2920,7 +2974,6 @@ class Orchestrator:
                     restored_coalesce_state=restored_coalesce_state,
                     settings=settings,
                     payload_store=payload_store,
-                    schema_contract=schema_contract,
                     incomplete_by_row=incomplete_by_row,
                     recovery_manager=recovery_manager,
                     resume_checkpoint_id=resume_checkpoint_id,
@@ -3097,17 +3150,16 @@ class Orchestrator:
         run_id: str,
         config: PipelineConfig,
         graph: ExecutionGraph,
-        unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]],
+        unprocessed_rows: Sequence[ResumedRow],
         restored_aggregation_state: Mapping[str, AggregationCheckpointState],
         restored_coalesce_state: CoalesceCheckpointState | None,
         settings: ElspethSettings | None = None,
         *,
         payload_store: PayloadStore,
-        schema_contract: SchemaContract,
         incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]],
         recovery_manager: RecoveryManager,
         resume_checkpoint_id: str,
-        schema_contracts_by_source: Mapping[NodeID, SchemaContract] | None = None,
+        schema_contracts_by_source: Mapping[NodeID, SchemaContract],
         shutdown_event: threading.Event | None = None,
     ) -> RunResult:
         """Process unprocessed rows during resume.
@@ -3149,8 +3201,9 @@ class Orchestrator:
             shutdown_event=shutdown_event,
         )
 
-        # Restore contract from parameter (already retrieved by resume() caller)
-        run_ctx.ctx.contract = schema_contract
+        # ADR-025 §3: schema contracts are plural-by-source on resume.
+        # ``ctx.contract`` is set per-row inside the resume loop via the
+        # per-source lookup; runtime preflights do not read it.
         run_transform_runtime_preflights(factory, run_id, config, run_ctx.ctx)
 
         loop_ctx = LoopContext(
@@ -3169,7 +3222,6 @@ class Orchestrator:
             interrupted = run_resume_processing_loop(
                 loop_ctx,
                 unprocessed_rows,
-                schema_contract,
                 incomplete_by_row=incomplete_by_row,
                 recovery_manager=recovery_manager,
                 payload_store=payload_store,

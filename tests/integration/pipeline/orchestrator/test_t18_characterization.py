@@ -21,12 +21,14 @@ from sqlalchemy import text
 from elspeth.contracts import (
     Determinism,
     PipelineRow,
+    ResumedRow,
     RunStatus,
     SourceProtocol,
     TransformProtocol,
 )
 from elspeth.contracts.results import SourceRow
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+from elspeth.contracts.types import NodeID
 from elspeth.core.config import AggregationSettings, SourceSettings, TriggerConfig
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
@@ -452,14 +454,18 @@ class TestT18CharacterizationResumePath:
             payload_store=payload_store,
         )
 
-        # Retrieve the actual row_id created during the original run
+        # Retrieve the actual row_id and source_node_id created during the original run.
+        # ADR-025 §3 + §4: resume rows are ResumedRow instances carrying
+        # source_node_id; the per-source contract map is keyed by that identity.
         assert db._engine is not None
         with db._engine.connect() as conn:
-            row_id = conn.execute(
-                text("SELECT row_id FROM rows WHERE run_id = :run_id LIMIT 1"),
+            row_record = conn.execute(
+                text("SELECT row_id, source_node_id FROM rows WHERE run_id = :run_id LIMIT 1"),
                 {"run_id": run_id},
-            ).scalar()
-        assert row_id is not None, "Original run should have created at least one row"
+            ).first()
+        assert row_record is not None, "Original run should have created at least one row"
+        row_id, source_node_id_str = row_record
+        source_node_id = NodeID(source_node_id_str)
 
         # Clear captures from original run
         captured_contracts.clear()
@@ -486,14 +492,21 @@ class TestT18CharacterizationResumePath:
             run_id=run_id,
             config=config,
             graph=graph,
-            unprocessed_rows=[(row_id, 0, {"value": 1})],
+            unprocessed_rows=[
+                ResumedRow(
+                    row_id=row_id,
+                    row_index=0,
+                    source_node_id=source_node_id,
+                    row_data={"value": 1},
+                ),
+            ],
             restored_aggregation_state={},
             restored_coalesce_state=None,
             payload_store=payload_store,
-            schema_contract=resume_contract,
             incomplete_by_row={},
             recovery_manager=MagicMock(),
             resume_checkpoint_id="t18-test-checkpoint",
+            schema_contracts_by_source={source_node_id: resume_contract},
         )
 
         # The transform must have seen the contract during process()
@@ -593,7 +606,13 @@ class TestT18CharacterizationResumePath:
             on_start_calls["sink"] += 1
             original_sink_on_start(ctx)
 
-        # Call _process_resumed_rows directly with empty rows
+        # Call _process_resumed_rows directly with empty rows.
+        # ADR-025 §3: schema_contracts_by_source is non-empty by contract;
+        # derive the source NodeID from the graph rather than fabricating one,
+        # so the test exercises the production reconstruction path identity.
+        sources_list = list(graph.get_sources())
+        assert len(sources_list) == 1, "single-source pipeline expected for this test"
+        source_node_id = sources_list[0]
         with patch.object(output_sink, "on_start", side_effect=tracking_sink_on_start):
             result = orchestrator._process_resumed_rows(
                 factory=factory,
@@ -604,10 +623,10 @@ class TestT18CharacterizationResumePath:
                 restored_aggregation_state={},
                 restored_coalesce_state=None,
                 payload_store=payload_store,
-                schema_contract=schema_contract,
                 incomplete_by_row={},
                 recovery_manager=MagicMock(),
                 resume_checkpoint_id="t18-test-checkpoint",
+                schema_contracts_by_source={source_node_id: schema_contract},
             )
 
         # _process_resumed_rows also returns RUNNING (same as _execute_run)

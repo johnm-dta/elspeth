@@ -31,6 +31,7 @@ from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 if TYPE_CHECKING:
     from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
+    from elspeth.contracts.checkpoint import ResumedRow
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.plugin_context import PluginContext
@@ -532,33 +533,87 @@ class ResumeState:
 
     Bundles the state reconstruction results needed to process resumed rows.
     Short-lived: consumed immediately by the resume method.
+
+    Per ADR-025 Decision §3, schema contracts are plural-by-source.
+    ``schema_contracts_by_source`` is non-optional **and never empty** —
+    resume reconstruction either populates one contract per source from
+    ``run_sources`` (RC6 audit DBs) or one contract keyed by the
+    single-source NodeID derived from ``rows.source_node_id`` (pre-RC6
+    audit DBs). The previous singular ``schema_contract`` field has
+    been deleted; consumers look up each row's contract via
+    ``schema_contracts_by_source[row.source_node_id]``.
+
+    The empty case — a run that failed before any row was committed
+    and before any ``run_sources`` records were written (``on_start``
+    failure, source-level abort, infrastructure crash pre-ingest) — is
+    refused **upstream** in ``_reconstruct_resume_state`` via
+    :class:`EmptyResumeStateError`. That exception is the interpretable
+    "nothing to resume" outcome; the construction-time guard below is
+    the chokepoint that pins the invariant against future regressions
+    where some caller bypasses the upstream check.
     """
 
     factory: RecorderFactory
     run_id: str
     restored_aggregation_state: Mapping[str, AggregationCheckpointState]
     restored_coalesce_state: CoalesceCheckpointState | None
-    unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]] | tuple[str, int, NodeID, dict[str, Any]]]
-    schema_contract: SchemaContract
+    unprocessed_rows: Sequence[ResumedRow]
     # F1 fix: incomplete child tokens grouped by row_id — used by the resume loop
     # to dispatch partial-fork/expand/coalesce rows via mid-DAG continuation
     # instead of whole-row restart (which re-emits completed branches).
     incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]]
     # RecoveryManager needed by resume loop for reconstruct_token_row.
     recovery_manager: RecoveryManager
-    schema_contracts_by_source: Mapping[NodeID, SchemaContract] = field(default_factory=dict)
+    schema_contracts_by_source: Mapping[NodeID, SchemaContract]
 
     def __post_init__(self) -> None:
+        # Local import to avoid hoisting OrchestrationInvariantError into the
+        # module header — it's only referenced inside this guard, and the
+        # contracts package is already an L0 dependency so this is not a
+        # layer-architecture concern.
+        from elspeth.contracts.errors import OrchestrationInvariantError
+
         # incomplete_by_row is a dict[str, list[IncompleteTokenSpec]] of frozen specs;
         # deep_freeze converts it to MappingProxyType[str, tuple[IncompleteTokenSpec, ...]].
         # The resume loop consumes it via membership (`row_id in incomplete_by_row`) and
         # iteration (`for s in incomplete_by_row[row_id]`), both fine on the frozen shape.
         # recovery_manager is a live service object (not a container) — NOT frozen here.
         freeze_fields(self, "restored_aggregation_state", "incomplete_by_row", "schema_contracts_by_source")
-        # unprocessed_rows contains raw row dicts that PipelineRow expects as
-        # plain dict — deep_freeze would convert them to MappingProxyType.
+        # unprocessed_rows contains ResumedRow instances whose ``row_data``
+        # field is a plain dict that PipelineRow expects as plain dict —
+        # deep_freeze would convert it to MappingProxyType, breaking
+        # downstream mutation semantics. Coerce the outer sequence to a
+        # tuple but leave the row_data dict alone (the dataclass is already
+        # frozen, so the dict reference cannot be reassigned).
         if not isinstance(self.unprocessed_rows, tuple):
             object.__setattr__(self, "unprocessed_rows", tuple(self.unprocessed_rows))
+        # ADR-025 §3: schema_contracts_by_source is non-empty by invariant.
+        # The empty case (no rows committed, no run_sources records) is
+        # handled upstream by ``_reconstruct_resume_state`` via
+        # :class:`EmptyResumeStateError` — ResumeState is never
+        # constructed in that case. This guard pins the invariant so a
+        # future caller that bypasses the upstream check fails loudly
+        # rather than silently picking an arbitrary contract.
+        if not self.schema_contracts_by_source:
+            raise OrchestrationInvariantError(
+                "ResumeState.schema_contracts_by_source must not be empty. "
+                "Empty-state resume should have been refused upstream via "
+                "EmptyResumeStateError before ResumeState was constructed. "
+                "If you're hitting this, the upstream check is missing."
+            )
+        # ADR-025 §3: resume rejects rather than picks an arbitrary
+        # contract. Every row's ``source_node_id`` must have a
+        # corresponding entry in ``schema_contracts_by_source`` —
+        # otherwise the loop would have to pick a default, which is
+        # the failure mode this ADR closes.
+        missing = {row.source_node_id for row in self.unprocessed_rows} - set(self.schema_contracts_by_source)
+        if missing:
+            raise OrchestrationInvariantError(
+                "ResumeState.schema_contracts_by_source is missing entries for "
+                f"source_node_id(s): {sorted(missing)}. Available keys: "
+                f"{sorted(self.schema_contracts_by_source)}. Resume rejects rather "
+                "than picks an arbitrary contract (ADR-025 §3)."
+            )
 
 
 # Factory that creates a per-sink checkpoint callback.

@@ -17,6 +17,7 @@ UUIDs that wouldn't match stored checkpoints, breaking the resume flow.
 import json
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -220,6 +221,33 @@ class TestResumeComprehensive:
                         created_at=now,
                     )
                 )
+
+            # ADR-025 §3: record run_sources for the single source node.
+            # Production code (Orchestrator._run_main_processing_loop ->
+            # _emit_source_loading) writes a run_sources row BEFORE the
+            # first ingested row is persisted, so a real failed run will
+            # always have at least one run_sources record present even if
+            # zero rows were committed. Reproducing that shape in the
+            # fixture lets the RC6 resume path key the schema contract
+            # under the actual ``source_node_id`` and avoids triggering
+            # ``EmptyResumeStateError`` for tests that legitimately
+            # exercise the early-exit path (all rows already processed)
+            # rather than the refuse path (no work ever persisted).
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
 
             # Create rows with payloads
             for i in range(num_rows):
@@ -479,6 +507,8 @@ class TestResumeComprehensive:
                     status=RunStatus.FAILED,
                     source_schema_json=json.dumps({"properties": {}, "required": []}),
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
             for node_id, plugin_name, node_type in [
@@ -577,9 +607,21 @@ class TestResumeComprehensive:
             payload_store,
         )
 
+        from elspeth.contracts import ResumedRow
+
         assert state.unprocessed_rows == (
-            ("row-orders", 0, NodeID("source-orders"), {"order_id": 101}),
-            ("row-refunds", 1, NodeID("source-refunds"), {"refund_id": "r-7"}),
+            ResumedRow(
+                row_id="row-orders",
+                row_index=0,
+                source_node_id=NodeID("source-orders"),
+                row_data={"order_id": 101},
+            ),
+            ResumedRow(
+                row_id="row-refunds",
+                row_index=1,
+                source_node_id=NodeID("source-refunds"),
+                row_data={"refund_id": "r-7"},
+            ),
         )
         assert state.schema_contracts_by_source[NodeID("source-orders")].version_hash() == orders_contract_hash
         assert state.schema_contracts_by_source[NodeID("source-refunds")].version_hash() == refunds_contract_hash
@@ -2088,3 +2130,489 @@ class TestResumeComprehensive:
         # destination).  This pins the audit-distinguishability invariant
         # at the resume layer.
         assert all(o.sink_name == "error_sink" for o in routed_on_error_outcomes)
+
+
+class TestMultiSourceResumeContractDispatch:
+    """Regression coverage for G2 / elspeth-01942858c3 and the
+    test plan in the consolidated G2-companion ticket
+    elspeth-d5f0194fc8.
+
+    Before ADR-025, ``_reconstruct_resume_state`` collapsed the
+    per-source contract map by calling
+    ``next(iter(schema_contracts_by_source.values()))`` and dropping
+    the result on ``ResumeState.schema_contract``. Two sources whose
+    schemas legitimately differ (e.g., a fan-in pipeline merging
+    ``orders`` and ``refunds``) were validated under whichever
+    contract happened to be returned first by the SQL query — a
+    Tier-1 audit-integrity violation per CLAUDE.md.
+
+    These tests pin the post-ADR-025 behaviour:
+
+    1. Each row's schema contract is recovered via the row's
+       ``source_node_id``, not an arbitrary pick.
+    2. A row whose ``source_node_id`` is not present in
+       ``schema_contracts_by_source`` crashes with
+       ``OrchestrationInvariantError`` rather than silently picking
+       a default.
+    3. Single-source resume still works after the structural change
+       (no regression on the legitimate-single case).
+    4. The ``ResumeState`` dataclass has no singular
+       ``schema_contract`` field (introspected via
+       ``dataclasses.fields``, not ``hasattr`` — ``hasattr`` is
+       banned per CLAUDE.md).
+    """
+
+    @staticmethod
+    def _create_schema_contract(fields: list[tuple[str, type]]) -> tuple[str, str]:
+        """Build a fixed SchemaContract for test setup (identity helper)."""
+        from elspeth.contracts.contract_records import ContractAuditRecord
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+
+        field_contracts = tuple(
+            FieldContract(
+                normalized_name=name,
+                original_name=name,
+                python_type=py_type,
+                required=True,
+                source="declared",
+            )
+            for name, py_type in fields
+        )
+        contract = SchemaContract(mode="FIXED", fields=field_contracts, locked=True)
+        audit_record = ContractAuditRecord.from_contract(contract)
+        return audit_record.to_json(), contract.version_hash()
+
+    def _build_two_source_run(
+        self,
+        db: LandscapeDB,
+        payload_store: Any,
+        checkpoint_mgr: Any,
+        *,
+        run_id: str,
+    ) -> tuple[ExecutionGraph, str, str, dict[str, Any]]:
+        """Insert a 2-source FAILED run wired for resume reconstruction.
+
+        Returns:
+            (graph, orders_contract_hash, refunds_contract_hash, row_payloads)
+            so callers can correlate observed contracts to their
+            originating source on the per-row validation path.
+        """
+        now = datetime.now(UTC)
+        orders_schema_json = json.dumps({"properties": {"order_id": {"type": "integer"}}, "required": ["order_id"]})
+        refunds_schema_json = json.dumps({"properties": {"refund_id": {"type": "string"}}, "required": ["refund_id"]})
+        orders_contract_json, orders_contract_hash = self._create_schema_contract([("order_id", int)])
+        refunds_contract_json, refunds_contract_hash = self._create_schema_contract([("refund_id", str)])
+
+        graph = ExecutionGraph()
+        graph.add_node(
+            "source-orders",
+            node_type=NodeType.SOURCE,
+            plugin_name="null",
+            config={"source_name": "orders"},
+        )
+        graph.add_node(
+            "source-refunds",
+            node_type=NodeType.SOURCE,
+            plugin_name="null",
+            config={"source_name": "refunds"},
+        )
+        graph.add_node(
+            "sink",
+            node_type=NodeType.SINK,
+            plugin_name="json",
+            config={"schema": {"mode": "observed"}},
+        )
+        graph.add_edge("source-orders", "sink", label="continue")
+        graph.add_edge("source-refunds", "sink", label="continue")
+
+        with db.engine.begin() as conn:
+            conn.execute(
+                runs_table.insert().values(
+                    run_id=run_id,
+                    started_at=now,
+                    config_hash="test",
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status=RunStatus.FAILED,
+                    source_schema_json=json.dumps({"properties": {}, "required": []}),
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+            for node_id, plugin_name, node_type in [
+                ("source-orders", "null", NodeType.SOURCE),
+                ("source-refunds", "null", NodeType.SOURCE),
+                ("sink", "json", NodeType.SINK),
+            ]:
+                conn.execute(
+                    nodes_table.insert().values(
+                        node_id=node_id,
+                        run_id=run_id,
+                        plugin_name=plugin_name,
+                        node_type=node_type,
+                        plugin_version="1.0.0",
+                        determinism=Determinism.DETERMINISTIC if node_type != NodeType.SINK else Determinism.IO_WRITE,
+                        config_hash="test",
+                        config_json="{}",
+                        registered_at=now,
+                    )
+                )
+            for source_node_id, source_name, schema_json, contract_json, contract_hash in [
+                ("source-orders", "orders", orders_schema_json, orders_contract_json, orders_contract_hash),
+                ("source-refunds", "refunds", refunds_schema_json, refunds_contract_json, refunds_contract_hash),
+            ]:
+                conn.execute(
+                    run_sources_table.insert().values(
+                        run_id=run_id,
+                        source_node_id=source_node_id,
+                        source_name=source_name,
+                        plugin_name="null",
+                        lifecycle_state="loaded",
+                        config_hash="test",
+                        schema_json=schema_json,
+                        schema_contract_json=contract_json,
+                        schema_contract_hash=contract_hash,
+                        recorded_at=now,
+                    )
+                )
+            for edge_id, from_node in [("e-orders", "source-orders"), ("e-refunds", "source-refunds")]:
+                conn.execute(
+                    edges_table.insert().values(
+                        edge_id=edge_id,
+                        run_id=run_id,
+                        from_node_id=from_node,
+                        to_node_id="sink",
+                        label="continue",
+                        default_mode=RoutingMode.MOVE,
+                        created_at=now,
+                    )
+                )
+            row_payloads: dict[str, Any] = {}
+            for row_id, source_node_id, row_index, source_row_index, ingest_sequence, row_data in [
+                ("row-orders", "source-orders", 0, 0, 0, {"order_id": "101"}),
+                ("row-refunds", "source-refunds", 1, 0, 1, {"refund_id": "r-7"}),
+            ]:
+                ref = payload_store.store(json.dumps(row_data).encode())
+                row_payloads[row_id] = row_data
+                conn.execute(
+                    rows_table.insert().values(
+                        row_id=row_id,
+                        run_id=run_id,
+                        source_node_id=source_node_id,
+                        row_index=row_index,
+                        source_row_index=source_row_index,
+                        ingest_sequence=ingest_sequence,
+                        source_data_hash=f"h-{row_id}",
+                        source_data_ref=ref,
+                        created_at=now,
+                    )
+                )
+            conn.execute(
+                tokens_table.insert().values(
+                    token_id="tok-multi-source",
+                    row_id="row-orders",
+                    run_id=run_id,
+                    created_at=now,
+                )
+            )
+
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id="tok-multi-source",
+            node_id="sink",
+            sequence_number=1,
+            graph=graph,
+        )
+        return graph, orders_contract_hash, refunds_contract_hash, row_payloads
+
+    def test_resume_picks_correct_contract_per_source(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Multi-source resume looks up each row's contract via source_node_id.
+
+        Distinct version_hash() values on the per-source contracts make
+        an arbitrary-pick failure observable: if the orchestrator picked
+        one contract for both rows, one of the per-row contract lookups
+        would carry the wrong hash. ADR-025 §3 requires per-source
+        dispatch; this test pins the dispatch.
+        """
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+
+        run_id = "resume-multi-source-per-row-contract"
+        _graph, orders_hash, refunds_hash, _payloads = self._build_two_source_run(db, payload_store, checkpoint_mgr, run_id=run_id)
+
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
+        assert checkpoint is not None
+
+        state = orchestrator._reconstruct_resume_state(
+            ResumePoint(
+                checkpoint=checkpoint,
+                token_id=checkpoint.token_id,
+                node_id=checkpoint.node_id,
+                sequence_number=checkpoint.sequence_number,
+            ),
+            payload_store,
+        )
+
+        # Distinct contracts are preserved per source (no arbitrary pick).
+        assert state.schema_contracts_by_source[NodeID("source-orders")].version_hash() == orders_hash
+        assert state.schema_contracts_by_source[NodeID("source-refunds")].version_hash() == refunds_hash
+        assert orders_hash != refunds_hash, "test setup error: contracts must differ"
+
+        # Every recovered row carries the source_node_id needed to dispatch
+        # the per-row contract — this is the load-bearing carrier ADR-025
+        # makes mandatory.
+        orders_rows = [r for r in state.unprocessed_rows if r.source_node_id == NodeID("source-orders")]
+        refunds_rows = [r for r in state.unprocessed_rows if r.source_node_id == NodeID("source-refunds")]
+        assert len(orders_rows) == 1
+        assert len(refunds_rows) == 1
+
+        # Verify per-row dispatch directly: the contract recovered for
+        # each row by its source_node_id matches the source's contract
+        # version_hash. An arbitrary-pick implementation would fail one
+        # of these assertions on whichever source's contract did not
+        # "win" the pick.
+        for row in state.unprocessed_rows:
+            recovered_contract = state.schema_contracts_by_source[row.source_node_id]
+            if row.source_node_id == NodeID("source-orders"):
+                assert recovered_contract.version_hash() == orders_hash
+            else:
+                assert recovered_contract.version_hash() == refunds_hash
+
+    def test_resume_rejects_missing_contract(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Looking up a row whose source_node_id has no contract crashes.
+
+        ADR-025 §3 requires resume to refuse rather than pick a default
+        when the audit trail has a row whose source's schema contract
+        is missing. This test calls the resume loop directly with a
+        crafted ``schema_contracts_by_source`` that omits one row's
+        ``source_node_id`` and asserts the offensive-programming crash.
+        """
+        from elspeth.contracts import ResumedRow
+        from elspeth.contracts.errors import OrchestrationInvariantError
+        from elspeth.engine.orchestrator.resume import run_resume_processing_loop
+        from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext
+
+        processor = MagicMock()
+        processor.has_scheduled_work.return_value = False
+        processor.process_existing_row.return_value = []
+
+        config = PipelineConfig(
+            source=MagicMock(),
+            sources={"orders": MagicMock(), "refunds": MagicMock()},
+            transforms=(),
+            sinks={"default": MagicMock()},
+        )
+        loop_ctx = LoopContext(
+            counters=ExecutionCounters(),
+            pending_tokens={"default": []},
+            processor=processor,
+            ctx=MagicMock(),
+            config=config,
+            agg_transform_lookup={},
+            coalesce_executor=None,
+            coalesce_node_map={},
+        )
+
+        orders_contract = MagicMock(name="orders-contract")
+        rows = (
+            ResumedRow(
+                row_id="row-orders",
+                row_index=0,
+                source_node_id=NodeID("source-orders"),
+                row_data={"order_id": 1},
+            ),
+            ResumedRow(
+                row_id="row-refunds",
+                row_index=1,
+                source_node_id=NodeID("source-refunds"),
+                row_data={"refund_id": "r1"},
+            ),
+        )
+
+        # ``schema_contracts_by_source`` deliberately omits source-refunds.
+        # The loop must crash on the refunds row rather than reuse
+        # the orders contract or pick a default.
+        with pytest.raises(OrchestrationInvariantError, match="source-refunds"):
+            run_resume_processing_loop(
+                loop_ctx,
+                rows,
+                incomplete_by_row={},
+                recovery_manager=MagicMock(),
+                payload_store=MagicMock(),
+                run_id="run-missing-source-contract",
+                resume_checkpoint_id="checkpoint-missing-source-contract",
+                schema_contracts_by_source={NodeID("source-orders"): orders_contract},
+                source_on_success_by_source={
+                    NodeID("source-orders"): "default",
+                    NodeID("source-refunds"): "default",
+                },
+            )
+
+    def test_resume_single_source_round_trip(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Single-source resume still works after structural change.
+
+        Regression guard: ADR-025 deletes the singular ResumeState field,
+        but legitimate single-source pipelines must keep resuming. This
+        test builds a single-source FAILED run via the pre-RC6 legacy
+        writer (only ``runs.contract_json``, no ``run_sources``) and
+        asserts the resume reconstruction returns a single-entry
+        ``schema_contracts_by_source`` keyed by the source NodeID
+        observed on the recovered rows.
+        """
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+
+        run_id = "resume-single-source-round-trip"
+        contract_json, contract_hash = self._create_schema_contract([("id", int)])
+        now = datetime.now(UTC)
+        source_node_id = NodeID("source-only")
+
+        graph = ExecutionGraph()
+        graph.add_node(
+            "source-only",
+            node_type=NodeType.SOURCE,
+            plugin_name="null",
+            config={"source_name": "source"},
+        )
+        graph.add_node(
+            "sink",
+            node_type=NodeType.SINK,
+            plugin_name="json",
+            config={"schema": {"mode": "observed"}},
+        )
+        graph.add_edge("source-only", "sink", label="continue")
+
+        source_schema_json = json.dumps({"properties": {"id": {"type": "integer"}}, "required": ["id"]})
+
+        with db.engine.begin() as conn:
+            conn.execute(
+                runs_table.insert().values(
+                    run_id=run_id,
+                    started_at=now,
+                    config_hash="test",
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status=RunStatus.FAILED,
+                    source_schema_json=source_schema_json,
+                    schema_contract_json=contract_json,
+                    schema_contract_hash=contract_hash,
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+            for node_id, plugin_name, node_type in [
+                ("source-only", "null", NodeType.SOURCE),
+                ("sink", "json", NodeType.SINK),
+            ]:
+                conn.execute(
+                    nodes_table.insert().values(
+                        node_id=node_id,
+                        run_id=run_id,
+                        plugin_name=plugin_name,
+                        node_type=node_type,
+                        plugin_version="1.0.0",
+                        determinism=Determinism.DETERMINISTIC if node_type != NodeType.SINK else Determinism.IO_WRITE,
+                        config_hash="test",
+                        config_json="{}",
+                        registered_at=now,
+                    )
+                )
+            conn.execute(
+                edges_table.insert().values(
+                    edge_id="e-only",
+                    run_id=run_id,
+                    from_node_id="source-only",
+                    to_node_id="sink",
+                    label="continue",
+                    default_mode=RoutingMode.MOVE,
+                    created_at=now,
+                )
+            )
+            ref = payload_store.store(json.dumps({"id": "42"}).encode())
+            conn.execute(
+                rows_table.insert().values(
+                    row_id="row-single",
+                    run_id=run_id,
+                    source_node_id="source-only",
+                    row_index=0,
+                    source_row_index=0,
+                    ingest_sequence=0,
+                    source_data_hash="h-single",
+                    source_data_ref=ref,
+                    created_at=now,
+                )
+            )
+            conn.execute(
+                tokens_table.insert().values(
+                    token_id="tok-single",
+                    row_id="row-single",
+                    run_id=run_id,
+                    created_at=now,
+                )
+            )
+
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id="tok-single",
+            node_id="sink",
+            sequence_number=1,
+            graph=graph,
+        )
+        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
+        assert checkpoint is not None
+
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        state = orchestrator._reconstruct_resume_state(
+            ResumePoint(
+                checkpoint=checkpoint,
+                token_id=checkpoint.token_id,
+                node_id=checkpoint.node_id,
+                sequence_number=checkpoint.sequence_number,
+            ),
+            payload_store,
+        )
+
+        # The single-source path constructs the per-source map from the
+        # legacy run_contract keyed under the rows' shared source NodeID.
+        assert set(state.schema_contracts_by_source) == {source_node_id}
+        assert state.schema_contracts_by_source[source_node_id].version_hash() == contract_hash
+        assert len(state.unprocessed_rows) == 1
+        assert state.unprocessed_rows[0].source_node_id == source_node_id
+
+    def test_resume_state_has_no_singular_schema_contract_field(self) -> None:
+        """``ResumeState.schema_contract`` is deleted by ADR-025 §3.
+
+        Future-proof against typo-restorations: introspect the dataclass
+        fields directly via ``dataclasses.fields`` rather than
+        ``hasattr`` (which is banned per CLAUDE.md because it swallows
+        @property exceptions). A regression that re-adds a singular
+        field will be visible immediately.
+        """
+        import dataclasses
+
+        from elspeth.engine.orchestrator.types import ResumeState
+
+        field_names = {f.name for f in dataclasses.fields(ResumeState)}
+        assert "schema_contract" not in field_names, (
+            "ResumeState.schema_contract was deleted by ADR-025 §3; a regression "
+            "has reintroduced the singular field. Per-row contract dispatch must go "
+            "through schema_contracts_by_source[row.source_node_id], not a "
+            "next(iter(...)) arbitrary pick."
+        )
+        assert "schema_contracts_by_source" in field_names

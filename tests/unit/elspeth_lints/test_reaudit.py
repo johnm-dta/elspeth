@@ -695,8 +695,14 @@ def test_render_json_report_is_valid_json_with_enum_strings() -> None:
     assert payload["outcomes"][0]["original_model_verdict"] == "BLOCKED"
     assert payload["outcomes"][0]["fresh_verdict"] == "ACCEPTED"
     # Summary is a list of {divergence, count} dicts, ordered by severity.
+    # JUDGE_CALL_FAILED outranks WAS_ACCEPTED_NOW_BLOCKED because a
+    # data-collection failure (judge transport rejected the call) is
+    # more urgent than any verdict-change signal — the entry simply
+    # wasn't re-judged. The first verdict-change divergence (the most
+    # urgent operator-actionable verdict signal) is the next slot.
     summary_names = [s["divergence"] for s in payload["summary"]]
-    assert summary_names[0] == "WAS_ACCEPTED_NOW_BLOCKED"  # always first per severity ordering
+    assert summary_names[0] == "JUDGE_CALL_FAILED"
+    assert summary_names[1] == "WAS_ACCEPTED_NOW_BLOCKED"
 
 
 def test_render_markdown_report_snapshot() -> None:
@@ -899,3 +905,368 @@ def test_cli_reaudit_unsupported_rule_exits_2(tmp_path: Path, capsys: pytest.Cap
     assert exit_code == 2
     captured = capsys.readouterr()
     assert "not supported" in captured.err
+
+
+# =====================================================================
+# C3-2 / C3-3: per-entry failure isolation + sweep-completeness banner
+# (closes elspeth-9a4e54cc01)
+# =====================================================================
+
+
+@contextmanager
+def _mock_judge_call_raising(exc: BaseException) -> Iterator[MagicMock]:
+    """Patch ``openai.OpenAI`` so the judge call raises ``exc``.
+
+    Used to simulate transport failures inside reaudit's per-entry
+    boundary. The exception is raised when the test code invokes
+    ``client.chat.completions.create(...)`` — i.e. exactly where a real
+    OpenAI SDK call would surface a network / timeout / rate-limit /
+    5xx error.
+    """
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = exc
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client) as client_class,
+    ):
+        yield client_class
+
+
+def test_c3_2_transport_failure_classifies_judge_call_failed(tmp_path: Path) -> None:
+    """A transient OpenAI APIError inside the sweep records JUDGE_CALL_FAILED.
+
+    The exception classname + message survive on the outcome's
+    ``fresh_rationale`` for audit, and the entry's
+    ``fresh_verdict`` / ``fresh_recorded_at`` remain ``None`` (no
+    fresh verdict landed). The surrounding-code snapshot is still
+    populated because reaudit extracts it before the failing call.
+    """
+    from openai import APIConnectionError
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-01T00:00:00+00:00",
+    )
+
+    # APIConnectionError ctor requires a ``request`` kwarg — use a real
+    # SDK error so the catch in reaudit exercises the actual SDK class
+    # hierarchy (APIError is the umbrella; APIConnectionError is one
+    # leaf the operator will see in production).
+    transient = APIConnectionError(request=MagicMock())
+    with _mock_judge_call_raising(transient):
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert len(report.outcomes) == 1
+    outcome = report.outcomes[0]
+    assert outcome.divergence is ReauditDivergence.JUDGE_CALL_FAILED
+    assert outcome.fresh_verdict is None
+    assert outcome.fresh_recorded_at is None
+    assert outcome.fresh_rationale is not None
+    assert "APIConnectionError" in outcome.fresh_rationale
+    # The surrounding code was extracted before the failing call.
+    assert outcome.code_snapshot != ""
+    assert "Widget" in outcome.code_snapshot
+    # Sweep itself completed — all dispatched entries produced an
+    # outcome (even if that outcome is JUDGE_CALL_FAILED).
+    assert report.entries_dispatched == 1
+    assert report.total_entries == 1
+
+
+def test_c3_2_sweep_continues_after_transport_failure(tmp_path: Path) -> None:
+    """One failing entry mid-sweep does not abort the surviving entries.
+
+    Three entries; entry 2 raises a transport error; entries 1 and 3
+    produce normal STILL_AGREES outcomes. The report carries all three
+    outcomes in order, the failing one classified JUDGE_CALL_FAILED.
+    """
+    import hashlib as _hashlib
+
+    from openai import APITimeoutError
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    finding = _live_widget_finding(root)
+    fp = finding.fingerprint
+    live_file_fp = _hashlib.sha256((root / "plugins/widget.py").read_bytes()).hexdigest()
+    live_ast_path = finding.ast_path
+    # Three duplicate entries — same key, different owners. The loader
+    # accepts them and reaudit iterates them in YAML order.
+    lines: list[str] = ["allow_hits:"]
+    for i in range(3):
+        lines.append(f"- key: plugins/widget.py:R1:Widget:lookup:fp={fp}")
+        lines.append(f"  owner: agent-{i}")
+        lines.append("  reason: |-")
+        lines.append("    payload is Tier-3 external data")
+        lines.append("  safety: |-")
+        lines.append("    bounded coercion")
+        lines.append("  expires: '2030-01-01'")
+        lines.append("  judge_verdict: ACCEPTED")
+        lines.append("  judge_recorded_at: '2024-01-01T00:00:00+00:00'")
+        lines.append("  judge_model: claude-opus-4-7")
+        lines.append("  judge_rationale: |-")
+        lines.append(f"    rationale entry {i}")
+        lines.append(f"  file_fingerprint: '{live_file_fp}'")
+        lines.append(f"  ast_path: '{live_ast_path}'")
+    (allowlist_dir / "plugins.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # Per-call side_effect: entry 1 success, entry 2 raises, entry 3
+    # success. Validates that the failure is isolated to the failing
+    # entry and the loop continues.
+    ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
+    transient = APITimeoutError(request=MagicMock())
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = [ok_completion, transient, ok_completion]
+
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client),
+    ):
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert len(report.outcomes) == 3
+    assert report.outcomes[0].divergence is ReauditDivergence.STILL_AGREES
+    assert report.outcomes[1].divergence is ReauditDivergence.JUDGE_CALL_FAILED
+    assert "APITimeoutError" in (report.outcomes[1].fresh_rationale or "")
+    assert report.outcomes[2].divergence is ReauditDivergence.STILL_AGREES
+    # The full SDK call count was 3 — the loop did not short-circuit
+    # after the middle failure.
+    assert fake_client.chat.completions.create.call_count == 3
+    # Sweep completed in full — all dispatched, no missing.
+    assert report.entries_dispatched == 3
+    assert report.total_entries == 3
+
+
+def test_c3_2_judge_configuration_error_still_aborts_sweep(tmp_path: Path) -> None:
+    """JudgeConfigurationError (missing API key / SDK) is sweep-fatal.
+
+    Contrast with APIError (caught per-entry). Configuration errors are
+    not transient — there is no value in continuing the sweep when the
+    API key is absent — so they propagate out of reaudit_entries to be
+    surfaced as a CLI exit-2.
+    """
+    from elspeth_lints.core.judge import JudgeConfigurationError
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-01T00:00:00+00:00",
+    )
+
+    # Remove the API key from the environment for the duration of this
+    # call so JudgeConfigurationError fires inside call_judge.
+    env_without_key = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
+    with (
+        patch.dict(os.environ, env_without_key, clear=True),
+        pytest.raises(JudgeConfigurationError),
+    ):
+        reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+
+def test_c3_3_entries_dispatched_equals_count_on_complete_sweep(tmp_path: Path) -> None:
+    """A sweep that processes N entries reports entries_dispatched == N.
+
+    Confirms the dispatch counter increments on the per-entry boundary
+    (not just on successful outcomes) and matches total_entries when
+    nothing aborts the loop.
+    """
+    import hashlib as _hashlib
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    finding = _live_widget_finding(root)
+    fp = finding.fingerprint
+    live_file_fp = _hashlib.sha256((root / "plugins/widget.py").read_bytes()).hexdigest()
+    live_ast_path = finding.ast_path
+    lines: list[str] = ["allow_hits:"]
+    for i in range(5):
+        lines.append(f"- key: plugins/widget.py:R1:Widget:lookup:fp={fp}")
+        lines.append(f"  owner: agent-{i}")
+        lines.append("  reason: |-")
+        lines.append("    payload is Tier-3 external data")
+        lines.append("  safety: |-")
+        lines.append("    bounded coercion")
+        lines.append("  expires: '2030-01-01'")
+        lines.append("  judge_verdict: ACCEPTED")
+        lines.append("  judge_recorded_at: '2024-01-01T00:00:00+00:00'")
+        lines.append("  judge_model: claude-opus-4-7")
+        lines.append("  judge_rationale: |-")
+        lines.append(f"    rationale entry {i}")
+        lines.append(f"  file_fingerprint: '{live_file_fp}'")
+        lines.append(f"  ast_path: '{live_ast_path}'")
+    (allowlist_dir / "plugins.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert report.entries_dispatched == 5
+    assert report.total_entries == 5
+    assert _incomplete_sweep_banner_is_absent(report)
+
+
+def _incomplete_sweep_banner_is_absent(report: ReauditReport) -> bool:
+    """Helper: assert the renderers do not emit the banner on a complete sweep."""
+    text = render_report_text(report)
+    md = render_report_markdown(report)
+    js = render_report_json(report)
+    return ("INCOMPLETE SWEEP" not in text) and ("INCOMPLETE SWEEP" not in md) and ("incomplete_sweep" not in json.loads(js))
+
+
+def test_c3_3_incomplete_sweep_banner_renders_on_partial_report() -> None:
+    """A ReauditReport with entries_dispatched < total_entries renders banners.
+
+    Simulates the "sweep was killed mid-loop after dispatching K of N"
+    case by constructing the report directly: the orchestrator does not
+    yet persist partial state (out of scope per the C3-3 plan), so the
+    test validates the *renderer* contract that any caller who DOES
+    surface a partial-state report will get the operator-visible
+    banner. The text, markdown, and JSON outputs all carry the signal.
+    """
+    outcomes = [
+        _fixed_outcome(
+            key=f"plugins/a.py:R1:Foo:bar:fp=aaa{i:03d}",
+            divergence=ReauditDivergence.STILL_AGREES,
+            original_verdict=JudgeVerdict.ACCEPTED,
+            fresh_verdict=JudgeVerdict.ACCEPTED,
+            fresh_rationale="still good",
+        )
+        for i in range(3)
+    ]
+    # Three outcomes recorded, but the sweep planned to dispatch ten —
+    # seven entries were never reached.
+    report = ReauditReport.from_outcomes(outcomes, entries_dispatched=3, total_entries=10)
+
+    text = render_report_text(report)
+    assert "INCOMPLETE SWEEP" in text
+    assert "7" in text  # 10 - 3 missing
+    assert "10" in text
+
+    md = render_report_markdown(report)
+    assert "INCOMPLETE SWEEP" in md
+    # The dispatched-vs-planned row is in the summary table.
+    assert "3 / 10" in md
+
+    payload = json.loads(render_report_json(report))
+    assert payload["entries_dispatched"] == 3
+    assert payload["total_entries"] == 10
+    assert payload["incomplete_sweep"]["missing"] == 7
+    assert "INCOMPLETE SWEEP" in payload["incomplete_sweep"]["message"]
+
+
+def test_c3_3_judge_call_failed_does_not_trigger_incomplete_sweep(tmp_path: Path) -> None:
+    """A sweep that completed but had JUDGE_CALL_FAILED outcomes is NOT incomplete.
+
+    The two failure modes are operator-actionable for different
+    reasons: JUDGE_CALL_FAILED says "I tried this entry and the
+    transport rejected the call", INCOMPLETE_SWEEP says "I never tried
+    these entries at all". The banner must not fire for the former
+    (the renderer's banner is reserved for entries the sweep never
+    reached).
+    """
+    from openai import APIConnectionError
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-01T00:00:00+00:00",
+    )
+
+    transient = APIConnectionError(request=MagicMock())
+    with _mock_judge_call_raising(transient):
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert report.entries_dispatched == report.total_entries == 1
+    text = render_report_text(report)
+    assert "INCOMPLETE SWEEP" not in text
+    # But the JUDGE_CALL_FAILED divergence does surface — it is the
+    # operator-actionable signal for this sweep.
+    assert "JUDGE_CALL_FAILED" in text
+
+
+def test_c3_2_cli_exits_1_on_judge_call_failed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """CLI exits 1 when any entry hits JUDGE_CALL_FAILED.
+
+    Distinct from exit 2 (configuration errors) and exit 0 (clean
+    sweep, only verdict-change divergences). Operators running reaudit
+    in CI need a non-zero exit when data-collection gaps appear, so a
+    failed transport doesn't quietly produce a green build.
+    """
+    from openai import APIConnectionError
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-01T00:00:00+00:00",
+    )
+
+    argv = [
+        "reaudit",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--format",
+        "text",
+    ]
+    transient = APIConnectionError(request=MagicMock())
+    with _mock_judge_call_raising(transient):
+        exit_code = main(argv)
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "JUDGE_CALL_FAILED" in captured.out

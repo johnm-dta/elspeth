@@ -86,6 +86,15 @@ class ReauditDivergence(StrEnum):
     ``ENTRY_OBSOLETE`` is the off-tree path: the entry's underlying
     finding no longer exists in the source. The judge is *not* called
     for these — there is nothing for the model to evaluate.
+
+    ``JUDGE_CALL_FAILED`` is the transport-failure path: the judge call
+    raised an SDK-level transport error (network, timeout, rate-limit,
+    5xx) and the entry could not be re-judged on this sweep. The entry
+    is *not* obsolete and its prior verdict is *not* refreshed — the
+    operator must rerun once the transport problem is resolved. The
+    exception classname + message is captured in ``fresh_rationale``
+    so the report carries the diagnostic without needing the original
+    stderr. Closes elspeth-9a4e54cc01 / C3-2.
     """
 
     STILL_AGREES = "STILL_AGREES"
@@ -95,18 +104,26 @@ class ReauditDivergence(StrEnum):
     PRE_JUDGE_FRESH_BLOCK = "PRE_JUDGE_FRESH_BLOCK"
     PRE_JUDGE_FRESH_ACCEPT = "PRE_JUDGE_FRESH_ACCEPT"
     ENTRY_OBSOLETE = "ENTRY_OBSOLETE"
+    JUDGE_CALL_FAILED = "JUDGE_CALL_FAILED"
 
 
 # Operator-actionable severity ranking. Lower values surface first in
 # the markdown report so the most urgent debt is at the top.
+#
+# JUDGE_CALL_FAILED ranks first: the entry was *not* re-judged. Until
+# the operator resolves the transport failure (network, rate-limit, 5xx)
+# and reruns, the entry's decay status is unknown — that ignorance is
+# more urgent than any verdict-change signal below it. Closes
+# elspeth-9a4e54cc01 / C3-2.
 _DIVERGENCE_ORDER: dict[ReauditDivergence, int] = {
-    ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED: 0,
-    ReauditDivergence.PRE_JUDGE_FRESH_BLOCK: 1,
-    ReauditDivergence.OVERRIDE_NO_LONGER_NEEDED: 2,
-    ReauditDivergence.ENTRY_OBSOLETE: 3,
-    ReauditDivergence.OVERRIDE_STILL_NEEDED: 4,
-    ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT: 5,
-    ReauditDivergence.STILL_AGREES: 6,
+    ReauditDivergence.JUDGE_CALL_FAILED: 0,
+    ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED: 1,
+    ReauditDivergence.PRE_JUDGE_FRESH_BLOCK: 2,
+    ReauditDivergence.OVERRIDE_NO_LONGER_NEEDED: 3,
+    ReauditDivergence.ENTRY_OBSOLETE: 4,
+    ReauditDivergence.OVERRIDE_STILL_NEEDED: 5,
+    ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT: 6,
+    ReauditDivergence.STILL_AGREES: 7,
 }
 
 
@@ -114,13 +131,21 @@ _DIVERGENCE_ORDER: dict[ReauditDivergence, int] = {
 class ReauditOutcome:
     """One entry's reaudit result.
 
-    ``fresh_verdict`` / ``fresh_rationale`` / ``fresh_recorded_at`` are
-    ``None`` only for ``ENTRY_OBSOLETE`` (no judge call was made). All
-    other divergence values carry a populated fresh-verdict triple.
+    ``fresh_verdict`` / ``fresh_recorded_at`` are ``None`` for
+    ``ENTRY_OBSOLETE`` (no judge call was made) and for
+    ``JUDGE_CALL_FAILED`` (judge call was attempted but raised a
+    transport error). ``fresh_rationale`` is ``None`` for
+    ``ENTRY_OBSOLETE`` but carries the captured exception classname +
+    message for ``JUDGE_CALL_FAILED`` so the failure diagnostic is
+    durable on the report. All other divergence values carry a fully
+    populated fresh-verdict triple.
 
     ``code_snapshot`` is the surrounding code the judge saw, recorded
     verbatim so the report is independently re-readable months later
-    without needing the source tree at the same commit.
+    without needing the source tree at the same commit. For
+    ``JUDGE_CALL_FAILED`` the snapshot is still populated (we extracted
+    it before the failing call), preserving "what the operator would
+    have judged" even though no verdict landed.
     """
 
     entry: AllowlistEntry
@@ -140,14 +165,47 @@ class ReauditReport:
     ``outcomes`` is a tuple (immutable container field) so the report
     can be freely passed around without defensive copies. ``summary``
     is a frozen mapping of divergence-name to count.
+
+    ``entries_dispatched`` is the count of entries the sweep started
+    processing. It is incremented as the per-entry loop *enters* each
+    iteration, before any work (scan, judge call, classification) runs,
+    so it reflects intent rather than success. ``total_entries`` is the
+    count of entries surviving the upstream filters — the planned
+    dispatch ceiling. A sweep that ran to completion has
+    ``entries_dispatched == total_entries``. A sweep killed mid-loop
+    (process killed, machine rebooted, uncaught exception above the
+    per-entry boundary) has ``entries_dispatched < total_entries``: the
+    delta is the count of entries that were never reaudited at all.
+
+    Renderers surface that delta as an "INCOMPLETE SWEEP" banner on the
+    text / markdown reports and as a discrete ``incomplete_sweep``
+    object on the JSON report. Closes elspeth-9a4e54cc01 / C3-3.
     """
 
     outcomes: tuple[ReauditOutcome, ...]
     summary: tuple[tuple[str, int], ...] = field(default_factory=tuple)
+    entries_dispatched: int = 0
+    total_entries: int = 0
 
     @classmethod
-    def from_outcomes(cls, outcomes: Sequence[ReauditOutcome]) -> ReauditReport:
-        """Build a report from a sequence of outcomes, computing the summary."""
+    def from_outcomes(
+        cls,
+        outcomes: Sequence[ReauditOutcome],
+        *,
+        entries_dispatched: int | None = None,
+        total_entries: int | None = None,
+    ) -> ReauditReport:
+        """Build a report from a sequence of outcomes, computing the summary.
+
+        ``entries_dispatched`` and ``total_entries`` default to
+        ``len(outcomes)`` when omitted, which is the "sweep ran to
+        completion and every dispatched entry produced an outcome"
+        case. Callers tracking partial-sweep state pass them
+        explicitly: ``entries_dispatched`` is the dispatch count
+        observed at the point the loop exited (whether cleanly or
+        otherwise), and ``total_entries`` is the planned dispatch
+        ceiling computed before the loop ran.
+        """
         counts: dict[str, int] = {member.value: 0 for member in ReauditDivergence}
         for outcome in outcomes:
             counts[outcome.divergence.value] += 1
@@ -157,7 +215,14 @@ class ReauditReport:
             counts.items(),
             key=lambda kv: _DIVERGENCE_ORDER[ReauditDivergence(kv[0])],
         )
-        return cls(outcomes=tuple(outcomes), summary=tuple(ordered))
+        dispatched = len(outcomes) if entries_dispatched is None else entries_dispatched
+        total = len(outcomes) if total_entries is None else total_entries
+        return cls(
+            outcomes=tuple(outcomes),
+            summary=tuple(ordered),
+            entries_dispatched=dispatched,
+            total_entries=total,
+        )
 
 
 # =========================================================================
@@ -304,7 +369,15 @@ def reaudit_entries(
     # call so a single-keyed cache suffices.
     findings_cache: dict[str, list[Any]] = {}
 
+    # Track dispatched-vs-planned so an aborted-mid-sweep run surfaces
+    # the deficit on the report (closes elspeth-9a4e54cc01 / C3-3).
+    # Incremented *before* the per-entry work runs so an uncaught
+    # exception above the per-entry try/except still leaves
+    # ``entries_dispatched`` equal to "how many we tried".
+    total_entries = len(filtered)
+    entries_dispatched = 0
     for entry in filtered:
+        entries_dispatched += 1
         outcome = _reaudit_one_entry(
             entry=entry,
             root=root,
@@ -313,7 +386,11 @@ def reaudit_entries(
         )
         outcomes.append(outcome)
 
-    return ReauditReport.from_outcomes(outcomes)
+    return ReauditReport.from_outcomes(
+        outcomes,
+        entries_dispatched=entries_dispatched,
+        total_entries=total_entries,
+    )
 
 
 def _apply_filters(
@@ -405,7 +482,32 @@ def _reaudit_one_entry(
         rationale=entry.reason,
         surrounding_code=surrounding_code,
     )
-    response = call_judge(request)
+    # Per-entry transport-failure isolation (closes elspeth-9a4e54cc01 /
+    # C3-2). The judge call is a Tier-3 external boundary: a transient
+    # network failure on entry 423 of 700 must not discard the prior
+    # 422 outcomes. We catch only ``openai.APIError`` (the SDK umbrella
+    # for connection / timeout / rate-limit / 5xx) and classify as
+    # ``JUDGE_CALL_FAILED``; ``JudgeConfigurationError`` (missing API
+    # key, missing SDK) and ``RuntimeError`` from malformed-response
+    # detection are NOT caught — they're sweep-fatal misconfigurations
+    # or corruption signals and should abort loudly. Lazy import so
+    # ``elspeth-lints --help`` doesn't pay the SDK cost on every
+    # invocation (mirrors the pattern in ``call_judge`` itself).
+    from openai import APIError
+
+    try:
+        response = call_judge(request)
+    except APIError as exc:
+        return ReauditOutcome(
+            entry=entry,
+            original_verdict=entry.judge_verdict,
+            original_model_verdict=entry.judge_model_verdict,
+            fresh_verdict=None,
+            fresh_rationale=f"{type(exc).__name__}: {exc}",
+            fresh_recorded_at=None,
+            divergence=ReauditDivergence.JUDGE_CALL_FAILED,
+            code_snapshot=surrounding_code,
+        )
     divergence = _classify_divergence(
         entry_verdict=entry.judge_verdict,
         entry_model_verdict=entry.judge_model_verdict,
@@ -834,8 +936,19 @@ def render_report_text(report: ReauditReport) -> str:
 
     Format: ``{file}:{rule}:{symbol}  {divergence}  fresh={verdict}``.
     Stable column ordering so diffs across runs are easy to read.
+
+    When the sweep is incomplete (``entries_dispatched <
+    total_entries``), an "INCOMPLETE SWEEP" banner is prepended so the
+    operator cannot miss that some entries were never reaudited at all
+    (distinct from JUDGE_CALL_FAILED, which records entries the sweep
+    *attempted* but the transport rejected). Closes
+    elspeth-9a4e54cc01 / C3-3.
     """
     lines: list[str] = []
+    banner = _incomplete_sweep_banner(report)
+    if banner is not None:
+        lines.append(banner)
+        lines.append("")
     for outcome in report.outcomes:
         symbol = outcome.entry.key
         fresh = outcome.fresh_verdict.value if outcome.fresh_verdict is not None else "<no judge call>"
@@ -845,6 +958,27 @@ def render_report_text(report: ReauditReport) -> str:
     for name, count in report.summary:
         lines.append(f"  {name:<32} {count}")
     return "\n".join(lines) + "\n"
+
+
+def _incomplete_sweep_banner(report: ReauditReport) -> str | None:
+    """Return the textual "INCOMPLETE SWEEP" banner, or ``None`` if complete.
+
+    A sweep is "complete" when every planned dispatch produced an
+    outcome — ``entries_dispatched == total_entries``. JUDGE_CALL_FAILED
+    outcomes still count as completed dispatches (the sweep reached the
+    entry, attempted the judge call, and recorded the transport failure
+    as a divergence). The banner fires only for entries the sweep never
+    reached — process killed, machine rebooted, uncaught exception in
+    the per-entry orchestration above the call-judge boundary.
+    """
+    missing = report.total_entries - report.entries_dispatched
+    if missing <= 0:
+        return None
+    return (
+        f"!! INCOMPLETE SWEEP: {missing} entry/entries of {report.total_entries} "
+        f"were never reaudited (dispatched {report.entries_dispatched}). "
+        "The sweep aborted before reaching them. Rerun reaudit to cover them."
+    )
 
 
 def render_report_json(report: ReauditReport) -> str:
@@ -859,7 +993,7 @@ def render_report_json(report: ReauditReport) -> str:
     """
     import json
 
-    payload = {
+    payload: dict[str, Any] = {
         "outcomes": [
             {
                 "entry": _entry_to_json(outcome.entry),
@@ -874,7 +1008,18 @@ def render_report_json(report: ReauditReport) -> str:
             for outcome in report.outcomes
         ],
         "summary": [{"divergence": name, "count": count} for name, count in report.summary],
+        # Dispatch accounting — always present so consumers don't have
+        # to defensively probe; the fields are the machine-readable
+        # counterpart to the "INCOMPLETE SWEEP" banner the text /
+        # markdown renderers emit.
+        "entries_dispatched": report.entries_dispatched,
+        "total_entries": report.total_entries,
     }
+    if report.entries_dispatched < report.total_entries:
+        payload["incomplete_sweep"] = {
+            "missing": report.total_entries - report.entries_dispatched,
+            "message": _incomplete_sweep_banner(report),
+        }
     return json.dumps(payload, indent=2, sort_keys=False) + "\n"
 
 
@@ -910,12 +1055,20 @@ def render_report_markdown(report: ReauditReport) -> str:
     lines: list[str] = []
     lines.append("# Reaudit report")
     lines.append("")
+    banner = _incomplete_sweep_banner(report)
+    if banner is not None:
+        # Use a markdown blockquote so the banner stands out visually
+        # and survives plain-text rendering in PR comments / wiki
+        # paste-throughs.
+        lines.append(f"> **{banner}**")
+        lines.append("")
     lines.append("## Summary")
     lines.append("")
     lines.append("| Divergence | Count |")
     lines.append("| --- | --- |")
     for name, count in report.summary:
         lines.append(f"| {name} | {count} |")
+    lines.append(f"| _entries dispatched_ | {report.entries_dispatched} / {report.total_entries} |")
     lines.append("")
 
     grouped: dict[ReauditDivergence, list[ReauditOutcome]] = {member: [] for member in ReauditDivergence}
@@ -969,6 +1122,12 @@ def _outcome_notes(outcome: ReauditOutcome) -> str:
         # code_snapshot when there's no live finding; surface it here
         # so the operator can act without opening the JSON dump.
         return outcome.code_snapshot
+    if outcome.divergence is ReauditDivergence.JUDGE_CALL_FAILED:
+        # JUDGE_CALL_FAILED outcomes carry the exception classname +
+        # message in fresh_rationale; surface the full text (not just
+        # the first line) so the operator can diagnose without opening
+        # the JSON dump.
+        return outcome.fresh_rationale if outcome.fresh_rationale is not None else "<no diagnostic captured>"
     if outcome.fresh_rationale is None:
         return ""
     return outcome.fresh_rationale.splitlines()[0] if outcome.fresh_rationale else ""

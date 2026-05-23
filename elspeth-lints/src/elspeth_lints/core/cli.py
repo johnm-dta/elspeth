@@ -1269,6 +1269,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
     """
     from elspeth_lints.core.judge import JudgeConfigurationError
     from elspeth_lints.core.reaudit import (
+        ReauditDivergence,
         ReauditError,
         reaudit_entries,
         render_report_json,
@@ -1312,6 +1313,19 @@ def _run_reaudit(args: argparse.Namespace) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")
 
+    # Exit-code policy (closes elspeth-9a4e54cc01 / C3-2 + C3-3):
+    #   0 — sweep complete, every entry produced a verdict-based
+    #       divergence (including ENTRY_OBSOLETE).
+    #   1 — sweep had operator-actionable data-collection gaps:
+    #       either entries the sweep never reached
+    #       (entries_dispatched < total_entries) OR entries whose
+    #       judge call raised a transport error (JUDGE_CALL_FAILED).
+    #       Distinct from the verdict-change cases (which are *signal*,
+    #       not failure) — those still exit 0.
+    judge_call_failures = sum(1 for outcome in report.outcomes if outcome.divergence is ReauditDivergence.JUDGE_CALL_FAILED)
+    incomplete = report.entries_dispatched < report.total_entries
+    if judge_call_failures > 0 or incomplete:
+        return 1
     return 0
 
 

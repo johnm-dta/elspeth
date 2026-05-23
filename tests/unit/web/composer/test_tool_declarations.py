@@ -749,6 +749,79 @@ class TestStep3MutationTierMigration:
         assert names == expected
 
 
+class TestStep3BlobDiscoveryTierMigration:
+    """All 4 blob-discovery tools must carry declarations with byte-identical schemas."""
+
+    def _get(self, name: str) -> dict[str, object]:
+        return next(d for d in get_tool_definitions() if d["name"] == name)
+
+    def test_list_blobs(self) -> None:
+        assert self._get("list_blobs") == {
+            "name": "list_blobs",
+            "description": "List uploaded/created files (blobs) in this session with metadata.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_get_blob_metadata(self) -> None:
+        assert self._get("get_blob_metadata") == {
+            "name": "get_blob_metadata",
+            "description": "Get metadata for a specific blob (file) by ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "blob_id": {"type": "string", "description": "Blob ID."},
+                },
+                "required": ["blob_id"],
+            },
+        }
+
+    def test_get_blob_content(self) -> None:
+        assert self._get("get_blob_content") == {
+            "name": "get_blob_content",
+            "description": "Retrieve the content of a blob (file) for inspection. Large files are truncated to 50,000 characters.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "blob_id": {
+                        "type": "string",
+                        "description": "ID of the blob to read.",
+                    },
+                },
+                "required": ["blob_id"],
+            },
+        }
+
+    def test_inspect_source(self) -> None:
+        assert self._get("inspect_source") == {
+            "name": "inspect_source",
+            "description": (
+                "Return bounded structural facts about a blob-backed source: source kind, observed "
+                "headers, sample row count, inferred scalar types per column, URL candidates, and "
+                "warnings. Reads at most 8 KiB of the blob and parses at most 100 rows. Use this "
+                "before declaring a fixed CSV/JSON schema — observed headers and inferred types "
+                "tell you which fields the source actually contains and what numeric coercion is "
+                "needed before any gate or value_transform numeric op. Never returns raw row "
+                "content; only summary facts."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "blob_id": {
+                        "type": "string",
+                        "description": "ID of the blob to inspect.",
+                    },
+                },
+                "required": ["blob_id"],
+            },
+        }
+
+    def test_all_four_blob_discovery_tools_registered(self) -> None:
+        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+
+        names = {d.name for d in _REGISTERED_TOOLS if d.kind is ToolKind.BLOB_DISCOVERY}
+        assert names == {"list_blobs", "get_blob_metadata", "get_blob_content", "inspect_source"}
+
+
 class TestToolDeclarationInvariants:
     """The constructor must crash early on inconsistent declarations."""
 

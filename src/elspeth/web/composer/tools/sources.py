@@ -568,6 +568,32 @@ def _execute_inspect_source(
     return _discovery_result(state, facts_to_dict(facts))
 
 
+_INSPECT_SOURCE_DECLARATION = ToolDeclaration(
+    name="inspect_source",
+    handler=_execute_inspect_source,
+    kind=ToolKind.BLOB_DISCOVERY,
+    description=(
+        "Return bounded structural facts about a blob-backed source: source kind, observed "
+        "headers, sample row count, inferred scalar types per column, URL candidates, and "
+        "warnings. Reads at most 8 KiB of the blob and parses at most 100 rows. Use this "
+        "before declaring a fixed CSV/JSON schema — observed headers and inferred types "
+        "tell you which fields the source actually contains and what numeric coercion is "
+        "needed before any gate or value_transform numeric op. Never returns raw row "
+        "content; only summary facts."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {
+                "type": "string",
+                "description": "ID of the blob to inspect.",
+            },
+        },
+        "required": ["blob_id"],
+    },
+)
+
+
 def _execute_patch_source_options(
     args: dict[str, Any],
     state: CompositionState,
@@ -721,6 +747,7 @@ TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
     _PATCH_SOURCE_OPTIONS_DECLARATION,
     _CLEAR_SOURCE_DECLARATION,
     _SET_SOURCE_FROM_BLOB_DECLARATION,
+    _INSPECT_SOURCE_DECLARATION,
 )
 """Every tool declared in this module, in stable order.
 

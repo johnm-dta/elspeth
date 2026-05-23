@@ -267,64 +267,16 @@ def get_tool_definitions() -> list[dict[str, Any]]:
         _TOOL_DEFS_BY_NAME["get_pipeline_state"],
         _TOOL_DEFS_BY_NAME["diff_pipeline"],
         # Blob tools
-        {
-            "name": "list_blobs",
-            "description": "List uploaded/created files (blobs) in this session with metadata.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "get_blob_metadata",
-            "description": "Get metadata for a specific blob (file) by ID.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {"type": "string", "description": "Blob ID."},
-                },
-                "required": ["blob_id"],
-            },
-        },
+        _TOOL_DEFS_BY_NAME["list_blobs"],
+        _TOOL_DEFS_BY_NAME["get_blob_metadata"],
         _TOOL_DEFS_BY_NAME["set_source_from_blob"],
         _TOOL_DEFS_BY_NAME["create_blob"],
         _TOOL_DEFS_BY_NAME["update_blob"],
         _TOOL_DEFS_BY_NAME["delete_blob"],
-        {
-            "name": "get_blob_content",
-            "description": "Retrieve the content of a blob (file) for inspection. Large files are truncated to 50,000 characters.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {
-                        "type": "string",
-                        "description": "ID of the blob to read.",
-                    },
-                },
-                "required": ["blob_id"],
-            },
-        },
+        _TOOL_DEFS_BY_NAME["get_blob_content"],
         _TOOL_DEFS_BY_NAME["list_recipes"],
         _TOOL_DEFS_BY_NAME["apply_pipeline_recipe"],
-        {
-            "name": "inspect_source",
-            "description": (
-                "Return bounded structural facts about a blob-backed source: source kind, observed "
-                "headers, sample row count, inferred scalar types per column, URL candidates, and "
-                "warnings. Reads at most 8 KiB of the blob and parses at most 100 rows. Use this "
-                "before declaring a fixed CSV/JSON schema — observed headers and inferred types "
-                "tell you which fields the source actually contains and what numeric coercion is "
-                "needed before any gate or value_transform numeric op. Never returns raw row "
-                "content; only summary facts."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {
-                        "type": "string",
-                        "description": "ID of the blob to inspect.",
-                    },
-                },
-                "required": ["blob_id"],
-            },
-        },
+        _TOOL_DEFS_BY_NAME["inspect_source"],
         # Secret tools
         {
             "name": "list_secret_refs",

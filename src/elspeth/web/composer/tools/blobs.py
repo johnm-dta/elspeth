@@ -204,6 +204,15 @@ def _handle_list_blobs(
     return _discovery_result(state, blobs)
 
 
+_LIST_BLOBS_DECLARATION = ToolDeclaration(
+    name="list_blobs",
+    handler=_handle_list_blobs,
+    kind=ToolKind.BLOB_DISCOVERY,
+    description="List uploaded/created files (blobs) in this session with metadata.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+)
+
+
 def _handle_get_blob_metadata(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -219,6 +228,21 @@ def _handle_get_blob_metadata(
     # Exclude storage_path from response
     safe_blob = {k: v for k, v in blob.items() if k != "storage_path"}
     return _discovery_result(state, safe_blob)
+
+
+_GET_BLOB_METADATA_DECLARATION = ToolDeclaration(
+    name="get_blob_metadata",
+    handler=_handle_get_blob_metadata,
+    kind=ToolKind.BLOB_DISCOVERY,
+    description="Get metadata for a specific blob (file) by ID.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {"type": "string", "description": "Blob ID."},
+        },
+        "required": ["blob_id"],
+    },
+)
 
 
 _ALLOWED_BLOB_MIME_TYPES: frozenset[str] = frozenset(
@@ -1311,6 +1335,24 @@ def _execute_get_blob_content(
     )
 
 
+_GET_BLOB_CONTENT_DECLARATION = ToolDeclaration(
+    name="get_blob_content",
+    handler=_execute_get_blob_content,
+    kind=ToolKind.BLOB_DISCOVERY,
+    description="Retrieve the content of a blob (file) for inspection. Large files are truncated to 50,000 characters.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {
+                "type": "string",
+                "description": "ID of the blob to read.",
+            },
+        },
+        "required": ["blob_id"],
+    },
+)
+
+
 # ``_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES`` and the matching predicate
 # ``is_blob_store_only_mutation_tool`` are declared in
 # ``elspeth.web.composer.tools.discovery``. Per-tool blob-kwarg-shape data
@@ -1321,6 +1363,9 @@ def _execute_get_blob_content(
 
 
 TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _LIST_BLOBS_DECLARATION,
+    _GET_BLOB_METADATA_DECLARATION,
+    _GET_BLOB_CONTENT_DECLARATION,
     _CREATE_BLOB_DECLARATION,
     _UPDATE_BLOB_DECLARATION,
     _DELETE_BLOB_DECLARATION,

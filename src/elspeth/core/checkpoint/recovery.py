@@ -381,15 +381,18 @@ class RecoveryManager:
                 for r in rows_result:
                     row_metadata[r.row_id] = (r.row_index, r.ingest_sequence, NodeID(r.source_node_id), r.source_data_ref)
 
+        # Per Three-Tier Trust Model: the audit DB is Tier 1; ``row_ids`` comes
+        # from ``get_unprocessed_rows()`` and ``row_metadata`` is built from the
+        # same DB in the lookup above. A ``row_id`` missing from ``row_metadata``
+        # is internal audit corruption. Let the KeyError raise from the sort
+        # key — no defensive ``else -1`` arm that would silently mis-order
+        # corrupt data before any explicit check could fire.
         ordered_row_ids = sorted(
             row_ids,
-            key=lambda row_id: row_metadata[row_id][1] if row_id in row_metadata else -1,
+            key=lambda row_id: row_metadata[row_id][1],
         )
         result: list[ResumedRow] = []
         for row_id in ordered_row_ids:
-            if row_id not in row_metadata:
-                raise AuditIntegrityError(f"Row {row_id} not found in database — audit data corruption (Tier 1 violation)")
-
             row_index, _ingest_sequence, source_node_id, source_data_ref = row_metadata[row_id]
             if source_node_id not in source_schema_classes:
                 raise AuditIntegrityError(

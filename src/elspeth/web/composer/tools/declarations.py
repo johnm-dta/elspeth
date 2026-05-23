@@ -65,7 +65,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 from elspeth.contracts.freeze import freeze_fields
 
@@ -101,15 +104,6 @@ class ToolKind(Enum):
     SECRET_MUTATION = "secret_mutation"
 
 
-_MUTATION_KINDS: Final[frozenset[ToolKind]] = frozenset(
-    {
-        ToolKind.MUTATION,
-        ToolKind.BLOB_MUTATION,
-        ToolKind.SECRET_MUTATION,
-    }
-)
-
-
 @dataclass(frozen=True, slots=True)
 class ToolDeclaration:
     """One composer tool, declared at one site, co-located with its handler.
@@ -138,9 +132,15 @@ class ToolDeclaration:
             Pydantic validation model; the two surfaces are deliberately
             distinct (see module docstring).
         cacheable: True if results can be cached within a compose() call.
-            Forbidden for any mutation kind; for discovery tools this is the
-            **explicit opt-in** flag that today drives
-            ``_CACHEABLE_DISCOVERY_TOOL_NAMES``.
+            Only ``DISCOVERY`` may set this — mutation tools must never be
+            cached (would serve a stale write result), and BLOB/SECRET
+            discovery tools today are not part of the per-call cache
+            (``_registry.py`` asserts ``_CACHEABLE_DISCOVERY_TOOL_NAMES``
+            is a subset of the DISCOVERY name-set). The construction-time
+            invariant below catches the wider cacheable!=DISCOVERY shape
+            at declaration time rather than deferring to the registry's
+            import-time subset check (Python-engineer M3 review finding,
+            2026-05-23).
         needs_blob_quota: True if the dispatcher should pass
             ``max_blob_storage_per_session_bytes`` to the handler via
             ``ToolContext``. Only meaningful for ``BLOB_MUTATION``.
@@ -170,15 +170,43 @@ class ToolDeclaration:
         if not isinstance(self.kind, ToolKind):
             raise TypeError(f"ToolDeclaration({self.name!r}).kind must be a ToolKind member, got {type(self.kind).__name__}.")
 
-        # Cacheability invariant — mutation/session-aware tools MUST NOT be
-        # cacheable. Caching a mutation serves a stale write result; caching
-        # a session-aware async response defeats the per-call semantics.
-        if self.cacheable and self.kind in _MUTATION_KINDS:
+        # Cacheability invariant — only DISCOVERY tools may be cacheable.
+        # Inverted (against the previous ``kind in _MUTATION_KINDS`` check)
+        # to fire on construction for BLOB_DISCOVERY / SECRET_DISCOVERY too,
+        # rather than deferring to the ``_registry.py`` subset assertion
+        # (Python-engineer M3 review finding, 2026-05-23). The previous
+        # invariant exclusively named mutation kinds; with the inverted
+        # form an inadvertent ``cacheable=True`` on a non-DISCOVERY tool of
+        # any kind fails at the declaration site.
+        if self.cacheable and self.kind is not ToolKind.DISCOVERY:
             raise ValueError(
                 f"ToolDeclaration({self.name!r}).cacheable=True is forbidden "
-                f"for kind {self.kind.value!r}. Caching a mutation or "
-                "session-aware tool serves stale state to the LLM."
+                f"for kind {self.kind.value!r}. Only DISCOVERY tools may be "
+                "cacheable — mutation tools would serve stale write results, "
+                "and BLOB/SECRET discovery tools are not part of the per-call "
+                "cache contract (_registry.py enforces "
+                "_CACHEABLE_DISCOVERY_TOOL_NAMES ⊆ _DISCOVERY_TOOL_NAMES)."
             )
+
+        # JSON Schema validity invariant — the ``parameters`` shape we ship
+        # to the LLM must meta-validate against the Draft 2020-12 spec. A
+        # malformed schema (typo on ``type``, mistyped enum, structural
+        # error) would otherwise escape to the model provider and fail at
+        # compose time with a 400 response — the diagnostic the user pays
+        # for is then opaque ("invalid_request_error" from upstream) and
+        # the compose turn is lost. ``check_schema`` walks the metaschema,
+        # not user data, so this is purely a construction-time check.
+        # Validation must happen BEFORE ``freeze_fields`` because
+        # ``Draft202012Validator.check_schema`` uses ``isinstance(x, dict)``
+        # in its type checker and rejects ``MappingProxyType`` /
+        # tuple-coerced ``required`` arrays. Systems-thinker
+        # recommendation #3 (2026-05-23).
+        try:
+            Draft202012Validator.check_schema(self.json_schema)
+        except SchemaError as exc:
+            raise ValueError(
+                f"ToolDeclaration({self.name!r}).json_schema is not a valid JSON Schema (Draft 2020-12): {exc.message}"
+            ) from exc
 
         # Blob-kwarg invariants — only BLOB_MUTATION may set these.
         if self.kind is not ToolKind.BLOB_MUTATION:

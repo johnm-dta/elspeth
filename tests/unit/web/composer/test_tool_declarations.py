@@ -919,6 +919,55 @@ class TestToolDeclarationInvariants:
         with pytest.raises(ValueError, match="cacheable=True is forbidden"):
             self._make(kind=ToolKind.MUTATION, cacheable=True)
 
+    def test_cacheable_blob_mutation_raises(self) -> None:
+        """Inverted cacheability invariant (Python-engineer M3, 2026-05-23):
+        the check fires for every non-DISCOVERY kind, not only the original
+        mutation triplet."""
+        with pytest.raises(ValueError, match="Only DISCOVERY tools may be cacheable"):
+            self._make(kind=ToolKind.BLOB_MUTATION, cacheable=True)
+
+    def test_cacheable_secret_mutation_raises(self) -> None:
+        """Inverted cacheability invariant: SECRET_MUTATION is non-DISCOVERY
+        and must reject cacheable=True at the declaration site."""
+        with pytest.raises(ValueError, match="Only DISCOVERY tools may be cacheable"):
+            self._make(kind=ToolKind.SECRET_MUTATION, cacheable=True)
+
+    def test_cacheable_blob_discovery_raises(self) -> None:
+        """Inverted cacheability invariant: BLOB_DISCOVERY tools are NOT
+        part of the per-call cache contract (``_registry.py`` enforces
+        ``_CACHEABLE_DISCOVERY_TOOL_NAMES ⊆ _DISCOVERY_TOOL_NAMES``). The
+        constructor must reject ``cacheable=True`` at declaration time so
+        the error surfaces at the call site of the misconfigured
+        declaration, not at registry import (Python-engineer M3 review
+        finding, 2026-05-23)."""
+        with pytest.raises(ValueError, match="Only DISCOVERY tools may be cacheable"):
+            self._make(kind=ToolKind.BLOB_DISCOVERY, cacheable=True)
+
+    def test_cacheable_secret_discovery_raises(self) -> None:
+        """Inverted cacheability invariant: SECRET_DISCOVERY tools are
+        excluded from caching by the same registry subset assertion as
+        BLOB_DISCOVERY. The constructor catches the misconfiguration at
+        declaration time."""
+        with pytest.raises(ValueError, match="Only DISCOVERY tools may be cacheable"):
+            self._make(kind=ToolKind.SECRET_DISCOVERY, cacheable=True)
+
+    def test_invalid_json_schema_raises(self) -> None:
+        """Systems-thinker recommendation #3 (2026-05-23): the ``json_schema``
+        field must meta-validate against Draft 2020-12 at construction time.
+        Without this a malformed schema (typo in ``type``, structural error)
+        escapes to the LLM API edge and fails as an opaque upstream 400."""
+        with pytest.raises(ValueError, match="is not a valid JSON Schema"):
+            # ``type: "objet"`` (sic) is a typo the metaschema rejects via
+            # its ``simpleTypes`` enum. This catches the canonical class of
+            # mistake the check defends against.
+            self._make(json_schema={"type": "objet", "properties": {}, "required": []})
+
+    def test_invalid_json_schema_structural_error_raises(self) -> None:
+        """``properties`` MUST be an object per Draft 2020-12; passing a
+        list instead is a structural error the metaschema catches."""
+        with pytest.raises(ValueError, match="is not a valid JSON Schema"):
+            self._make(json_schema={"type": "object", "properties": ["wrong"], "required": []})
+
     def test_tool_kind_has_no_session_aware_value(self) -> None:
         """SESSION_AWARE was a dead enum value advertising a shape no
         declaration carried — removed by the 2026-05-23 four-agent review

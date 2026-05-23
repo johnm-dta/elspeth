@@ -31,6 +31,13 @@ dependencies = [
     # Plugin system
     "pluggy>=1.6,<2",  # Plugin architecture (pytest uses this)
 
+    # JSON Schema validation — Draft 2020-12 meta-validation of composer
+    # tool argument schemas at declaration construction time
+    # (src/elspeth/web/composer/tools/declarations.py). Without this an
+    # invalid schema escapes to the LLM API edge and fails at compose time
+    # with a 400 response. Systems-thinker recommendation #3 (2026-05-23).
+    "jsonschema>=4.26,<5",
+
     # Data handling
     "numpy>=1.26,<3",  # Numeric types (pandas dependency, explicit for schema validation)
     "pandas>=2.3,<3",  # DataFrame operations

@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any, Final
 
+from jsonschema import Draft202012Validator
 from sqlalchemy import Engine
 
 from elspeth.contracts.freeze import deep_freeze, deep_thaw
@@ -83,7 +84,32 @@ __all__ = [
 # ``test_trailing_tool_name_is_locked``) stays attached to it across deploys.
 # ---------------------------------------------------------------------------
 
-_REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = deep_freeze(
+
+def _validate_and_freeze_tool_definition(defn: dict[str, Any]) -> Mapping[str, Any]:
+    """Meta-validate ``defn["parameters"]`` against JSON Schema Draft 2020-12, then deep-freeze.
+
+    Declared tools meta-validate their ``json_schema`` inside
+    ``ToolDeclaration.__post_init__``. The two inline definitions below
+    (``request_advisor_hint`` and ``request_interpretation_review``) do
+    NOT flow through ``ToolDeclaration`` because their handlers are
+    async / coroutine-shaped — but they ARE emitted on every
+    ``get_tool_definitions`` call alongside the declared tools, so they
+    must meet the same schema-validity contract. Without this check a
+    typo in either inline schema would escape to the LLM API edge and
+    fail at compose time with an opaque upstream 400. Systems-thinker
+    recommendation #3 (2026-05-23).
+
+    Validation runs BEFORE ``deep_freeze`` because
+    ``Draft202012Validator.check_schema`` uses ``isinstance(x, dict)`` in
+    its type checker and rejects ``MappingProxyType`` / tuple-coerced
+    arrays the deep-freeze produces.
+    """
+    Draft202012Validator.check_schema(defn["parameters"])
+    frozen: Mapping[str, Any] = deep_freeze(defn)
+    return frozen
+
+
+_REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freeze_tool_definition(
     {
         "name": "request_advisor_hint",
         "description": (
@@ -162,7 +188,7 @@ _REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = deep_freeze(
 # The description below is normative documentation for the LLM (mirrored
 # in the composer skill markdown) and is reviewed by the audit panel as
 # part of the request_interpretation_review event row's provenance.
-_REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[Mapping[str, Any]] = deep_freeze(
+_REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freeze_tool_definition(
     {
         "name": "request_interpretation_review",
         "description": (

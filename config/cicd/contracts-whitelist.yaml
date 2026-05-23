@@ -672,6 +672,12 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools/generation.py:_numeric_aggregation_diagnostics_for_observed_csv:return (list)"
   - "src/elspeth/web/composer/tools/_dispatch.py:get_tool_definitions:return (list)"
   - "src/elspeth/web/composer/tools/_dispatch.py:execute_tool:arguments"
+  # JSON Schema meta-validation helper for the two non-declared inline
+  # tool definitions emitted by get_tool_definitions(). The ``defn``
+  # parameter is a literal dict at the call site (declared in this
+  # module, not LLM-supplied); Tier-1 audit-readiness is enforced by
+  # the validity check inside the helper before the dict is deep-frozen.
+  - "src/elspeth/web/composer/tools/_dispatch.py:_validate_and_freeze_tool_definition:defn"
   - "src/elspeth/web/composer/tools/sources.py:_execute_set_source:args"
   - "src/elspeth/web/composer/tools/transforms.py:_execute_upsert_node:args"
   - "src/elspeth/web/composer/tools/transforms.py:_execute_upsert_edge:args"
@@ -700,7 +706,7 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools/blobs.py:_handle_get_blob_metadata:arguments"
   - "src/elspeth/web/composer/tools/sources.py:_execute_set_source_from_blob:arguments"
   - "src/elspeth/web/composer/tools/sources.py:_execute_inspect_source:arguments"
-  - "src/elspeth/web/composer/tools/recipes.py:_execute_apply_pipeline_recipe:arguments"
+  - "src/elspeth/web/composer/tools/sessions.py:_execute_apply_pipeline_recipe:arguments"
   - "src/elspeth/web/composer/tools/recipes.py:_execute_list_recipes:arguments"
   # Recipe slot validation — operator-supplied slot dicts (Tier-3) and the
   # set_pipeline-shaped args dict each recipe builds. Both shapes are
@@ -817,7 +823,7 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._compose_loop:messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_messages:chat_history (list)"
   - "src/elspeth/web/composer/service.py:_make_cache_key:arguments"
-  - "src/elspeth/web/composer/llm_response_parsing.py:_build_llm_call_record:messages (list)"
+  - "src/elspeth/web/composer/llm_response_parsing.py:build_llm_call_record:messages (list)"
   # Late-binding capture of the per-tool-call arguments inside the
   # dispatch_with_audit closure. The loop-local `arguments` is a Tier-3
   # parsed dict (LLM-supplied tool call arguments — no schema available
@@ -846,7 +852,7 @@ allowed_dict_patterns:
   # operates on the same provider-call payload shape as the call sites above.
   # The `tools` parameter is typed `list | None`, so the contracts check
   # treats it as a separate shape; only `messages (list)` is whitelisted here.
-  - "src/elspeth/web/composer/llm_response_parsing.py:_apply_anthropic_cache_markers:messages (list)"
+  - "src/elspeth/web/composer/llm_response_parsing.py:apply_anthropic_cache_markers:messages (list)"
   - "src/elspeth/web/composer/prompts.py:build_messages:chat_history (list)"
   - "src/elspeth/web/composer/prompts.py:build_messages:return (list)"
 

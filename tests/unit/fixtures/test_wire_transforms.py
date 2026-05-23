@@ -67,7 +67,7 @@ def test_build_linear_pipeline_uses_wired_transforms() -> None:
 
     source, _transforms, sinks, graph = build_linear_pipeline(source_data, transforms=transforms, sink_name="default")
 
-    assert source.on_success == "list_source_out"
+    assert source.on_success == "primary_out"
     assert list(sinks.keys()) == ["default"]
     assert len(graph.get_pipeline_node_sequence()) == 2
     assert list(graph.get_terminal_sink_map().values()) == ["default"]
@@ -76,7 +76,7 @@ def test_build_linear_pipeline_uses_wired_transforms() -> None:
 def test_build_fork_pipeline_routes_to_branch_sinks() -> None:
     gate = GateSettings(
         name="router",
-        input="list_source_out",
+        input="primary_out",
         condition="row['value'] > 0",
         routes={"true": "sink_a", "false": "sink_b"},
     )
@@ -97,7 +97,7 @@ def test_build_fork_pipeline_routes_to_branch_sinks() -> None:
 def test_build_fork_pipeline_supports_join_via_coalesce() -> None:
     gate = GateSettings(
         name="fork_gate",
-        input="list_source_out",
+        input="primary_out",
         condition="True",
         routes={"true": "fork", "false": "output"},
         fork_to=["path_a", "path_b"],

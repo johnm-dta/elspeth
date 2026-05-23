@@ -96,7 +96,7 @@ def _run_fork_on_db(
     payload_store = FilesystemPayloadStore(payload_root)
     gate = GateSettings(
         name="router",
-        input="list_source_out",
+        input="primary_out",
         condition="row['value'] > 50",
         routes={"true": "high_sink", "false": "low_sink"},
     )

@@ -216,7 +216,7 @@ class TestToolListOrderIsCacheKeyContract:
         """
         from elspeth.web.composer.service import ComposerServiceImpl
         from elspeth.web.composer.tools import get_tool_definitions
-        from tests.unit.web.composer.test_service import _make_settings, _mock_catalog
+        from tests.unit.web.composer._helpers import _make_settings, _mock_catalog
 
         catalog = _mock_catalog()
         settings = _make_settings()
@@ -275,7 +275,7 @@ class TestCacheMarkersWiredAtCallSite:
             ComposerAvailability,
             ComposerServiceImpl,
         )
-        from tests.unit.web.composer.test_service import (
+        from tests.unit.web.composer._helpers import (
             FakeChoice,
             _empty_state,
             _make_llm_response,
@@ -343,7 +343,7 @@ class TestCacheMarkersWiredAtCallSite:
             ComposerAvailability,
             ComposerServiceImpl,
         )
-        from tests.unit.web.composer.test_service import (
+        from tests.unit.web.composer._helpers import (
             FakeChoice,
             _empty_state,
             _make_llm_response,

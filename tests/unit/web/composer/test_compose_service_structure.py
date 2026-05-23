@@ -5,17 +5,37 @@ from pathlib import Path
 
 import pytest
 
-# The composer-service surface spans these files after the 2026-05-23 refactor
-# split ComposerServiceImpl helpers into siblings. Module-tail patches of
-# ComposerServiceImpl methods or _PHASE3_* sentinels are forbidden in any of
-# them — the anti-pattern can hide in a sibling module just as easily as in
-# service.py itself.
-COMPOSER_SERVICE_SURFACE_PATHS = (
-    Path("src/elspeth/web/composer/service.py"),
-    Path("src/elspeth/web/composer/llm_response_parsing.py"),
-    Path("src/elspeth/web/composer/_required_paths_validator.py"),
-    Path("src/elspeth/web/composer/progress.py"),
-)
+# The composer-service surface spans every top-level module file in
+# ``src/elspeth/web/composer/``. Module-tail patches of ComposerServiceImpl
+# methods or ``_PHASE3_*`` sentinels are forbidden in any of them — the
+# anti-pattern can hide in a sibling module just as easily as in
+# ``service.py`` itself.
+#
+# Globbed discovery (rather than a hand-listed tuple) so the gate
+# automatically extends to new sibling modules without a maintenance step.
+# The prior hand-list silently missed every module added after its initial
+# authoring (elspeth-59cdfcaf67) — globbing closes the lifecycle hole.
+#
+# Subdirectory packages (``composer/tools/``, ``composer/skills/``,
+# ``composer/guided/``) are intentionally excluded: the forbidden pattern
+# (``ComposerServiceImpl.<attr> = ...`` at module tail) is a top-level
+# service-surface concern, and the subdirectories are tool implementations
+# / skill graphs that never reference the service class identifier.
+
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+_COMPOSER_DIR = _REPO_ROOT / "src" / "elspeth" / "web" / "composer"
+
+# Sort for deterministic test-ID ordering across collections.
+# Exclude ``__init__.py`` — it's a package marker, not a module-surface
+# carrier, and the anti-pattern's only known incidence in __init__ would be
+# an explicit re-export, not a module-tail patch.
+COMPOSER_SERVICE_SURFACE_PATHS: tuple[Path, ...] = tuple(sorted(p for p in _COMPOSER_DIR.glob("*.py") if p.name != "__init__.py"))
+
+# Module-load smoke assertions: catch a glob that suddenly returns nothing
+# (path drift after a refactor) before the parametrized tests get a chance
+# to silently report zero collected cases.
+assert COMPOSER_SERVICE_SURFACE_PATHS, f"globbed surface paths must not be empty; checked {_COMPOSER_DIR}"
+assert all(p.is_file() for p in COMPOSER_SERVICE_SURFACE_PATHS), "globbed surface paths must all be real files; check directory layout"
 
 
 @pytest.mark.parametrize("module_path", COMPOSER_SERVICE_SURFACE_PATHS, ids=lambda p: p.name)

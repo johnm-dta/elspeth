@@ -53,7 +53,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
-from tests.unit.web.composer.test_service import (
+from tests.unit.web.composer._helpers import (
     FakeChoice,
     _empty_state,
     _make_llm_response,

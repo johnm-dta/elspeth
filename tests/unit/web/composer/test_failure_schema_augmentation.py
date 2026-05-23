@@ -142,7 +142,7 @@ def _passthrough_transform_schema() -> PluginSchemaInfo:
     )
 
 
-class TestFailureScheamAugmentationSetPipeline:
+class TestFailureSchemaAugmentationSetPipeline:
     def test_failed_set_pipeline_includes_plugin_schemas_for_named_plugins(self) -> None:
         """set_pipeline rejection naming a plugin → that plugin's schema inline.
 
@@ -271,7 +271,7 @@ class TestFailureScheamAugmentationSetPipeline:
         assert "plugin_schemas" not in payload
 
 
-class TestFailureScheamAugmentationMultiPluginErrors:
+class TestFailureSchemaAugmentationMultiPluginErrors:
     """Cover the multi-plugin iteration contract directly.
 
     ``set_pipeline`` is atomic and bails at the first per-component
@@ -326,7 +326,7 @@ class TestFailureScheamAugmentationMultiPluginErrors:
         assert schemas["sink/json"]["plugin_type"] == "sink"
 
 
-class TestFailureScheamAugmentationDeduplication:
+class TestFailureSchemaAugmentationDeduplication:
     def test_plugin_schemas_deduplicated_when_multiple_errors_name_same_plugin(self) -> None:
         """Two distinct errors naming the same (kind, plugin) → schema emitted once."""
         from elspeth.web.composer.state import ValidationEntry, ValidationSummary
@@ -365,7 +365,7 @@ class TestFailureScheamAugmentationDeduplication:
         assert list(schemas.keys()) == ["source/csv"]
 
 
-class TestFailureScheamAugmentationPerToolCoverage:
+class TestFailureSchemaAugmentationPerToolCoverage:
     """Confirm the augmentation hook fires for every option-shape tool."""
 
     def test_set_source_failure_carries_schema(self) -> None:
@@ -477,7 +477,7 @@ class TestFailureScheamAugmentationPerToolCoverage:
         assert "source/csv" in payload["plugin_schemas"]
 
 
-class TestFailureScheamAugmentationNonAugmentedTools:
+class TestFailureSchemaAugmentationNonAugmentedTools:
     def test_get_plugin_schema_does_not_carry_plugin_schemas_field(self) -> None:
         """Discovery tools — even on failure — must NOT trigger augmentation."""
         catalog = _make_catalog_with_schemas()

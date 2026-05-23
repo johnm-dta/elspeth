@@ -126,6 +126,22 @@ class LandscapeWriteRepository:
                             output_contract_json=None,
                         )
                     )
+                # Cache-replay rows: exactly one source per replayed run, so
+                # ``source_row_index = row_index`` (position within the
+                # source) and ``ingest_sequence = row_index`` (monotone
+                # run-wide order). This is *recording reality*, not
+                # fabrication — the cache stores a deterministic single-
+                # source sequence; the three fields are genuinely equal.
+                #
+                # Load-bearing assumption: this path mints exactly ONE
+                # source node (``source_node_id = self._node_id(run_id, 0)``
+                # at the head of this method). A future contributor adding
+                # multi-source cache replay MUST re-derive
+                # ``source_row_index`` per source and ``ingest_sequence``
+                # globally — the equality above is single-source-specific
+                # and would otherwise produce per-source row-index
+                # collisions on the ``UniqueConstraint("run_id",
+                # "ingest_sequence")`` (filigree elspeth-56c3cda89b).
                 for row_index, _row in enumerate(rows):
                     conn.execute(
                         rows_table.insert().values(

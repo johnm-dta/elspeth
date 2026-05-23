@@ -242,6 +242,49 @@ edges_table = Table(
 )
 
 # === Source Rows ===
+#
+# Audit-DB invariants for the rows table (filigree elspeth-56c3cda89b,
+# ADR-bundle systems-thinker Finding 5, "Tragedy of the Commons"). The shared
+# resource is the audit database's invariant surface; the actors are 25+
+# downstream consumers (audit-readiness panel, ``elspeth explain``, MCP
+# failure-context, redaction policy, composer state, resume orchestrator,
+# replay verifier...). Each consumer carries its own assumption about
+# per-source provenance; without a central guarantor, the failure mode is
+# *simultaneous* across consumers rather than progressive.
+#
+# Invariants by mechanical enforcement status:
+#
+# 1. ``source_node_id NOT NULL`` (this table, line 225). STRUCTURALLY
+#    ENFORCED at schema level. Every row in the audit trail attributes to a
+#    specific source node, never NULL.
+#
+# 2. ``ingest_sequence`` is monotone per run and globally unique within a
+#    run. STRUCTURALLY ENFORCED via ``UniqueConstraint("run_id",
+#    "ingest_sequence")`` (line 234) plus the ``NOT NULL`` on the column.
+#
+# 3. Compound row identity ``(run_id, source_node_id, source_row_index)``
+#    is unique. STRUCTURALLY ENFORCED via ``UniqueConstraint`` at line 233.
+#    Two sources emitting the same ``source_row_index`` value produce
+#    distinct rows because ``source_node_id`` discriminates.
+#
+# Invariants NOT YET structurally enforced (gaps below the schema):
+#
+# A. ``source_row_index`` and ``ingest_sequence`` fabrication ban (G22).
+#    ``data_flow_repository.create_row`` raises ``AuditIntegrityError`` when
+#    these values are not explicitly provided ("Do not fabricate
+#    source_row_index or ingest_sequence from row_index"), but the
+#    prohibition lives in an exception string at one write boundary. The
+#    cache-replay write path (``write_repository.record_synthesised_run``)
+#    intentionally sets all three equal because there is exactly one source;
+#    a future contributor adding a multi-source synthesised-run path could
+#    silently drift. Tracked under filigree elspeth-92afea0d23 (elspeth-lints
+#    rule with the same enforcement status as ``trust_tier.tier_model``).
+#
+# B. Scheduler lease-ownership transitions (G29). ``token_work_items``
+#    carries the current lease state but not its transition history; a
+#    lease-expiry event during multi-worker execution leaves no per-worker
+#    audit attribution. Tracked under filigree elspeth-9030f34c32
+#    (``scheduler_events`` table).
 
 rows_table = Table(
     "rows",

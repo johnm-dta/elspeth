@@ -196,7 +196,25 @@ class _MalformedLLMResponseError(ComposerServiceError):
 
 
 class _BadRequestLLMError(ComposerServiceError):
-    """Internal carrier for provider bad-request failures."""
+    """Internal carrier for provider bad-request failures.
+
+    Carries the raw provider message and HTTP status code on dedicated
+    attributes so the route layer can surface them under
+    ``expose_provider_error=True`` without having to re-parse the wrapped
+    LiteLLM exception. ``str(self)`` is unchanged from the parent class —
+    only the wrap message is rendered there.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_detail: str | None = None,
+        provider_status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider_detail = provider_detail
+        self.provider_status_code = provider_status_code
 
 
 class _ReasoningMetadata(TypedDict):
@@ -4165,7 +4183,11 @@ class ComposerServiceImpl:
                 **kwargs,
             )
         except LiteLLMBadRequestError as exc:
-            raise _BadRequestLLMError(f"LLM request rejected ({type(exc).__name__})") from exc
+            raise _BadRequestLLMError(
+                f"LLM request rejected ({type(exc).__name__})",
+                provider_detail=str(exc) or None,
+                provider_status_code=getattr(exc, "status_code", None),
+            ) from exc
         # Tier 3 boundary: LiteLLM can return empty choices on content-filter,
         # rate-limit, or malformed upstream responses.  Validate before callers
         # index into choices[0].
@@ -4193,7 +4215,11 @@ class ComposerServiceImpl:
                 **kwargs,
             )
         except LiteLLMBadRequestError as exc:
-            raise _BadRequestLLMError(f"LLM request rejected ({type(exc).__name__})") from exc
+            raise _BadRequestLLMError(
+                f"LLM request rejected ({type(exc).__name__})",
+                provider_detail=str(exc) or None,
+                provider_status_code=getattr(exc, "status_code", None),
+            ) from exc
         if not response.choices:
             raise _MalformedLLMResponseError("LLM returned empty choices array — cannot explain run diagnostics", response=response)
         return response
@@ -4903,6 +4929,7 @@ class ComposerServiceImpl:
                 ) from None
             except LiteLLMAuthError:
                 raise
+            # _BadRequestLLMError intentionally not retried — 400s are not transient.
             except LiteLLMAPIError:
                 attempt += 1
                 if attempt >= _LLM_API_MAX_ATTEMPTS:

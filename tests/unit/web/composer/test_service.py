@@ -2799,6 +2799,85 @@ class TestComposerAvailabilityAndBadRequest:
         assert "leaked-detail" not in str(exc_info.value)
 
     @pytest.mark.asyncio
+    async def test_bad_request_llm_error_preserves_provider_detail(self) -> None:
+        """``_BadRequestLLMError`` carries the underlying provider message.
+
+        The wrap message (``str(exc)``) is intentionally redacted so the
+        route layer does not leak provider details by default. The route
+        layer's ``expose_provider_error=True`` path re-uses
+        ``provider_detail`` to surface the raw message after scrubbing.
+
+        Ticket: elspeth-9f7f9d5787.
+        """
+        from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        bad_request = LiteLLMBadRequestError(
+            message="provider says bad",
+            model="gpt-4o",
+            llm_provider="openai",
+        )
+
+        with (
+            patch(
+                "elspeth.web.composer.service._litellm_acompletion",
+                new_callable=AsyncMock,
+                side_effect=bad_request,
+            ),
+            pytest.raises(_BadRequestLLMError) as exc_info,
+        ):
+            await service.compose("Hello", [], state)
+
+        # str(exc) unchanged from the existing redacted wrap message.
+        assert str(exc_info.value) == "LLM request rejected (BadRequestError)"
+        # New attributes carry the provider detail for the route layer.
+        assert exc_info.value.provider_detail is not None
+        assert "provider says bad" in exc_info.value.provider_detail
+        assert exc_info.value.provider_status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_bad_request_llm_error_empty_message_collapses_to_none(self) -> None:
+        """Empty-string provider messages collapse to ``None`` so callers can
+        distinguish "no detail" from "empty string" via truthiness checks.
+        """
+        from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        # LiteLLM's BadRequestError formats the message into a longer string;
+        # passing an empty message still yields a non-empty rendered str.
+        # To exercise the empty-collapse path, raise the exception type
+        # directly with an empty rendered form.
+        bad_request = LiteLLMBadRequestError(message="", model="m", llm_provider="p")
+        # Force str(exc) == "" so the ``or None`` collapse can fire.
+        bad_request.args = ("",)
+        bad_request.message = ""
+
+        with (
+            patch(
+                "elspeth.web.composer.service._litellm_acompletion",
+                new_callable=AsyncMock,
+                side_effect=bad_request,
+            ),
+            pytest.raises(_BadRequestLLMError) as exc_info,
+        ):
+            await service.compose("Hello", [], state)
+
+        # str(bad_request) is "" so provider_detail should collapse to None.
+        # provider_status_code is still set from the .status_code attribute.
+        assert exc_info.value.provider_detail is None
+        assert exc_info.value.provider_status_code == 400
+
+    @pytest.mark.asyncio
     async def test_litellm_api_error_is_retried_before_unavailable(self) -> None:
         from litellm.exceptions import APIError as LiteLLMAPIError
 

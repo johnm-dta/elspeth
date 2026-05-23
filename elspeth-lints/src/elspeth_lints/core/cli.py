@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import re
 import sys
 from collections.abc import Sequence
@@ -852,6 +853,15 @@ def _run_justify(args: argparse.Namespace) -> int:
         write_verdict = response.verdict
         model_verdict = None
 
+    # C8-3 binding: compute the source-file fingerprint and capture the
+    # finding's ast_path at write time, alongside the judge metadata.
+    # These two fields make the persisted quartet cryptographically
+    # bound to the bytes + AST node the judge actually inspected — the
+    # loader/matcher pair (allowlist.load_allowlist and
+    # allowlist.verify_entry_binding_against_finding) reads them back
+    # and asserts the binding still holds, closing the quartet-
+    # transplant attack vector.
+    file_fingerprint = hashlib.sha256(target_file.read_bytes()).hexdigest()
     yaml_entry = _build_yaml_entry_text(
         key=finding.canonical_key,
         owner=args.owner,
@@ -861,6 +871,8 @@ def _run_justify(args: argparse.Namespace) -> int:
         model_id=response.model_id,
         judge_rationale=response.judge_rationale,
         model_verdict=model_verdict,
+        file_fingerprint=file_fingerprint,
+        ast_path=finding.ast_path,
     )
     target_yaml = _suggest_yaml_target(finding=finding, allowlist_dir=allowlist_dir)
 
@@ -1006,6 +1018,8 @@ def _build_yaml_entry_text(
     recorded_at: Any,  # datetime
     model_id: str,
     judge_rationale: str,
+    file_fingerprint: str,
+    ast_path: str,
     model_verdict: Any = None,  # JudgeVerdict | None; populated only on override
 ) -> str:
     """Render one ``allow_hits`` entry as YAML text.
@@ -1047,6 +1061,14 @@ def _build_yaml_entry_text(
     lines.append("  judge_rationale: |-")
     for rationale_line in judge_rationale.splitlines() or [""]:
         lines.append(f"    {rationale_line}")
+    # C8-3 binding fields. ``file_fingerprint`` is the SHA-256 of the
+    # source-file bytes the judge inspected; ``ast_path`` is the AST
+    # field/index path from the module root to the finding's subject
+    # node. Together they bind the persisted quartet to source+AST so
+    # the loader/matcher pair can detect quartet transplant and
+    # source drift. Both are scalars; emit inline.
+    lines.append(f"  file_fingerprint: {_yaml_inline_scalar(file_fingerprint)}")
+    lines.append(f"  ast_path: {_yaml_inline_scalar(ast_path)}")
     return "\n".join(lines) + "\n"
 
 

@@ -20,6 +20,7 @@ See ``B2`` in the cicd-judge-cli prototype review.
 
 from __future__ import annotations
 
+import hashlib
 import textwrap
 from pathlib import Path
 
@@ -50,6 +51,8 @@ def test_override_entry_without_judge_model_verdict_crashes(tmp_path: Path) -> N
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
             judge_rationale: model said BLOCKED but we proceed
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
             # judge_model_verdict deliberately omitted — corruption.
     """).strip()
     path = tmp_path / "al.yaml"
@@ -83,6 +86,8 @@ def test_non_override_entry_with_judge_model_verdict_crashes(tmp_path: Path) -> 
             judge_model: claude-opus-4-7
             judge_rationale: judge agrees
             judge_model_verdict: ACCEPTED  # fabricated divergence on a non-override entry
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
     """).strip()
     path = tmp_path / "al.yaml"
     path.write_text(yaml)
@@ -196,6 +201,8 @@ def test_fully_populated_override_entry_round_trips(tmp_path: Path) -> None:
             judge_model: claude-opus-4-7
             judge_rationale: "model said: this should be fixed in code"
             judge_model_verdict: BLOCKED
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
     """).strip()
     path = tmp_path / "al.yaml"
     path.write_text(yaml)
@@ -249,6 +256,8 @@ def test_fully_populated_non_override_entry_round_trips(tmp_path: Path) -> None:
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
             judge_rationale: judge agrees
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
     """).strip()
     path = tmp_path / "al.yaml"
     path.write_text(yaml)
@@ -343,6 +352,8 @@ def test_override_with_judge_model_verdict_blocked_round_trips(tmp_path: Path) -
             judge_model: claude-opus-4-7
             judge_rationale: model said BLOCKED; operator proceeds anyway
             judge_model_verdict: BLOCKED
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
     """).strip()
     path = tmp_path / "al.yaml"
     path.write_text(yaml)
@@ -384,8 +395,233 @@ def test_whitespace_only_rationale_on_post_judge_entry_crashes(tmp_path: Path) -
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
             judge_rationale: "   "
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
     """).strip()
     path = tmp_path / "al.yaml"
     path.write_text(yaml)
     with pytest.raises(ValueError, match=r"allow_hits\[0\].*judge_rationale.*empty"):
         load_allowlist(path, valid_rule_ids=set())
+
+
+# ---------------------------------------------------------------------------
+# C8-3: quartet-transplant defence (binding fields + source-drift gate).
+#
+# The C8-3 attack vector: a judge quartet (verdict + rationale + model +
+# recorded_at) accepted on a SAFE entry A is copied verbatim onto an entry B
+# keyed at DANGEROUS code, and the allowlist gate has no way to detect the
+# rebind because the quartet is plain text and not bound to the code it was
+# judged against. The fix wires two binding fields (file_fingerprint +
+# ast_path) end-to-end:
+#
+#   * Writer (``elspeth-lints justify``) computes both at write time.
+#   * Loader (``load_allowlist`` with ``source_root``) recomputes the live
+#     file_fingerprint and rejects mismatches at load — catching cross-file
+#     transplant and source drift.
+#   * Matcher (tier_model's ``_match_finding``) asserts the live finding's
+#     ast_path equals the persisted one — catching in-file AST-node
+#     transplant.
+#
+# These tests pin the invariants enforced at the loader gate; the writer
+# tests live in test_justify.py and the matcher integration tests live in
+# test_trust_tier_model_rule.py (covered via the C8-3 ast-mismatch case).
+# ---------------------------------------------------------------------------
+
+
+def test_post_judge_entry_missing_file_fingerprint_crashes(tmp_path: Path) -> None:
+    """A judge-gated entry without ``file_fingerprint`` is transplantable."""
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: agent
+            reason: tier-3 boundary
+            safety: low
+            judge_verdict: ACCEPTED
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: claude-opus-4-7
+            judge_rationale: judge agrees
+            ast_path: "body[0]"
+            # file_fingerprint deliberately omitted — quartet is unbound.
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+    with pytest.raises(ValueError, match=r"allow_hits\[0\].*binding fields are missing.*file_fingerprint"):
+        load_allowlist(path, valid_rule_ids=set())
+
+
+def test_post_judge_entry_missing_ast_path_crashes(tmp_path: Path) -> None:
+    """A judge-gated entry without ``ast_path`` is transplantable within a file."""
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: agent
+            reason: tier-3 boundary
+            safety: low
+            judge_verdict: ACCEPTED
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: claude-opus-4-7
+            judge_rationale: judge agrees
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            # ast_path deliberately omitted — in-file transplant possible.
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+    with pytest.raises(ValueError, match=r"allow_hits\[0\].*binding fields are missing.*ast_path"):
+        load_allowlist(path, valid_rule_ids=set())
+
+
+def test_pre_judge_entry_with_stray_binding_field_crashes(tmp_path: Path) -> None:
+    """A pre-judge entry must not carry binding fields (invariant 4).
+
+    Binding fields are written ONLY by ``justify`` alongside a judge
+    verdict. Their presence on a verdict-less entry is the same class
+    of partial-revert corruption as a stray ``judge_rationale``.
+    """
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: agent
+            reason: pre-judge era entry
+            safety: low
+            # judge_verdict deliberately omitted
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+    with pytest.raises(ValueError, match=r"allow_hits\[0\].*file_fingerprint.*pre-judge"):
+        load_allowlist(path, valid_rule_ids=set())
+
+
+def _write_source(root: Path, file_path: str, content: str) -> Path:
+    """Lay out one source file under ``root`` and return its absolute path."""
+    target = root / file_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return target
+
+
+def _write_judge_gated_yaml(
+    *,
+    yaml_path: Path,
+    key: str,
+    file_fingerprint: str,
+    ast_path: str,
+) -> None:
+    """Write one judge-gated allowlist entry to ``yaml_path``."""
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+            allow_hits:
+              - key: {key}
+                owner: test-agent
+                reason: tier-3 boundary
+                safety: low
+                judge_verdict: ACCEPTED
+                judge_recorded_at: '2026-05-23T00:00:00+00:00'
+                judge_model: anthropic/claude-opus-4
+                judge_rationale: judge accepted the suppression
+                file_fingerprint: '{file_fingerprint}'
+                ast_path: '{ast_path}'
+            """)
+    )
+
+
+def test_transplanted_quartet_across_files_fails_at_load(tmp_path: Path) -> None:
+    """C8-3 cross-file transplant: copying quartet+binding from file A onto an entry keyed at file B fails.
+
+    Setup: two source files (a.py, b.py) with different bytes. A
+    judge-gated allowlist entry is written for a finding in a.py with
+    a's live file_fingerprint. An attacker copies that entry's whole
+    quartet + binding fields onto an entry whose key points at b.py.
+    The loader recomputes b.py's bytes hash, compares against the
+    persisted (a-derived) file_fingerprint, and refuses to load.
+
+    This is THE CORE SECURITY TEST: it proves the binding wiring
+    actually closes the transplant attack the C8-3 ticket exists to
+    close.
+    """
+    source_root = tmp_path / "src"
+    a_path = _write_source(source_root, "a.py", "# safe file: empty module\n")
+    b_path = _write_source(source_root, "b.py", "import os\nos.system('rm -rf /')\n")
+    a_fp = hashlib.sha256(a_path.read_bytes()).hexdigest()
+    b_fp = hashlib.sha256(b_path.read_bytes()).hexdigest()
+    assert a_fp != b_fp  # sanity: the files MUST differ
+
+    allowlist = tmp_path / "allowlist.yaml"
+    # The transplant: key points at b.py, but file_fingerprint is a's.
+    # That is exactly what an attacker would write after pasting a's
+    # accepted quartet onto a synthesized b-keyed entry.
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key="b.py:R1:dangerous:fp=deadbeef",
+        file_fingerprint=a_fp,
+        ast_path="body[0]",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+    message = str(exc_info.value)
+    assert "file_fingerprint mismatch" in message
+    assert "b.py" in message
+    assert a_fp in message  # the persisted (wrong) fingerprint
+    assert b_fp in message  # the live (correct) fingerprint
+
+
+def test_source_drift_after_judge_verdict_fails_at_load(tmp_path: Path) -> None:
+    """C8-3 source-drift: editing the source after the verdict invalidates the binding.
+
+    Scenario: the judge accepted a suppression at a particular file
+    state; the source has since been edited (refactor, change to
+    surrounding code, anything that mutates the bytes). The judge's
+    rationale no longer describes the live code, so the entry must
+    be re-justified. The load-time gate makes that requirement
+    mechanically enforced rather than aspirational.
+    """
+    source_root = tmp_path / "src"
+    src_path = _write_source(source_root, "drifty.py", "# original content\n")
+    original_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
+
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key="drifty.py:R1:fn:fp=somehash",
+        file_fingerprint=original_fp,
+        ast_path="body[0]",
+    )
+
+    # First load: source unchanged, binding holds, load succeeds.
+    al = load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+    assert len(al.entries) == 1
+
+    # Now drift the source. The judge's rationale was written about
+    # the ORIGINAL bytes; the live bytes are different.
+    src_path.write_text("# completely different content with bug\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"file_fingerprint mismatch.*drifty\.py"):
+        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+
+def test_load_without_source_root_skips_recompute_but_still_requires_binding(tmp_path: Path) -> None:
+    """Loaders that don't have a source root (override_rate, judge_coverage) still enforce co-presence.
+
+    ``source_root=None`` skips the live-bytes recompute (which would be
+    meaningless without a tree to read), but invariant 8 (binding co-
+    presence) still fires from ``_validate_judge_metadata_atomic``.
+    This is the contract: aggregate-shape loaders see fewer guarantees
+    than rule loaders, but never see broken-shape entries.
+    """
+    # Missing binding fields: invariant 8 fires even without source_root.
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a.py:R1:fn:fp=1"
+            owner: agent
+            reason: tier-3 boundary
+            safety: low
+            judge_verdict: ACCEPTED
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: claude-opus-4-7
+            judge_rationale: judge agrees
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+    with pytest.raises(ValueError, match=r"binding fields are missing"):
+        load_allowlist(path, valid_rule_ids=set())  # source_root defaults to None

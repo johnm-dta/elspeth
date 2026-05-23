@@ -313,6 +313,8 @@ def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path) -> None:
           judge_recorded_at: '2026-05-23T12:00:00+00:00'
           judge_model: anthropic/claude-opus-4
           judge_rationale: model reasoned that this boundary is legitimate.
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
     """)
     )
     _commit(tmp_path, "PR: judged new entry")
@@ -526,7 +528,7 @@ def test_directory_routing_detects_crlf_line_endings(tmp_path: Path) -> None:
     enforce_dir = _init_git_fixture(tmp_path)
     yaml_path = enforce_dir / "web.yaml"
     # CRLF line endings with allow_hits NOT at start-of-file.
-    yaml_content = "# leading comment\r\nallow_hits:\r\n- key: web/x.py:R1:fn:fp=aa\r\n  owner: alice\r\n  reason: r\r\n  safety: contained\r\n  judge_verdict: ACCEPTED\r\n  judge_recorded_at: '2026-05-23T00:00:00+00:00'\r\n  judge_model: m\r\n  judge_rationale: r\r\n"
+    yaml_content = "# leading comment\r\nallow_hits:\r\n- key: web/x.py:R1:fn:fp=aa\r\n  owner: alice\r\n  reason: r\r\n  safety: contained\r\n  judge_verdict: ACCEPTED\r\n  judge_recorded_at: '2026-05-23T00:00:00+00:00'\r\n  judge_model: m\r\n  judge_rationale: r\r\n  file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'\r\n  ast_path: body[0]\r\n"
     yaml_path.write_bytes(yaml_content.encode("utf-8"))
     baseline = _commit(tmp_path, "initial: CRLF allow_hits")
 
@@ -561,6 +563,8 @@ def test_directory_routing_detects_allow_hits_at_start_of_file(tmp_path: Path) -
         "  judge_recorded_at: '2026-05-23T00:00:00+00:00'\n"
         "  judge_model: m\n"
         "  judge_rationale: r\n"
+        "  file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'\n"
+        "  ast_path: body[0]\n"
     )
     baseline = _commit(tmp_path, "initial: start-of-file allow_hits")
 
@@ -610,6 +614,8 @@ def test_baseline_parse_failure_raises_judge_coverage_error(tmp_path: Path) -> N
           judge_recorded_at: '2026-05-23T00:00:00+00:00'
           judge_model: anthropic/claude-opus-4
           judge_rationale: rationale
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
     """)
     )
     _commit(tmp_path, "PR: fix baseline shape")

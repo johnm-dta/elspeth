@@ -22,6 +22,7 @@ from textwrap import dedent
 
 import pytest
 
+from elspeth_lints.core.allowlist import JudgeVerdict
 from elspeth_lints.rules.trust_tier.tier_model.rule import (
     Allowlist,
     AllowlistBudgetViolation,
@@ -2291,3 +2292,120 @@ class TestCoreAllowlistConsolidation:
         assert matched is rule
         assert rule.matched_count == 1
         assert entry.matched is False
+
+
+# =============================================================================
+# C8-3: matcher-side binding verification — in-file transplant defence.
+#
+# Cross-file transplant is caught at load time (test in
+# test_allowlist_judge_metadata_integrity.py). In-file transplant — the same
+# file's bytes pass the load-time file_fingerprint check, but the persisted
+# ast_path points at a different AST node than the live finding does — is
+# caught here at match time, in the rule's ``_match_finding``.
+# =============================================================================
+
+
+class TestC83InFileTransplantDefence:
+    """The matcher refuses to honor a judge verdict whose ast_path no longer matches."""
+
+    def test_matcher_rejects_judge_gated_entry_with_mismatched_ast_path(self) -> None:
+        """An entry whose persisted ast_path differs from the live finding's fails the match.
+
+        Construction: build a synthetic Finding and a synthetic
+        AllowlistEntry whose canonical_key matches the finding (so
+        ``entry.matches(finding_key)`` returns True), and whose
+        judge_verdict is set (so binding verification arms). The
+        entry's persisted ast_path deliberately differs from the
+        finding's live ast_path — that is the in-file transplant
+        shape. ``_match_finding`` must raise.
+        """
+        finding = Finding(
+            rule_id="R1",
+            file_path="plugins/widget.py",
+            line=10,
+            col=4,
+            symbol_context=("Widget", "lookup"),
+            fingerprint="livefp00",
+            code_snippet="payload.get(...)",
+            message="dict.get on Tier-2 data",
+            ast_path="body[0]/body[1]/body[2]/value",  # the LIVE address
+        )
+        entry = AllowlistEntry(
+            key=finding.canonical_key,  # canonical key MATCHES the finding
+            owner="historic-agent",
+            reason="r",
+            safety="s",
+            expires=None,
+            file_fingerprint="0" * 64,
+            ast_path="body[0]/body[1]/body[99]/value",  # transplanted: DIFFERENT
+            judge_verdict=JudgeVerdict.ACCEPTED,
+            judge_recorded_at=datetime(2026, 5, 1, tzinfo=UTC),
+            judge_model="anthropic/claude-opus-4",
+            judge_rationale="judge accepted at a different node entirely",
+        )
+        al = Allowlist(entries=[entry], per_file_rules=[])
+        with pytest.raises(ValueError, match=r"ast_path mismatch.*plugins/widget\.py"):
+            _match_finding(al, finding)
+
+    def test_matcher_accepts_judge_gated_entry_with_matching_ast_path(self) -> None:
+        """Happy path: entry's persisted ast_path equals the live finding's, match succeeds."""
+        finding = Finding(
+            rule_id="R1",
+            file_path="plugins/widget.py",
+            line=10,
+            col=4,
+            symbol_context=("Widget", "lookup"),
+            fingerprint="livefp00",
+            code_snippet="payload.get(...)",
+            message="dict.get on Tier-2 data",
+            ast_path="body[0]/body[1]/body[2]/value",
+        )
+        entry = AllowlistEntry(
+            key=finding.canonical_key,
+            owner="historic-agent",
+            reason="r",
+            safety="s",
+            expires=None,
+            file_fingerprint="0" * 64,
+            ast_path=finding.ast_path,  # matches
+            judge_verdict=JudgeVerdict.ACCEPTED,
+            judge_recorded_at=datetime(2026, 5, 1, tzinfo=UTC),
+            judge_model="anthropic/claude-opus-4",
+            judge_rationale="judge accepted at this exact AST node",
+        )
+        al = Allowlist(entries=[entry], per_file_rules=[])
+        matched = _match_finding(al, finding)
+        assert matched is entry
+        assert entry.matched is True
+
+    def test_matcher_skips_binding_check_for_pre_judge_entry(self) -> None:
+        """Pre-judge entries (no judge_verdict) carry no binding fields; matcher must skip the check.
+
+        Pre-judge era entries predate the C8-3 binding wiring. They
+        match purely on canonical key (as before); the binding gate
+        only arms when ``judge_verdict`` is set. This test pins that
+        backward-compatible behaviour so existing allowlists (the
+        whole ~700-entry historical corpus) keep matching cleanly.
+        """
+        finding = Finding(
+            rule_id="R1",
+            file_path="plugins/widget.py",
+            line=10,
+            col=4,
+            symbol_context=("Widget", "lookup"),
+            fingerprint="livefp00",
+            code_snippet="payload.get(...)",
+            message="dict.get on Tier-2 data",
+            ast_path="body[0]/body[1]/body[2]/value",
+        )
+        entry = AllowlistEntry(
+            key=finding.canonical_key,
+            owner="historic-agent",
+            reason="r",
+            safety="s",
+            expires=None,
+            # No judge_verdict, no binding fields — the pre-C8-3 shape.
+        )
+        al = Allowlist(entries=[entry], per_file_rules=[])
+        matched = _match_finding(al, finding)
+        assert matched is entry

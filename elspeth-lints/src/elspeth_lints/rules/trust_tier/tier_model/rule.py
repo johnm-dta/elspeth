@@ -38,7 +38,11 @@ from elspeth_lints.core.allowlist import (
     AllowlistBudgetViolation as AllowlistBudgetViolation,
 )
 from elspeth_lints.core.allowlist import AllowlistEntry as AllowlistEntry
-from elspeth_lints.core.allowlist import FindingKey, load_allowlist
+from elspeth_lints.core.allowlist import (
+    FindingKey,
+    load_allowlist,
+    verify_entry_binding_against_finding,
+)
 from elspeth_lints.core.allowlist import PerFileRule as PerFileRule
 from elspeth_lints.core.protocols import (
     Finding as LintFinding,
@@ -69,7 +73,19 @@ def _add_months(today: date, months: int) -> date:
 
 @dataclass(frozen=True)
 class Finding:
-    """A detected violation of the no-bug-hiding policy."""
+    """A detected violation of the no-bug-hiding policy.
+
+    ``ast_path`` is the AST field/index path from the module root to the
+    finding's subject node, joined with ``"/"`` (e.g.
+    ``"body[3]/body[1]/value/args[0]"``). It is the AST-level address the
+    fingerprint already encodes; surfacing it explicitly is what closes
+    the C8-3 quartet-transplant attack — the loader/matcher pair (in
+    ``elspeth_lints.core.allowlist``) verifies that an allowlist entry
+    carrying judge metadata still points at the same AST node it was
+    judged against. For layer-import findings (which have no AST subject)
+    we synthesise a stable address of the form ``import:<module>`` so
+    every Finding instance carries a non-empty ast_path.
+    """
 
     rule_id: str
     file_path: str
@@ -79,6 +95,7 @@ class Finding:
     fingerprint: str
     code_snippet: str
     message: str
+    ast_path: str = ""
 
     @property
     def canonical_key(self) -> str:
@@ -212,10 +229,7 @@ RULES: dict[str, dict[str, Any]] = {
     },
     "R_TB_MALFORMED": {
         "name": "trust-boundary-malformed-metadata",
-        "description": (
-            "@trust_boundary metadata is the wrong shape "
-            "(e.g. 'suppresses' is not a tuple, 'source_param' is not a string)."
-        ),
+        "description": ("@trust_boundary metadata is the wrong shape (e.g. 'suppresses' is not a tuple, 'source_param' is not a string)."),
         "remediation": (
             "Compare the call to the documented signature in "
             "src/elspeth/contracts/trust_boundary.py. 'suppresses' must be "
@@ -567,6 +581,7 @@ class TierModelVisitor(ast.NodeVisitor):
                 fingerprint=self._fingerprint_node(rule_id, node),
                 code_snippet=self._get_code_snippet(node.lineno),
                 message=message,
+                ast_path="/".join(self.path_stack) or "<module-root>",
             )
         )
 
@@ -588,6 +603,7 @@ class TierModelVisitor(ast.NodeVisitor):
                 fingerprint=self._fingerprint_node(diagnostic.rule_id, node),
                 code_snippet=self._get_code_snippet(node.lineno),
                 message=diagnostic.message,
+                ast_path="/".join(self.path_stack) or "<module-root>",
             )
         )
 
@@ -1223,6 +1239,11 @@ def scan_layer_imports_file(
             from_name = LAYER_NAMES[file_layer]
             to_name = LAYER_NAMES[target_layer]
 
+            # Layer-import findings have no AST subject; the import target
+            # module IS the address. Synthesise a stable ast_path of the
+            # form ``import:<module>`` so binding verification works the
+            # same way as AST-rooted findings.
+            import_ast_path = f"import:{module_name}"
             if line in tc_lines:
                 tc_payload = f"TC|{relative_path}|{module_name}"
                 tc_fp = hashlib.sha256(tc_payload.encode()).hexdigest()[:16]
@@ -1236,6 +1257,7 @@ def scan_layer_imports_file(
                         fingerprint=tc_fp,
                         code_snippet=snippet,
                         message=f"TYPE_CHECKING import: {from_name} annotates with {to_name} ({module_name})",
+                        ast_path=import_ast_path,
                     )
                 )
             else:
@@ -1253,6 +1275,7 @@ def scan_layer_imports_file(
                         fingerprint=fp,
                         code_snippet=snippet,
                         message=f"Upward import: {from_name} imports from {to_name} ({module_name})",
+                        ast_path=import_ast_path,
                     )
                 )
 
@@ -1871,12 +1894,25 @@ def _match_finding(allowlist: Allowlist, finding: Finding) -> AllowlistEntry | P
             return rule
     for entry in allowlist.entries:
         if entry.matches(finding_key):
+            # C8-3 in-file transplant defence: a quartet copied onto a
+            # different AST node within the same file still matches the
+            # canonical key (the key carries fingerprint, which is
+            # path-derived, so the keys differ — but a hand-edited
+            # transplant could rebind the key and copy the quartet). The
+            # persisted ast_path is the AST-level address the judge
+            # actually inspected; it must equal the live finding's
+            # ast_path. Mismatch ⇒ tampering or unannounced refactor.
+            verify_entry_binding_against_finding(
+                entry,
+                file_path=finding.file_path,
+                ast_path=finding.ast_path,
+            )
             entry.matched = True
             return entry
     return None
 
 
-def _load_tier_model_allowlist(path: Path) -> Allowlist:
+def _load_tier_model_allowlist(path: Path, *, source_root: Path | None = None) -> Allowlist:
     """Load the tier-model allowlist via core's loader, then apply local governance.
 
     Core's ``load_allowlist`` treats a missing file path as an empty mapping
@@ -1885,10 +1921,16 @@ def _load_tier_model_allowlist(path: Path) -> Allowlist:
     a ghost path. Governance (banned rules, pattern-tag vocabulary,
     bugfix-owner discipline, registry coherence on ``allow_hits[].key``) is
     applied after the generic load.
+
+    ``source_root`` is passed through to the core loader so judge-gated
+    entries can have their ``file_fingerprint`` verified against the
+    current bytes of the source file at the path encoded in their key.
+    Cross-file quartet transplants fail at load time; in-file transplants
+    are caught at match time in :func:`_match_finding`.
     """
     if not path.exists():
         return Allowlist(entries=[])
-    allowlist = load_allowlist(path, valid_rule_ids=_ALL_RULE_IDS)
+    allowlist = load_allowlist(path, valid_rule_ids=_ALL_RULE_IDS, source_root=source_root)
     _validate_allowlist_governance(allowlist)
     return allowlist
 
@@ -2019,7 +2061,7 @@ def collect_check_result(
         raise ValueError(f"{resolved_root} is not a directory")
 
     resolved_allowlist_path = allowlist_path if allowlist_path is not None else _default_allowlist_path(resolved_root)
-    allowlist = _load_tier_model_allowlist(resolved_allowlist_path)
+    allowlist = _load_tier_model_allowlist(resolved_allowlist_path, source_root=resolved_root)
     exclude_patterns = exclude_patterns or []
     files = files or []
 

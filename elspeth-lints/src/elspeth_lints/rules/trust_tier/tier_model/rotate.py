@@ -103,6 +103,39 @@ def _finding_covered_by_per_file_rule(finding: Finding, rules: list[PerFileRule]
     return any(rule.matches(key) for rule in rules)
 
 
+def _refuse_rotation_of_judge_gated_entry(entry: AllowlistEntry) -> None:
+    """Crash if a judge-gated entry would be rotated.
+
+    Rotation rebinds an entry's canonical key (and its embedded
+    fingerprint) to a new AST signature. For a judge-gated entry the
+    persisted ``file_fingerprint`` + ``ast_path`` bind the quartet to
+    the exact bytes and AST node the judge inspected; the rotated key
+    would point at different code while the binding fields still
+    described the original code. Auto-rotating the binding fields
+    requires re-running the judge against the new code — which defeats
+    the point of rotation (a mechanical, no-judgement refactor sweep).
+    The audit-honest response is to refuse: the operator deletes the
+    stale entry, re-justifies against the rotated code, and the new
+    quartet records what the judge actually said about the new
+    location.
+
+    Raises ``RuntimeError`` (matching the existing rotate-error
+    convention in :func:`apply_plan`) with a message that names the
+    entry key and source file so the operator can locate and resolve
+    it.
+    """
+    if entry.judge_verdict is None:
+        return
+    raise RuntimeError(
+        f"refusing to rotate judge-gated allowlist entry in {entry.source_file}: "
+        f"{entry.key!r} carries judge_verdict={entry.judge_verdict.value!r}. "
+        "Rotation would silently rebind the persisted file_fingerprint + ast_path "
+        "to different code than the judge actually inspected. Re-run justify against "
+        "the rotated location (deleting this entry first) so the new quartet records "
+        "what the judge says about the new code."
+    )
+
+
 def fingerprint_of(canonical_key: str) -> str:
     """Return the fingerprint hex from a canonical key's ``:fp=<hex>`` suffix.
 
@@ -313,6 +346,7 @@ def plan_rotations(
             if new_key == old_key:
                 unchanged += 1
             else:
+                _refuse_rotation_of_judge_gated_entry(es[0])
                 rotations.append(
                     Rotation(
                         old_key=old_key,
@@ -356,6 +390,7 @@ def plan_rotations(
                 if entry.key == finding.canonical_key:
                     unchanged += 1
                 else:
+                    _refuse_rotation_of_judge_gated_entry(entry)
                     rotations.append(
                         Rotation(
                             old_key=entry.key,

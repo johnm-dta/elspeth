@@ -326,7 +326,12 @@ def _iterate_entries_from_directory(directory: Path) -> list[AllowlistEntry]:
             data = _load_yaml_strict(yaml_file.read_text(encoding="utf-8"))
         except (yaml.YAMLError, ValueError) as exc:
             raise JudgeCoverageError(f"{yaml_file}: failed to parse as YAML mapping: {exc}") from exc
-        entries.extend(_parse_allow_hits(data, source_file=yaml_file.name))
+        # source_root=None: judge_coverage audits the *aggregate* judge-
+        # gated-fraction of persisted entries; it does not have access to
+        # the source tree and would not benefit from per-entry binding
+        # verification. Co-presence invariants still fire from
+        # _validate_judge_metadata_atomic.
+        entries.extend(_parse_allow_hits(data, source_file=yaml_file.name, source_root=None))
     return entries
 
 
@@ -389,7 +394,10 @@ def _load_entries_from_git(
         except (yaml.YAMLError, ValueError) as exc:
             raise JudgeCoverageError(f"baseline {baseline_ref}:{rel_path}: failed to parse as YAML mapping: {exc}") from exc
         try:
-            entries.extend(_parse_allow_hits(data, source_file=Path(rel_path).name))
+            # source_root=None: baseline entries come from a historical
+            # git ref where the source tree at that ref isn't on disk —
+            # binding verification is meaningless here.
+            entries.extend(_parse_allow_hits(data, source_file=Path(rel_path).name, source_root=None))
         except (ValueError, TypeError) as exc:
             raise JudgeCoverageError(
                 f"baseline {baseline_ref}:{rel_path}: allow_hits entry shape violated loader invariants: {exc}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -207,22 +208,50 @@ class Allowlist:
         ]
 
 
-def load_allowlist(path: Path, *, valid_rule_ids: Collection[str]) -> Allowlist:
-    """Load an allowlist from a YAML file or directory of YAML files."""
+def load_allowlist(
+    path: Path,
+    *,
+    valid_rule_ids: Collection[str],
+    source_root: Path | None = None,
+) -> Allowlist:
+    """Load an allowlist from a YAML file or directory of YAML files.
+
+    ``source_root`` enables the C8-3 quartet-transplant defence at load
+    time: when an entry carries judge metadata, its persisted
+    ``file_fingerprint`` is recomputed from the bytes of the source file
+    (the path encoded in the entry's key, resolved against
+    ``source_root``) and must match. A mismatch ⇒ either the source
+    drifted under a still-trusted judge verdict (the rationale no
+    longer describes the live code), or the quartet was transplanted
+    from a different file. Either case is corruption and must crash on
+    load rather than silently propagate into the gate's decision.
+
+    Cross-file transplants are caught here. In-file transplants
+    (quartet pasted onto a different AST node within the same file,
+    with the entry's key rebound to match) keep the file_fingerprint
+    intact and are caught at match time via
+    :func:`verify_entry_binding_against_finding`.
+
+    When ``source_root`` is ``None`` the file-fingerprint recompute is
+    skipped (call sites that don't know the source root, e.g. some
+    diagnostics loaders, still get co-presence enforcement). Production
+    rule loaders MUST pass ``source_root`` so the load-time gate is
+    live.
+    """
     if path.is_dir():
         defaults = _load_defaults(path / "_defaults.yaml")
         entries: list[AllowlistEntry] = []
         per_file_rules: list[PerFileRule] = []
         for yaml_file in sorted(file for file in path.glob("*.yaml") if file.name != "_defaults.yaml"):
             data = _load_yaml_file(yaml_file)
-            entries.extend(_parse_allow_hits(data, source_file=yaml_file.name))
+            entries.extend(_parse_allow_hits(data, source_file=yaml_file.name, source_root=source_root))
             per_file_rules.extend(_parse_per_file_rules(data, valid_rule_ids=valid_rule_ids, source_file=yaml_file.name))
         return _allowlist_from_defaults(entries=entries, per_file_rules=per_file_rules, defaults=defaults)
 
     data = _load_yaml_file(path)
     defaults = _defaults_from_mapping(data)
     return _allowlist_from_defaults(
-        entries=_parse_allow_hits(data, source_file=path.name),
+        entries=_parse_allow_hits(data, source_file=path.name, source_root=source_root),
         per_file_rules=_parse_per_file_rules(data, valid_rule_ids=valid_rule_ids, source_file=path.name),
         defaults=defaults,
     )
@@ -310,7 +339,12 @@ def _parse_allowlist_budget(defaults: dict[str, Any]) -> _BudgetCeilings:
     )
 
 
-def _parse_allow_hits(data: dict[str, Any], *, source_file: str) -> list[AllowlistEntry]:
+def _parse_allow_hits(
+    data: dict[str, Any],
+    *,
+    source_file: str,
+    source_root: Path | None,
+) -> list[AllowlistEntry]:
     entries_raw = _list_value(data, "allow_hits")
     entries: list[AllowlistEntry] = []
     for index, raw_entry in enumerate(entries_raw):
@@ -333,8 +367,119 @@ def _parse_allow_hits(data: dict[str, Any], *, source_file: str) -> list[Allowli
             judge_model_verdict=_optional_judge_verdict(entry, "judge_model_verdict", context=ctx, allow_blocked=True),
         )
         _validate_judge_metadata_atomic(allowlist_entry, context=ctx)
+        if source_root is not None and allowlist_entry.judge_verdict is not None:
+            _verify_file_fingerprint_at_load(allowlist_entry, source_root=source_root, context=ctx)
         entries.append(allowlist_entry)
     return entries
+
+
+def _file_path_from_canonical_key(key: str) -> str:
+    """Extract the ``file_path`` segment from a canonical allowlist key.
+
+    The canonical key shape is
+    ``<file_path>:<rule_id>:<symbol_context_joined_by_colons>:fp=<hash>``
+    (see :attr:`FindingKey.canonical_key`). The symbol_context tuple is
+    joined by ``:`` — a method symbol like ``("Widget", "lookup")``
+    becomes ``Widget:lookup`` — so rsplit-from-the-right does not
+    recover file_path. We anchor on the ``.py:`` boundary instead: the
+    file path is a Python source file, so the FIRST occurrence of
+    ``.py:`` delimits its end.
+
+    Returns the segment before ``.py:`` plus the ``.py`` suffix.
+    Raises ``ValueError`` if the key does not match the canonical shape
+    (missing ``:fp=`` suffix, or no ``.py:`` boundary).
+    """
+    if ":fp=" not in key:
+        raise ValueError(f"allowlist key is not in canonical form (missing ':fp=' suffix): {key!r}")
+    marker = ".py:"
+    py_idx = key.find(marker)
+    if py_idx < 0:
+        raise ValueError(f"allowlist key is not in canonical form (no '.py:' boundary delimiting file_path from rule_id): {key!r}")
+    return key[: py_idx + len(".py")]
+
+
+def _compute_file_fingerprint(source_path: Path) -> str:
+    """Return the SHA-256 hex digest of ``source_path``'s bytes.
+
+    This is the C8-3 binding primitive: a judge inspected the file's
+    bytes at a given moment, and the persisted ``file_fingerprint`` is
+    that moment's digest. Recomputing on load and comparing detects
+    both source-drift (file modified after judgment, judge's rationale
+    no longer describes live code) and cross-file quartet transplant
+    (quartet copied onto an entry whose file_path differs from the
+    file the judge originally inspected).
+    """
+    return hashlib.sha256(source_path.read_bytes()).hexdigest()
+
+
+def _verify_file_fingerprint_at_load(entry: AllowlistEntry, *, source_root: Path, context: str) -> None:
+    """Recompute and assert the persisted ``file_fingerprint`` matches live source.
+
+    Crashes on mismatch (Tier-1 doctrine: silently propagating a stale
+    or transplanted judge verdict into the gate's decision is evidence
+    tampering). Crashes on missing source file (the entry binds to a
+    file that no longer exists — the rotation/deletion was not
+    accompanied by removing the dependent judge-gated entry, which is
+    audit-broken).
+    """
+    file_path = _file_path_from_canonical_key(entry.key)
+    source_path = source_root / file_path
+    if not source_path.exists():
+        raise ValueError(
+            f"{context}: judge-gated entry binds to {file_path!r} which does not exist "
+            f"under {source_root}; either the source file was removed without removing "
+            f"the dependent allowlist entry, or the entry's key was transplanted from a "
+            f"different repository layout. Refusing to load."
+        )
+    live_fingerprint = _compute_file_fingerprint(source_path)
+    # ``entry.file_fingerprint`` is non-None here: invariant 8 in
+    # ``_validate_judge_metadata_atomic`` (binding co-presence) already
+    # enforced its presence for judge-gated entries before we got here.
+    assert entry.file_fingerprint is not None  # narrow for type-checker
+    if entry.file_fingerprint != live_fingerprint:
+        raise ValueError(
+            f"{context}: file_fingerprint mismatch for {file_path!r}: persisted "
+            f"{entry.file_fingerprint!r} but live source hashes to "
+            f"{live_fingerprint!r}. Either the source file was modified after the "
+            f"judge accepted the suppression (the rationale no longer describes the "
+            f"live code, re-justify is required) or the judge quartet was "
+            f"transplanted from a different file (corruption / tampering)."
+        )
+
+
+def verify_entry_binding_against_finding(entry: AllowlistEntry, *, file_path: str, ast_path: str) -> None:
+    """Assert a matched allowlist entry's persisted ``ast_path`` matches the live finding.
+
+    Called from the rule's matcher (``_match_finding``) after a
+    canonical-key match: this is the C8-3 in-file transplant defence.
+    A hand-edited transplant could copy a quartet from a safe entry
+    onto an entry whose key matches a dangerous live finding (rebind
+    the key, paste the quartet). The persisted ``ast_path`` is the AST-
+    level address the judge actually inspected; it must equal the live
+    finding's ast_path. Mismatch ⇒ corruption or unannounced refactor
+    that landed without re-running ``justify``.
+
+    Entries without judge metadata (``judge_verdict is None``, the pre-
+    judge era shape) carry no binding fields and are not checked here —
+    they predate the judge gate and the only binding signal they have
+    is the canonical_key itself, which is what the caller already
+    matched against.
+    """
+    if entry.judge_verdict is None:
+        return
+    # Co-presence is enforced at load (invariant 8); both fields are
+    # non-None here.
+    assert entry.file_fingerprint is not None
+    assert entry.ast_path is not None
+    if entry.ast_path != ast_path:
+        raise ValueError(
+            f"ast_path mismatch on judge-gated entry for {file_path!r}: persisted "
+            f"{entry.ast_path!r} but live finding's ast_path is {ast_path!r}. The "
+            f"judge accepted a different AST node — either the code was refactored "
+            f"and the entry needs re-justification, or the judge quartet was "
+            f"transplanted onto a different finding within the same file "
+            f"(corruption / tampering). Entry key: {entry.key!r}."
+        )
 
 
 def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> None:
@@ -391,14 +536,18 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
        even if that helper were loosened to accept empty strings, the
        atomic validator must still catch the corrupt shape.
 
-    The judge-quartet-to-code binding (the C8-3 transplant defence
-    originally scoped to T5) is NOT enforced here. The ``file_fingerprint``
-    and ``ast_path`` fields exist as optional schema (per docs/elspeth-
-    lints/protocols.md) but no production writer (``justify``, ``rotate``)
-    emits them, and no matcher uses them. Enforcing the binding at this
-    loader gate would invalidate every justify-written entry without
-    closing the transplant attack — that needs a coordinated writer +
-    loader + matcher epic. Filed as a follow-up.
+    Invariant 8 (C8-3 binding co-presence): when ``judge_verdict`` is
+    set, ``file_fingerprint`` and ``ast_path`` must both be present.
+    These two fields bind the judge quartet to the source bytes + AST
+    node the judge actually inspected; without them the quartet is
+    transplantable (copy from a safe entry onto an entry keyed at
+    dangerous code; loader can't tell the difference). The live-source
+    recompute is performed by :func:`_verify_file_fingerprint_at_load`
+    in ``_parse_allow_hits`` (load-time, catches cross-file transplant
+    and source drift) and by :func:`verify_entry_binding_against_finding`
+    at match time (catches in-file AST-node transplant). Both
+    verifications require the fields' presence, which this invariant
+    guarantees.
     """
     # Invariant 5 (defense-in-depth vs _optional_judge_verdict): neither
     # judge_verdict nor judge_model_verdict may be BLOCKED on a persisted
@@ -421,7 +570,11 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
             "OVERRIDDEN_BY_OPERATOR (recording what the model said pre-override)."
         )
 
-    # Invariant 4: pre-judge entries are fully empty in the judge cluster.
+    # Invariant 4: pre-judge entries are fully empty in the judge cluster
+    # AND must not carry binding fields (file_fingerprint / ast_path).
+    # Binding fields are written ONLY by ``justify`` alongside a judge
+    # verdict; their presence on a verdict-less entry is corruption from
+    # the same class of partial revert / merge accident.
     if entry.judge_verdict is None:
         stray: list[str] = []
         if entry.judge_recorded_at is not None:
@@ -432,10 +585,15 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
             stray.append("judge_rationale")
         if entry.judge_model_verdict is not None:
             stray.append("judge_model_verdict")
+        if entry.file_fingerprint is not None:
+            stray.append("file_fingerprint")
+        if entry.ast_path is not None:
+            stray.append("ast_path")
         if stray:
             raise ValueError(
                 f"{context}: judge_verdict is absent but other judge metadata is present "
-                f"({', '.join(stray)}); pre-judge entries must omit every judge_* field. "
+                f"({', '.join(stray)}); pre-judge entries must omit every judge_* field "
+                "and every binding field. "
                 "This shape indicates a partial revert or merge corruption."
             )
         return
@@ -454,6 +612,29 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
             f"required companion fields are missing ({', '.join(missing)}); the judge-"
             "metadata quartet (judge_verdict + judge_recorded_at + judge_model + "
             "judge_rationale) is atomic. A partial write is corruption."
+        )
+
+    # Invariant 8 (C8-3 binding co-presence): post-judge entries must
+    # carry both binding fields. Without them the quartet is
+    # transplantable — an attacker can copy the verdict + rationale +
+    # model + recorded_at from a safe entry onto an entry keyed at
+    # dangerous code, and the gate has no way to detect the rebind.
+    # The load-time and match-time binding checks downstream both
+    # require these fields' presence, which this invariant guarantees.
+    missing_binding: list[str] = []
+    if entry.file_fingerprint is None:
+        missing_binding.append("file_fingerprint")
+    if entry.ast_path is None:
+        missing_binding.append("ast_path")
+    if missing_binding:
+        raise ValueError(
+            f"{context}: judge_verdict is set ({entry.judge_verdict.value!r}) but the "
+            f"required binding fields are missing ({', '.join(missing_binding)}); "
+            "judge-gated entries must record file_fingerprint (the SHA-256 of the "
+            "source file the judge inspected) and ast_path (the AST address of the "
+            "finding the judge accepted) so the gate can detect quartet transplant "
+            "and source drift. An entry whose verdict cannot be bound to the code it "
+            "judged is audit-broken."
         )
 
     # Invariant 7: rationale must be non-empty after whitespace strip.

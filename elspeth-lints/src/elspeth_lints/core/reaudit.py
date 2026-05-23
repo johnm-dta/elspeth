@@ -282,7 +282,11 @@ def reaudit_entries(
     # dispatch returns the sub-rule vocabulary for the rule package
     # named by ``rule_filter``.
     valid_rule_ids = _valid_rule_ids_for(rule_filter)
-    allowlist = load_allowlist(allowlist_dir, valid_rule_ids=valid_rule_ids)
+    # Pass source_root so the C8-3 binding gate verifies file_fingerprint
+    # against the live source. Reaudit re-judges entries against current
+    # code anyway, so the load-time check just ensures the entries we're
+    # about to re-judge weren't tampered with since the original verdict.
+    allowlist = load_allowlist(allowlist_dir, valid_rule_ids=valid_rule_ids, source_root=root)
 
     filtered = _apply_filters(
         entries=allowlist.entries,

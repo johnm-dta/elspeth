@@ -1296,3 +1296,113 @@ def test_justify_rule_default_package_id_remains_no_op(tmp_path: Path) -> None:
     with _mock_judge_call(verdict="ACCEPTED", rationale="judge agrees"):
         exit_code = main(argv)
     assert exit_code == 0
+
+
+# =============================================================================
+# C8-3: writer emits binding fields, round-trip through loader stays bound
+# =============================================================================
+#
+# The justify writer is the only production producer of judge-gated allowlist
+# entries. To close the C8-3 quartet-transplant attack we need the writer to
+# emit both binding fields (file_fingerprint + ast_path) so the loader can
+# verify the binding still holds at every subsequent load. These tests pin
+# the writer-side half of that contract; the loader-side tests live in
+# test_allowlist_judge_metadata_integrity.py under the "C8-3" header.
+# =============================================================================
+
+
+def test_justify_writes_file_fingerprint_and_ast_path(tmp_path: Path) -> None:
+    """An ACCEPTED entry written by justify carries both C8-3 binding fields.
+
+    Asserts: the emitted YAML contains a ``file_fingerprint:`` whose
+    value is the SHA-256 hex digest of plugins/widget.py's bytes, and
+    an ``ast_path:`` whose value matches what the tier_model rule
+    emits for the same Widget.lookup R1 finding.
+    """
+    import hashlib
+
+    from elspeth_lints.rules.trust_tier.tier_model.rule import scan_file
+
+    root, target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    expected_file_fp = hashlib.sha256(target.read_bytes()).hexdigest()
+    # Pull the live ast_path from the same scanner the writer uses.
+    findings = [f for f in scan_file(target, root) if f.rule_id == "R1"]
+    assert len(findings) == 1
+    expected_ast_path = findings[0].ast_path
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "tier-3 boundary",
+        "--owner",
+        "binding-test-agent",
+    ]
+    with _mock_judge_call(verdict="ACCEPTED", rationale="judge agrees"):
+        assert main(argv) == 0
+
+    target_yaml = allowlist_dir / "plugins.yaml"
+    text = target_yaml.read_text(encoding="utf-8")
+    assert f"file_fingerprint: {expected_file_fp}" in text
+    # ast_path contains '[' / ']' so the writer single-quotes it
+    # (see _yaml_inline_scalar's conservative-quoting rule); accept
+    # either quoted or bare form for forward compatibility.
+    assert f"ast_path: '{expected_ast_path}'" in text or f"ast_path: {expected_ast_path}" in text
+
+    # The loader (with source_root) verifies the binding lives — proves
+    # the writer-side fingerprint actually matches the live source bytes.
+    loaded = load_allowlist(target_yaml, valid_rule_ids={"R1"}, source_root=root)
+    assert len(loaded.entries) == 1
+    entry = loaded.entries[0]
+    assert entry.file_fingerprint == expected_file_fp
+    assert entry.ast_path == expected_ast_path
+
+
+def test_justify_override_also_writes_binding_fields(tmp_path: Path) -> None:
+    """The operator-override path emits binding fields too.
+
+    Override entries are the most security-sensitive subset of judge-
+    gated entries: the operator bypassed the model's verdict. The
+    binding fields must travel with the entry whether or not the
+    operator overrode — otherwise the override path becomes the
+    transplant vector.
+    """
+    import hashlib
+
+    root, target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    expected_file_fp = hashlib.sha256(target.read_bytes()).hexdigest()
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "shipping under deadline",
+        "--owner",
+        "operator",
+        "--operator-override",
+    ]
+    with _mock_judge_call(verdict="BLOCKED", rationale="rationale is shallow; fix the code"):
+        assert main(argv) == 0
+
+    target_yaml = allowlist_dir / "plugins.yaml"
+    text = target_yaml.read_text(encoding="utf-8")
+    assert "judge_verdict: OVERRIDDEN_BY_OPERATOR" in text
+    assert "judge_model_verdict: BLOCKED" in text
+    assert f"file_fingerprint: {expected_file_fp}" in text
+    assert "ast_path:" in text

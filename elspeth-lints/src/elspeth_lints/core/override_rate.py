@@ -262,7 +262,13 @@ def _iterate_allow_hits(directory: Path) -> list[AllowlistEntry]:
             raise OverrideRateError(f"{yaml_file}: failed to parse as YAML mapping: {exc}") from exc
         if "allow_hits" not in data:
             continue
-        entries.extend(_parse_allow_hits(data, source_file=yaml_file.name))
+        # source_root=None: override_rate audits the *aggregate* shape of
+        # the persisted allowlist for compliance accounting; it does not
+        # have access to the source tree the entries bind to (and would
+        # not benefit from per-entry binding verification — the gate is
+        # rate-of-overrides, not per-entry correctness). The co-presence
+        # invariants still fire from _validate_judge_metadata_atomic.
+        entries.extend(_parse_allow_hits(data, source_file=yaml_file.name, source_root=None))
     return entries
 
 

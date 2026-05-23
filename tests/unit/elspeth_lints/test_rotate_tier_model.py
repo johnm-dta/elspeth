@@ -103,9 +103,7 @@ def test_one_to_one_same_fp_is_unchanged() -> None:
 
 def test_one_to_one_different_fp_is_rotation() -> None:
     finding = _make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="bbbb")
-    entry = _make_entry(
-        file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="aaaa", source_file="web.yaml"
-    )
+    entry = _make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="aaaa", source_file="web.yaml")
     plan = plan_rotations(findings=[finding], allowlist_entries=[entry])
     assert len(plan.rotations) == 1
     rotation = plan.rotations[0]
@@ -164,12 +162,8 @@ def test_entry_with_no_finding_is_stale() -> None:
 
 
 def test_n_to_n_without_symmetric_flag_is_ambiguous() -> None:
-    findings = [
-        _make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("aaaa", "bbbb")
-    ]
-    entries = [
-        _make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("cccc", "dddd")
-    ]
+    findings = [_make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("aaaa", "bbbb")]
+    entries = [_make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("cccc", "dddd")]
     plan = plan_rotations(findings=findings, allowlist_entries=entries, allow_symmetric_pairing=False)
     assert plan.rotations == ()
     assert len(plan.ambiguous) == 1
@@ -181,12 +175,8 @@ def test_n_to_n_without_symmetric_flag_is_ambiguous() -> None:
 
 def test_n_to_n_with_default_symmetric_pairing_rotates_deterministically() -> None:
     """Drop-in compatibility check: the prior tool paired N:N groups by default."""
-    findings = [
-        _make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("dddd", "cccc")
-    ]
-    entries = [
-        _make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("bbbb", "aaaa")
-    ]
+    findings = [_make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("dddd", "cccc")]
+    entries = [_make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("bbbb", "aaaa")]
     # No allow_symmetric_pairing kwarg => uses the new default (True).
     plan = plan_rotations(findings=findings, allowlist_entries=entries)
     assert plan.ambiguous == ()
@@ -219,9 +209,7 @@ def test_asymmetric_n_to_m_remains_ambiguous_even_with_flag() -> None:
     findings = [
         _make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="aaaa"),
     ]
-    entries = [
-        _make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("bbbb", "cccc")
-    ]
+    entries = [_make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("bbbb", "cccc")]
     plan = plan_rotations(findings=findings, allowlist_entries=entries, allow_symmetric_pairing=True)
     assert len(plan.ambiguous) == 1
     assert plan.rotations == ()
@@ -229,9 +217,7 @@ def test_asymmetric_n_to_m_remains_ambiguous_even_with_flag() -> None:
 
 def test_todo_entries_are_surfaced_regardless_of_match_state() -> None:
     finding = _make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="aaaa")
-    matched_todo = _make_entry(
-        file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="aaaa", owner="TODO", reason="TODO -- review"
-    )
+    matched_todo = _make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="aaaa", owner="TODO", reason="TODO -- review")
     plan = plan_rotations(findings=[finding], allowlist_entries=[matched_todo])
     assert plan.unchanged_count == 1
     assert plan.todo_entry_count == 1
@@ -239,12 +225,8 @@ def test_todo_entries_are_surfaced_regardless_of_match_state() -> None:
 
 
 def test_symmetric_pairing_with_some_matching_fps_marks_those_unchanged() -> None:
-    findings = [
-        _make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("aaaa", "dddd")
-    ]
-    entries = [
-        _make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("aaaa", "bbbb")
-    ]
+    findings = [_make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("aaaa", "dddd")]
+    entries = [_make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint=f) for f in ("aaaa", "bbbb")]
     plan = plan_rotations(findings=findings, allowlist_entries=entries, allow_symmetric_pairing=True)
     # Sorted entries: aaaa, bbbb; sorted findings: aaaa, dddd.
     # Pair 0: aaaa<->aaaa = unchanged. Pair 1: bbbb<->dddd = rotation.
@@ -390,3 +372,53 @@ def _empty_plan_with(
         new_findings=(),
         unchanged_count=0,
     )
+
+
+# =============================================================================
+# C8-3: rotate refuses to silently re-bind judge-gated entries
+# =============================================================================
+#
+# Rotation rebinds an entry's canonical key (and its embedded fingerprint)
+# to a new AST signature. For a judge-gated entry the persisted
+# file_fingerprint + ast_path were bound to the EXACT bytes and AST node the
+# judge inspected; auto-rotating the key would leave the binding fields
+# describing the original code while the key pointed at the new code. The
+# audit-honest response is to refuse: the operator deletes the stale entry,
+# re-justifies against the rotated location, and the new quartet records
+# what the judge actually said about the new location.
+# =============================================================================
+
+
+def test_rotate_refuses_judge_gated_entry_one_to_one() -> None:
+    """A 1:1 rotation candidate carrying judge_verdict raises before producing a Rotation."""
+    from datetime import UTC, datetime
+
+    from elspeth_lints.core.allowlist import JudgeVerdict
+
+    finding = _make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="bbbb")
+    entry = _make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="aaaa", source_file="web.yaml")
+    # Convert to judge-gated.
+    entry.judge_verdict = JudgeVerdict.ACCEPTED
+    entry.judge_recorded_at = datetime(2026, 5, 1, tzinfo=UTC)
+    entry.judge_model = "anthropic/claude-opus-4"
+    entry.judge_rationale = "judge accepted"
+    entry.file_fingerprint = "0" * 64
+    entry.ast_path = "body[0]"
+
+    with pytest.raises(RuntimeError, match=r"refusing to rotate judge-gated.*web\.yaml"):
+        plan_rotations(findings=[finding], allowlist_entries=[entry])
+
+
+def test_rotate_allows_pre_judge_entry_to_rotate_normally() -> None:
+    """Pre-judge entries (no judge_verdict) rotate without obstruction.
+
+    Pins the backward-compatible behaviour: the ~700-entry historical
+    corpus has no judge metadata, so the refusal doesn't affect any
+    existing rotation workflow. Refusal is gated exclusively on
+    ``judge_verdict is not None``.
+    """
+    finding = _make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="bbbb")
+    entry = _make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="aaaa", source_file="web.yaml")
+    # No judge metadata — the historical-corpus shape.
+    plan = plan_rotations(findings=[finding], allowlist_entries=[entry])
+    assert len(plan.rotations) == 1

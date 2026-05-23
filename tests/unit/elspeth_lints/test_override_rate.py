@@ -68,6 +68,11 @@ def _write_entry(
     yaml_path = enforce_dir / file_name
     iso = recorded_at.isoformat()
     extra = f"  judge_model_verdict: {model_verdict}\n" if model_verdict else ""
+    # Binding fields (file_fingerprint + ast_path) are required co-presence
+    # companions of judge_verdict (per C8-3 invariant 8). The override-rate
+    # gate doesn't load through a source-root verifier so the values are
+    # synthetic, just non-empty strings of the right shape. compute_override_rate
+    # calls load_allowlist without source_root, so no live recompute happens.
     yaml_path.write_text(
         textwrap.dedent(f"""\
         allow_hits:
@@ -79,6 +84,8 @@ def _write_entry(
           judge_recorded_at: '{iso}'
           judge_model: anthropic/claude-opus-4
           judge_rationale: test rationale
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: 'body[0]'
         {extra}    """)
     )
 

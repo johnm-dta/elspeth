@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -114,12 +115,18 @@ def _write_widget_lookup_entry(
     judge_verdict: str | None,
     judge_model_verdict: str | None = None,
     judge_recorded_at: str | None = None,
+    source_root: Path | None = None,
 ) -> Path:
     """Write a single allowlist entry whose key targets Widget.lookup's R1.
 
     The fingerprint is supplied by the caller; tests obtain the real
     fingerprint from a separate scan helper so the entry actually
-    matches a live finding.
+    matches a live finding. When ``judge_verdict`` is set, the C8-3
+    binding fields (file_fingerprint + ast_path) are also written:
+    if ``source_root`` is supplied, both are computed against the live
+    source tree so reaudit's load gate passes; otherwise synthetic
+    placeholders are emitted (only acceptable for tests that load via
+    paths passing ``source_root=None`` to ``load_allowlist``).
     """
     key = f"plugins/widget.py:R1:Widget:lookup:fp={fingerprint}"
     lines: list[str] = []
@@ -140,6 +147,20 @@ def _write_widget_lookup_entry(
         lines.append("  judge_model: claude-opus-4-7")
         lines.append("  judge_rationale: |-")
         lines.append("    original judge said the boundary was genuine")
+    # Binding fields (C8-3): required co-presence companions of
+    # judge_verdict per invariant 8.
+    if judge_verdict is not None:
+        if source_root is not None:
+            import hashlib as _hashlib  # local import to keep top-of-file footprint minimal
+
+            target_source = source_root / "plugins/widget.py"
+            file_fp = _hashlib.sha256(target_source.read_bytes()).hexdigest()
+            live_ast_path = _live_widget_finding(source_root).ast_path
+        else:
+            file_fp = "0" * 64
+            live_ast_path = "body[0]/body[0]/body[1]/value"
+        lines.append(f"  file_fingerprint: '{file_fp}'")
+        lines.append(f"  ast_path: '{live_ast_path}'")
     target = allowlist_dir / "plugins.yaml"
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
@@ -147,6 +168,16 @@ def _write_widget_lookup_entry(
 
 def _live_fingerprint_for_widget(root: Path) -> str:
     """Run the scanner once to grab the fingerprint of the R1 finding."""
+    return _live_widget_finding(root).fingerprint
+
+
+def _live_widget_finding(root: Path) -> Any:
+    """Return the R1 ``Finding`` instance for widget.lookup at ``root``.
+
+    Tests use this to grab BOTH the live fingerprint (for the canonical
+    key) and the live ast_path (for the binding field) from a single
+    scan.
+    """
     from elspeth_lints.rules.trust_tier.tier_model.rule import scan_file
 
     target_file = (root / "plugins/widget.py").resolve()
@@ -154,7 +185,7 @@ def _live_fingerprint_for_widget(root: Path) -> str:
     r1_findings = [f for f in findings if f.rule_id == "R1"]
     if len(r1_findings) != 1:
         raise AssertionError(f"expected exactly one R1 finding, got {len(r1_findings)}: {r1_findings}")
-    return r1_findings[0].fingerprint
+    return r1_findings[0]
 
 
 # =====================================================================
@@ -191,6 +222,7 @@ def test_still_agrees_when_accepted_stays_accepted(tmp_path: Path) -> None:
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict="ACCEPTED",
         judge_recorded_at="2024-01-01T00:00:00+00:00",
@@ -224,6 +256,7 @@ def test_was_accepted_now_blocked(tmp_path: Path) -> None:
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict="ACCEPTED",
         judge_recorded_at="2024-01-01T00:00:00+00:00",
@@ -253,6 +286,7 @@ def test_override_no_longer_needed(tmp_path: Path) -> None:
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict="OVERRIDDEN_BY_OPERATOR",
         judge_model_verdict="BLOCKED",
@@ -278,6 +312,7 @@ def test_override_still_needed(tmp_path: Path) -> None:
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict="OVERRIDDEN_BY_OPERATOR",
         judge_model_verdict="BLOCKED",
@@ -303,6 +338,7 @@ def test_pre_judge_fresh_block(tmp_path: Path) -> None:
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict=None,  # pre-judge entry
     )
@@ -326,6 +362,7 @@ def test_pre_judge_fresh_accept(tmp_path: Path) -> None:
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict=None,
     )
@@ -355,6 +392,7 @@ def test_entry_obsolete_when_no_current_finding(tmp_path: Path) -> None:
     # Stale fingerprint that does NOT match any live finding.
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint="stale_fingerprint_that_does_not_match",
         judge_verdict="ACCEPTED",
         judge_recorded_at="2024-01-01T00:00:00+00:00",
@@ -375,30 +413,39 @@ def test_entry_obsolete_when_no_current_finding(tmp_path: Path) -> None:
 
 
 def test_entry_obsolete_when_source_file_deleted(tmp_path: Path) -> None:
-    """Entry's underlying source file no longer exists — same divergence."""
+    """Source-file deletion under a judge-gated entry now fails at load (C8-3).
+
+    Before C8-3 binding enforcement, reaudit would classify this as
+    ENTRY_OBSOLETE (no live finding because the file is gone). With
+    binding enforcement, the load-time gate fires first: a judge-gated
+    entry bound to a missing file is corruption (the dependent entry
+    should have been removed when the source was deleted), and the
+    correct response is to refuse to load — surfacing the dangling
+    audit record rather than silently degrading it to "obsolete." The
+    operator removes the entry; reaudit is not the cleanup tool for
+    this class of drift.
+    """
     root, target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict="ACCEPTED",
         judge_recorded_at="2024-01-01T00:00:00+00:00",
     )
-    # Delete the source file before reaudit. The judge must not be
-    # called for ENTRY_OBSOLETE so we don't bother mocking anthropic.
     target.unlink()
 
-    report = reaudit_entries(
-        root=root.resolve(),
-        allowlist_dir=allowlist_dir,
-        rule_filter="trust_tier.tier_model",
-        since=None,
-        limit=None,
-        include_pre_judge=False,
-    )
-
-    assert report.outcomes[0].divergence is ReauditDivergence.ENTRY_OBSOLETE
+    with pytest.raises(ValueError, match=r"judge-gated entry binds to .* which does not exist"):
+        reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
 
 
 # =====================================================================
@@ -415,6 +462,7 @@ def test_since_filter_skips_fresh_entries(tmp_path: Path) -> None:
     yesterday = (datetime.now(UTC) - timedelta(days=1)).isoformat()
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict="ACCEPTED",
         judge_recorded_at=yesterday,
@@ -441,6 +489,7 @@ def test_since_filter_passes_old_entries(tmp_path: Path) -> None:
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict="ACCEPTED",
         judge_recorded_at="2020-01-01T00:00:00+00:00",
@@ -461,9 +510,15 @@ def test_since_filter_passes_old_entries(tmp_path: Path) -> None:
 
 def test_limit_caps_processed_entries(tmp_path: Path) -> None:
     """``--limit N`` processes only the first N entries surviving filters."""
+    import hashlib as _hashlib
+
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
-    fp = _live_fingerprint_for_widget(root)
+    finding = _live_widget_finding(root)
+    fp = finding.fingerprint
+    # Live binding values so each entry passes the C8-3 load-time gate.
+    live_file_fp = _hashlib.sha256((root / "plugins/widget.py").read_bytes()).hexdigest()
+    live_ast_path = finding.ast_path
     # Three entries — duplicate keys are unusual but the loader accepts
     # them and our orchestrator iterates them in order. We test the
     # mechanism by writing three.
@@ -481,6 +536,8 @@ def test_limit_caps_processed_entries(tmp_path: Path) -> None:
         lines.append("  judge_model: claude-opus-4-7")
         lines.append("  judge_rationale: |-")
         lines.append(f"    rationale entry {i}")
+        lines.append(f"  file_fingerprint: '{live_file_fp}'")
+        lines.append(f"  ast_path: '{live_ast_path}'")
     (allowlist_dir / "plugins.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
@@ -502,6 +559,7 @@ def test_include_pre_judge_off_skips_pre_judge_entries(tmp_path: Path) -> None:
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict=None,
     )
@@ -721,6 +779,7 @@ def test_cli_reaudit_text_output(tmp_path: Path, capsys: pytest.CaptureFixture[s
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict="ACCEPTED",
         judge_recorded_at="2024-01-01T00:00:00+00:00",
@@ -749,6 +808,7 @@ def test_cli_reaudit_writes_output_file(tmp_path: Path) -> None:
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict="ACCEPTED",
         judge_recorded_at="2024-01-01T00:00:00+00:00",
@@ -781,6 +841,7 @@ def test_cli_reaudit_missing_api_key_exits_2(tmp_path: Path, capsys: pytest.Capt
     fp = _live_fingerprint_for_widget(root)
     _write_widget_lookup_entry(
         allowlist_dir,
+        source_root=root,
         fingerprint=fp,
         judge_verdict="ACCEPTED",
         judge_recorded_at="2024-01-01T00:00:00+00:00",

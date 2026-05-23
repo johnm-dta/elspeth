@@ -186,7 +186,14 @@ per_file_rules:
 
 
 def test_allowlist_accepts_protocol_schema_fields(tmp_path: Path) -> None:
-    """The allowlist schema includes the protocol-layer fingerprint fields."""
+    """The allowlist schema includes the C8-3 binding fields on judge-gated entries.
+
+    Per invariant 8, binding fields (file_fingerprint + ast_path) are
+    required co-presence companions of judge_verdict; per invariant 4,
+    pre-judge entries (no judge_verdict) must omit them. This test
+    pins the post-C8-3 shape: binding fields ride with the judge
+    quartet, not as a standalone schema extension.
+    """
     from elspeth_lints.core.allowlist import FindingKey, load_allowlist
 
     allowlist_file = tmp_path / "allowlist.yaml"
@@ -198,12 +205,18 @@ allow_hits:
     reason: existing migrated finding
     safety: reviewed before migration
     expires_at: 2099-01-01
+    judge_verdict: ACCEPTED
+    judge_recorded_at: '2026-05-23T00:00:00+00:00'
+    judge_model: anthropic/claude-opus-4
+    judge_rationale: the boundary is legitimate
     file_fingerprint: sha256:source
     ast_path: Module.body[0].body[0]
 """,
         encoding="utf-8",
     )
 
+    # source_root=None: this test exercises the schema shape only, not
+    # the file_fingerprint live-recompute (no source tree on disk).
     allowlist = load_allowlist(allowlist_file, valid_rule_ids={"R1"})
     finding = FindingKey(
         file_path="src/example.py",

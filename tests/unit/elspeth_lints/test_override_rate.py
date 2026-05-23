@@ -216,11 +216,20 @@ def test_entry_one_microsecond_before_boundary_is_excluded(tmp_path: Path) -> No
     assert detail.report.judged_in_window == 0
 
 
-def test_future_dated_entries_are_excluded(tmp_path: Path) -> None:
-    """Entries with judge_recorded_at after reference_time are excluded.
+def test_future_dated_entries_raise_tampering_detected(tmp_path: Path) -> None:
+    """Entries with judge_recorded_at after reference_time raise TAMPERING_DETECTED (C7-6).
 
-    Clock-skew / tampering defence: a "from the future" entry is
-    not part of the rolling-recent-behaviour signal.
+    The prior behaviour silently excluded future-dated entries from
+    both numerator and denominator. That is precisely the silent
+    drop the gate exists to prevent: an operator could forward-date
+    an override past ``reference_time`` to vanish from the rolling
+    denominator, OR backdate one out of the rolling-recent window,
+    and the gate would happily report a clean rate.
+
+    Fail-closed (C7-6): we raise ``OverrideRateError`` with a
+    ``TAMPERING_DETECTED`` prefix and the offending entry key. The
+    CLI surfaces this as exit-2 (gate broken; operator must
+    investigate).
     """
     enforce_root = _make_allowlist_dir(tmp_path)
     enforce_dir = enforce_root / "enforce_x"
@@ -234,14 +243,58 @@ def test_future_dated_entries_are_excluded(tmp_path: Path) -> None:
         model_verdict="BLOCKED",
     )
 
-    detail = compute_override_rate(
-        allowlist_root=enforce_root,
-        window_days=30,
-        min_samples=1,
-        max_rate=0.10,
-        reference_time=now,
+    with pytest.raises(OverrideRateError) as exc:
+        compute_override_rate(
+            allowlist_root=enforce_root,
+            window_days=30,
+            min_samples=1,
+            max_rate=0.10,
+            reference_time=now,
+        )
+    message = str(exc.value)
+    assert "TAMPERING_DETECTED" in message
+    assert "x.py:R1:a:fp=aa" in message
+    assert "a.yaml" in message
+
+
+def test_future_dated_entry_exit_code_is_two(tmp_path: Path) -> None:
+    """CLI handler returns exit code 2 (gate broken) on TAMPERING_DETECTED (C7-6).
+
+    Pins the CLI contract: ``OverrideRateError`` => exit 2 (operator
+    investigates), distinct from exit 1 (rate exceeded budget — a
+    business-decision outcome the operator triages).
+    """
+    from elspeth_lints.core.cli import main
+
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    future = now + timedelta(days=1)
+    _write_entry(
+        enforce_dir,
+        file_name="a.yaml",
+        key="x.py:R1:a:fp=aa",
+        verdict="OVERRIDDEN_BY_OPERATOR",
+        recorded_at=future,
+        model_verdict="BLOCKED",
     )
-    assert detail.report.judged_in_window == 0
+
+    exit_code = main(
+        [
+            "check-override-rate",
+            "--allowlist-root",
+            str(enforce_root),
+            "--window-days",
+            "30",
+            "--min-samples",
+            "1",
+            "--max-rate",
+            "0.10",
+            "--reference-time",
+            now.isoformat(),
+        ]
+    )
+    assert exit_code == 2
 
 
 def test_pre_judge_entries_contribute_to_neither_side(tmp_path: Path) -> None:
@@ -407,6 +460,58 @@ def test_naive_reference_time_rejected(tmp_path: Path) -> None:
             reference_time=datetime(2026, 5, 23),  # noqa: DTZ001 - intentional naive value to test rejection
         )
     assert "timezone-aware" in str(exc.value)
+
+
+def test_malformed_yaml_raises_override_rate_error(tmp_path: Path) -> None:
+    """Malformed YAML raises ``OverrideRateError`` (not an uncaught traceback) — C7-5.
+
+    ``yaml.safe_load`` raises ``yaml.YAMLError``, a sibling of
+    ``Exception`` rather than a ``ValueError`` subclass. The prior
+    handler caught only ``ValueError`` and let ``YAMLError`` escape
+    as exit-1 ("gate broken") with a raw traceback — the wrong
+    failure shape for the documented exit-2 ("operator-actionable
+    structured message") contract.
+    """
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    (enforce_dir / "bad.yaml").write_text("key: [unclosed\n")
+
+    with pytest.raises(OverrideRateError) as exc:
+        compute_override_rate(
+            allowlist_root=enforce_root,
+            window_days=30,
+            min_samples=1,
+            max_rate=0.10,
+            reference_time=datetime(2026, 5, 23, tzinfo=UTC),
+        )
+    assert "failed to parse as YAML mapping" in str(exc.value)
+    assert "bad.yaml" in str(exc.value)
+
+
+def test_malformed_yaml_exit_code_is_two(tmp_path: Path) -> None:
+    """CLI returns exit 2 on malformed YAML (C7-5 CLI surface)."""
+    from elspeth_lints.core.cli import main
+
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    (enforce_dir / "bad.yaml").write_text("key: [unclosed\n")
+
+    exit_code = main(
+        [
+            "check-override-rate",
+            "--allowlist-root",
+            str(enforce_root),
+            "--window-days",
+            "30",
+            "--min-samples",
+            "1",
+            "--max-rate",
+            "0.10",
+            "--reference-time",
+            "2026-05-23T00:00:00+00:00",
+        ]
+    )
+    assert exit_code == 2
 
 
 def test_missing_allowlist_root_rejected(tmp_path: Path) -> None:

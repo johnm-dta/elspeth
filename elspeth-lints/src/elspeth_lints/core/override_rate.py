@@ -31,6 +31,17 @@ Entries are included when ``judge_recorded_at >= reference_time -
 window``. Window default is 30 days, configurable via
 ``--window-days``.
 
+**Tampering detection (C7-6).** An entry with
+``judge_recorded_at > reference_time`` (future-dated relative to
+the rolling-window anchor) is the exact tampering signal this
+gate exists to catch: silently excluding such an entry would let
+an operator forward-date an override out of the denominator (or
+backdate it out of the rolling-recent window). On encountering a
+future-dated entry the gate raises ``OverrideRateError`` with a
+``TAMPERING_DETECTED`` prefix and the offending key; the CLI
+surfaces this as exit-2 ("gate broken — operator must
+investigate") rather than producing a misleading rate.
+
 **Scope boundary.** Same as the C1 judge-coverage gate: reads
 ``allow_hits:`` YAML shape only. Private legacy shapes
 (``allow_classes:`` for ``audit_evidence.nominal_base``, etc.) do
@@ -172,16 +183,31 @@ def compute_override_rate(
         for entry in _iterate_allow_hits(entry_dir):
             if entry.judge_recorded_at is None:
                 continue
-            if entry.judge_recorded_at < window_start:
-                continue
             if entry.judge_recorded_at > reference_time:
-                # Future-dated entry: data tampering or clock skew.
-                # Excluded from the window (our window is "the last
-                # N days up to now", not "the last N days plus
-                # whatever lives in the future"). Surface via the
-                # contributing-entries list for the operator-facing
-                # log? — out of scope; the entry would also flunk
-                # downstream sanity checks.
+                # C7-6: future-dated entry. This is exactly the
+                # timestamp-tampering signal the override-rate gate
+                # exists to catch — silently excluding it from the
+                # window (the prior behaviour) lets an operator
+                # backdate their override out of the rolling-recent
+                # window OR forward-date it past ``reference_time``
+                # to vanish from the denominator. Either way the
+                # rate gate's signal is destroyed.
+                #
+                # We fail closed: raise ``OverrideRateError`` with a
+                # ``TAMPERING_DETECTED`` prefix the CLI surfaces to
+                # the operator with the offending entry's key. The
+                # entry must be investigated (clock skew on the
+                # machine that wrote it, or deliberate tampering)
+                # before the gate can produce a trustworthy rate.
+                raise OverrideRateError(
+                    f"TAMPERING_DETECTED: judge_recorded_at "
+                    f"{entry.judge_recorded_at.isoformat()} is after "
+                    f"reference_time {reference_time.isoformat()} for entry "
+                    f"{entry.source_file}::{entry.key}; future-dated judge "
+                    "timestamps indicate clock skew or deliberate tampering. "
+                    "Investigate before re-running the override-rate gate."
+                )
+            if entry.judge_recorded_at < window_start:
                 continue
             judged_in_window += 1
             if entry.judge_verdict is JudgeVerdict.OVERRIDDEN_BY_OPERATOR:
@@ -225,9 +251,14 @@ def _iterate_allow_hits(directory: Path) -> list[AllowlistEntry]:
             text = yaml_file.read_text(encoding="utf-8")
         except OSError as exc:
             raise OverrideRateError(f"could not read {yaml_file}: {exc}") from exc
+        # C7-5: ``yaml.safe_load`` raises ``yaml.YAMLError``, which is
+        # NOT a ``ValueError`` subclass. Catching only ``ValueError``
+        # let malformed YAML escape as an uncaught traceback (exit 1,
+        # "gate broken") rather than the documented exit-2 with a
+        # structured ``OverrideRateError`` message.
         try:
             data = _load_yaml_strict(text)
-        except ValueError as exc:
+        except (yaml.YAMLError, ValueError) as exc:
             raise OverrideRateError(f"{yaml_file}: failed to parse as YAML mapping: {exc}") from exc
         if "allow_hits" not in data:
             continue

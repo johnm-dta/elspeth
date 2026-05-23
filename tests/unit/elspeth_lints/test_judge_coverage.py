@@ -434,3 +434,278 @@ def test_report_passes_returns_true_when_no_violations() -> None:
         violations=(),
     )
     assert empty.passes
+
+
+# =========================================================================
+# C7-4a: OSError during routing must fail closed, not silent-skip
+# =========================================================================
+
+
+def test_directory_routing_oserror_raises_judge_coverage_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreadable YAML file during the allow_hits routing check fails the gate (C7-4a).
+
+    The prior behaviour caught ``OSError`` and silently continued —
+    indistinguishable from "this file has no allow_hits". A silent
+    skip on read failure means the gate would route the *whole
+    directory* out of inspection when only one file was unreadable.
+    We surface as ``JudgeCoverageError`` (CLI exit 2 — gate broken).
+    """
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n")
+
+    from typing import Any
+
+    real_read_text = Path.read_text
+
+    def fake_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == yaml_path:
+            raise OSError("permission denied (simulated)")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+    with pytest.raises(JudgeCoverageError) as exc_info:
+        check_judge_coverage(
+            allowlist_root=tmp_path / "config" / "cicd",
+            baseline_ref="HEAD",
+            repo_root=tmp_path,
+        )
+    assert "web.yaml" in str(exc_info.value)
+    assert "routing for allow_hits" in str(exc_info.value)
+
+
+def test_directory_routing_oserror_cli_exit_code_is_two(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI surfaces the OSError-routing failure as exit 2 (C7-4a)."""
+    from elspeth_lints.core.cli import main
+
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n")
+    _commit(tmp_path, "initial")
+
+    from typing import Any
+
+    real_read_text = Path.read_text
+
+    def fake_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == yaml_path:
+            raise OSError("permission denied (simulated)")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+    exit_code = main(
+        [
+            "check-judge-coverage",
+            "--allowlist-root",
+            str(tmp_path / "config" / "cicd"),
+            "--baseline-ref",
+            "HEAD",
+            "--repo-root",
+            str(tmp_path),
+        ]
+    )
+    assert exit_code == 2
+
+
+# =========================================================================
+# C7-4b: CRLF + start-of-file allow_hits detection
+# =========================================================================
+
+
+def test_directory_routing_detects_crlf_line_endings(tmp_path: Path) -> None:
+    """A YAML file with CRLF line endings and ``allow_hits:`` mid-file is routed in (C7-4b).
+
+    The prior substring-match for ``"\\nallow_hits:"`` missed CRLF
+    (``"\\r\\nallow_hits:"``). A missed routing decision silently
+    excludes the whole directory from the gate's purview — the
+    operator sees the gate pass on a corpus the gate never actually
+    inspected.
+    """
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    # CRLF line endings with allow_hits NOT at start-of-file.
+    yaml_content = "# leading comment\r\nallow_hits:\r\n- key: web/x.py:R1:fn:fp=aa\r\n  owner: alice\r\n  reason: r\r\n  safety: contained\r\n  judge_verdict: ACCEPTED\r\n  judge_recorded_at: '2026-05-23T00:00:00+00:00'\r\n  judge_model: m\r\n  judge_rationale: r\r\n"
+    yaml_path.write_bytes(yaml_content.encode("utf-8"))
+    baseline = _commit(tmp_path, "initial: CRLF allow_hits")
+
+    reports = check_judge_coverage(
+        allowlist_root=tmp_path / "config" / "cicd",
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+    # The enforce_tier_model directory MUST have been routed in.
+    assert "enforce_tier_model" in reports
+    assert reports["enforce_tier_model"].head_entry_count == 1
+
+
+def test_directory_routing_detects_allow_hits_at_start_of_file(tmp_path: Path) -> None:
+    """A YAML file beginning with ``allow_hits:`` at byte 0 is routed in (C7-4b).
+
+    The prior substring-match required a preceding newline. A
+    YAML file authored with ``allow_hits:`` as the very first
+    token (no header comment, no blank line) would be silently
+    excluded from inspection.
+    """
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    # allow_hits: as the very first bytes of the file.
+    yaml_path.write_text(
+        "allow_hits:\n"
+        "- key: web/x.py:R1:fn:fp=aa\n"
+        "  owner: alice\n"
+        "  reason: r\n"
+        "  safety: contained\n"
+        "  judge_verdict: ACCEPTED\n"
+        "  judge_recorded_at: '2026-05-23T00:00:00+00:00'\n"
+        "  judge_model: m\n"
+        "  judge_rationale: r\n"
+    )
+    baseline = _commit(tmp_path, "initial: start-of-file allow_hits")
+
+    reports = check_judge_coverage(
+        allowlist_root=tmp_path / "config" / "cicd",
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+    assert "enforce_tier_model" in reports
+    assert reports["enforce_tier_model"].head_entry_count == 1
+
+
+# =========================================================================
+# C7-4c: baseline parse failure must fail the gate (not silently empty)
+# =========================================================================
+
+
+def test_baseline_parse_failure_raises_judge_coverage_error(tmp_path: Path) -> None:
+    """A baseline YAML that doesn't parse fails the gate; it does NOT degrade to empty-baseline (C7-4c).
+
+    The prior behaviour silently caught ``ValueError`` and treated
+    the unparseable baseline file as contributing zero entries.
+    That converted every HEAD entry to "new", which floods the
+    operator with bogus "missing judge metadata" violations and
+    hides the real problem (baseline corruption / schema drift).
+
+    Fail-closed: raise ``JudgeCoverageError`` with the offending
+    baseline path. The operator fixes the baseline (or picks a
+    different ref), not the cascading symptoms.
+    """
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    # Baseline content is malformed (YAML mapping must be a dict;
+    # a scalar string at root is rejected by _load_yaml_strict).
+    yaml_path.write_text("just a scalar string at root\n")
+    baseline = _commit(tmp_path, "initial: malformed-mapping baseline")
+
+    # HEAD content is a well-formed allow_hits with one entry.
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aa
+          owner: alice
+          reason: legitimate boundary
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T00:00:00+00:00'
+          judge_model: anthropic/claude-opus-4
+          judge_rationale: rationale
+    """)
+    )
+    _commit(tmp_path, "PR: fix baseline shape")
+
+    with pytest.raises(JudgeCoverageError) as exc_info:
+        check_one_directory(
+            allowlist_dir=enforce_dir,
+            baseline_ref=baseline,
+            repo_root=tmp_path,
+        )
+    assert "baseline" in str(exc_info.value)
+    assert "web.yaml" in str(exc_info.value)
+
+
+def test_baseline_yamlerror_raises_judge_coverage_error(tmp_path: Path) -> None:
+    """A baseline file with un-tokenisable YAML (yaml.YAMLError) fails the gate (C7-4c + C7-5).
+
+    Combines the baseline-parse-must-fail-closed contract (C7-4c)
+    with the YAMLError-not-subclass-of-ValueError fix (C7-5): a
+    baseline whose YAML cannot even be tokenised must still produce
+    a ``JudgeCoverageError``, not an uncaught traceback.
+    """
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    # ``:- invalid yaml -:`` is a tokeniser-level error (yaml.YAMLError).
+    yaml_path.write_text("key: [unclosed\n")
+    baseline = _commit(tmp_path, "initial: tokenizer-error baseline")
+
+    # Replace HEAD with valid content.
+    yaml_path.write_text("allow_hits: []\n")
+    _commit(tmp_path, "PR: clean head")
+
+    with pytest.raises(JudgeCoverageError) as exc_info:
+        check_one_directory(
+            allowlist_dir=enforce_dir,
+            baseline_ref=baseline,
+            repo_root=tmp_path,
+        )
+    assert "baseline" in str(exc_info.value)
+    assert "failed to parse" in str(exc_info.value)
+
+
+# =========================================================================
+# C7-5: yaml.YAMLError catch at HEAD parse path
+# =========================================================================
+
+
+def test_head_yamlerror_raises_judge_coverage_error(tmp_path: Path) -> None:
+    """A HEAD file with un-tokenisable YAML raises JudgeCoverageError (C7-5).
+
+    ``yaml.safe_load`` raises ``yaml.YAMLError`` for malformed
+    input — a sibling of Exception, NOT a ValueError subclass. The
+    prior handler caught only ``ValueError`` and let YAMLError
+    escape as a raw traceback (exit-1 "gate broken" via wrong
+    channel) rather than the documented exit-2 with a structured
+    JudgeCoverageError message.
+    """
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n")
+    baseline = _commit(tmp_path, "initial: clean baseline")
+
+    # Replace HEAD with a tokeniser-error file.
+    yaml_path.write_text("key: [unclosed\n")
+    _commit(tmp_path, "PR: malformed HEAD")
+
+    with pytest.raises(JudgeCoverageError) as exc_info:
+        check_one_directory(
+            allowlist_dir=enforce_dir,
+            baseline_ref=baseline,
+            repo_root=tmp_path,
+        )
+    assert "web.yaml" in str(exc_info.value)
+    assert "failed to parse" in str(exc_info.value)
+
+
+def test_head_yamlerror_cli_exit_code_is_two(tmp_path: Path) -> None:
+    """CLI returns exit 2 for HEAD YAMLError (C7-5 surface)."""
+    from elspeth_lints.core.cli import main
+
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n")
+    _commit(tmp_path, "initial")
+    yaml_path.write_text("key: [unclosed\n")
+    _commit(tmp_path, "PR: malformed HEAD")
+
+    exit_code = main(
+        [
+            "check-judge-coverage",
+            "--allowlist-root",
+            str(tmp_path / "config" / "cicd"),
+            "--baseline-ref",
+            "HEAD~1",
+            "--repo-root",
+            str(tmp_path),
+        ]
+    )
+    assert exit_code == 2

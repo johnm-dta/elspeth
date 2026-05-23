@@ -253,22 +253,42 @@ def _missing_judge_fields(entry: AllowlistEntry) -> tuple[str, ...]:
 
 
 def _directory_has_allow_hits(directory: Path) -> bool:
-    """Cheap structural check: does ANY YAML file here carry ``allow_hits:``?
+    """Structural check: does ANY YAML file here carry a top-level ``allow_hits`` key?
 
-    Avoids the cost of full parsing for directories that exclusively
-    use other shapes (``allow_classes:``, per_file_rules-only). The
-    check is a substring match — accurate enough for routing because
-    YAML's grammar would not produce ``allow_hits:`` outside the
-    intended position in any of our hand-written files.
+    Avoids the cost of full parsing downstream for directories that
+    exclusively use other shapes (``allow_classes:``,
+    per_file_rules-only).
+
+    **Fail-closed (C7-4a):** an ``OSError`` while reading a YAML file
+    is NOT silently skipped. The gate cannot distinguish "directory
+    has no allow_hits" from "directory has unreadable allow_hits";
+    the second case is the silent-failure mode the gate exists to
+    prevent. We raise ``JudgeCoverageError`` so the CLI surfaces
+    exit-2 (gate-broken) rather than exit-0 (gate-passed).
+
+    **Fail-closed (C7-4b):** the routing check used to be a substring
+    match for ``"\\nallow_hits:"``. That missed CRLF line endings
+    (``"\\r\\nallow_hits:"``) and ``allow_hits:`` at start-of-file
+    after a UTF-8 BOM. A missed routing decision silently excludes
+    the whole directory from the gate. Replaced with a YAML parse
+    and a structural top-level-key check.
+
+    A YAML parse failure here is *also* a fail-closed condition:
+    HEAD content is our data and corruption cannot be silently
+    routed away from the gate. We raise ``JudgeCoverageError``.
     """
     for yaml_file in directory.glob("*.yaml"):
         if yaml_file.name == "_defaults.yaml":
             continue
         try:
             text = yaml_file.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if "\nallow_hits:" in text or text.startswith("allow_hits:"):
+        except OSError as exc:
+            raise JudgeCoverageError(f"could not read {yaml_file} while routing for allow_hits: {exc}") from exc
+        try:
+            data = _load_yaml_strict(text)
+        except (yaml.YAMLError, ValueError) as exc:
+            raise JudgeCoverageError(f"{yaml_file}: failed to parse as YAML mapping while routing for allow_hits: {exc}") from exc
+        if "allow_hits" in data:
             return True
     return False
 
@@ -294,9 +314,17 @@ def _iterate_entries_from_directory(directory: Path) -> list[AllowlistEntry]:
     for yaml_file in sorted(directory.glob("*.yaml")):
         if yaml_file.name == "_defaults.yaml":
             continue
+        # C7-5: ``yaml.safe_load`` raises ``yaml.YAMLError`` (a sibling
+        # of ``Exception``, not a ``ValueError`` subclass). Catching
+        # only ``ValueError`` let malformed YAML escape as an uncaught
+        # traceback (exit 1, "gate broken"), masquerading as the
+        # documented exit-2 ("gate broken — surface to operator") via
+        # different output shape. We catch both so the CLI gets a
+        # ``JudgeCoverageError`` and emits a clean exit-2 with a
+        # structured message.
         try:
             data = _load_yaml_strict(yaml_file.read_text(encoding="utf-8"))
-        except ValueError as exc:
+        except (yaml.YAMLError, ValueError) as exc:
             raise JudgeCoverageError(f"{yaml_file}: failed to parse as YAML mapping: {exc}") from exc
         entries.extend(_parse_allow_hits(data, source_file=yaml_file.name))
     return entries
@@ -316,14 +344,22 @@ def _load_entries_from_git(
     produce no baseline entries — every entry in such a file is
     treated as new and must be judged.
 
-    A baseline file that fails to parse is *not* an error: the
-    baseline may have been written under a different schema version
-    and the gate's job is "compare against baseline as it was, even
-    if that baseline carried legacy debt." We surface the parse
-    failure as a structural anomaly but treat the file as
-    contributing zero baseline entries (most conservative — every
-    HEAD entry against an unparseable baseline file becomes "new",
-    which is the safe behaviour for an audit gate).
+    **Fail-closed (C7-4c).** A baseline file that fails to parse used
+    to be silently treated as contributing zero baseline entries.
+    That swaps the entire grandfathering signal for "every HEAD
+    entry is new" — sounds conservative, but in practice the
+    operator sees a flood of "missing judge metadata" violations
+    that hides the actual problem (baseline corruption) and creates
+    enormous pressure to slap judge stubs onto entries that were
+    already grandfathered. We raise ``JudgeCoverageError`` instead,
+    so the CLI emits exit-2 ("gate broken — surface to operator")
+    with the offending baseline path and parse diagnostic. The
+    operator fixes the baseline (or the ref), not the symptoms.
+
+    Same discipline applies to ``_parse_allow_hits`` invariant
+    violations: a baseline whose entry shape no longer parses under
+    the current schema is a structural anomaly that the operator
+    must see, not silently route around.
     """
     rel_dir = _relative_to_repo(allowlist_dir, repo_root)
     file_names = _ls_tree_yaml_files(
@@ -345,17 +381,19 @@ def _load_entries_from_git(
         )
         if content is None:
             continue
+        # C7-4c + C7-5: catch both ``yaml.YAMLError`` and ``ValueError``,
+        # and raise rather than silently dropping the baseline entries
+        # for this file. A silent empty baseline destroys grandfathering.
         try:
             data = _load_yaml_strict(content)
-        except ValueError:
-            # Baseline shape we can't parse — treat as empty contributor.
-            continue
+        except (yaml.YAMLError, ValueError) as exc:
+            raise JudgeCoverageError(f"baseline {baseline_ref}:{rel_path}: failed to parse as YAML mapping: {exc}") from exc
         try:
             entries.extend(_parse_allow_hits(data, source_file=Path(rel_path).name))
-        except (ValueError, TypeError):
-            # Baseline entry shape violated the loader's invariants.
-            # Same conservative handling as YAML parse failure.
-            continue
+        except (ValueError, TypeError) as exc:
+            raise JudgeCoverageError(
+                f"baseline {baseline_ref}:{rel_path}: allow_hits entry shape violated loader invariants: {exc}"
+            ) from exc
     return entries
 
 

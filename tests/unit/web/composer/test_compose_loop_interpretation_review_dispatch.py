@@ -88,7 +88,7 @@ def _fake_response_with_tool_call(
 
     The real LiteLLM response has a long surface; the compose loop reads
     only ``response.choices[0].message.{content,tool_calls}`` and
-    ``response.model`` for ``_safe_response_model``. We synthesise the
+    ``response.model`` for ``safe_response_model``. We synthesise the
     minimum the loop needs.
     """
     return _fake_response_with_tool_calls(

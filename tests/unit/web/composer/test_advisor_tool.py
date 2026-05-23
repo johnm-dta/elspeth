@@ -340,7 +340,7 @@ async def test_advisor_call_records_outer_invocation_and_inner_llm_call() -> Non
 
     No new audit dataclass needed — the existing primitives cover the
     whole shape because the inner call lands on recorder.record_llm_call
-    via _build_llm_call_record fired from _call_advisor_with_audit's
+    via build_llm_call_record fired from _call_advisor_with_audit's
     finally block.
     """
     catalog = _mock_catalog()

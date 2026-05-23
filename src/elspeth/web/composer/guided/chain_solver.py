@@ -23,8 +23,8 @@ from elspeth.web.composer.guided.state_machine import (
     SourceResolved,
 )
 from elspeth.web.composer.llm_response_parsing import (
-    _attach_llm_calls,
-    _build_llm_call_record,
+    attach_llm_calls,
+    build_llm_call_record,
 )
 from elspeth.web.composer.service import (
     _COMPOSER_LLM_TEMPERATURE,
@@ -314,7 +314,7 @@ async def solve_chain(
     finally:
         if recorder is not None and status is not None:
             recorder.record_llm_call(
-                _build_llm_call_record(
+                build_llm_call_record(
                     model_requested=model,
                     messages=messages,
                     tools=_GUIDED_LLM_TOOLS,
@@ -334,7 +334,7 @@ async def solve_chain(
             # composer/service.py:3307-3309 and :3404-3406.
             current_exc = sys.exc_info()[1]
             if current_exc is not None:
-                _attach_llm_calls(current_exc, recorder)
+                attach_llm_calls(current_exc, recorder)
 
 
 def _extract_tool_call(response: Any) -> tuple[str, dict[str, Any]]:

@@ -1480,13 +1480,6 @@ allow_hits:
   safety: Missing-field diagnostics surface concrete dotted/indexed paths; the walker
     emits no fabricated values and a malformed tool definition crashes at import.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_provider_details_payload:fp=9c29bd1bc7679a01
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
 - key: web/composer/llm_response_parsing.py:R2:_provider_details_payload:fp=2a1833c0a52a5e5a
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
@@ -1494,161 +1487,133 @@ allow_hits:
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=129470a225d57f27
+- key: web/composer/llm_response_parsing.py:R2:token_usage_from_response:fp=129470a225d57f27
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_token_usage_from_response:fp=b0ed98f2855c32ae
+- key: web/composer/llm_response_parsing.py:R1:token_usage_from_response:fp=019b920aea416acb
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=019b920aea416acb
+- key: web/composer/llm_response_parsing.py:R1:token_usage_from_response:fp=8a4d5742fc096a4c
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=8a4d5742fc096a4c
+- key: web/composer/llm_response_parsing.py:R1:token_usage_from_response:fp=7a51927419dde97b
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=7a51927419dde97b
+- key: web/composer/llm_response_parsing.py:R1:token_usage_from_response:fp=23654a5020554ff2
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=23654a5020554ff2
+- key: web/composer/llm_response_parsing.py:R1:token_usage_from_response:fp=40e4830b7986f089
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=40e4830b7986f089
+- key: web/composer/llm_response_parsing.py:R1:token_usage_from_response:fp=14c33dfbf868059d
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=14c33dfbf868059d
+- key: web/composer/llm_response_parsing.py:R1:token_usage_from_response:fp=01435ad22c7f7946
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_token_usage_from_response:fp=1288463a66cb0d29
+- key: web/composer/llm_response_parsing.py:R1:token_usage_from_response:fp=fa9224835d150b3f
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_token_usage_from_response:fp=73da358cb50f7ea8
+- key: web/composer/llm_response_parsing.py:R1:token_usage_from_response:fp=5cd0d50b12dd73ad
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_token_usage_from_response:fp=66f75ad04196354c
+- key: web/composer/llm_response_parsing.py:R2:token_usage_from_response:fp=b05d403d618526a2
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=01435ad22c7f7946
+- key: web/composer/llm_response_parsing.py:R2:token_usage_from_response:fp=c745f85451112e20
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=fa9224835d150b3f
+- key: web/composer/llm_response_parsing.py:R2:token_usage_from_response:fp=9abdc8a826386eea
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=5cd0d50b12dd73ad
+- key: web/composer/llm_response_parsing.py:R2:token_usage_from_response:fp=633b8b555a08a0d5
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=b05d403d618526a2
+- key: web/composer/llm_response_parsing.py:R2:token_usage_from_response:fp=cb1c4be269a3e9f0
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=c745f85451112e20
+- key: web/composer/llm_response_parsing.py:R2:token_usage_from_response:fp=2bfecea3bd9c907b
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=9abdc8a826386eea
+- key: web/composer/llm_response_parsing.py:R2:token_usage_from_response:fp=320755415534b8b2
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=633b8b555a08a0d5
+- key: web/composer/llm_response_parsing.py:R2:token_usage_from_response:fp=0d833fdefa90f98f
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=cb1c4be269a3e9f0
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=2bfecea3bd9c907b
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=320755415534b8b2
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=0d833fdefa90f98f
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=b62e64bc2d61e617
+- key: web/composer/llm_response_parsing.py:R2:token_usage_from_response:fp=b62e64bc2d61e617
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
@@ -1662,13 +1627,6 @@ allow_hits:
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_provider_cost_from_response:fp=1a8502d16367269c
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
 - key: web/composer/llm_response_parsing.py:R2:_provider_cost_from_response:fp=e68305badf66bd65
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
@@ -1676,14 +1634,7 @@ allow_hits:
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R2:_safe_response_model:fp=0c7de3a07a40310f
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_safe_response_model:fp=3b92b7574fe8ca70
+- key: web/composer/llm_response_parsing.py:R2:safe_response_model:fp=0c7de3a07a40310f
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
@@ -1691,20 +1642,6 @@ allow_hits:
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
 - key: web/composer/llm_response_parsing.py:R2:_safe_provider_request_id:fp=25a663b069e6a21e
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_safe_provider_request_id:fp=0602b3a6b651c9ed
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_response_field:fp=7b98204cb11f11e6
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
@@ -1719,41 +1656,6 @@ allow_hits:
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
 - key: web/composer/llm_response_parsing.py:R2:_response_field:fp=66a71df341185085
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_first_response_message:fp=0da90638df6a03f0
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=104e3cf0f025c001
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=ce5525f8747099d7
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=bacffcd9f9423b74
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=f77f22d448487ccf
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
@@ -1781,28 +1683,7 @@ allow_hits:
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_reasoning_metadata_from_response:fp=46a43691f7c6b835
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_reasoning_metadata_from_response:fp=f0ada16480e94218
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R5:_supports_anthropic_prompt_cache_markers:fp=a4ba939051d5a39d
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
-- key: web/composer/llm_response_parsing.py:R1:_apply_anthropic_cache_markers:fp=37f7de34a9e33a02
+- key: web/composer/llm_response_parsing.py:R1:apply_anthropic_cache_markers:fp=37f7de34a9e33a02
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
     be mapping-shaped, object-shaped, absent, or provider-specific.
@@ -2134,231 +2015,6 @@ allow_hits:
     was non-UUID. Downstream callers receive a redacted_identity record without blob_id
     (only content_hash_prefix).
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=f122869738cb3060
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``source.options`` (a ``Mapping[str, Any]``
-    from :class:`SourceSpec` — the type is Tier-1 but the *values* under each key
-    are LLM-supplied). ``schema`` is optional; absence means 'no declared schema,
-    infer from sample data'.
-  safety: Returns None at line 568, which the caller treats as 'observed' (the default
-    inference path); no diagnostics are silently dropped.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=5012dd4edbe70f0e
-  owner: composer-tools-generation
-  reason: Tier-3 type narrow on the LLM-authored ``schema`` value (any JSON type is
-    possible at this boundary). When ``schema`` is not a Mapping, the diagnostic helper
-    returns None (no schema-mode information available).
-  safety: Wrong-shape schema fails the narrow and returns None at line 568; the caller's
-    downstream diagnostics treat that as 'mode unknown' (no false negatives).
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=1287b9bcc0b4fddd
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping
-    at line 567). The ``mode`` key is optional; absence means the operator declared
-    a schema without a mode (likely a partial composer state) and the helper returns
-    None to signal 'mode-unknown' to the caller.
-  safety: Absent or non-string mode returns None at line 568; callers treat mode-
-    unknown as observed-CSV default.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=6404b93bc7e87752
-  owner: composer-tools-generation
-  reason: Tier-3 type narrow on the LLM-authored ``mode`` value within ``schema.mode``.
-    Non-string modes (e.g. a number, dict, or None) return None at line 568 — same
-    'mode-unknown' fallthrough as absent mode.
-  safety: Non-string returns None; no exception; downstream diagnostics handle the
-    mode-unknown case identically to absent-schema.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_sample_csv_rows:fp=7511eed75216631e
-  owner: composer-tools-generation
-  reason: 'Tier-3 CSV-row boundary: ``csv.DictReader`` can yield rows where ``key``
-    is None (ragged rows where extra fields land in the implicit ``None`` key). The
-    ``isinstance(key, str)`` filter drops those entries so the downstream sampler
-    only emits string-keyed cells.'
-  safety: Non-string keys (None or any other type from a misconfigured DictReader)
-    are silently dropped from the sample, which is correct — they have no header to
-    attribute to.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=6f9a482b131046b4
-  owner: composer-tools-generation
-  reason: 'Standard ``ast.walk`` node-type discrimination: ``isinstance(node, ast.Subscript)``
-    is the canonical way to filter Subscript nodes from the walk. This is sum-type
-    dispatch over ``ast.AST``, not a defensive type check on untrusted data.'
-  safety: Non-Subscript nodes are skipped (continue to next node); no exception, no
-    false negatives.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=8e7bcc3c428079c1
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination within the Subscript branch: ``isinstance(node.value,
-    ast.Name)`` filters subscripts of the form ``<Name>[<slice>]`` (e.g. ``row[''field'']``).'
-  safety: Non-Name values fall to the next ``if`` branch; no false negatives.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=e2659eeb9f49bcb2
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.slice, ast.Constant)``
-    filters Subscript slices that are literal constants (vs. computed expressions
-    like ``row[some_var]``).'
-  safety: Computed slices are skipped; field extraction is limited to literal indices,
-    which is correct for the row-field detector.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=8ee48859ff64703a
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.slice.value, str)``
-    further narrows the Constant slice to strings (we only collect string-keyed row
-    references).'
-  safety: Non-string constants (e.g. numeric indices) are skipped.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=8755d95e16eba833
-  owner: composer-tools-generation
-  reason: 'Standard ``ast.walk`` node-type discrimination: ``isinstance(node, ast.Call)``
-    selects the ``row.get(''field'')`` sibling pattern that the Subscript branch above
-    doesn''t cover.'
-  safety: Non-Call nodes are skipped — fully complementary to the Subscript branch.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=76aea13dbddbd402
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination within the Call branch: ``isinstance(node.func,
-    ast.Attribute)`` filters calls of the form ``<obj>.<method>(...)`` — required
-    to match ``row.get(...)``.'
-  safety: Non-Attribute callables fail the narrow; no row-field extraction for non-
-    attribute calls.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=4034c2b8d6a79378
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.func.value, ast.Name)``
-    requires the method-receiver to be a bare Name (so we match ``row.get(...)`` but
-    not ``obj.row.get(...)``).'
-  safety: Non-Name receivers (e.g. attribute chains) are skipped.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=0507ae62245208b1
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.args[0], ast.Constant)``
-    filters ``row.get(<literal>)`` calls (vs ``row.get(var)``).'
-  safety: Computed-arg calls are skipped — field extraction is literal-only.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=d45ca689453b6c59
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.args[0].value,
-    str)`` narrows the Constant arg to strings (only string-keyed row.get calls are
-    collected).'
-  safety: Non-string literal args (e.g. numeric) are skipped.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=a195de2ec58be4ab
-  owner: composer-tools-generation
-  reason: Tier-3 conversion of LLM-authored gate-expression evaluation failure into
-    a structured diagnostic. ``parser.evaluate(row)`` is running the LLM-authored
-    gate condition (an ``ExpressionParser`` of a user expression) against a sampled
-    CSV row; a failure means the expression is type-mismatched for the data shape
-    (e.g. comparing a string CSV value to an int). The except clause captures the
-    exception, emits a ``_blocking_diagnostic`` with the original error text in ``message``,
-    and breaks out of the row loop — the diagnostic is the audit record, not a silent
-    swallow.
-  safety: Narrowed to ``ExpressionEvaluationError`` (not bare ``Exception``); other
-    exceptions (programmer bugs in the parser, AttributeError on row) propagate. The
-    exception text is included verbatim in the diagnostic so the audit trail names
-    the type mismatch.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=2f0f72f4ed07da2e
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``node.options`` (NodeSpec.options is ``Mapping[str,
-    Any]``; the values at each key are LLM-supplied). ``operations`` is the value-transform
-    pipeline; absence or non-list means 'this is not a field-preserving transform
-    we can prove past'.
-  safety: Returns False at line 698; the proof helper's caller treats False as 'abstain'
-    (no transformation inferred) so the proof step doesn't fabricate a result.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=5feab788ca85f48d
-  owner: composer-tools-generation
-  reason: 'Tier-3 narrow on the LLM-authored ``operations`` value: must be a list
-    or tuple to be iterable as a transform sequence. Anything else (mapping, scalar,
-    None) returns False to signal ''cannot prove preservation''.'
-  safety: Wrong-shape operations returns False; proof helper abstains.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=ef963351171229bf
-  owner: composer-tools-generation
-  reason: 'Tier-3 narrow on each operation entry within the LLM-authored ``operations``
-    list: a non-Mapping entry means we cannot reason about the operation''s target
-    field. Return False to abstain.'
-  safety: Non-Mapping entries return False (abstain); proof helper does not synthesise
-    a result from malformed input.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=ffd711cb1ba8752c
-  owner: composer-tools-generation
-  reason: Tier-3 read of LLM-authored ``operation.target`` (the field this operation
-    writes to). Absence is permitted by the schema; matching the current field_name
-    to ``target`` is the field-preservation check.
-  safety: A missing target is treated as 'this op does not write to field_name' (preservation
-    possibly intact); the loop continues to the next op.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=1443a7b892ef99f3
-  owner: composer-tools-generation
-  reason: Tier-3 read of LLM-authored aggregation contract options. ``value_field``
-    is required for numeric aggregations but the helper handles absence gracefully
-    — a missing value_field means we abstain from the diagnostic (line 776 ``type(value_field)
-    is not str``).
-  safety: Missing or non-string value_field returns the helper to the next node without
-    emitting a diagnostic; no false positives.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=b1adbe6654c2e17b
-  owner: composer-tools-generation
-  reason: Read of our own type-inference output. ``inferred_types`` is a ``Mapping[str,
-    str] | None`` we computed from sampled CSV data; a missing ``value_field`` key
-    means inference produced no signal for that column (e.g. all-empty values). ``.get(...)``
-    returns None which is included verbatim in the diagnostic's evidence_locator as
-    ``inferred_sample_type``.
-  safety: None is the correct representation of 'no inference available'; the diagnostic
-    message text already shows ``inferred_type or 'unknown'`` so the audit trail distinguishes
-    'unknown' from 'str' (the runtime type).
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=68d752ef9078c2cd
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``source.options``. ``blob_ref`` is schema-
-    optional — present only when set_source_from_blob (or inline_blob in set_pipeline)
-    wired a blob into the source; for path-based sources it is absent. The function
-    abstains from blob-backed proof checks when absent.
-  safety: Absent blob_ref returns the diagnostic list unchanged; no fabricated blob
-    lookups.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=42299a0cf96100ac
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``source.options.schema`` during proof diagnostics.
-    Re-read here (separate from ``_source_schema_mode``) to pull the schema for the
-    fixed-mode-omits-columns blocking check.
-  safety: Absent or non-Mapping schema fails the isinstance gate at line 923; no diagnostic
-    emitted.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=6e3b33a65e1eb5bd
-  owner: composer-tools-generation
-  reason: 'Tier-3 narrow on the LLM-authored ``schema`` value within ``compute_proof_diagnostics``:
-    the helper only emits the ``csv_fixed_schema_omits_observed_columns`` blocking
-    diagnostic when schema is a Mapping with mode=''fixed''.'
-  safety: Non-Mapping or non-fixed-mode schema bypasses the diagnostic branch; not
-    a Tier-1 'our data crash' because the schema is LLM-authored composer state.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=9851276013b10380
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping).
-    ``mode`` may be absent or non-string; ``schema.get('mode') == 'fixed'`` is the
-    discriminator for the blocking-diagnostic branch.
-  safety: Absent or wrong-typed mode causes the equality check to fail; no false-
-    positive diagnostic.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=3dd1188dad796392
-  owner: composer-tools-generation
-  reason: 'Tier-3 walk of LLM-authored ``schema`` Mapping: ``fields`` is the declared
-    column list. ``schema.get(''fields'') or ()`` coerces an absent or falsy value
-    to an empty tuple so the downstream isinstance check at line 925 has a normalised
-    value to test.'
-  safety: Empty tuple cannot trigger the missing-columns diagnostic (no declared columns
-    ⇒ no omission); behavior is conservative.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=68e168d4bf3691cb
-  owner: composer-tools-generation
-  reason: Tier-3 narrow on the LLM-authored ``schema.fields`` value before iterating
-    it as a declared-column sequence. Non-(list|tuple) shapes (mapping, scalar) bypass
-    the diagnostic branch.
-  safety: Wrong-shape fields silently bypasses the diagnostic — no synthesized diagnostic
-    against malformed schema input.
-  expires: '2026-08-23'
 - key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=2776823d39a788ae
   owner: web-sessions
   reason: Best-effort rmdir of the parent quarantine_root once the session-scoped
@@ -2465,13 +2121,6 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=8edfcec7fd4e1857
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: handler = all_handlers.get(tool_name)'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
 - key: web/composer/tools/secrets.py:R1:_execute_wire_secret_ref:fp=05b9c08a1e37f7c4
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
@@ -2570,60 +2219,6 @@ allow_hits:
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: mode = options.get("mode",
     "write")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/generation.py:R1:_execute_get_plugin_assistance:fp=7438aaa931c598e5
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: issue_code = args.get("issue_code")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=cd58a09c6cf05f6e
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: provider = args.get("provider")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=efbe1ef49b29d7b2
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: limit = args.get("limit",
-    50)'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=4b0e29ebc009b94c
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(limit, int)
-    or limit < 1:'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=c643bfda82c8511d
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if provider is not None and
-    isinstance(provider, str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/transforms.py:R5:_execute_upsert_node:fp=6dbbe113913c6d20
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: branches = dict(validated.branches)
-    if isinstance(validated.branches, Mapping) else tuple(validated.branches)'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/transforms.py:R1:_execute_upsert_edge:fp=930ea2901121f4ea
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: if routes.get(route_key)
-    != to_node:'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
@@ -2907,10 +2502,9 @@ allow_hits:
   expires: null
 - key: web/composer/tools/sessions.py:R5:_execute_apply_pipeline_recipe:fp=03005c04311fd341
   owner: composer-tools-rearchitect
-  reason: 'Co-located from web/composer/tools/recipes.py by the
-    rc5-2-review-2026-05-23 recipes/sessions co-location refactor
-    (elspeth-65e72442f0). Pattern preserved: isinstance() used: elif
-    isinstance(existing_data, Mapping):'
+  reason: 'Co-located from web/composer/tools/recipes.py by the rc5-2-review-2026-05-23
+    recipes/sessions co-location refactor (elspeth-65e72442f0). Pattern preserved:
+    isinstance() used: elif isinstance(existing_data, Mapping):'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
@@ -2996,6 +2590,292 @@ allow_hits:
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
     str):'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=7931bd4d1292eced
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: Potential dict.get() usage: handler = all_handlers.get(tool_name)'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_get_plugin_assistance:fp=2659d11875b79ad7
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: Potential dict.get() usage: issue_code = args.get("issue_code")'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=a11e6bf657094cda
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: Potential dict.get() usage: provider = args.get("provider")'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=ffda9918e784544c
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: Potential dict.get() usage: limit = args.get("limit",
+    50)'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=b5196caadba924e0
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: isinstance() used: if not isinstance(limit, int)
+    or limit < 1:'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=81fb794ccc5ac3a6
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: isinstance() used: if provider is not None and
+    isinstance(provider, str):'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=1e01f67e259d5322
+  owner: composer-tools-generation
+  reason: Tier-3 walk of LLM-authored ``source.options`` (a ``Mapping[str, Any]``
+    from :class:`SourceSpec` — the type is Tier-1 but the *values* under each key
+    are LLM-supplied). ``schema`` is optional; absence means 'no declared schema,
+    infer from sample data'.
+  safety: Returns None at line 568, which the caller treats as 'observed' (the default
+    inference path); no diagnostics are silently dropped.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=45247f29d2d046a0
+  owner: composer-tools-generation
+  reason: Tier-3 type narrow on the LLM-authored ``schema`` value (any JSON type is
+    possible at this boundary). When ``schema`` is not a Mapping, the diagnostic helper
+    returns None (no schema-mode information available).
+  safety: Wrong-shape schema fails the narrow and returns None at line 568; the caller's
+    downstream diagnostics treat that as 'mode unknown' (no false negatives).
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=c837f9fca364f29d
+  owner: composer-tools-generation
+  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping
+    at line 567). The ``mode`` key is optional; absence means the operator declared
+    a schema without a mode (likely a partial composer state) and the helper returns
+    None to signal 'mode-unknown' to the caller.
+  safety: Absent or non-string mode returns None at line 568; callers treat mode-
+    unknown as observed-CSV default.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=8a4a2135a4c84388
+  owner: composer-tools-generation
+  reason: Tier-3 type narrow on the LLM-authored ``mode`` value within ``schema.mode``.
+    Non-string modes (e.g. a number, dict, or None) return None at line 568 — same
+    'mode-unknown' fallthrough as absent mode.
+  safety: Non-string returns None; no exception; downstream diagnostics handle the
+    mode-unknown case identically to absent-schema.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_sample_csv_rows:fp=52a2a7a3379ec6fc
+  owner: composer-tools-generation
+  reason: 'Tier-3 CSV-row boundary: ``csv.DictReader`` can yield rows where ``key``
+    is None (ragged rows where extra fields land in the implicit ``None`` key). The
+    ``isinstance(key, str)`` filter drops those entries so the downstream sampler
+    only emits string-keyed cells.'
+  safety: Non-string keys (None or any other type from a misconfigured DictReader)
+    are silently dropped from the sample, which is correct — they have no header to
+    attribute to.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=c0f0699d9b3c074f
+  owner: composer-tools-generation
+  reason: 'Standard ``ast.walk`` node-type discrimination: ``isinstance(node, ast.Subscript)``
+    is the canonical way to filter Subscript nodes from the walk. This is sum-type
+    dispatch over ``ast.AST``, not a defensive type check on untrusted data.'
+  safety: Non-Subscript nodes are skipped (continue to next node); no exception, no
+    false negatives.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=69770c6472f59367
+  owner: composer-tools-generation
+  reason: 'Standard ``ast`` field discrimination within the Subscript branch: ``isinstance(node.value,
+    ast.Name)`` filters subscripts of the form ``<Name>[<slice>]`` (e.g. ``row[''field'']``).'
+  safety: Non-Name values fall to the next ``if`` branch; no false negatives.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=35df88283b3d2db4
+  owner: composer-tools-generation
+  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.slice, ast.Constant)``
+    filters Subscript slices that are literal constants (vs. computed expressions
+    like ``row[some_var]``).'
+  safety: Computed slices are skipped; field extraction is limited to literal indices,
+    which is correct for the row-field detector.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=803e314fd59f3b0d
+  owner: composer-tools-generation
+  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.slice.value, str)``
+    further narrows the Constant slice to strings (we only collect string-keyed row
+    references).'
+  safety: Non-string constants (e.g. numeric indices) are skipped.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=01cfcf28ee73bb8b
+  owner: composer-tools-generation
+  reason: 'Standard ``ast.walk`` node-type discrimination: ``isinstance(node, ast.Call)``
+    selects the ``row.get(''field'')`` sibling pattern that the Subscript branch above
+    doesn''t cover.'
+  safety: Non-Call nodes are skipped — fully complementary to the Subscript branch.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=9ce5c6368a62282e
+  owner: composer-tools-generation
+  reason: 'Standard ``ast`` field discrimination within the Call branch: ``isinstance(node.func,
+    ast.Attribute)`` filters calls of the form ``<obj>.<method>(...)`` — required
+    to match ``row.get(...)``.'
+  safety: Non-Attribute callables fail the narrow; no row-field extraction for non-
+    attribute calls.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=0cc4c176bb4ede4c
+  owner: composer-tools-generation
+  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.func.value, ast.Name)``
+    requires the method-receiver to be a bare Name (so we match ``row.get(...)`` but
+    not ``obj.row.get(...)``).'
+  safety: Non-Name receivers (e.g. attribute chains) are skipped.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=8a2838c1b542cc39
+  owner: composer-tools-generation
+  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.args[0], ast.Constant)``
+    filters ``row.get(<literal>)`` calls (vs ``row.get(var)``).'
+  safety: Computed-arg calls are skipped — field extraction is literal-only.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=1928aed581830013
+  owner: composer-tools-generation
+  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.args[0].value,
+    str)`` narrows the Constant arg to strings (only string-keyed row.get calls are
+    collected).'
+  safety: Non-string literal args (e.g. numeric) are skipped.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=62bbe77905080af2
+  owner: composer-tools-generation
+  reason: Tier-3 conversion of LLM-authored gate-expression evaluation failure into
+    a structured diagnostic. ``parser.evaluate(row)`` is running the LLM-authored
+    gate condition (an ``ExpressionParser`` of a user expression) against a sampled
+    CSV row; a failure means the expression is type-mismatched for the data shape
+    (e.g. comparing a string CSV value to an int). The except clause captures the
+    exception, emits a ``_blocking_diagnostic`` with the original error text in ``message``,
+    and breaks out of the row loop — the diagnostic is the audit record, not a silent
+    swallow.
+  safety: Narrowed to ``ExpressionEvaluationError`` (not bare ``Exception``); other
+    exceptions (programmer bugs in the parser, AttributeError on row) propagate. The
+    exception text is included verbatim in the diagnostic so the audit trail names
+    the type mismatch.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=427004220006b843
+  owner: composer-tools-generation
+  reason: Tier-3 walk of LLM-authored ``node.options`` (NodeSpec.options is ``Mapping[str,
+    Any]``; the values at each key are LLM-supplied). ``operations`` is the value-transform
+    pipeline; absence or non-list means 'this is not a field-preserving transform
+    we can prove past'.
+  safety: Returns False at line 698; the proof helper's caller treats False as 'abstain'
+    (no transformation inferred) so the proof step doesn't fabricate a result.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=ba40686f56e7bbab
+  owner: composer-tools-generation
+  reason: 'Tier-3 narrow on the LLM-authored ``operations`` value: must be a list
+    or tuple to be iterable as a transform sequence. Anything else (mapping, scalar,
+    None) returns False to signal ''cannot prove preservation''.'
+  safety: Wrong-shape operations returns False; proof helper abstains.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=48fec03d120bf3d2
+  owner: composer-tools-generation
+  reason: 'Tier-3 narrow on each operation entry within the LLM-authored ``operations``
+    list: a non-Mapping entry means we cannot reason about the operation''s target
+    field. Return False to abstain.'
+  safety: Non-Mapping entries return False (abstain); proof helper does not synthesise
+    a result from malformed input.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=b5d6c8dc386cd3c2
+  owner: composer-tools-generation
+  reason: Tier-3 read of LLM-authored ``operation.target`` (the field this operation
+    writes to). Absence is permitted by the schema; matching the current field_name
+    to ``target`` is the field-preservation check.
+  safety: A missing target is treated as 'this op does not write to field_name' (preservation
+    possibly intact); the loop continues to the next op.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=982315d99b533f04
+  owner: composer-tools-generation
+  reason: Tier-3 read of LLM-authored aggregation contract options. ``value_field``
+    is required for numeric aggregations but the helper handles absence gracefully
+    — a missing value_field means we abstain from the diagnostic (line 776 ``type(value_field)
+    is not str``).
+  safety: Missing or non-string value_field returns the helper to the next node without
+    emitting a diagnostic; no false positives.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=21b5f922f28a2509
+  owner: composer-tools-generation
+  reason: Read of our own type-inference output. ``inferred_types`` is a ``Mapping[str,
+    str] | None`` we computed from sampled CSV data; a missing ``value_field`` key
+    means inference produced no signal for that column (e.g. all-empty values). ``.get(...)``
+    returns None which is included verbatim in the diagnostic's evidence_locator as
+    ``inferred_sample_type``.
+  safety: None is the correct representation of 'no inference available'; the diagnostic
+    message text already shows ``inferred_type or 'unknown'`` so the audit trail distinguishes
+    'unknown' from 'str' (the runtime type).
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=d7bf6b1cdf48069b
+  owner: composer-tools-generation
+  reason: Tier-3 walk of LLM-authored ``source.options``. ``blob_ref`` is schema-
+    optional — present only when set_source_from_blob (or inline_blob in set_pipeline)
+    wired a blob into the source; for path-based sources it is absent. The function
+    abstains from blob-backed proof checks when absent.
+  safety: Absent blob_ref returns the diagnostic list unchanged; no fabricated blob
+    lookups.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=e6189c6382fd5352
+  owner: composer-tools-generation
+  reason: Tier-3 walk of LLM-authored ``source.options.schema`` during proof diagnostics.
+    Re-read here (separate from ``_source_schema_mode``) to pull the schema for the
+    fixed-mode-omits-columns blocking check.
+  safety: Absent or non-Mapping schema fails the isinstance gate at line 923; no diagnostic
+    emitted.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=0608e0753339f361
+  owner: composer-tools-generation
+  reason: 'Tier-3 narrow on the LLM-authored ``schema`` value within ``compute_proof_diagnostics``:
+    the helper only emits the ``csv_fixed_schema_omits_observed_columns`` blocking
+    diagnostic when schema is a Mapping with mode=''fixed''.'
+  safety: Non-Mapping or non-fixed-mode schema bypasses the diagnostic branch; not
+    a Tier-1 'our data crash' because the schema is LLM-authored composer state.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=1cdbbb4bacdaf587
+  owner: composer-tools-generation
+  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping).
+    ``mode`` may be absent or non-string; ``schema.get('mode') == 'fixed'`` is the
+    discriminator for the blocking-diagnostic branch.
+  safety: Absent or wrong-typed mode causes the equality check to fail; no false-
+    positive diagnostic.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=d069e88ca73ba9e9
+  owner: composer-tools-generation
+  reason: 'Tier-3 walk of LLM-authored ``schema`` Mapping: ``fields`` is the declared
+    column list. ``schema.get(''fields'') or ()`` coerces an absent or falsy value
+    to an empty tuple so the downstream isinstance check at line 925 has a normalised
+    value to test.'
+  safety: Empty tuple cannot trigger the missing-columns diagnostic (no declared columns
+    ⇒ no omission); behavior is conservative.
+  expires: '2026-08-23'
+- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=85ec0e1328ec4f8f
+  owner: composer-tools-generation
+  reason: Tier-3 narrow on the LLM-authored ``schema.fields`` value before iterating
+    it as a declared-column sequence. Non-(list|tuple) shapes (mapping, scalar) bypass
+    the diagnostic branch.
+  safety: Wrong-shape fields silently bypasses the diagnostic — no synthesized diagnostic
+    against malformed schema input.
+  expires: '2026-08-23'
+- key: web/composer/tools/transforms.py:R5:_execute_upsert_node:fp=a6cb126be5c76f54
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: isinstance() used: branches = dict(validated.branches)
+    if isinstance(validated.branches, Mapping) else tuple(validated.branches)'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/transforms.py:R1:_execute_upsert_edge:fp=8544ef6f282a67c8
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: Potential dict.get() usage: if routes.get(route_key)
+    != to_node:'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null

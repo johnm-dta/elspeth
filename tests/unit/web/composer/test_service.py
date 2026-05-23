@@ -1621,7 +1621,7 @@ class TestProviderCacheTokenAudit:
 
     @pytest.mark.asyncio
     async def test_openai_nested_cached_tokens_lands_on_audit_record(self) -> None:
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1631,7 +1631,7 @@ class TestProviderCacheTokenAudit:
                 "prompt_tokens_details": {"cached_tokens": 1024},
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.prompt_tokens == 1200
         assert usage.cached_prompt_tokens == 1024
         assert usage.cache_creation_input_tokens is None
@@ -1639,7 +1639,7 @@ class TestProviderCacheTokenAudit:
 
     @pytest.mark.asyncio
     async def test_anthropic_sibling_cache_fields_land_on_audit_record(self) -> None:
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1649,7 +1649,7 @@ class TestProviderCacheTokenAudit:
                 "cache_read_input_tokens": 1100,
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None
@@ -1664,7 +1664,7 @@ class TestProviderCacheTokenAudit:
         carry the SAME value because LiteLLM derives the former from the
         latter. The audit row must record only the Anthropic-shape signal.
         """
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1675,7 +1675,7 @@ class TestProviderCacheTokenAudit:
                 "cache_read_input_tokens": 1100,
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None
@@ -1691,7 +1691,7 @@ class TestProviderCacheTokenAudit:
         misleads the auditor into thinking the provider reported a zero-hit
         cache read, when in fact the provider only reported cache creation.
         """
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1702,7 +1702,7 @@ class TestProviderCacheTokenAudit:
                 "cache_read_input_tokens": 0,
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 0
         assert usage.cached_prompt_tokens is None
@@ -1712,11 +1712,11 @@ class TestProviderCacheTokenAudit:
         """Pydantic-shaped (attribute) usage object also dedups when siblings present.
 
         Real LiteLLM responses are Pydantic ``Usage`` objects, not Mappings.
-        Verifies the elif branch in ``_token_usage_from_response`` honors the
+        Verifies the elif branch in ``token_usage_from_response`` honors the
         same dedup rule: nested ``prompt_tokens_details.cached_tokens`` is
         dropped when an Anthropic sibling is present on the attribute object.
         """
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         @dataclass
         class FakePromptTokensDetails:
@@ -1750,7 +1750,7 @@ class TestProviderCacheTokenAudit:
                 cache_read_input_tokens=1100,
             ),
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None
@@ -1758,10 +1758,10 @@ class TestProviderCacheTokenAudit:
     @pytest.mark.asyncio
     async def test_no_cache_metadata_leaves_fields_none(self) -> None:
         """Absent cache metadata must NOT be fabricated to zero."""
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120})
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cached_prompt_tokens is None
         assert usage.cache_creation_input_tokens is None
         assert usage.cache_read_input_tokens is None

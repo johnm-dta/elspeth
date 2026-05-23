@@ -832,14 +832,14 @@ class TestR5IsinstanceClassification:
         source = dedent("""
             from collections.abc import Mapping
 
-            def _token_usage_from_response(response):
+            def token_usage_from_response(response):
                 usage = getattr(response, "usage", None)
                 if isinstance(usage, Mapping):
                     return usage
                 return None
         """)
 
-        assert self._r5_findings(source, filename="web/composer/service.py") == []
+        assert self._r5_findings(source, filename="web/composer/llm_response_parsing.py") == []
 
     def test_unlisted_web_helper_still_flagged(self) -> None:
         """The boundary-helper split must not suppress arbitrary web helpers."""

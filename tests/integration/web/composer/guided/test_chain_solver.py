@@ -1031,7 +1031,7 @@ class TestSolveChainLLMCallAudit:
 
     @pytest.mark.asyncio
     async def test_escaping_exception_carries_llm_calls_attribute(self) -> None:
-        """``_attach_llm_calls`` attaches the recorder snapshot to the escaping exception.
+        """``attach_llm_calls`` attaches the recorder snapshot to the escaping exception.
 
         Mirrors the freeform pattern at ``composer/service.py:3307-3309``.
         The escaping exception's ``llm_calls`` attribute lets a downstream

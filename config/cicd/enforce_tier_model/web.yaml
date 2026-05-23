@@ -1690,6 +1690,126 @@ allow_hits:
   safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
     optional fields remain None and no token counts or costs are fabricated.
   expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_provider_details_payload:fp=9c29bd1bc7679a01
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(value, Mapping) probes provider
+    payload shape (mapping vs object vs None) before extracting structured fields.
+  safety: Mapping path returns the value verbatim; non-mapping path falls through
+    to getattr-based extraction; absent path returns None. No fabrication of missing
+    fields.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:token_usage_from_response:fp=b0ed98f2855c32ae
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(usage, Mapping) detects whether
+    LiteLLM returned a usage dict vs a typed object.
+  safety: Mapping branch reads via __getitem__; object branch reads via getattr; absent
+    fields remain None. Token counts never fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:token_usage_from_response:fp=1288463a66cb0d29
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — conditional pass-through of provider
+    prompt_tokens_details only when it is mapping-shaped (LiteLLM emits dict for some
+    providers, None or object for others).
+  safety: Non-mapping shape stored as None; downstream audit consumer treats absence
+    as "provider did not report breakdown" rather than zero.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:token_usage_from_response:fp=73da358cb50f7ea8
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — conditional pass-through of
+    completion_tokens_details (provider-specific shape).
+  safety: Non-mapping shape stored as None (absence-preserving per CLAUDE.md Tier-3
+    rule).
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:token_usage_from_response:fp=66f75ad04196354c
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — conditional pass-through of
+    output_tokens_details (provider-specific shape).
+  safety: Non-mapping shape stored as None (absence-preserving per CLAUDE.md Tier-3
+    rule).
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_provider_cost_from_response:fp=1a8502d16367269c
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(usage, Mapping) detects mapping
+    vs object shape before reading cost field.
+  safety: Non-mapping branch uses getattr; missing cost remains None; never coerced
+    to zero.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:safe_response_model:fp=3b92b7574fe8ca70
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(model, str) and model.strip()
+    rejects empty or non-string model identifiers before persistence to the audit
+    trail.
+  safety: Non-string or empty model returns None; auditor sees explicit absence rather
+    than fabricated identifier.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_safe_provider_request_id:fp=0602b3a6b651c9ed
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(value, str) plus length cap
+    on provider request_id before persistence.
+  safety: Non-string or oversized request_id returns None (absence-preserving); never
+    truncated silently.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_response_field:fp=7b98204cb11f11e6
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(value, Mapping) selects __getitem__
+    vs getattr access path on dual-shape response object.
+  safety: Either path returns the field's value; non-mapping/non-object inputs return
+    sentinel handled by caller.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_first_response_message:fp=0da90638df6a03f0
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(choices, list | tuple) gates
+    iteration over provider 'choices' array which is sometimes absent on streaming
+    or guardrail-rejected responses.
+  safety: Non-list/empty returns None; caller treats as "no message" rather than fabricating
+    one.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=104e3cf0f025c001
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — scalar-shape gate (isinstance scalar union)
+    on recursive JSON-safe coercion of provider artifact data.
+  safety: Scalar pass-through; unrecognized shape returns repr() for audit-safe display
+    without crashing on unknown provider types.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=ce5525f8747099d7
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(value, Mapping) recursive
+    dispatch in the JSON-safe artifact coercer.
+  safety: Mapping coerced element-wise via the same coercer; structural recursion
+    bounded by depth limit.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=bacffcd9f9423b74
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(value, list | tuple) recursive
+    dispatch in the JSON-safe artifact coercer.
+  safety: Sequence coerced element-wise via the same coercer; bounded.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=f77f22d448487ccf
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(value, set | frozenset) coerced
+    to list for JSON serialisation of provider-supplied set-shaped fields.
+  safety: Set coerced via the same coercer; deterministic ordering via sorted() at
+    use site.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_reasoning_metadata_from_response:fp=46a43691f7c6b835
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — isinstance(reasoning_content, str) rejects
+    non-string reasoning_content before persistence.
+  safety: Non-string content remains None (absence-preserving).
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_reasoning_metadata_from_response:fp=f0ada16480e94218
+  owner: composer-llm
+  reason: Tier 3 LiteLLM response boundary — second isinstance(reasoning_content,
+    str) check for the legacy/alternate field name path.
+  safety: Non-string content remains None (absence-preserving).
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:supports_anthropic_prompt_cache_markers:fp=a4ba939051d5a39d
+  owner: composer-llm
+  reason: Tier 3 LiteLLM model-name boundary — isinstance(model, str) gate before
+    string-prefix match on Anthropic model identifiers.
+  safety: Non-string model returns False (no prompt cache markers attached); explicit
+    rather than crashing.
+  expires: '2026-08-23'
 - key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=cbc93e20036437ee
   owner: web-sessions
   reason: Tier-3 shape validation of composer-authored options[INTERPRETATION_REQUIREMENTS_KEY]

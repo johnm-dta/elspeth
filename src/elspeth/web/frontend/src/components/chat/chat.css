@@ -981,6 +981,12 @@
   color: var(--color-text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
+  /* Bound the response body so the Accept/Reject actions below the card
+     stay visible. Long set_pipeline / propose-chain responses can exceed
+     several hundred lines; without a cap they push the action row off the
+     viewport. */
+  max-height: 320px;
+  overflow-y: auto;
 }
 
 .tool-call-actions {

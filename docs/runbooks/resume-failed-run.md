@@ -186,4 +186,5 @@ To reduce resume scenarios:
 ## See Also
 
 - [Incident Response](incident-response.md) - For investigating root cause
+- [Scheduler Lease Recovery](scheduler-lease-recovery.md) - For diagnosing stuck `leased` work items, SCREAM invariants, and lease-expiry churn before invoking `elspeth resume`
 - [Configuration Reference](../reference/configuration.md#checkpoint-settings) - Checkpoint configuration

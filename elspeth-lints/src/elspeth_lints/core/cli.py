@@ -790,6 +790,32 @@ def _run_justify(args: argparse.Namespace) -> int:
         return 2
 
     finding = matching[0]
+
+    # Cross-check the operator-asserted --rule against the rule_id the
+    # scanner actually reported for the chosen symbol. The default
+    # ``trust_tier.tier_model`` is a rule-PACKAGE selector (the same
+    # token reaudit accepts) and is the no-op case: it asserts only
+    # that we're working inside the tier_model rule set, which is
+    # already structurally true here. When the operator passes a
+    # specific sub-rule id (e.g. ``--rule R5``), it must match
+    # ``finding.rule_id`` exactly — otherwise the audit primitive lies
+    # (operator says "I'm suppressing R5", scanner picked R1, judge
+    # sees R1, the YAML entry binds to R1, and a future reaudit
+    # against R5 misses it). Refuse rather than silently rebinding.
+    # Closes elspeth-98c06d159f (C2-3).
+    if args.rule != "trust_tier.tier_model" and args.rule != finding.rule_id:
+        sys.stderr.write(
+            f"--rule mismatch: operator asserted {args.rule!r} but the scanner "
+            f"reported {finding.rule_id!r} for symbol {args.symbol!r} in "
+            f"{args.file_path}. Either correct --rule to {finding.rule_id!r} (if "
+            f"you intended to suppress the finding the scanner actually flagged), "
+            f"or pick a different --symbol (if you intended to suppress a "
+            f"{args.rule!r} finding elsewhere in this file). Refusing to write the "
+            "entry — silently rebinding the operator's --rule to the scanner's "
+            "rule_id would corrupt the audit attribution.\n"
+        )
+        return 2
+
     surrounding_code = _extract_surrounding_code(target_file, finding.line, context_lines=15)
     request = JudgeRequest(
         file_path=finding.file_path,

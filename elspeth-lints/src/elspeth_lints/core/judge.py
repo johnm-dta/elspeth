@@ -677,9 +677,19 @@ def call_judge(
         },
     ]
     client = OpenAI(base_url=_OPENROUTER_BASE_URL, api_key=api_key)
+    # temperature=0 is load-bearing for the judge: it pins verdict
+    # reproducibility. OpenRouter's default sampling temperature
+    # (~1.0 for most routes) makes the verdict non-deterministic, which
+    # floods the reaudit pipeline with phantom WAS_ACCEPTED_NOW_BLOCKED
+    # divergences across re-runs of the same prompt+code+rationale. The
+    # judge primitive is "given identical inputs, the verdict is stable
+    # enough that a re-run is an audit signal, not noise" — temperature=0
+    # is the cheapest available enforcement of that contract. Closes
+    # elspeth-0c5db2604c (C2-4).
     completion = client.chat.completions.create(
         model=model_id,
         max_tokens=1024,
+        temperature=0,
         messages=cast(Any, messages),
     )
 
@@ -708,9 +718,21 @@ def call_judge(
 
     prompt_tokens_total, prompt_tokens_cached = _extract_cache_accounting(completion)
 
+    # Record the *served* model id (what OpenRouter actually routed to),
+    # not the requested one. OpenRouter may re-route to a fallback when
+    # the primary route is saturated; if we record the requested id and
+    # the served id diverges, the audit trail loses the actual provenance
+    # of the verdict — a subsequent reaudit of "the same model" would
+    # silently be against a different one. Falling back to the requested
+    # `model_id` only when the transport didn't surface a served value
+    # honours the Tier-3 record-what-we-got contract: don't fabricate a
+    # served id, but don't drop the audit primitive on transports that
+    # omit the field either. Closes elspeth-0e1d0978fa (C1-1).
+    served_model_id = completion.model if completion.model else model_id
+
     return JudgeResponse(
         verdict=verdict,
-        model_id=model_id,
+        model_id=served_model_id,
         judge_rationale=rationale,
         recorded_at=datetime.now(UTC),
         should_use_decorator=should_use_decorator,
@@ -731,16 +753,12 @@ def _extract_text_block(completion: Any) -> str:
     choices = completion.choices
     if not isinstance(choices, list) or len(choices) != 1:
         raise RuntimeError(
-            f"judge response must have exactly one choice; got "
-            f"{len(choices) if isinstance(choices, list) else type(choices).__name__}"
+            f"judge response must have exactly one choice; got {len(choices) if isinstance(choices, list) else type(choices).__name__}"
         )
     message = choices[0].message
     content = message.content
     if not isinstance(content, str) or not content.strip():
-        raise RuntimeError(
-            f"judge response message content must be a non-empty string; "
-            f"got {type(content).__name__}"
-        )
+        raise RuntimeError(f"judge response message content must be a non-empty string; got {type(content).__name__}")
     return content
 
 
@@ -761,10 +779,7 @@ def _extract_cache_accounting(completion: Any) -> tuple[int, int | None]:
     usage = completion.usage
     prompt_tokens_total = usage.prompt_tokens
     if not isinstance(prompt_tokens_total, int):
-        raise RuntimeError(
-            f"judge response usage.prompt_tokens must be int; got "
-            f"{type(prompt_tokens_total).__name__}"
-        )
+        raise RuntimeError(f"judge response usage.prompt_tokens must be int; got {type(prompt_tokens_total).__name__}")
     details = getattr(usage, "prompt_tokens_details", None)
     if details is None:
         return prompt_tokens_total, None
@@ -772,10 +787,7 @@ def _extract_cache_accounting(completion: Any) -> tuple[int, int | None]:
     if cached is None:
         return prompt_tokens_total, None
     if not isinstance(cached, int):
-        raise RuntimeError(
-            f"judge response usage.prompt_tokens_details.cached_tokens "
-            f"must be int or None; got {type(cached).__name__}"
-        )
+        raise RuntimeError(f"judge response usage.prompt_tokens_details.cached_tokens must be int or None; got {type(cached).__name__}")
     return prompt_tokens_total, cached
 
 
@@ -791,9 +803,7 @@ def _parse_judge_payload(raw_text: str) -> dict[str, Any]:
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"judge returned non-JSON response; refusing to coerce. raw: {stripped!r}"
-        ) from exc
+        raise RuntimeError(f"judge returned non-JSON response; refusing to coerce. raw: {stripped!r}") from exc
     if not isinstance(parsed, dict):
         raise RuntimeError(f"judge JSON must be an object; got {type(parsed).__name__}")
     for required in ("verdict", "rationale", "should_use_decorator"):
@@ -815,10 +825,7 @@ def _verdict_from_string(value: Any) -> JudgeVerdict:
         return JudgeVerdict.ACCEPTED
     if value == JudgeVerdict.BLOCKED.value:
         return JudgeVerdict.BLOCKED
-    raise RuntimeError(
-        f"judge verdict must be ACCEPTED or BLOCKED (the model does not emit "
-        f"OVERRIDDEN_BY_OPERATOR); got {value!r}"
-    )
+    raise RuntimeError(f"judge verdict must be ACCEPTED or BLOCKED (the model does not emit OVERRIDDEN_BY_OPERATOR); got {value!r}")
 
 
 def _required_str_field(payload: dict[str, Any], key: str) -> str:

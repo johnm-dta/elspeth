@@ -84,6 +84,7 @@ def _mock_openrouter_completion(
     should_use_decorator: Any = None,
     prompt_tokens: int = 4000,
     cached_tokens: int | None = 0,
+    served_model: str | None = "anthropic/claude-opus-4",
 ) -> MagicMock:
     """Build a mock OpenAI-SDK ``chat.completions.create`` return value.
 
@@ -109,6 +110,14 @@ def _mock_openrouter_completion(
     choice.message = message
     completion = MagicMock()
     completion.choices = [choice]
+    # Explicitly set ``completion.model`` so existing happy-path tests
+    # (which assert ``judge_model: anthropic/claude-opus-4`` survives
+    # the YAML round-trip) keep passing now that ``call_judge`` records
+    # the SERVED model id (not the requested one). Tests that need to
+    # exercise routing-divergence or absent-served-id paths pass
+    # ``served_model=`` explicitly. See the C1-1 (elspeth-0e1d0978fa)
+    # tests below.
+    completion.model = served_model
     # Usage shape: total + optional details. cached_tokens=None means
     # the field on details is absent (we model this by setting details
     # to None directly, which judge._extract_cache_accounting treats as
@@ -134,6 +143,7 @@ def _mock_judge_call(
     rationale: str,
     prompt_tokens: int = 4000,
     cached_tokens: int | None = 0,
+    served_model: str | None = "anthropic/claude-opus-4",
 ) -> Iterator[MagicMock]:
     """Patch ``openai.OpenAI`` so tests run offline.
 
@@ -146,6 +156,7 @@ def _mock_judge_call(
         rationale=rationale,
         prompt_tokens=prompt_tokens,
         cached_tokens=cached_tokens,
+        served_model=served_model,
     )
     fake_client = MagicMock()
     fake_client.chat.completions.create.return_value = fake_completion
@@ -243,13 +254,20 @@ def test_justify_accepted_writes_entry_with_judge_metadata(tmp_path: Path) -> No
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "payload is Tier-3 external data from upstream tool-call",
-        "--owner", "test-agent-accepted",
-        "--format", "json",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "payload is Tier-3 external data from upstream tool-call",
+        "--owner",
+        "test-agent-accepted",
+        "--format",
+        "json",
     ]
     with _mock_judge_call(verdict="ACCEPTED", rationale="genuine Tier-3 boundary"):
         exit_code = main(argv)
@@ -286,12 +304,18 @@ def test_justify_blocked_does_not_write_and_exits_nonzero(tmp_path: Path, capsys
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "I just don't want to fix this",
-        "--owner", "lazy-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "I just don't want to fix this",
+        "--owner",
+        "lazy-agent",
     ]
     with _mock_judge_call(verdict="BLOCKED", rationale="rationale is shallow; fix the code"):
         exit_code = main(argv)
@@ -325,12 +349,18 @@ def test_justify_operator_override_records_override_with_model_rationale(tmp_pat
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "shipping under deadline",
-        "--owner", "operator-jdoe",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "shipping under deadline",
+        "--owner",
+        "operator-jdoe",
         "--operator-override",
     ]
     with _mock_judge_call(verdict="BLOCKED", rationale="model says: this should be fixed in code"):
@@ -363,12 +393,18 @@ def test_justify_non_override_records_judge_model_verdict_as_none(tmp_path: Path
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "genuine Tier-3 boundary",
-        "--owner", "test-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "genuine Tier-3 boundary",
+        "--owner",
+        "test-agent",
     ]
     with _mock_judge_call(verdict="ACCEPTED", rationale="judge agrees"):
         exit_code = main(argv)
@@ -399,12 +435,18 @@ def test_justify_dry_run_never_writes(tmp_path: Path, verdict_str: str) -> None:
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "...",
-        "--owner", "test-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "...",
+        "--owner",
+        "test-agent",
         "--dry-run",
     ]
     with _mock_judge_call(verdict=verdict_str, rationale="judge said something"):
@@ -425,12 +467,18 @@ def test_justify_missing_api_key_emits_configuration_error(tmp_path: Path, capsy
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "...",
-        "--owner", "test-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "...",
+        "--owner",
+        "test-agent",
     ]
     env_without_key = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
     with patch.dict(os.environ, env_without_key, clear=True):
@@ -456,25 +504,31 @@ def test_justify_ambiguous_symbol_errors_before_calling_judge(tmp_path: Path, ca
     (root / "plugins").mkdir(parents=True)
     target = root / "plugins" / "widget.py"
     target.write_text(
-        '''\
+        """\
 class Widget:
     def lookup(self, a: dict, b: dict) -> tuple[str, str]:
         # Two R1 findings on the same symbol_context — the judge gate
         # needs them disambiguated before it will gate one of them.
         return a.get("x", ""), b.get("y", "")
-''',
+""",
         encoding="utf-8",
     )
     allowlist_dir = _build_allowlist_dir(tmp_path)
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "Tier-3 boundary",
-        "--owner", "test-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "Tier-3 boundary",
+        "--owner",
+        "test-agent",
     ]
     # Set the API key so we definitely don't fall out via the
     # configuration check — the ambiguity error must fire first.
@@ -504,12 +558,18 @@ def test_justify_round_trip_preserves_judge_metadata_across_reads(tmp_path: Path
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "tier-3 boundary; payload comes from external tool-call",
-        "--owner", "round-trip-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "tier-3 boundary; payload comes from external tool-call",
+        "--owner",
+        "round-trip-agent",
     ]
     with _mock_judge_call(verdict="ACCEPTED", rationale="judge's verbatim reasoning"):
         exit_code = main(argv)
@@ -561,11 +621,16 @@ def test_justify_requires_owner_argument(tmp_path: Path, capsys: pytest.CaptureF
     allowlist_dir = _build_allowlist_dir(tmp_path)
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "tier-3 boundary",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "tier-3 boundary",
         # --owner deliberately omitted
     ]
     with pytest.raises(SystemExit) as exc_info:
@@ -576,9 +641,7 @@ def test_justify_requires_owner_argument(tmp_path: Path, capsys: pytest.CaptureF
 
 
 @pytest.mark.parametrize("owner_value", ["", "   ", "\t\t", "\n"])
-def test_justify_rejects_empty_owner(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], owner_value: str
-) -> None:
+def test_justify_rejects_empty_owner(tmp_path: Path, capsys: pytest.CaptureFixture[str], owner_value: str) -> None:
     """Empty or whitespace-only --owner is rejected by the argparse type callable.
 
     The audit signal is the named identity that claimed responsibility;
@@ -590,12 +653,18 @@ def test_justify_rejects_empty_owner(
     allowlist_dir = _build_allowlist_dir(tmp_path)
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "tier-3 boundary",
-        "--owner", owner_value,
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "tier-3 boundary",
+        "--owner",
+        owner_value,
     ]
     with pytest.raises(SystemExit) as exc_info:
         main(argv)
@@ -821,12 +890,18 @@ def test_justify_text_output_includes_cache_line(tmp_path: Path, capsys: pytest.
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "Tier-3 boundary",
-        "--owner", "test-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "Tier-3 boundary",
+        "--owner",
+        "test-agent",
     ]
     with _mock_judge_call(
         verdict="ACCEPTED",
@@ -852,12 +927,18 @@ def test_justify_text_output_renders_cached_none_as_na(tmp_path: Path, capsys: p
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "Tier-3 boundary",
-        "--owner", "test-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "Tier-3 boundary",
+        "--owner",
+        "test-agent",
     ]
     with _mock_judge_call(
         verdict="ACCEPTED",
@@ -880,13 +961,20 @@ def test_justify_json_output_includes_cache_fields(tmp_path: Path, capsys: pytes
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "Tier-3 boundary",
-        "--owner", "test-agent",
-        "--format", "json",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "Tier-3 boundary",
+        "--owner",
+        "test-agent",
+        "--format",
+        "json",
     ]
     with _mock_judge_call(
         verdict="ACCEPTED",
@@ -902,22 +990,27 @@ def test_justify_json_output_includes_cache_fields(tmp_path: Path, capsys: pytes
     assert payload["prompt_tokens_cached"] == 3500
 
 
-def test_justify_json_output_cache_fields_when_provider_omits_cached(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_justify_json_output_cache_fields_when_provider_omits_cached(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """JSON output preserves the absence signal as JSON null, not zero."""
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "Tier-3 boundary",
-        "--owner", "test-agent",
-        "--format", "json",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "Tier-3 boundary",
+        "--owner",
+        "test-agent",
+        "--format",
+        "json",
     ]
     with _mock_judge_call(
         verdict="ACCEPTED",
@@ -945,12 +1038,18 @@ def test_justify_records_owner_verbatim(tmp_path: Path) -> None:
     allowlist_dir = _build_allowlist_dir(tmp_path)
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/widget.py",
-        "--symbol", "Widget.lookup",
-        "--rationale", "tier-3 boundary",
-        "--owner", "my-test-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "tier-3 boundary",
+        "--owner",
+        "my-test-agent",
     ]
     with _mock_judge_call(verdict="ACCEPTED", rationale="judge agrees"):
         exit_code = main(argv)
@@ -961,3 +1060,239 @@ def test_justify_records_owner_verbatim(tmp_path: Path) -> None:
     # Round-trip: the loader exposes the same value on the dataclass.
     al = load_allowlist(allowlist_dir / "plugins.yaml", valid_rule_ids={"R1"})
     assert al.entries[0].owner == "my-test-agent"
+
+
+# =============================================================================
+# C1-1 (elspeth-0e1d0978fa): JudgeResponse.model_id records the SERVED model,
+# not the requested one. OpenRouter may transparently re-route to a fallback
+# (capacity, regional policy); the audit primitive must capture what actually
+# answered the prompt, not the requested route — otherwise a subsequent
+# reaudit "against the same model" silently runs against a different one.
+# =============================================================================
+
+
+def test_call_judge_records_served_model_when_transport_routes_to_fallback() -> None:
+    """When OpenRouter routes to a fallback model, the served id is recorded."""
+    request = JudgeRequest(
+        file_path="plugins/widget.py",
+        rule_id="R1",
+        symbol="Widget.lookup",
+        fingerprint="fp",
+        rationale="...",
+        surrounding_code="...",
+    )
+    fallback_id = "anthropic/claude-opus-4-served-by-fallback"
+    with _mock_judge_call(
+        verdict="ACCEPTED",
+        rationale="ok",
+        served_model=fallback_id,
+    ):
+        response = call_judge(request)
+    # The judge was *requested* as anthropic/claude-opus-4 (the default
+    # passed via call_judge's keyword), but the transport returned a
+    # different served-model id. The JudgeResponse must surface the
+    # served id — that's the audit primitive.
+    assert response.model_id == fallback_id
+
+
+def test_call_judge_falls_back_to_requested_model_when_transport_omits_served_id() -> None:
+    """Transports that omit completion.model fall back to the requested id.
+
+    Per the Tier-3 record-what-we-got contract: we don't fabricate a
+    served id, but we also don't drop the audit primitive when the
+    transport omits it. The fallback is the requested model id —
+    documented as ``or model_id`` in ``call_judge``.
+    """
+    request = JudgeRequest(
+        file_path="plugins/widget.py",
+        rule_id="R1",
+        symbol="Widget.lookup",
+        fingerprint="fp",
+        rationale="...",
+        surrounding_code="...",
+    )
+    # Falsy served_model: simulates a transport that didn't surface
+    # the field. None and "" both trigger the fallback branch.
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok", served_model=None):
+        response = call_judge(request)
+    assert response.model_id == "anthropic/claude-opus-4"  # the requested default
+
+
+def test_justify_yaml_records_served_model_id(tmp_path: Path) -> None:
+    """The on-disk YAML's judge_model field carries the served (not requested) id."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fallback_id = "anthropic/claude-opus-4-served-by-fallback"
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "tier-3 boundary",
+        "--owner",
+        "test-agent",
+    ]
+    with _mock_judge_call(
+        verdict="ACCEPTED",
+        rationale="judge agrees",
+        served_model=fallback_id,
+    ):
+        exit_code = main(argv)
+    assert exit_code == 0
+    text = (allowlist_dir / "plugins.yaml").read_text(encoding="utf-8")
+    assert f"judge_model: {fallback_id}" in text
+
+
+# =============================================================================
+# C2-4 (elspeth-0c5db2604c): temperature=0 is pinned on the chat-completions
+# call so the verdict is reproducible across reaudit runs. Without this,
+# OpenRouter's default sampling temperature (~1.0) produces phantom
+# WAS_ACCEPTED_NOW_BLOCKED divergences on identical prompts.
+# =============================================================================
+
+
+def test_call_judge_pins_temperature_zero_for_verdict_reproducibility() -> None:
+    request = JudgeRequest(
+        file_path="plugins/widget.py",
+        rule_id="R1",
+        symbol="Widget.lookup",
+        fingerprint="fp",
+        rationale="...",
+        surrounding_code="...",
+    )
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok") as client_class:
+        call_judge(request)
+    fake_client = client_class.return_value
+    create_call = fake_client.chat.completions.create.call_args
+    # The kwarg must be present and exactly 0 (not 0.0-via-coercion,
+    # not absent-and-relying-on-SDK-default). The audit primitive is
+    # "we asked for greedy decoding on this verdict" — anything else
+    # (including omission, which inherits OpenRouter's ~1.0 default)
+    # breaks reaudit reproducibility.
+    assert create_call.kwargs["temperature"] == 0
+
+
+# =============================================================================
+# C2-3 (elspeth-98c06d159f): --rule must cross-check against
+# finding.rule_id. The default ``trust_tier.tier_model`` is the package
+# selector and is a no-op (preserves the existing always-package-id call
+# sites in tests + CI). A specific sub-rule id (e.g. R5) that mismatches
+# the scanner's actual finding must crash before the judge is called.
+# =============================================================================
+
+
+def test_justify_rule_mismatch_crashes_before_calling_judge(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """--rule R5 against an R1 finding refuses to write and names the divergence.
+
+    The synthetic file produces R1 (``dict.get`` on Tier-2 data). The
+    operator asserts ``--rule R5`` (loop-iteration rule). Refusing
+    prevents an audit-attribution lie: the entry would otherwise be
+    written claiming the R5 rule was suppressed when in fact R1 was.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "tier-3 boundary",
+        "--owner",
+        "test-agent",
+        "--rule",
+        "R5",
+    ]
+    # Provide the API key + a no-op client so the only failure mode
+    # available is the --rule mismatch (not a config error or a call
+    # going through).
+    judge_called = MagicMock()
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False), patch("openai.OpenAI", judge_called):
+        exit_code = main(argv)
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    # The error must name both ids (operator-asserted + scanner-reported)
+    # so the operator can tell which side to correct.
+    assert "R5" in captured.err
+    assert "R1" in captured.err
+    # The judge must NOT have been called — the mismatch is local and
+    # the API call would have cost tokens for an entry we can't write.
+    judge_called.assert_not_called()
+    # And nothing was written.
+    assert not (allowlist_dir / "plugins.yaml").exists()
+
+
+def test_justify_rule_matching_subrule_id_passes(tmp_path: Path) -> None:
+    """--rule R1 against an R1 finding completes the write end-to-end.
+
+    Mirror of the ``test_justify_accepted_writes_entry_with_judge_metadata``
+    happy path, but with the operator explicitly naming the sub-rule
+    id instead of relying on the package-id default. Asserts the
+    cross-check accepts the matching case.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "tier-3 boundary",
+        "--owner",
+        "test-agent",
+        "--rule",
+        "R1",  # operator names the sub-rule id explicitly
+    ]
+    with _mock_judge_call(verdict="ACCEPTED", rationale="judge agrees"):
+        exit_code = main(argv)
+    assert exit_code == 0
+    text = (allowlist_dir / "plugins.yaml").read_text(encoding="utf-8")
+    # Entry was written and carries the R1 rule id.
+    assert "plugins/widget.py:R1:Widget:lookup:fp=" in text
+
+
+def test_justify_rule_default_package_id_remains_no_op(tmp_path: Path) -> None:
+    """The default --rule (package selector) does NOT trigger the cross-check.
+
+    This pins the no-op contract: existing call sites and tests that
+    use the default must keep working unchanged. The cross-check is
+    only armed when the operator passes a non-default --rule.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "tier-3 boundary",
+        "--owner",
+        "test-agent",
+        # --rule omitted: argparse fills in "trust_tier.tier_model"
+    ]
+    with _mock_judge_call(verdict="ACCEPTED", rationale="judge agrees"):
+        exit_code = main(argv)
+    assert exit_code == 0

@@ -104,6 +104,12 @@ def _mock_openrouter_completion(
     choice.message = message
     completion = MagicMock()
     completion.choices = [choice]
+    # Explicit ``completion.model`` is required now that ``call_judge``
+    # records the served model id (per C1-1, elspeth-0e1d0978fa). Without
+    # this, MagicMock auto-attributes a non-JSON-serialisable Mock object
+    # to ``completion.model``, which then flows into JudgeResponse.model_id
+    # and breaks JSON serialisation in --format json tests.
+    completion.model = "anthropic/claude-opus-4"
     completion.usage = MagicMock(
         prompt_tokens=4000,
         prompt_tokens_details=MagicMock(cached_tokens=0),
@@ -218,12 +224,18 @@ def test_justify_blocked_with_decorator_text_output_names_decorator(
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/tool_executor.py",
-        "--symbol", "ToolExecutor._execute_set_pipeline",
-        "--rationale", "arguments comes from the composer tool call",
-        "--owner", "test-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/tool_executor.py",
+        "--symbol",
+        "ToolExecutor._execute_set_pipeline",
+        "--rationale",
+        "arguments comes from the composer tool call",
+        "--owner",
+        "test-agent",
     ]
     with _mock_judge_call(
         verdict="BLOCKED",
@@ -252,12 +264,18 @@ def test_justify_blocked_without_decorator_text_output_lacks_decorator_mention(
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/tool_executor.py",
-        "--symbol", "ToolExecutor._execute_set_pipeline",
-        "--rationale", "...",
-        "--owner", "test-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/tool_executor.py",
+        "--symbol",
+        "ToolExecutor._execute_set_pipeline",
+        "--rationale",
+        "...",
+        "--owner",
+        "test-agent",
     ]
     with _mock_judge_call(
         verdict="BLOCKED",
@@ -284,12 +302,18 @@ def test_justify_accepted_text_output_has_no_decorator_nudge(
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/tool_executor.py",
-        "--symbol", "ToolExecutor._execute_set_pipeline",
-        "--rationale", "Tier-3 boundary, decorator already in place upstream",
-        "--owner", "test-agent",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/tool_executor.py",
+        "--symbol",
+        "ToolExecutor._execute_set_pipeline",
+        "--rationale",
+        "Tier-3 boundary, decorator already in place upstream",
+        "--owner",
+        "test-agent",
     ]
     with _mock_judge_call(
         verdict="ACCEPTED",
@@ -317,13 +341,20 @@ def test_justify_json_output_includes_should_use_decorator_field(
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/tool_executor.py",
-        "--symbol", "ToolExecutor._execute_set_pipeline",
-        "--rationale", "arguments is a tool-call payload",
-        "--owner", "test-agent",
-        "--format", "json",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/tool_executor.py",
+        "--symbol",
+        "ToolExecutor._execute_set_pipeline",
+        "--rationale",
+        "arguments is a tool-call payload",
+        "--owner",
+        "test-agent",
+        "--format",
+        "json",
     ]
     with _mock_judge_call(
         verdict="BLOCKED",
@@ -351,13 +382,20 @@ def test_justify_json_output_null_should_use_decorator_when_absent(
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/tool_executor.py",
-        "--symbol", "ToolExecutor._execute_set_pipeline",
-        "--rationale", "Tier-3 boundary, decorator already present upstream",
-        "--owner", "test-agent",
-        "--format", "json",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/tool_executor.py",
+        "--symbol",
+        "ToolExecutor._execute_set_pipeline",
+        "--rationale",
+        "Tier-3 boundary, decorator already present upstream",
+        "--owner",
+        "test-agent",
+        "--format",
+        "json",
     ]
     with _mock_judge_call(
         verdict="ACCEPTED",
@@ -395,12 +433,18 @@ def test_justify_operator_override_past_decorator_suggestion_records_both_signal
 
     argv = [
         "justify",
-        "--root", str(root),
-        "--allowlist-dir", str(allowlist_dir),
-        "--file-path", "plugins/tool_executor.py",
-        "--symbol", "ToolExecutor._execute_set_pipeline",
-        "--rationale", "shipping under deadline; decorator refactor too risky now",
-        "--owner", "operator-jdoe",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/tool_executor.py",
+        "--symbol",
+        "ToolExecutor._execute_set_pipeline",
+        "--rationale",
+        "shipping under deadline; decorator refactor too risky now",
+        "--owner",
+        "operator-jdoe",
         "--operator-override",
     ]
     model_rationale = (

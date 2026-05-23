@@ -4903,6 +4903,116 @@ class TestSecretTools:
         assert delta_fresh == delta_threaded
 
 
+class TestSecretToolsArgumentValidation:
+    """Tier-3 shape contract for the secret-ref handlers.
+
+    Pairs with ``TestSecretTools`` (semantic / state-mutation paths).  These
+    tests exercise the Pydantic argument-model layer that converts shape
+    failures into :class:`ToolArgumentError` — the same dispatch-layer
+    contract sources/blobs/outputs/sessions already satisfy.  Without this
+    layer, a malformed LLM call (wrong type, extra field, unknown ``target``
+    enum) would escape ``execute_tool`` as a bare exception and be
+    laundered by the compose loop's catch-all into
+    :class:`ComposerPluginCrashError` → HTTP 500, denying the LLM the
+    recoverable ARG_ERROR payload it needs to self-correct.
+    """
+
+    def _svc(self) -> MagicMock:
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        svc = MagicMock()
+        svc.list_refs.return_value = [
+            SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
+        ]
+        svc.has_ref.return_value = True
+        return svc
+
+    def test_validate_secret_ref_wrong_type_for_name(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "validate_secret_ref",
+                {"name": 42},
+                state,
+                catalog,
+                secret_service=self._svc(),
+                user_id="test-user",
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_validate_secret_ref_rejects_extra_field(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "validate_secret_ref",
+                {"name": "OPENROUTER_API_KEY", "bogus": "value"},
+                state,
+                catalog,
+                secret_service=self._svc(),
+                user_id="test-user",
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_wire_secret_ref_wrong_type_for_name(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "wire_secret_ref",
+                {"name": 42, "target": "source", "option_key": "api_key"},
+                state,
+                catalog,
+                secret_service=self._svc(),
+                user_id="test-user",
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_wire_secret_ref_unknown_target_enum(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "wire_secret_ref",
+                {"name": "OPENROUTER_API_KEY", "target": "global", "option_key": "api_key"},
+                state,
+                catalog,
+                secret_service=self._svc(),
+                user_id="test-user",
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_wire_secret_ref_rejects_extra_field(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "wire_secret_ref",
+                {
+                    "name": "OPENROUTER_API_KEY",
+                    "target": "source",
+                    "option_key": "api_key",
+                    "bogus": "value",
+                },
+                state,
+                catalog,
+                secret_service=self._svc(),
+                user_id="test-user",
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+
 # ---------------------------------------------------------------------------
 # Merge-patch helper tests
 # ---------------------------------------------------------------------------

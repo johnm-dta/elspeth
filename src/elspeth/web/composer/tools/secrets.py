@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict
+from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
     CompositionState,
 )
@@ -21,6 +25,63 @@ from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
 )
+
+
+# Tier-3 argument-shape models.  Secret tools are POLICY-driven in the
+# redaction MANIFEST (``redaction.py:2662-2680`` — ``handles_no_sensitive_data=True``
+# with a :class:`HandlesNoSensitiveDataReason` justification struct), because
+# secret VALUES never traverse the composer tool surface — only refs (names +
+# scopes).  These argument models therefore live module-local and are used
+# ONLY for shape validation; they are intentionally NOT registered in the
+# redaction MANIFEST so the declarative reason struct is preserved.
+#
+# Every other tier module wraps LLM-supplied ``arguments`` with
+# ``Model.model_validate`` → ``except ValidationError: raise ToolArgumentError``
+# (sources.py:279, blobs.py:553, outputs.py:205, sessions.py:181).  Secrets
+# previously omitted this layer: presence-of-required-keys is upstream-guarded
+# by ``_TOOL_REQUIRED_PATHS`` (``service.py:2516``) so a literal missing key
+# does not reach the handler, but type-mismatch (``name: 42``), extra fields,
+# and the ``target`` enum constraint were unenforced — type-mismatch in
+# particular could crash deep in ``secret_service.has_ref(user_id, 42)`` and
+# be laundered into ``ComposerPluginCrashError`` → HTTP 500 instead of a
+# recoverable ARG_ERROR the LLM can act on.
+class _ValidateSecretRefArgumentsModel(BaseModel):
+    """Tier-3 shape contract for ``validate_secret_ref``.
+
+    Mirrors the JSON schema at ``_VALIDATE_SECRET_REF_DECLARATION`` —
+    a single ``name`` string identifying the secret reference to check.
+    ``extra="forbid"`` rejects misrouted argument shapes early (e.g. an
+    LLM accidentally sending ``wire_secret_ref`` args here).
+    """
+
+    name: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _WireSecretRefArgumentsModel(BaseModel):
+    """Tier-3 shape contract for ``wire_secret_ref``.
+
+    Mirrors the JSON schema at ``_WIRE_SECRET_REF_DECLARATION`` — three
+    required strings (``name``, ``target``, ``option_key``) plus optional
+    ``target_id`` for node/output targets (validated at the handler's
+    semantic layer, not the shape layer — same channel discipline as
+    ``set_pipeline``'s post-validation ``blob_id`` / ``inline_blob``
+    mutual-exclusion check).
+
+    ``target`` is ``Literal[...]`` to lift the enum constraint into the
+    Pydantic layer; the runtime ``else: Unknown target type`` branch in
+    :func:`_execute_wire_secret_ref` becomes belt-and-suspenders (only
+    reachable if Pydantic validation is bypassed) but is retained for
+    defense-in-depth.
+    """
+
+    name: str
+    target: Literal["source", "node", "output"]
+    target_id: str | None = None
+    option_key: str
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def _handle_list_secret_refs(
@@ -52,7 +113,15 @@ def _handle_validate_secret_ref(
 ) -> ToolResult:
     if context.secret_service is None or context.user_id is None:
         return _failure_result(state, "Secret tools require secret service context.")
-    name = arguments["name"]
+    try:
+        validated = _ValidateSecretRefArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="validate_secret_ref arguments",
+            expected="object conforming to _ValidateSecretRefArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+    name = validated.name
     available = context.secret_service.has_ref(context.user_id, name)
     return _discovery_result(state, {"name": name, "available": available})
 
@@ -80,10 +149,19 @@ def _execute_wire_secret_ref(
     if context.secret_service is None or context.user_id is None:
         return _failure_result(state, "Secret tools require secret service context.")
 
-    name = arguments["name"]
-    target = arguments["target"]
-    option_key = arguments["option_key"]
-    target_id = arguments.get("target_id")
+    try:
+        validated = _WireSecretRefArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="wire_secret_ref arguments",
+            expected="object conforming to _WireSecretRefArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    name = validated.name
+    target = validated.target
+    option_key = validated.option_key
+    target_id = validated.target_id
 
     # Validate the secret ref exists
     if not context.secret_service.has_ref(context.user_id, name):
@@ -123,7 +201,10 @@ def _execute_wire_secret_ref(
         new_state = state.with_node(new_node)
         return _mutation_result(new_state, (target_id,))
 
-    elif target == "output":
+    else:
+        # ``target == "output"`` — Pydantic ``Literal["source", "node", "output"]``
+        # guarantees this is the only remaining variant; explicit
+        # ``elif`` plus an "unknown target" else was dead code post-validation.
         if target_id is None:
             return _failure_result(state, "target_id is required for output targets.")
         output = next((o for o in state.outputs if o.name == target_id), None)
@@ -137,9 +218,6 @@ def _execute_wire_secret_ref(
         new_output = replace(output, options=patched_options)
         new_state = state.with_output(new_output)
         return _mutation_result(new_state, (target_id,))
-
-    else:
-        return _failure_result(state, f"Unknown target type: '{target}'.")
 
 
 _WIRE_SECRET_REF_DECLARATION = ToolDeclaration(

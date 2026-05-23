@@ -43,5 +43,5 @@ def test_composition_references_blob_crashes_on_corrupt_source_options() -> None
         "sources": {"primary": {"plugin": "csv", "options": ["not", "a", "dict"]}},
     }
 
-    with pytest.raises(AuditIntegrityError, match=r"source\.options"):
+    with pytest.raises(AuditIntegrityError, match=r"sources\['primary'\]\.options"):
         _composition_references_blob(composition_state, "blob-123", "/unused")

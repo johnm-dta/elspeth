@@ -171,13 +171,23 @@ def _composition_references_blob(
     if type(composition_state) is not dict:
         raise AuditIntegrityError(f"Tier 1: composition_states is {type(composition_state).__name__}, expected dict")
 
-    if "source" in composition_state:
-        source = composition_state["source"]
-        if source is not None and type(source) is not dict:
-            raise AuditIntegrityError(f"Tier 1: composition_states.source is {type(source).__name__}, expected dict")
-        source_options = source["options"] if source is not None and "options" in source else None
-        if _options_reference_blob(source_options, blob_id, storage_path, "source"):
-            return True
+    if "sources" in composition_state:
+        sources = composition_state["sources"]
+        # Per ADR-025 §1, the canonical pipeline dict emits `sources` as a
+        # non-null dict whenever any source is present. A null `sources` map
+        # in a persisted composition_state is internal corruption (Tier 1).
+        if sources is None:
+            raise AuditIntegrityError("Tier 1: composition_states.sources is null, expected dict")
+        if type(sources) is not dict:
+            raise AuditIntegrityError(f"Tier 1: composition_states.sources is {type(sources).__name__}, expected dict")
+        for source_name, source in sources.items():
+            if source is None:
+                raise AuditIntegrityError(f"Tier 1: composition_states.sources[{source_name!r}] is null, expected dict")
+            if type(source) is not dict:
+                raise AuditIntegrityError(f"Tier 1: composition_states.sources[{source_name!r}] is {type(source).__name__}, expected dict")
+            source_options = source["options"] if "options" in source else None
+            if _options_reference_blob(source_options, blob_id, storage_path, f"sources[{source_name!r}]"):
+                return True
 
     for collection_key in ("transforms", "gates", "aggregations", "coalesce"):
         if collection_key not in composition_state:

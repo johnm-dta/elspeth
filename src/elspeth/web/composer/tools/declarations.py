@@ -31,19 +31,6 @@ schema (richer prose, more description text). The two surfaces are structurally
 distinct artifacts, not duplicates; ``model_json_schema()`` would not reproduce
 the LLM-facing prose.
 
-Architectural override versus the precursor PR
-----------------------------------------------
-
-The precursor writer kept ``_BLOB_QUOTA_MUTATION_TOOLS`` and
-``_BLOB_PROVENANCE_MUTATION_TOOLS`` in ``blobs.py`` with the rationale that
-they describe "the kwarg-shape dispatch, not tool classification". Under the
-declaration model that distinction collapses: a tool's blob-kwarg shape *is*
-a property of the tool, so it belongs in the declaration
-(``needs_blob_quota`` / ``needs_blob_provenance``). The locality property
-the precursor cared about is preserved by a different mechanism — every
-declaration lives in the plane module next to its handler, so blob-kwarg
-data still co-locates with the blob handler that consumes it.
-
 Import topology — no cyclic aggregation
 ---------------------------------------
 
@@ -141,12 +128,6 @@ class ToolDeclaration:
             at declaration time rather than deferring to the registry's
             import-time subset check (Python-engineer M3 review finding,
             2026-05-23).
-        needs_blob_quota: True if the dispatcher should pass
-            ``max_blob_storage_per_session_bytes`` to the handler via
-            ``ToolContext``. Only meaningful for ``BLOB_MUTATION``.
-        needs_blob_provenance: True if the dispatcher should pass
-            ``user_message_id`` to the handler via ``ToolContext``. Only
-            meaningful for ``BLOB_MUTATION``.
         blob_store_only: True if the tool writes only to blob storage and
             never advances ``CompositionState`` (excluded from the
             ``trust_mode == "explicit_approve"`` proposal-interception gate).
@@ -159,8 +140,6 @@ class ToolDeclaration:
     description: str
     json_schema: Mapping[str, Any]
     cacheable: bool = False
-    needs_blob_quota: bool = False
-    needs_blob_provenance: bool = False
     blob_store_only: bool = False
 
     def __post_init__(self) -> None:
@@ -208,23 +187,9 @@ class ToolDeclaration:
                 f"ToolDeclaration({self.name!r}).json_schema is not a valid JSON Schema (Draft 2020-12): {exc.message}"
             ) from exc
 
-        # Blob-kwarg invariants — only BLOB_MUTATION may set these.
-        if self.kind is not ToolKind.BLOB_MUTATION:
-            if self.needs_blob_quota:
-                raise ValueError(
-                    f"ToolDeclaration({self.name!r}).needs_blob_quota=True is "
-                    "only valid for BLOB_MUTATION; the dispatcher does not "
-                    "pass max_blob_storage_per_session_bytes through other "
-                    "dispatch paths."
-                )
-            if self.needs_blob_provenance:
-                raise ValueError(
-                    f"ToolDeclaration({self.name!r}).needs_blob_provenance=True "
-                    "is only valid for BLOB_MUTATION; the dispatcher does not "
-                    "pass user_message_id through other dispatch paths."
-                )
-            if self.blob_store_only:
-                raise ValueError(f"ToolDeclaration({self.name!r}).blob_store_only=True is only valid for BLOB_MUTATION.")
+        # blob_store_only invariant — only BLOB_MUTATION may set this.
+        if self.blob_store_only and self.kind is not ToolKind.BLOB_MUTATION:
+            raise ValueError(f"ToolDeclaration({self.name!r}).blob_store_only=True is only valid for BLOB_MUTATION.")
 
         freeze_fields(self, "json_schema")
 
@@ -287,16 +252,6 @@ def derive_tool_definitions_by_name(
             for decl in tools
         }
     )
-
-
-def derive_blob_quota_names(tools: Iterable[ToolDeclaration]) -> frozenset[str]:
-    """Return the names of BLOB_MUTATION tools that consume the quota kwarg."""
-    return frozenset(decl.name for decl in tools if decl.kind is ToolKind.BLOB_MUTATION and decl.needs_blob_quota)
-
-
-def derive_blob_provenance_names(tools: Iterable[ToolDeclaration]) -> frozenset[str]:
-    """Return the names of BLOB_MUTATION tools that consume the provenance kwarg."""
-    return frozenset(decl.name for decl in tools if decl.kind is ToolKind.BLOB_MUTATION and decl.needs_blob_provenance)
 
 
 def derive_blob_store_only_names(tools: Iterable[ToolDeclaration]) -> frozenset[str]:

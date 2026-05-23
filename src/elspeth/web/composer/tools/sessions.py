@@ -662,7 +662,7 @@ def _execute_apply_pipeline_recipe(
 _APPLY_PIPELINE_RECIPE_DECLARATION = ToolDeclaration(
     name="apply_pipeline_recipe",
     handler=_execute_apply_pipeline_recipe,
-    kind=ToolKind.BLOB_MUTATION,
+    kind=ToolKind.MUTATION,
     description=(
         "Apply a registered pipeline recipe with operator-supplied slot values and replace "
         "the current pipeline state with the resulting configuration. Slots are validated "
@@ -685,9 +685,6 @@ _APPLY_PIPELINE_RECIPE_DECLARATION = ToolDeclaration(
         },
         "required": ["recipe_name", "slots"],
     },
-    needs_blob_quota=True,
-    needs_blob_provenance=True,
-    blob_store_only=False,
 )
 
 

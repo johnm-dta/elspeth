@@ -30,8 +30,6 @@ from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
     assert_unique_names,
-    derive_blob_provenance_names,
-    derive_blob_quota_names,
     derive_blob_store_only_names,
     derive_cacheable_names,
     derive_handler_map_for,
@@ -167,9 +165,7 @@ class TestCreateBlobMigration:
         assert _CREATE_BLOB_DECLARATION.kind is ToolKind.BLOB_MUTATION
 
     def test_declaration_blob_kwarg_shape(self) -> None:
-        """create_blob needs quota, provenance, and is blob-store-only."""
-        assert _CREATE_BLOB_DECLARATION.needs_blob_quota is True
-        assert _CREATE_BLOB_DECLARATION.needs_blob_provenance is True
+        """create_blob is blob-store-only (never advances CompositionState)."""
         assert _CREATE_BLOB_DECLARATION.blob_store_only is True
 
     def test_declaration_is_not_cacheable(self) -> None:
@@ -178,7 +174,7 @@ class TestCreateBlobMigration:
 
 
 class TestUpdateBlobMigration:
-    """update_blob migration: byte-identity + correct kwarg shape (quota, no provenance, store-only)."""
+    """update_blob migration: byte-identity + correct kind (BLOB_MUTATION, store-only)."""
 
     def test_get_tool_definitions_emits_expected_update_blob_definition(self) -> None:
         definitions = get_tool_definitions()
@@ -192,14 +188,12 @@ class TestUpdateBlobMigration:
         assert _UPDATE_BLOB_DECLARATION.kind is ToolKind.BLOB_MUTATION
 
     def test_declaration_blob_kwarg_shape(self) -> None:
-        """update_blob consumes quota but NOT provenance, and is blob-store-only."""
-        assert _UPDATE_BLOB_DECLARATION.needs_blob_quota is True
-        assert _UPDATE_BLOB_DECLARATION.needs_blob_provenance is False
+        """update_blob is blob-store-only (never advances CompositionState)."""
         assert _UPDATE_BLOB_DECLARATION.blob_store_only is True
 
 
 class TestDeleteBlobMigration:
-    """delete_blob migration: byte-identity + correct kwarg shape (no quota, no provenance, store-only)."""
+    """delete_blob migration: byte-identity + correct kind (BLOB_MUTATION, store-only)."""
 
     def test_get_tool_definitions_emits_expected_delete_blob_definition(self) -> None:
         definitions = get_tool_definitions()
@@ -210,9 +204,7 @@ class TestDeleteBlobMigration:
         assert _DELETE_BLOB_DECLARATION.handler is _execute_delete_blob
 
     def test_declaration_blob_kwarg_shape(self) -> None:
-        """delete_blob removes a row; no quota or provenance kwargs, but blob-store-only."""
-        assert _DELETE_BLOB_DECLARATION.needs_blob_quota is False
-        assert _DELETE_BLOB_DECLARATION.needs_blob_provenance is False
+        """delete_blob removes a row; blob-store-only (never advances CompositionState)."""
         assert _DELETE_BLOB_DECLARATION.blob_store_only is True
 
 
@@ -279,16 +271,14 @@ class TestSetSourceFromBlobMigration:
         assert _SET_SOURCE_FROM_BLOB_DECLARATION.kind is ToolKind.BLOB_MUTATION
 
     def test_declaration_blob_kwarg_shape(self) -> None:
-        """set_source_from_blob does not WRITE a blob — no quota/provenance; not store-only (it
-        advances CompositionState by setting the source)."""
-        assert _SET_SOURCE_FROM_BLOB_DECLARATION.needs_blob_quota is False
-        assert _SET_SOURCE_FROM_BLOB_DECLARATION.needs_blob_provenance is False
+        """set_source_from_blob does not WRITE a blob — not store-only (it advances
+        CompositionState by setting the source)."""
         assert _SET_SOURCE_FROM_BLOB_DECLARATION.blob_store_only is False
 
 
 class TestApplyPipelineRecipeMigration:
-    """apply_pipeline_recipe migration: byte-identity + correct kwarg shape (quota+provenance,
-    NOT blob-store-only because it replaces CompositionState)."""
+    """apply_pipeline_recipe migration: byte-identity + MUTATION kind (advances CompositionState;
+    does not create blobs on its own dispatch path — recipe slots cannot carry inline_blob)."""
 
     def test_get_tool_definitions_emits_expected_apply_pipeline_recipe_definition(self) -> None:
         definitions = get_tool_definitions()
@@ -298,19 +288,16 @@ class TestApplyPipelineRecipeMigration:
     def test_declaration_handler_matches(self) -> None:
         assert _APPLY_PIPELINE_RECIPE_DECLARATION.handler is _execute_apply_pipeline_recipe
 
-    def test_declaration_kind_is_blob_mutation(self) -> None:
-        assert _APPLY_PIPELINE_RECIPE_DECLARATION.kind is ToolKind.BLOB_MUTATION
+    def test_declaration_kind_is_mutation(self) -> None:
+        assert _APPLY_PIPELINE_RECIPE_DECLARATION.kind is ToolKind.MUTATION
 
     def test_declaration_blob_kwarg_shape(self) -> None:
-        """apply_pipeline_recipe may persist a recipe-scaffolded blob (needs quota+provenance) but
-        advances CompositionState (NOT blob-store-only)."""
-        assert _APPLY_PIPELINE_RECIPE_DECLARATION.needs_blob_quota is True
-        assert _APPLY_PIPELINE_RECIPE_DECLARATION.needs_blob_provenance is True
+        """apply_pipeline_recipe is not blob-store-only — it replaces CompositionState."""
         assert _APPLY_PIPELINE_RECIPE_DECLARATION.blob_store_only is False
 
 
 class TestStep2RegistryAggregation:
-    """All five blob-mutation declarations are aggregated into _REGISTERED_TOOLS at import time."""
+    """The four blob-mutation declarations are aggregated into _REGISTERED_TOOLS at import time."""
 
     def test_all_blob_mutation_tools_are_declared(self) -> None:
         from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
@@ -321,15 +308,15 @@ class TestStep2RegistryAggregation:
             "update_blob",
             "delete_blob",
             "set_source_from_blob",
-            "apply_pipeline_recipe",
         }
         assert declared == expected
 
     def test_registered_tools_count_at_least_five(self) -> None:
         from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
 
-        # Step 2 registered the five blob-mutation tools. Step 3 adds more
-        # tiers (discovery first); the count strictly grows as tiers migrate.
+        # Step 2 registered four blob-mutation tools plus apply_pipeline_recipe
+        # (MUTATION kind). Step 3 adds more tiers (discovery first); the count
+        # strictly grows as tiers migrate.
         assert len(_REGISTERED_TOOLS) >= 5
 
 
@@ -729,7 +716,7 @@ class TestStep3MutationTierMigration:
         mutations = [d for d in _REGISTERED_TOOLS if d.kind is ToolKind.MUTATION]
         for d in mutations:
             assert d.cacheable is False, f"{d.name} mutation must not be cacheable"
-        # Confirm we have all 13 standard mutations.
+        # Confirm we have all 14 standard mutations.
         names = {d.name for d in mutations}
         expected = {
             "set_source",
@@ -745,6 +732,7 @@ class TestStep3MutationTierMigration:
             "patch_output_options",
             "set_pipeline",
             "clear_source",
+            "apply_pipeline_recipe",
         }
         assert names == expected
 
@@ -978,14 +966,6 @@ class TestToolDeclarationInvariants:
         """
         assert "SESSION_AWARE" not in ToolKind.__members__
 
-    def test_non_blob_mutation_with_blob_quota_raises(self) -> None:
-        with pytest.raises(ValueError, match="needs_blob_quota=True is "):
-            self._make(kind=ToolKind.MUTATION, needs_blob_quota=True)
-
-    def test_non_blob_mutation_with_blob_provenance_raises(self) -> None:
-        with pytest.raises(ValueError, match="needs_blob_provenance=True"):
-            self._make(kind=ToolKind.DISCOVERY, needs_blob_provenance=True)
-
     def test_non_blob_mutation_with_blob_store_only_raises(self) -> None:
         with pytest.raises(ValueError, match="blob_store_only=True is "):
             self._make(kind=ToolKind.SECRET_MUTATION, blob_store_only=True)
@@ -1074,12 +1054,6 @@ class TestDerivationHelpers:
 
         result = derive_tool_definitions_by_name([_CREATE_BLOB_DECLARATION])
         assert deep_thaw(result["create_blob"]) == _EXPECTED_CREATE_BLOB_DEFINITION
-
-    def test_blob_quota_names_includes_create_blob(self) -> None:
-        assert derive_blob_quota_names([_CREATE_BLOB_DECLARATION]) == {"create_blob"}
-
-    def test_blob_provenance_names_includes_create_blob(self) -> None:
-        assert derive_blob_provenance_names([_CREATE_BLOB_DECLARATION]) == {"create_blob"}
 
     def test_blob_store_only_names_includes_create_blob(self) -> None:
         assert derive_blob_store_only_names([_CREATE_BLOB_DECLARATION]) == {"create_blob"}

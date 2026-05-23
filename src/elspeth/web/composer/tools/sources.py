@@ -438,8 +438,6 @@ _SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
         },
         "required": ["blob_id", "on_success"],
     },
-    needs_blob_quota=False,
-    needs_blob_provenance=False,
     blob_store_only=False,
 )
 

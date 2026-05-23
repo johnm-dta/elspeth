@@ -11,10 +11,9 @@ Hosts:
 - Blob DTOs (``BlobToolRecord`` / ``BlobCreatePayload`` / ``_PreparedBlobCreate``)
   and in-transaction signal exceptions (``_BlobQuotaExceededInTxn`` /
   ``_BlobUpdateBlockedByActiveRun``).
-- Per-tool blob-kwarg-shape data lives on ``ToolDeclaration``
-  (``needs_blob_quota`` / ``needs_blob_provenance``). Tool-classification name
-  sets and predicates live in ``elspeth.web.composer.tools.discovery``; the
-  trailing comment in this file points to that module.
+- Tool-classification name sets and predicates live in
+  ``elspeth.web.composer.tools.discovery``; the trailing comment in this file
+  points to that module.
 
 Patch-target stability: tests that bind ``_BLOB_QUOTA_BYTES`` /
 ``_check_blob_quota`` / ``_sync_get_blob`` by full dotted path must target this
@@ -632,8 +631,6 @@ _CREATE_BLOB_DECLARATION = ToolDeclaration(
         },
         "required": ["filename", "mime_type", "content"],
     },
-    needs_blob_quota=True,
-    needs_blob_provenance=True,
     blob_store_only=True,
 )
 
@@ -1082,8 +1079,6 @@ _UPDATE_BLOB_DECLARATION = ToolDeclaration(
         },
         "required": ["blob_id", "content"],
     },
-    needs_blob_quota=True,
-    needs_blob_provenance=False,
     blob_store_only=True,
 )
 
@@ -1208,8 +1203,6 @@ _DELETE_BLOB_DECLARATION = ToolDeclaration(
         },
         "required": ["blob_id"],
     },
-    needs_blob_quota=False,
-    needs_blob_provenance=False,
     blob_store_only=True,
 )
 
@@ -1355,11 +1348,10 @@ _GET_BLOB_CONTENT_DECLARATION = ToolDeclaration(
 
 # ``_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES`` and the matching predicate
 # ``is_blob_store_only_mutation_tool`` are declared in
-# ``elspeth.web.composer.tools.discovery``. Per-tool blob-kwarg-shape data
-# (``needs_blob_quota`` / ``needs_blob_provenance``) lives on each
-# ``ToolDeclaration`` next to the handler that consumes it; the dispatcher
-# carries the full ``ToolContext`` to every handler, so there is no
-# dispatch-time membership check to gate.
+# ``elspeth.web.composer.tools.discovery``. The dispatcher carries the full
+# ``ToolContext`` (including ``max_blob_storage_per_session_bytes`` and
+# ``user_message_id``) to every handler, so there is no per-tool kwarg-shape
+# gate to maintain at the declaration site.
 
 
 TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (

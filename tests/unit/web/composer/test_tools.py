@@ -3861,12 +3861,11 @@ class TestUpdateBlobQuota:
 
         from sqlalchemy import update as sa_update
 
-        from elspeth.web.sessions.models import blobs_table
-
         # Simulate concurrent writer: bump DB size_bytes to 50 *after*
         # _sync_get_blob() has already read 5.  We hook _sync_get_blob to
         # perform the concurrent write immediately after returning.
-        original_get = __import__("elspeth.web.composer.tools", fromlist=["_sync_get_blob"])._sync_get_blob
+        from elspeth.web.composer.tools.blobs import _sync_get_blob as original_get
+        from elspeth.web.sessions.models import blobs_table
 
         def _get_then_concurrent_write(*args, **kwargs):
             result = original_get(*args, **kwargs)

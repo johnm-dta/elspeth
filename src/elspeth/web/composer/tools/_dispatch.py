@@ -54,6 +54,9 @@ from elspeth.web.composer.tools.discovery import (
     _SESSION_AWARE_TOOL_NAMES,
 )
 from elspeth.web.composer.tools.generation import (
+    TOOLS_IN_MODULE as _GENERATION_TOOLS_IN_MODULE,
+)
+from elspeth.web.composer.tools.generation import (
     _execute_diff_pipeline,
     _execute_explain_validation_error,
     _execute_get_audit_info,
@@ -67,6 +70,9 @@ from elspeth.web.composer.tools.outputs import (
     _handle_patch_output_options,
     _handle_remove_output,
     _handle_set_output,
+)
+from elspeth.web.composer.tools.recipes import (
+    TOOLS_IN_MODULE as _RECIPES_TOOLS_IN_MODULE,
 )
 from elspeth.web.composer.tools.recipes import (
     _execute_list_recipes,
@@ -98,6 +104,9 @@ from elspeth.web.composer.tools.sources import (
     _handle_set_source,
 )
 from elspeth.web.composer.tools.transforms import (
+    TOOLS_IN_MODULE as _TRANSFORMS_TOOLS_IN_MODULE,
+)
+from elspeth.web.composer.tools.transforms import (
     _handle_list_sinks,
     _handle_list_transforms,
     _handle_patch_node_options,
@@ -126,6 +135,9 @@ _REGISTERED_TOOLS: Final[tuple[ToolDeclaration, ...]] = (
     *_BLOBS_TOOLS_IN_MODULE,
     *_SOURCES_TOOLS_IN_MODULE,
     *_SESSIONS_TOOLS_IN_MODULE,
+    *_GENERATION_TOOLS_IN_MODULE,
+    *_RECIPES_TOOLS_IN_MODULE,
+    *_TRANSFORMS_TOOLS_IN_MODULE,
 )
 assert_unique_names(_REGISTERED_TOOLS)
 _TOOL_DEFS_BY_NAME: Final[Mapping[str, dict[str, Any]]] = derive_tool_definitions_by_name(_REGISTERED_TOOLS)
@@ -150,45 +162,11 @@ def get_tool_definitions() -> list[dict[str, Any]]:
     """
     return [
         # Discovery tools
-        {
-            "name": "list_sources",
-            "description": "List available source plugins with name and summary.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "list_transforms",
-            "description": "List available transform plugins with name and summary.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "list_sinks",
-            "description": "List available sink plugins with name and summary.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "get_plugin_schema",
-            "description": "Get the full configuration schema for a plugin.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "plugin_type": {
-                        "type": "string",
-                        "enum": ["source", "transform", "sink"],
-                        "description": "Plugin type.",
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Plugin name (e.g. 'csv').",
-                    },
-                },
-                "required": ["plugin_type", "name"],
-            },
-        },
-        {
-            "name": "get_expression_grammar",
-            "description": "Get the gate expression syntax reference.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        _TOOL_DEFS_BY_NAME["list_sources"],
+        _TOOL_DEFS_BY_NAME["list_transforms"],
+        _TOOL_DEFS_BY_NAME["list_sinks"],
+        _TOOL_DEFS_BY_NAME["get_plugin_schema"],
+        _TOOL_DEFS_BY_NAME["get_expression_grammar"],
         # Mutation tools
         {
             "name": "set_source",
@@ -703,21 +681,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
             "description": "Remove the source from the pipeline composition state.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
-        {
-            "name": "explain_validation_error",
-            "description": "Get a human-readable explanation of a validation error "
-            "with suggested fixes. Pass the exact error text from a validation result.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "error_text": {
-                        "type": "string",
-                        "description": "The validation error message to explain.",
-                    },
-                },
-                "required": ["error_text"],
-            },
-        },
+        _TOOL_DEFS_BY_NAME["explain_validation_error"],
         {
             "name": "request_advisor_hint",
             "description": (
@@ -792,117 +756,12 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "required": ["trigger", "problem_summary", "recent_errors", "attempted_actions"],
             },
         },
-        {
-            "name": "get_plugin_assistance",
-            "description": (
-                "Retrieve plugin-owned guidance for a source, transform, or sink. "
-                "Two modes by ``issue_code``:\n"
-                "  * Omit ``issue_code`` (or pass null) to get discovery-time guidance "
-                "    — a summary of the plugin and composer_hints. (The same hints "
-                "    are also carried on list_sources / list_transforms / list_sinks / "
-                "    get_plugin_schema responses; this tool is the explicit path.)\n"
-                "  * Pass an ``issue_code`` (validators emit these as requirement_code "
-                "    on semantic_contracts entries) to get failure-time guidance — "
-                "    summary, suggested_fixes, and example before/after configurations."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "plugin_type": {
-                        "type": "string",
-                        "enum": ["source", "transform", "sink"],
-                        "description": "Plugin family. 'source', 'transform', or 'sink'.",
-                    },
-                    "plugin_name": {
-                        "type": "string",
-                        "description": "Plugin name (e.g. 'csv', 'web_scrape', 'database').",
-                    },
-                    "issue_code": {
-                        "type": ["string", "null"],
-                        "description": (
-                            "Optional. Stable issue identifier owned by the plugin "
-                            "for failure-time guidance. Omit or pass null for "
-                            "discovery-time guidance."
-                        ),
-                    },
-                },
-                "required": ["plugin_type", "plugin_name"],
-            },
-        },
-        {
-            "name": "list_models",
-            "description": "List available LLM model identifiers. Without a provider "
-            "filter, returns provider names and counts. With a provider filter, "
-            "returns matching model IDs (capped at limit). For provider='openrouter/' "
-            "the returned slugs are normalised to OpenRouter's HTTP API form "
-            "(without the litellm-internal 'openrouter/' routing prefix) — these "
-            "are the values to put directly in `model:`.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "provider": {
-                        "type": "string",
-                        "description": "Provider prefix to filter by (e.g. 'openrouter/', 'azure/'). "
-                        "Omit to get a provider summary instead of individual models.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max models to return (default 50).",
-                    },
-                },
-                "required": [],
-            },
-        },
-        {
-            "name": "get_audit_info",
-            "description": (
-                "Return facts about ELSPETH's Landscape audit trail. Call this BEFORE "
-                "answering any user question that mentions audit logging, audit "
-                "database, SQLite/Postgres audit, audit backend, audit export, "
-                "Landscape, or 'how do I record what the pipeline did'. Audit is "
-                "mandatory and operator-managed; the composer cannot configure the "
-                "backend (security boundary — see yaml_generator.py:179, fix S1). "
-                "Returns enabled status, composer_modifiable flag, and a canonical "
-                "summary to paraphrase. Does NOT return the audit URL/path/DSN — "
-                "that is operator-internal and intentionally not surfaced to the LLM."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "preview_pipeline",
-            "description": "Preview the current pipeline configuration — returns "
-            "validation status, source summary, and node/output overview "
-            "without executing. Use this to confirm the pipeline is set up "
-            "correctly before running.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "get_pipeline_state",
-            "description": "Inspect the full current pipeline state including all "
-            "options for source, nodes, and outputs. Use this during correction "
-            "loops to see what is currently configured before patching.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "component": {
-                        "type": "string",
-                        "description": (
-                            "Optional: return only one component — 'source', a node ID, or an output name. "
-                            "Accepted full-state aliases: omit component, pass 'full', 'all', 'pipeline', "
-                            "or pass the empty string."
-                        ),
-                    },
-                },
-                "required": [],
-            },
-        },
-        {
-            "name": "diff_pipeline",
-            "description": "Show what changed since the session was loaded or created. "
-            "Returns added, removed, and modified nodes/edges/outputs, "
-            "plus warnings introduced or resolved.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        _TOOL_DEFS_BY_NAME["get_plugin_assistance"],
+        _TOOL_DEFS_BY_NAME["list_models"],
+        _TOOL_DEFS_BY_NAME["get_audit_info"],
+        _TOOL_DEFS_BY_NAME["preview_pipeline"],
+        _TOOL_DEFS_BY_NAME["get_pipeline_state"],
+        _TOOL_DEFS_BY_NAME["diff_pipeline"],
         # Blob tools
         {
             "name": "list_blobs",
@@ -938,17 +797,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 "required": ["blob_id"],
             },
         },
-        {
-            "name": "list_recipes",
-            "description": (
-                "List the registered pipeline recipes — deterministic scaffolds for common simple "
-                "intents. Each recipe declares its required slots; apply_pipeline_recipe then "
-                "instantiates the recipe with operator-supplied slot values. Recipes accelerate "
-                "the highest-frequency 'classify CSV with LLM' and 'split rows by threshold' "
-                "patterns; for shapes outside the recipe set, hand-author with set_pipeline."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        _TOOL_DEFS_BY_NAME["list_recipes"],
         _TOOL_DEFS_BY_NAME["apply_pipeline_recipe"],
         {
             "name": "inspect_source",

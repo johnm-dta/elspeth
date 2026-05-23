@@ -68,6 +68,16 @@ def _handle_list_sources(
     return _discovery_result(state, context.catalog.list_sources())
 
 
+_LIST_SOURCES_DECLARATION = ToolDeclaration(
+    name="list_sources",
+    handler=_handle_list_sources,
+    kind=ToolKind.DISCOVERY,
+    description="List available source plugins with name and summary.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+    cacheable=True,
+)
+
+
 def _handle_set_source(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -645,7 +655,10 @@ def _handle_clear_source(
     return _execute_clear_source(arguments, state, context)
 
 
-TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (_SET_SOURCE_FROM_BLOB_DECLARATION,)
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _LIST_SOURCES_DECLARATION,
+    _SET_SOURCE_FROM_BLOB_DECLARATION,
+)
 """Every tool declared in this module, in stable order.
 
 ``_dispatch.py`` aggregates this tuple alongside every other plane's

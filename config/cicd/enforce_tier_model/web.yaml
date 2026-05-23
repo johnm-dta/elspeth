@@ -1984,7 +1984,7 @@ allow_hits:
     weak-ref GC window. Non-TimeoutError exceptions from inside the task propagate
     out of the finally-block.
   expires: '2026-08-23'
-- key: web/composer/tools/sources.py:R1:_resolve_source_blob:fp=8538dd251033402f
+- key: web/composer/tools/sources.py:R1:_resolve_source_blob:fp=8d2fa16cbc1d145f
   owner: composer-tools-sources
   reason: 'Constant-table lookup: ``_MIME_TO_SOURCE`` maps known MIME types to (plugin,
     mime_extra) pairs. ``blob[''mime_type'']`` was just read from a validated blob
@@ -1995,7 +1995,7 @@ allow_hits:
   safety: Missing MIME maps to a typed _failure_result with an actionable repair message
     (specify plugin explicitly); not a silent swallow.
   expires: '2026-08-23'
-- key: web/composer/tools/sources.py:R5:_execute_set_source_from_blob:fp=3d78a383fa6e1b88
+- key: web/composer/tools/sources.py:R5:_execute_set_source_from_blob:fp=5d6d80100cc08d35
   owner: composer-tools-sources
   reason: Sum-type discrimination on ``_resolve_source_blob`` return (``_ResolvedSourceBlob
     | ToolResult``). Same pattern as the sessions.py sibling at fp=ce8c53eb04fd5d3b
@@ -2003,7 +2003,7 @@ allow_hits:
   safety: Both arms of the union are handled; the function cannot fall through with
     an unresolved value.
   expires: '2026-08-23'
-- key: web/composer/tools/sources.py:R6:_execute_inspect_source:fp=0a4de5cc147561f6
+- key: web/composer/tools/sources.py:R6:_execute_inspect_source:fp=4e256b80d725051b
   owner: composer-tools-sources
   reason: Tier-3 conversion of LLM-tool-call ``blob_id`` to UUID. The user (LLM) may
     have supplied a blob_id that matched a row but is not a parseable UUID (e.g. a
@@ -2523,7 +2523,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_assert_affected_llm_node:fp=2128172252cfbf54
+- key: web/composer/tools/sessions.py:R1:_assert_affected_llm_node:fp=0974637edeb73f98
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: prompt_template =
@@ -2531,7 +2531,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_assert_affected_llm_node:fp=c9e27f431e94b121
+- key: web/composer/tools/sessions.py:R5:_assert_affected_llm_node:fp=b8261f33577e61c7
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
@@ -2539,14 +2539,14 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=da264558bc33cb6a
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=6125ed7ce23e8359
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(node, Mapping):'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=a687f78b66fc1165
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=447316f3f14bb4fa
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: if node.get("kind")
@@ -2554,14 +2554,14 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=c0d66a4eea465c4f
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=d42015e2aa728402
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: options = node.get("options")'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=c1760201cd8680c9
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=a89e77362c62c36a
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: prompt_template = options.get("prompt_template")
@@ -2569,7 +2569,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=e03662f0a263d461
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=87d55d39fa6fb827
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: prompt_template =
@@ -2577,7 +2577,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=37768c6a1331087a
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=578416240a77210f
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
@@ -2585,7 +2585,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders_typed:fp=d38b5e998c1d4c14
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders_typed:fp=3fcd24946a43df56
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
@@ -2593,28 +2593,28 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=00bfbde52ac6c052
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=ed6523ca5aa231ba
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: handler = all_handlers.get(tool_name)'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R1:_execute_get_plugin_assistance:fp=2659d11875b79ad7
+- key: web/composer/tools/generation.py:R1:_execute_get_plugin_assistance:fp=862616eebe4b9802
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: issue_code = args.get("issue_code")'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=a11e6bf657094cda
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=ea0d3d55af4db1f3
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: provider = args.get("provider")'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=ffda9918e784544c
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=97cca7ada60dc909
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: limit = args.get("limit",
@@ -2622,7 +2622,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=b5196caadba924e0
+- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=f3f32eda1403867c
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(limit, int)
@@ -2630,7 +2630,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=81fb794ccc5ac3a6
+- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=fc8738789e583239
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if provider is not None and
@@ -2638,7 +2638,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=1e01f67e259d5322
+- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=d2a21816ab2ed241
   owner: composer-tools-generation
   reason: Tier-3 walk of LLM-authored ``source.options`` (a ``Mapping[str, Any]``
     from :class:`SourceSpec` — the type is Tier-1 but the *values* under each key
@@ -2647,7 +2647,7 @@ allow_hits:
   safety: Returns None at line 568, which the caller treats as 'observed' (the default
     inference path); no diagnostics are silently dropped.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=45247f29d2d046a0
+- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=0eb7c772e277d8de
   owner: composer-tools-generation
   reason: Tier-3 type narrow on the LLM-authored ``schema`` value (any JSON type is
     possible at this boundary). When ``schema`` is not a Mapping, the diagnostic helper
@@ -2655,7 +2655,7 @@ allow_hits:
   safety: Wrong-shape schema fails the narrow and returns None at line 568; the caller's
     downstream diagnostics treat that as 'mode unknown' (no false negatives).
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=c837f9fca364f29d
+- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=1e609967c7d93a03
   owner: composer-tools-generation
   reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping
     at line 567). The ``mode`` key is optional; absence means the operator declared
@@ -2664,7 +2664,7 @@ allow_hits:
   safety: Absent or non-string mode returns None at line 568; callers treat mode-
     unknown as observed-CSV default.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=8a4a2135a4c84388
+- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=5566ba71f84e9191
   owner: composer-tools-generation
   reason: Tier-3 type narrow on the LLM-authored ``mode`` value within ``schema.mode``.
     Non-string modes (e.g. a number, dict, or None) return None at line 568 — same
@@ -2672,7 +2672,7 @@ allow_hits:
   safety: Non-string returns None; no exception; downstream diagnostics handle the
     mode-unknown case identically to absent-schema.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_sample_csv_rows:fp=52a2a7a3379ec6fc
+- key: web/composer/tools/generation.py:R5:_sample_csv_rows:fp=c00849992f2521a2
   owner: composer-tools-generation
   reason: 'Tier-3 CSV-row boundary: ``csv.DictReader`` can yield rows where ``key``
     is None (ragged rows where extra fields land in the implicit ``None`` key). The
@@ -2682,7 +2682,7 @@ allow_hits:
     are silently dropped from the sample, which is correct — they have no header to
     attribute to.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=c0f0699d9b3c074f
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=a25cea3da34095cb
   owner: composer-tools-generation
   reason: 'Standard ``ast.walk`` node-type discrimination: ``isinstance(node, ast.Subscript)``
     is the canonical way to filter Subscript nodes from the walk. This is sum-type
@@ -2690,13 +2690,13 @@ allow_hits:
   safety: Non-Subscript nodes are skipped (continue to next node); no exception, no
     false negatives.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=69770c6472f59367
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=90d7afaf0a06d5d4
   owner: composer-tools-generation
   reason: 'Standard ``ast`` field discrimination within the Subscript branch: ``isinstance(node.value,
     ast.Name)`` filters subscripts of the form ``<Name>[<slice>]`` (e.g. ``row[''field'']``).'
   safety: Non-Name values fall to the next ``if`` branch; no false negatives.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=35df88283b3d2db4
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=686d69be4715511d
   owner: composer-tools-generation
   reason: 'Standard ``ast`` field discrimination: ``isinstance(node.slice, ast.Constant)``
     filters Subscript slices that are literal constants (vs. computed expressions
@@ -2704,21 +2704,21 @@ allow_hits:
   safety: Computed slices are skipped; field extraction is limited to literal indices,
     which is correct for the row-field detector.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=803e314fd59f3b0d
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=7fad95d80b8f05c4
   owner: composer-tools-generation
   reason: 'Standard ``ast`` field discrimination: ``isinstance(node.slice.value, str)``
     further narrows the Constant slice to strings (we only collect string-keyed row
     references).'
   safety: Non-string constants (e.g. numeric indices) are skipped.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=01cfcf28ee73bb8b
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=c071de1c35e963e4
   owner: composer-tools-generation
   reason: 'Standard ``ast.walk`` node-type discrimination: ``isinstance(node, ast.Call)``
     selects the ``row.get(''field'')`` sibling pattern that the Subscript branch above
     doesn''t cover.'
   safety: Non-Call nodes are skipped — fully complementary to the Subscript branch.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=9ce5c6368a62282e
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=6337c6ea30a66b41
   owner: composer-tools-generation
   reason: 'Standard ``ast`` field discrimination within the Call branch: ``isinstance(node.func,
     ast.Attribute)`` filters calls of the form ``<obj>.<method>(...)`` — required
@@ -2726,27 +2726,27 @@ allow_hits:
   safety: Non-Attribute callables fail the narrow; no row-field extraction for non-
     attribute calls.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=0cc4c176bb4ede4c
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=a00175994ece4327
   owner: composer-tools-generation
   reason: 'Standard ``ast`` field discrimination: ``isinstance(node.func.value, ast.Name)``
     requires the method-receiver to be a bare Name (so we match ``row.get(...)`` but
     not ``obj.row.get(...)``).'
   safety: Non-Name receivers (e.g. attribute chains) are skipped.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=8a2838c1b542cc39
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=9bb3886c478b81a2
   owner: composer-tools-generation
   reason: 'Standard ``ast`` field discrimination: ``isinstance(node.args[0], ast.Constant)``
     filters ``row.get(<literal>)`` calls (vs ``row.get(var)``).'
   safety: Computed-arg calls are skipped — field extraction is literal-only.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=1928aed581830013
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=9914124ac1e7b0da
   owner: composer-tools-generation
   reason: 'Standard ``ast`` field discrimination: ``isinstance(node.args[0].value,
     str)`` narrows the Constant arg to strings (only string-keyed row.get calls are
     collected).'
   safety: Non-string literal args (e.g. numeric) are skipped.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=62bbe77905080af2
+- key: web/composer/tools/generation.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=410c326213c30459
   owner: composer-tools-generation
   reason: Tier-3 conversion of LLM-authored gate-expression evaluation failure into
     a structured diagnostic. ``parser.evaluate(row)`` is running the LLM-authored
@@ -2761,7 +2761,7 @@ allow_hits:
     exception text is included verbatim in the diagnostic so the audit trail names
     the type mismatch.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=427004220006b843
+- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=85f451fb0897fc14
   owner: composer-tools-generation
   reason: Tier-3 walk of LLM-authored ``node.options`` (NodeSpec.options is ``Mapping[str,
     Any]``; the values at each key are LLM-supplied). ``operations`` is the value-transform
@@ -2770,14 +2770,14 @@ allow_hits:
   safety: Returns False at line 698; the proof helper's caller treats False as 'abstain'
     (no transformation inferred) so the proof step doesn't fabricate a result.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=ba40686f56e7bbab
+- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=30768ff68abf9eca
   owner: composer-tools-generation
   reason: 'Tier-3 narrow on the LLM-authored ``operations`` value: must be a list
     or tuple to be iterable as a transform sequence. Anything else (mapping, scalar,
     None) returns False to signal ''cannot prove preservation''.'
   safety: Wrong-shape operations returns False; proof helper abstains.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=48fec03d120bf3d2
+- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=97b596124137cb8a
   owner: composer-tools-generation
   reason: 'Tier-3 narrow on each operation entry within the LLM-authored ``operations``
     list: a non-Mapping entry means we cannot reason about the operation''s target
@@ -2785,7 +2785,7 @@ allow_hits:
   safety: Non-Mapping entries return False (abstain); proof helper does not synthesise
     a result from malformed input.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=b5d6c8dc386cd3c2
+- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=b3d460bec97b4e45
   owner: composer-tools-generation
   reason: Tier-3 read of LLM-authored ``operation.target`` (the field this operation
     writes to). Absence is permitted by the schema; matching the current field_name
@@ -2793,7 +2793,7 @@ allow_hits:
   safety: A missing target is treated as 'this op does not write to field_name' (preservation
     possibly intact); the loop continues to the next op.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=982315d99b533f04
+- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=b249c551f9971987
   owner: composer-tools-generation
   reason: Tier-3 read of LLM-authored aggregation contract options. ``value_field``
     is required for numeric aggregations but the helper handles absence gracefully
@@ -2802,7 +2802,7 @@ allow_hits:
   safety: Missing or non-string value_field returns the helper to the next node without
     emitting a diagnostic; no false positives.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=21b5f922f28a2509
+- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=12f4180642bf5b4b
   owner: composer-tools-generation
   reason: Read of our own type-inference output. ``inferred_types`` is a ``Mapping[str,
     str] | None`` we computed from sampled CSV data; a missing ``value_field`` key
@@ -2813,7 +2813,7 @@ allow_hits:
     message text already shows ``inferred_type or 'unknown'`` so the audit trail distinguishes
     'unknown' from 'str' (the runtime type).
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=d7bf6b1cdf48069b
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=f14ebf755fef09b8
   owner: composer-tools-generation
   reason: Tier-3 walk of LLM-authored ``source.options``. ``blob_ref`` is schema-
     optional — present only when set_source_from_blob (or inline_blob in set_pipeline)
@@ -2822,7 +2822,7 @@ allow_hits:
   safety: Absent blob_ref returns the diagnostic list unchanged; no fabricated blob
     lookups.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=e6189c6382fd5352
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=55007107e4a842b8
   owner: composer-tools-generation
   reason: Tier-3 walk of LLM-authored ``source.options.schema`` during proof diagnostics.
     Re-read here (separate from ``_source_schema_mode``) to pull the schema for the
@@ -2830,7 +2830,7 @@ allow_hits:
   safety: Absent or non-Mapping schema fails the isinstance gate at line 923; no diagnostic
     emitted.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=0608e0753339f361
+- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=5753ff99ef576c94
   owner: composer-tools-generation
   reason: 'Tier-3 narrow on the LLM-authored ``schema`` value within ``compute_proof_diagnostics``:
     the helper only emits the ``csv_fixed_schema_omits_observed_columns`` blocking
@@ -2838,7 +2838,7 @@ allow_hits:
   safety: Non-Mapping or non-fixed-mode schema bypasses the diagnostic branch; not
     a Tier-1 'our data crash' because the schema is LLM-authored composer state.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=1cdbbb4bacdaf587
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=1dd6d5c711ea9953
   owner: composer-tools-generation
   reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping).
     ``mode`` may be absent or non-string; ``schema.get('mode') == 'fixed'`` is the
@@ -2846,7 +2846,7 @@ allow_hits:
   safety: Absent or wrong-typed mode causes the equality check to fail; no false-
     positive diagnostic.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=d069e88ca73ba9e9
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=7b18e346d61d85f6
   owner: composer-tools-generation
   reason: 'Tier-3 walk of LLM-authored ``schema`` Mapping: ``fields`` is the declared
     column list. ``schema.get(''fields'') or ()`` coerces an absent or falsy value
@@ -2855,7 +2855,7 @@ allow_hits:
   safety: Empty tuple cannot trigger the missing-columns diagnostic (no declared columns
     ⇒ no omission); behavior is conservative.
   expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=85ec0e1328ec4f8f
+- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=38f2ff012151ae09
   owner: composer-tools-generation
   reason: Tier-3 narrow on the LLM-authored ``schema.fields`` value before iterating
     it as a declared-column sequence. Non-(list|tuple) shapes (mapping, scalar) bypass
@@ -2863,7 +2863,7 @@ allow_hits:
   safety: Wrong-shape fields silently bypasses the diagnostic — no synthesized diagnostic
     against malformed schema input.
   expires: '2026-08-23'
-- key: web/composer/tools/transforms.py:R5:_execute_upsert_node:fp=a6cb126be5c76f54
+- key: web/composer/tools/transforms.py:R5:_execute_upsert_node:fp=8de23234dacb775e
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: branches = dict(validated.branches)
@@ -2871,7 +2871,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/transforms.py:R1:_execute_upsert_edge:fp=8544ef6f282a67c8
+- key: web/composer/tools/transforms.py:R1:_execute_upsert_edge:fp=993f3d6d91a955e8
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: if routes.get(route_key)

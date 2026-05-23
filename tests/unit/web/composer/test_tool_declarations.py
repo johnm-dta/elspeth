@@ -325,11 +325,253 @@ class TestStep2RegistryAggregation:
         }
         assert declared == expected
 
-    def test_registered_tools_count_is_five(self) -> None:
+    def test_registered_tools_count_at_least_five(self) -> None:
         from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
 
-        # Step 2 should register exactly the five blob-mutation tools; no other tier yet.
-        assert len(_REGISTERED_TOOLS) == 5
+        # Step 2 registered the five blob-mutation tools. Step 3 adds more
+        # tiers (discovery first); the count strictly grows as tiers migrate.
+        assert len(_REGISTERED_TOOLS) >= 5
+
+
+class TestStep3DiscoveryTierMigration:
+    """All 13 discovery tools must carry declarations with byte-identical schemas.
+
+    Each tool's ``json_schema`` field on its ``ToolDeclaration`` must round-trip
+    through ``derive_tool_definitions_by_name`` to the same JSON shape the
+    LLM saw before the migration. The fixed-expected-dict comparisons below
+    pin that shape so a future drift cannot silently re-author the LLM-facing
+    schema.
+    """
+
+    def _get(self, name: str) -> dict[str, object]:
+        return next(d for d in get_tool_definitions() if d["name"] == name)
+
+    def test_list_sources(self) -> None:
+        assert self._get("list_sources") == {
+            "name": "list_sources",
+            "description": "List available source plugins with name and summary.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_list_transforms(self) -> None:
+        assert self._get("list_transforms") == {
+            "name": "list_transforms",
+            "description": "List available transform plugins with name and summary.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_list_sinks(self) -> None:
+        assert self._get("list_sinks") == {
+            "name": "list_sinks",
+            "description": "List available sink plugins with name and summary.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_get_plugin_schema(self) -> None:
+        assert self._get("get_plugin_schema") == {
+            "name": "get_plugin_schema",
+            "description": "Get the full configuration schema for a plugin.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plugin_type": {
+                        "type": "string",
+                        "enum": ["source", "transform", "sink"],
+                        "description": "Plugin type.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Plugin name (e.g. 'csv').",
+                    },
+                },
+                "required": ["plugin_type", "name"],
+            },
+        }
+
+    def test_get_expression_grammar(self) -> None:
+        assert self._get("get_expression_grammar") == {
+            "name": "get_expression_grammar",
+            "description": "Get the gate expression syntax reference.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_explain_validation_error(self) -> None:
+        assert self._get("explain_validation_error") == {
+            "name": "explain_validation_error",
+            "description": "Get a human-readable explanation of a validation error "
+            "with suggested fixes. Pass the exact error text from a validation result.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "error_text": {
+                        "type": "string",
+                        "description": "The validation error message to explain.",
+                    },
+                },
+                "required": ["error_text"],
+            },
+        }
+
+    def test_get_plugin_assistance(self) -> None:
+        assert self._get("get_plugin_assistance") == {
+            "name": "get_plugin_assistance",
+            "description": (
+                "Retrieve plugin-owned guidance for a source, transform, or sink. "
+                "Two modes by ``issue_code``:\n"
+                "  * Omit ``issue_code`` (or pass null) to get discovery-time guidance "
+                "    — a summary of the plugin and composer_hints. (The same hints "
+                "    are also carried on list_sources / list_transforms / list_sinks / "
+                "    get_plugin_schema responses; this tool is the explicit path.)\n"
+                "  * Pass an ``issue_code`` (validators emit these as requirement_code "
+                "    on semantic_contracts entries) to get failure-time guidance — "
+                "    summary, suggested_fixes, and example before/after configurations."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plugin_type": {
+                        "type": "string",
+                        "enum": ["source", "transform", "sink"],
+                        "description": "Plugin family. 'source', 'transform', or 'sink'.",
+                    },
+                    "plugin_name": {
+                        "type": "string",
+                        "description": "Plugin name (e.g. 'csv', 'web_scrape', 'database').",
+                    },
+                    "issue_code": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Optional. Stable issue identifier owned by the plugin "
+                            "for failure-time guidance. Omit or pass null for "
+                            "discovery-time guidance."
+                        ),
+                    },
+                },
+                "required": ["plugin_type", "plugin_name"],
+            },
+        }
+
+    def test_list_models(self) -> None:
+        assert self._get("list_models") == {
+            "name": "list_models",
+            "description": "List available LLM model identifiers. Without a provider "
+            "filter, returns provider names and counts. With a provider filter, "
+            "returns matching model IDs (capped at limit). For provider='openrouter/' "
+            "the returned slugs are normalised to OpenRouter's HTTP API form "
+            "(without the litellm-internal 'openrouter/' routing prefix) — these "
+            "are the values to put directly in `model:`.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "description": "Provider prefix to filter by (e.g. 'openrouter/', 'azure/'). "
+                        "Omit to get a provider summary instead of individual models.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max models to return (default 50).",
+                    },
+                },
+                "required": [],
+            },
+        }
+
+    def test_get_audit_info(self) -> None:
+        assert self._get("get_audit_info") == {
+            "name": "get_audit_info",
+            "description": (
+                "Return facts about ELSPETH's Landscape audit trail. Call this BEFORE "
+                "answering any user question that mentions audit logging, audit "
+                "database, SQLite/Postgres audit, audit backend, audit export, "
+                "Landscape, or 'how do I record what the pipeline did'. Audit is "
+                "mandatory and operator-managed; the composer cannot configure the "
+                "backend (security boundary — see yaml_generator.py:179, fix S1). "
+                "Returns enabled status, composer_modifiable flag, and a canonical "
+                "summary to paraphrase. Does NOT return the audit URL/path/DSN — "
+                "that is operator-internal and intentionally not surfaced to the LLM."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_list_recipes(self) -> None:
+        assert self._get("list_recipes") == {
+            "name": "list_recipes",
+            "description": (
+                "List the registered pipeline recipes — deterministic scaffolds for common simple "
+                "intents. Each recipe declares its required slots; apply_pipeline_recipe then "
+                "instantiates the recipe with operator-supplied slot values. Recipes accelerate "
+                "the highest-frequency 'classify CSV with LLM' and 'split rows by threshold' "
+                "patterns; for shapes outside the recipe set, hand-author with set_pipeline."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_get_pipeline_state(self) -> None:
+        assert self._get("get_pipeline_state") == {
+            "name": "get_pipeline_state",
+            "description": "Inspect the full current pipeline state including all "
+            "options for source, nodes, and outputs. Use this during correction "
+            "loops to see what is currently configured before patching.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "component": {
+                        "type": "string",
+                        "description": (
+                            "Optional: return only one component — 'source', a node ID, or an output name. "
+                            "Accepted full-state aliases: omit component, pass 'full', 'all', 'pipeline', "
+                            "or pass the empty string."
+                        ),
+                    },
+                },
+                "required": [],
+            },
+        }
+
+    def test_preview_pipeline(self) -> None:
+        assert self._get("preview_pipeline") == {
+            "name": "preview_pipeline",
+            "description": "Preview the current pipeline configuration — returns "
+            "validation status, source summary, and node/output overview "
+            "without executing. Use this to confirm the pipeline is set up "
+            "correctly before running.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_diff_pipeline(self) -> None:
+        assert self._get("diff_pipeline") == {
+            "name": "diff_pipeline",
+            "description": "Show what changed since the session was loaded or created. "
+            "Returns added, removed, and modified nodes/edges/outputs, "
+            "plus warnings introduced or resolved.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_cacheable_subset_is_correct(self) -> None:
+        """The 10 discovery tools that should be cacheable are; the 3
+        session-mutable ones are not."""
+        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools.declarations import derive_cacheable_names
+
+        cacheable = derive_cacheable_names(_REGISTERED_TOOLS)
+        expected_cacheable = {
+            "list_sources",
+            "list_transforms",
+            "list_sinks",
+            "get_plugin_schema",
+            "get_expression_grammar",
+            "explain_validation_error",
+            "get_plugin_assistance",
+            "list_models",
+            "get_audit_info",
+            "list_recipes",
+        }
+        assert expected_cacheable <= cacheable
+        # The three session-mutable discovery tools MUST NOT be cacheable.
+        assert "get_pipeline_state" not in cacheable
+        assert "preview_pipeline" not in cacheable
+        assert "diff_pipeline" not in cacheable
 
 
 class TestToolDeclarationInvariants:

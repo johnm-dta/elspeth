@@ -38,6 +38,10 @@ from elspeth.web.composer.tools._common import (
     _validate_mutation_arguments,
     _validate_plugin_name,
 )
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
+)
 
 _NODE_ROUTING_OPTION_PATCH_KEYS: Final[frozenset[str]] = frozenset({"input", "on_success", "on_error", "routes", "fork_to"})
 
@@ -100,12 +104,32 @@ def _handle_list_transforms(
     return _discovery_result(state, context.catalog.list_transforms())
 
 
+_LIST_TRANSFORMS_DECLARATION = ToolDeclaration(
+    name="list_transforms",
+    handler=_handle_list_transforms,
+    kind=ToolKind.DISCOVERY,
+    description="List available transform plugins with name and summary.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+    cacheable=True,
+)
+
+
 def _handle_list_sinks(
     arguments: dict[str, Any],
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
     return _discovery_result(state, context.catalog.list_sinks())
+
+
+_LIST_SINKS_DECLARATION = ToolDeclaration(
+    name="list_sinks",
+    handler=_handle_list_sinks,
+    kind=ToolKind.DISCOVERY,
+    description="List available sink plugins with name and summary.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+    cacheable=True,
+)
 
 
 def _handle_upsert_node(
@@ -514,3 +538,13 @@ def _handle_patch_node_options(
         plugin_name=node.plugin,
         config_snapshot=node.options,
     )
+
+
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _LIST_TRANSFORMS_DECLARATION,
+    _LIST_SINKS_DECLARATION,
+)
+"""Every tool declared in this module, in stable order.
+
+``_dispatch.py`` aggregates this tuple alongside every other plane's
+TOOLS_IN_MODULE to build the registered-tool universe."""

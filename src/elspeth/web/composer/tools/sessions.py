@@ -760,6 +760,31 @@ def _execute_get_pipeline_state(
     return _discovery_result(state, data)
 
 
+_GET_PIPELINE_STATE_DECLARATION = ToolDeclaration(
+    name="get_pipeline_state",
+    handler=_execute_get_pipeline_state,
+    kind=ToolKind.DISCOVERY,
+    description="Inspect the full current pipeline state including all "
+    "options for source, nodes, and outputs. Use this during correction "
+    "loops to see what is currently configured before patching.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "component": {
+                "type": "string",
+                "description": (
+                    "Optional: return only one component — 'source', a node ID, or an output name. "
+                    "Accepted full-state aliases: omit component, pass 'full', 'all', 'pipeline', "
+                    "or pass the empty string."
+                ),
+            },
+        },
+        "required": [],
+    },
+    cacheable=False,
+)
+
+
 def _authoring_validation_payload(state: CompositionState, validation: ValidationSummary) -> dict[str, Any]:
     return {
         "is_valid": validation.is_valid,
@@ -1158,7 +1183,10 @@ _SESSION_AWARE_TOOL_HANDLERS: dict[str, SessionAwareToolHandler] = {
 # from there.
 
 
-TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (_APPLY_PIPELINE_RECIPE_DECLARATION,)
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _GET_PIPELINE_STATE_DECLARATION,
+    _APPLY_PIPELINE_RECIPE_DECLARATION,
+)
 """Every tool declared in this module, in stable order.
 
 ``_dispatch.py`` aggregates this tuple alongside every other plane's

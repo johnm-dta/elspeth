@@ -926,17 +926,83 @@
   font-size: var(--font-size-xs);
 }
 
-.tool-call-ribbon-icon {
+/* Tool-call info trigger + tooltip.
+   The trigger replaces the previous decorative .tool-call-ribbon-icon span:
+   it's a real <button> so keyboard users can focus it. Tooltip body shows
+   on hover or focus-visible via CSS only (no JS state). */
+.tool-call-info {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.tool-call-info-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 16px;
   height: 16px;
+  margin: 0;
+  padding: 0;
   border: 1px solid var(--color-border-strong);
   border-radius: 50%;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
   font-size: var(--font-size-3xs);
   font-weight: 700;
+  cursor: help;
+  /* The trigger is a button so it gets the global :focus-visible ring. */
+}
+
+.tool-call-info-trigger:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.tool-call-info-bubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: var(--z-popover, 50);
+  min-width: 220px;
+  max-width: 320px;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-snug);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  /* Hidden until the trigger is hovered or focused. visibility +
+     opacity transition together so the bubble can fade in but still be
+     pointer-event-inert until visible. */
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease, visibility 0s linear 0.12s;
+}
+
+.tool-call-info-bubble-name {
+  display: block;
+  margin-bottom: 2px;
   color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+}
+
+.tool-call-info-bubble-body {
+  display: block;
+}
+
+.tool-call-info:hover .tool-call-info-bubble,
+.tool-call-info-trigger:focus-visible ~ .tool-call-info-bubble,
+.tool-call-info-trigger:focus-visible + .tool-call-info-bubble {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity 0.12s ease, visibility 0s linear 0s;
 }
 
 .tool-call-card {

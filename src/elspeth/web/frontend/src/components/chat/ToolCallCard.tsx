@@ -2,6 +2,43 @@ import { useState } from "react";
 
 import type { CompositionProposal, ToolCall } from "@/types/api";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { describeToolCall } from "./toolCallDescriptions";
+
+/**
+ * A button-triggered tooltip explaining what a composer tool call does in
+ * general — not what it did to the current pipeline. Hover or keyboard-focus
+ * the "i" button to reveal. Uses CSS-only show/hide; no JS state.
+ */
+function ToolCallInfo({
+  toolName,
+  describedById,
+}: {
+  toolName: string;
+  describedById: string;
+}) {
+  return (
+    <span className="tool-call-info">
+      <button
+        type="button"
+        className="tool-call-info-trigger"
+        aria-label={`What does ${toolName} do?`}
+        aria-describedby={describedById}
+      >
+        i
+      </button>
+      <span
+        id={describedById}
+        role="tooltip"
+        className="tool-call-info-bubble"
+      >
+        <strong className="tool-call-info-bubble-name">{toolName}</strong>
+        <span className="tool-call-info-bubble-body">
+          {describeToolCall(toolName)}
+        </span>
+      </span>
+    </span>
+  );
+}
 
 interface ToolCallCardProps {
   toolCall: ToolCall;
@@ -24,9 +61,10 @@ export function ToolCallCard({
   if (!proposal) {
     return (
       <div className="tool-call-ribbon">
-        <span aria-hidden="true" className="tool-call-ribbon-icon">
-          i
-        </span>
+        <ToolCallInfo
+          toolName={toolCall.function.name}
+          describedById={`tool-call-info-${toolCall.id}`}
+        />
         <span>Looked up: {toolCall.function.name}</span>
       </div>
     );
@@ -44,6 +82,10 @@ export function ToolCallCard({
     <article className={`tool-call-card tool-call-card--${proposal.status}`}>
       <header className="tool-call-card-header">
         <strong>{heading}</strong>
+        <ToolCallInfo
+          toolName={proposal.tool_name}
+          describedById={`tool-call-info-${proposal.id}`}
+        />
         {proposal.audit_event_id && (
           <code className="tool-call-audit-id">
             audit {proposal.audit_event_id.slice(0, 8)}

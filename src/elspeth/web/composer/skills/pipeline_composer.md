@@ -264,6 +264,64 @@ the `interpretation_requirements` draft contains a header line while
 keep the header. Never strip the header to make `columns` "win" — the header is
 the self-describing audit fact, `columns` is the inversion of that fact.
 
+### Multi-source Pipelines
+
+Every pipeline needs one or more named sources, one or more sinks, and
+connections between them. ELSPETH supports plural sources (ADR-025): the
+`sources` block in `set_pipeline` is a mapping of `source_name` to source
+settings, and source tools such as `set_source`, `set_source_from_blob`,
+`patch_source_options`, and `clear_source` accept an explicit `source_name`.
+
+Build a multi-source pipeline when the operator describes independent inputs
+that must be processed together: "two sources", "two inputs", "merge two
+feeds", "join customer events and refund events", "combine these two files",
+"fan in from A and B", or "ingest from both X and Y".
+
+Rules for authoring plural sources:
+
+- Use explicit `source_name` for every source. Pick stable names from the
+  operator's prose (`customer_events`, `refund_events`), not positional
+  placeholders (`source_1`, `source_2`).
+- Use a `queue` node when two or more sources fan into a shared transform, gate,
+  aggregation, or coalesce. Sinks are exempt by policy: multiple sources may
+  MOVE directly into the same sink.
+- Keep per-source schemas independent. Do not collapse different inputs into a
+  fabricated shared schema; resume validates each row under its source's own
+  contract.
+- Do not write or template `source_row_index` or `ingest_sequence`. They are
+  engine-owned identity fields produced at runtime.
+- In multi-source pipelines, `wire_secret_ref` for a source uses
+  `target="source"` with `target_id="<source_name>"`. Omitting `target_id` is
+  reserved for exactly-one-source pipelines.
+
+Sketch the shape only after loading selected plugin schemas:
+
+```yaml
+sources:
+  customer_events:
+    plugin: csv
+    options: { path: "...", schema: { mode: fixed, fields: [...] } }
+  refund_events:
+    plugin: csv
+    options: { path: "...", schema: { mode: fixed, fields: [...] } }
+nodes:
+  - node_id: merged_queue
+    type: queue
+    on_success: enrich
+  - node_id: enrich
+    type: transform
+    plugin: ...
+    on_success: results
+outputs:
+  - sink_name: results
+    plugin: jsonl
+    options: { path: "...", schema: { mode: observed }, collision_policy: auto_increment }
+```
+
+Both sources connect to `merged_queue` through source routing or explicit
+`upsert_edge` calls; do not point plural sources at the same ordinary processing
+node without the queue.
+
 ### Utility Transforms
 
 Users often describe the effect, not the utility plugin. Plan utility transforms

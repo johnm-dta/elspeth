@@ -140,8 +140,22 @@ class TestResumeGuardrails:
                 payload_store=resume_test_env["payload_store"],
             )
 
-    def test_resume_fails_when_schema_contract_is_missing(self, resume_test_env: dict[str, Any]) -> None:
-        """Resume must not infer/fallback when schema contract is absent in audit trail."""
+    def test_resume_fails_with_empty_resume_state_when_schema_contract_is_missing(self, resume_test_env: dict[str, Any]) -> None:
+        """Resume must raise typed EmptyResumeStateError when contract is absent.
+
+        Per P1 elspeth-81dad89e1c, a NULL ``schema_contract_json`` in an
+        otherwise-structurally-valid runs row reflects the documented
+        "on_start failure before contract written" scenario named in
+        the ``EmptyResumeStateError`` docstring — NOT generic Tier-1
+        corruption. The legacy pre-RC6 path at orchestrator/core.py
+        previously raised ``OrchestrationInvariantError`` (Tier-1
+        traceback) for this case; the typed raise gives the CLI a
+        clean operator-interpretable exit path.
+
+        ``EmptyResumeStateError`` is a subclass of
+        ``OrchestrationInvariantError`` so any existing
+        ``except OrchestrationInvariantError`` catch still matches.
+        """
         run_id = _create_failed_run(resume_test_env["factory"], include_contract=False)
         orchestrator = Orchestrator(
             resume_test_env["db"],
@@ -154,7 +168,7 @@ class TestResumeGuardrails:
                 "elspeth.core.checkpoint.recovery.RecoveryManager.get_unprocessed_row_data",
                 return_value=[],
             ) as mock_get_unprocessed,
-            pytest.raises(OrchestrationInvariantError, match="schema contract is missing from audit trail") as exc_info,
+            pytest.raises(EmptyResumeStateError) as exc_info,
         ):
             orchestrator.resume(
                 resume_point=_make_resume_point(run_id),
@@ -164,8 +178,11 @@ class TestResumeGuardrails:
             )
 
         mock_get_unprocessed.assert_not_called()
-        assert run_id in str(exc_info.value)
-        assert "cannot proceed safely without the schema contract" in str(exc_info.value).lower()
+        assert exc_info.value.run_id == run_id
+        assert "schema contract was never written" in str(exc_info.value).lower()
+        # Subclass relationship is load-bearing — see the typed-error
+        # subclass commentary on the companion test below.
+        assert isinstance(exc_info.value, OrchestrationInvariantError)
 
     def test_resume_fails_when_graph_has_edges_but_db_edge_map_is_empty(self, resume_test_env: dict[str, Any]) -> None:
         """Resume must fail if graph edges exist but original run edge data is missing."""

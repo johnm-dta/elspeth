@@ -41,6 +41,7 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_create_blob
+from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -113,10 +114,12 @@ class TestPromoteCreateBlobArgErrorRouting:
             _execute_create_blob(
                 {},
                 _empty_state(),
-                _mock_catalog(),
-                data_dir="/tmp",
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    data_dir="/tmp",
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         # __cause__ chain MUST preserve the underlying ValidationError
         # so auditors can inspect missing fields without the LLM-facing
@@ -134,10 +137,12 @@ class TestPromoteCreateBlobArgErrorRouting:
                     "content": 42,  # not str
                 },
                 _empty_state(),
-                _mock_catalog(),
-                data_dir="/tmp",
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    data_dir="/tmp",
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -153,10 +158,12 @@ class TestPromoteCreateBlobArgErrorRouting:
                     "blob_id": "stray",  # belongs on update_blob / set_source_from_blob
                 },
                 _empty_state(),
-                _mock_catalog(),
-                data_dir="/tmp",
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    data_dir="/tmp",
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -170,10 +177,12 @@ class TestPromoteCreateBlobArgErrorRouting:
                 "content": "hello world",
             },
             _empty_state(),
-            _mock_catalog(),
-            data_dir=str(tmp_path),
-            session_engine=engine,
-            session_id=session_id,
+            ToolContext(
+                catalog=_mock_catalog(),
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+            ),
         )
         assert result.success is True
         assert result.data is not None

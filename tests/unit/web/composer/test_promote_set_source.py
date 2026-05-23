@@ -27,6 +27,7 @@ from elspeth.web.catalog.schemas import (
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_set_source
+from elspeth.web.composer.tools._common import ToolContext
 
 
 def _empty_state() -> CompositionState:
@@ -68,7 +69,7 @@ class TestPromoteSetSourceArgErrorRouting:
     def test_empty_arguments_raise_tool_argument_error(self) -> None:
         """A bare ``{}`` is missing all four required fields."""
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_set_source({}, _empty_state(), _mock_catalog())
+            _execute_set_source({}, _empty_state(), ToolContext(catalog=_mock_catalog()))
         # __cause__ chain MUST preserve the underlying ValidationError
         # so auditors can inspect missing fields without the LLM-facing
         # message exposing the raw Tier-3 argument values.
@@ -84,7 +85,7 @@ class TestPromoteSetSourceArgErrorRouting:
                     "on_validation_failure": "discard",
                 },
                 _empty_state(),
-                _mock_catalog(),
+                ToolContext(catalog=_mock_catalog()),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -100,7 +101,7 @@ class TestPromoteSetSourceArgErrorRouting:
                     "inline_blob": {"foo": "bar"},
                 },
                 _empty_state(),
-                _mock_catalog(),
+                ToolContext(catalog=_mock_catalog()),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -113,7 +114,7 @@ class TestPromoteSetSourceArgErrorRouting:
                 "on_validation_failure": "discard",
             },
             _empty_state(),
-            _mock_catalog(),
+            ToolContext(catalog=_mock_catalog()),
         )
         assert result.success is True
         assert result.updated_state.source is not None

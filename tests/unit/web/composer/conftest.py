@@ -101,6 +101,7 @@ from elspeth.web.composer.redaction import (
 )
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.config import WebSettings
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
@@ -475,6 +476,34 @@ def _mock_catalog() -> MagicMock:
         knob_schema={"fields": []},
     )
     return catalog
+
+
+@pytest.fixture
+def tool_context() -> ToolContext:
+    """Bare ToolContext for unit tests that only need a catalog.
+
+    Use ``replace(tool_context, ...)`` if a test needs additional fields
+    (data_dir, secret_service, etc.).
+    """
+
+    return ToolContext(catalog=_mock_catalog())
+
+
+@pytest.fixture
+def make_tool_context() -> Any:
+    """Factory for ToolContext with arbitrary overrides.
+
+    Usage::
+
+        ctx = make_tool_context(data_dir="/tmp/data", secret_service=svc)
+    """
+
+    def _factory(**overrides: Any) -> ToolContext:
+        kwargs: dict[str, Any] = {"catalog": _mock_catalog()}
+        kwargs.update(overrides)
+        return ToolContext(**kwargs)
+
+    return _factory
 
 
 def _make_settings(data_dir: Path, **overrides: Any) -> WebSettings:

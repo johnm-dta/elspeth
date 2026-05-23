@@ -42,10 +42,26 @@ from elspeth.web.composer.tools import (
     _execute_patch_output_options,
     _execute_patch_source_options,
 )
+from elspeth.web.composer.tools._common import ToolContext
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
+
+def _ctx() -> ToolContext:
+    """Bare ToolContext sufficient for the argument-validation tests below.
+
+    The Pydantic-validation tests reject the arguments before any catalog or
+    data-dir consumption, so a catalog-less context is fine. ``MagicMock``
+    keeps the type contract honest without spinning up a real catalog.
+    """
+
+    from unittest.mock import MagicMock
+
+    from elspeth.web.catalog.protocol import CatalogService
+
+    return ToolContext(catalog=MagicMock(spec=CatalogService))
 
 
 def _empty_state() -> CompositionState:
@@ -132,21 +148,21 @@ class TestPromotePatchSourceOptionsArgErrorRouting:
         """Missing required 'patch' field triggers ToolArgumentError."""
         state = _state_with_source()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_source_options({}, state)
+            _execute_patch_source_options({}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_patch_not_dict_raises_tool_argument_error(self) -> None:
         """Non-dict patch value rejected by Pydantic model before handler logic."""
         state = _state_with_source()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_source_options({"patch": "not-a-dict"}, state)
+            _execute_patch_source_options({"patch": "not-a-dict"}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_patch_none_raises_tool_argument_error(self) -> None:
         """None patch is not a valid dict."""
         state = _state_with_source()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_source_options({"patch": None}, state)
+            _execute_patch_source_options({"patch": None}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_extra_field_raises_tool_argument_error(self) -> None:
@@ -156,13 +172,14 @@ class TestPromotePatchSourceOptionsArgErrorRouting:
             _execute_patch_source_options(
                 {"patch": {"path": "/b"}, "node_id": "stray"},
                 state,
+                _ctx(),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_valid_arguments_dispatch_normally(self) -> None:
         """Valid patch dict succeeds when state has a source."""
         state = _state_with_source({"path": "/a", "schema": {"mode": "observed"}})
-        result = _execute_patch_source_options({"patch": {"path": "/b"}}, state)
+        result = _execute_patch_source_options({"patch": {"path": "/b"}}, state, _ctx())
         assert result.success is True
         assert result.updated_state.source is not None
 
@@ -204,35 +221,35 @@ class TestPromotePatchNodeOptionsArgErrorRouting:
         """Missing both required fields triggers ToolArgumentError."""
         state = _state_with_node()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_node_options({}, state)
+            _execute_patch_node_options({}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_missing_patch_raises_tool_argument_error(self) -> None:
         """node_id alone is insufficient; patch is required."""
         state = _state_with_node()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_node_options({"node_id": "t1"}, state)
+            _execute_patch_node_options({"node_id": "t1"}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_missing_node_id_raises_tool_argument_error(self) -> None:
         """patch alone is insufficient; node_id is required."""
         state = _state_with_node()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_node_options({"patch": {"field": "x"}}, state)
+            _execute_patch_node_options({"patch": {"field": "x"}}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_patch_not_dict_raises_tool_argument_error(self) -> None:
         """Non-dict patch value rejected by Pydantic model."""
         state = _state_with_node()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_node_options({"node_id": "t1", "patch": 42}, state)
+            _execute_patch_node_options({"node_id": "t1", "patch": 42}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_node_id_not_str_raises_tool_argument_error(self) -> None:
         """Non-string node_id rejected by Pydantic model."""
         state = _state_with_node()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_node_options({"node_id": 99, "patch": {}}, state)
+            _execute_patch_node_options({"node_id": 99, "patch": {}}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_extra_field_raises_tool_argument_error(self) -> None:
@@ -242,6 +259,7 @@ class TestPromotePatchNodeOptionsArgErrorRouting:
             _execute_patch_node_options(
                 {"node_id": "t1", "patch": {}, "sink_name": "stray"},
                 state,
+                _ctx(),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -265,7 +283,7 @@ class TestPromotePatchNodeOptionsArgErrorRouting:
         from elspeth.web.composer.tools import ToolResult
 
         state = _state_with_node("t1", {"field": "old"})
-        result = _execute_patch_node_options({"node_id": "t1", "patch": {"field": "new"}}, state)
+        result = _execute_patch_node_options({"node_id": "t1", "patch": {"field": "new"}}, state, _ctx())
         assert isinstance(result, ToolResult)
 
     def test_manifest_entry_is_type_driven(self) -> None:
@@ -301,35 +319,35 @@ class TestPromotePatchOutputOptionsArgErrorRouting:
         """Missing both required fields triggers ToolArgumentError."""
         state = _state_with_output()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_output_options({}, state)
+            _execute_patch_output_options({}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_missing_patch_raises_tool_argument_error(self) -> None:
         """sink_name alone is insufficient; patch is required."""
         state = _state_with_output()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_output_options({"sink_name": "out1"}, state)
+            _execute_patch_output_options({"sink_name": "out1"}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_missing_sink_name_raises_tool_argument_error(self) -> None:
         """patch alone is insufficient; sink_name is required."""
         state = _state_with_output()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_output_options({"patch": {"path": "/x"}}, state)
+            _execute_patch_output_options({"patch": {"path": "/x"}}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_patch_not_dict_raises_tool_argument_error(self) -> None:
         """Non-dict patch value rejected by Pydantic model."""
         state = _state_with_output()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_output_options({"sink_name": "out1", "patch": "x"}, state)
+            _execute_patch_output_options({"sink_name": "out1", "patch": "x"}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_sink_name_not_str_raises_tool_argument_error(self) -> None:
         """Non-string sink_name rejected by Pydantic model."""
         state = _state_with_output()
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_patch_output_options({"sink_name": 123, "patch": {}}, state)
+            _execute_patch_output_options({"sink_name": 123, "patch": {}}, state, _ctx())
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_extra_field_raises_tool_argument_error(self) -> None:
@@ -339,6 +357,7 @@ class TestPromotePatchOutputOptionsArgErrorRouting:
             _execute_patch_output_options(
                 {"sink_name": "out1", "patch": {}, "node_id": "stray"},
                 state,
+                _ctx(),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -351,6 +370,7 @@ class TestPromotePatchOutputOptionsArgErrorRouting:
         result = _execute_patch_output_options(
             {"sink_name": "out1", "patch": {"encoding": "utf-8"}},
             state,
+            _ctx(),
         )
         assert result.success is True
 

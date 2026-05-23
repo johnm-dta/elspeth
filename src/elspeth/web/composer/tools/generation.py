@@ -15,7 +15,7 @@ from sqlalchemy import Engine
 
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.schema import get_aggregation_contract_options
-from elspeth.web.catalog.protocol import CatalogService, PluginKind
+from elspeth.web.catalog.protocol import PluginKind
 from elspeth.web.composer.source_inspection import (
     derive_extra_column_risk,
     inspect_blob_content,
@@ -24,13 +24,12 @@ from elspeth.web.composer.state import (
     CompositionState,
     NodeSpec,
     SourceSpec,
-    ValidationSummary,
     _source_options_have_schema,
     _validate_gate_expression,
 )
 from elspeth.web.composer.tools._common import (
     _DATA_ERROR_KEY,
-    RuntimePreflight,
+    ToolContext,
     ToolResult,
     _discovery_result,
     _failure_result,
@@ -97,11 +96,10 @@ def get_expression_grammar() -> str:
 def _handle_get_plugin_schema(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     try:
-        schema = catalog.get_schema(arguments["plugin_type"], arguments["name"])
+        schema = context.catalog.get_schema(arguments["plugin_type"], arguments["name"])
         return _discovery_result(state, schema)
     except (ValueError, KeyError) as exc:
         # ValueError: catalog contract for "unknown plugin/type"
@@ -112,13 +110,13 @@ def _handle_get_plugin_schema(
 def _handle_get_expression_grammar(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
+    del context  # unused; signature uniformity with the other handlers.
     return _discovery_result(state, get_expression_grammar())
 
 
-_VALIDATION_ERROR_PATTERNS: list[tuple[str, str, str]] = [
+_VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
     (
         r"No source configured",
         "The pipeline has no data source. Every pipeline needs exactly one source to read input data from.",
@@ -224,7 +222,7 @@ _VALIDATION_ERROR_PATTERNS: list[tuple[str, str, str]] = [
         "A downstream node requires fields that its upstream producer does not guarantee.",
         "Call preview_pipeline to inspect edge_contracts, then update the upstream schema with patch_source_options or patch_node_options and re-preview until the edge shows satisfied=true.",
     ),
-]
+)
 
 
 def _extract_validator_expected_hint(error_text: str) -> str | None:
@@ -266,10 +264,10 @@ def _augment_with_expected_hint(fix: str, error_text: str) -> str:
 def _execute_explain_validation_error(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Explain a validation error with human-readable diagnosis and fix."""
+    del context  # unused; signature uniformity with the other handlers.
     error_text = args["error_text"]
     for pattern, explanation, fix in _VALIDATION_ERROR_PATTERNS:
         if re.search(pattern, error_text):
@@ -322,8 +320,7 @@ def _serialize_plugin_assistance_example(
 def _execute_get_plugin_assistance(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Return plugin-owned guidance for a source, transform, or sink.
 
@@ -350,6 +347,7 @@ def _execute_get_plugin_assistance(
         get_shared_plugin_manager,
     )
 
+    del context  # unused; signature uniformity with the other handlers.
     plugin_type_raw = args["plugin_type"]
     plugin_name = args["plugin_name"]
     issue_code = args.get("issue_code")
@@ -401,8 +399,7 @@ def _execute_get_plugin_assistance(
 def _execute_get_audit_info(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Return constant facts about the Landscape audit trail.
 
@@ -418,6 +415,7 @@ def _execute_get_audit_info(
     never reaches the LLM context. The model paraphrases `summary`; it
     does not need the URL itself.
     """
+    del context  # unused; signature uniformity with the other handlers.
     payload = {
         "enabled": True,
         "composer_modifiable": False,
@@ -448,8 +446,7 @@ def _execute_get_audit_info(
 def _execute_list_models(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """List available LLM model identifiers.
 
@@ -463,6 +460,7 @@ def _execute_list_models(
     """
     from elspeth.plugins.transforms.llm.model_catalog import read_litellm_model_list
 
+    del context  # unused; signature uniformity with the other handlers.
     all_models: list[str] = list(read_litellm_model_list())
 
     provider = args.get("provider")
@@ -1033,12 +1031,7 @@ def compute_proof_diagnostics(
 def _execute_preview_pipeline(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    runtime_preflight: RuntimePreflight | None = None,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Preview pipeline configuration — dry-run validation with source summary.
 
@@ -1054,12 +1047,12 @@ def _execute_preview_pipeline(
         {"outcome": "valid" if validation.is_valid else "invalid"},
     )
     authoring_payload = _authoring_validation_payload(state, validation)
-    runtime_result = runtime_preflight(state) if runtime_preflight is not None else None
+    runtime_result = context.runtime_preflight(state) if context.runtime_preflight is not None else None
 
     proof_diagnostics = compute_proof_diagnostics(
         state,
-        session_engine=session_engine,
-        session_id=session_id,
+        session_engine=context.session_engine,
+        session_id=context.session_id,
     )
     has_blocking_proof = any(d["severity"] == "blocking" for d in proof_diagnostics)
 
@@ -1107,21 +1100,21 @@ def _execute_preview_pipeline(
 def _execute_diff_pipeline(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    baseline: CompositionState | None = None,
-    current_validation: ValidationSummary | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Compute a diff/change summary against a baseline state.
 
-    The baseline is passed explicitly by the MCP server or web composer.
-    If no baseline is available, returns a notice instead.
+    The baseline is passed explicitly by the MCP server or web composer
+    via ``context.baseline``. If no baseline is available, returns a
+    notice instead.
 
-    Args:
-        current_validation: Pre-computed validation for the current state.
-            Threaded from the caller to avoid redundant recomputation.
+    Pre-computed current-state validation is threaded through
+    ``context.current_validation`` so this handler avoids redundant
+    recomputation when the caller already has the live ValidationSummary
+    in hand.
     """
+    baseline = context.baseline
+    current_validation = context.current_validation
     if baseline is None:
         return _discovery_result(
             state,

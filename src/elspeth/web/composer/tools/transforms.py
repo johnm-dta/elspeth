@@ -9,7 +9,6 @@ from typing import Any, Final, cast
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     PatchNodeOptionsArgumentsModel,
@@ -26,6 +25,7 @@ from elspeth.web.composer.state import (
     _validate_gate_expression,
 )
 from elspeth.web.composer.tools._common import (
+    ToolContext,
     ToolResult,
     _apply_merge_patch,
     _attach_post_call_hints,
@@ -95,35 +95,36 @@ class _SetMetadataArgumentsModel(BaseModel):
 def _handle_list_transforms(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, catalog.list_transforms())
+    return _discovery_result(state, context.catalog.list_transforms())
 
 
 def _handle_upsert_node(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    result = _execute_upsert_node(arguments, state, catalog)
-    # The node may be a gate or coalesce (plugin=None) — _attach handles
-    # that case. Extract the node identity from validated args so we
-    # look up the right entry on the post-mutation state.
-    try:
-        validated = _UpsertNodeArgumentsModel.model_validate(arguments)
-    except PydanticValidationError:
-        # Validation failed inside _execute_upsert_node; the result
-        # carries the failure. Skip hint resolution.
+    # _execute_upsert_node validates arguments via _validate_mutation_arguments,
+    # which raises ToolArgumentError on Pydantic failure — a
+    # PydanticValidationError can never escape into this caller. Re-validation
+    # on the success branch is deterministic by the same model; we only need
+    # the validated.id to look up the post-mutation node for hint resolution.
+    result = _execute_upsert_node(arguments, state, context)
+    if not result.success:
         return result
+    validated = _UpsertNodeArgumentsModel.model_validate(arguments)
     node_id = validated.id
     node = next((n for n in result.updated_state.nodes if n.id == node_id), None)
-    if node is None:
-        return result
+    # Offensive programming: _execute_upsert_node succeeded above, so the
+    # node it just upserted MUST be on the post-mutation state. Absence
+    # here would be a bug in state.with_node, not a runtime condition.
+    assert node is not None, (
+        f"_execute_upsert_node succeeded for node '{node_id}' but the post-mutation state does not contain it — invariant violation."
+    )
     return _attach_post_call_hints(
         result,
-        catalog,
+        context.catalog,
         plugin_type="transform",
         tool_name="upsert_node",
         plugin_name=node.plugin,
@@ -134,43 +135,39 @@ def _handle_upsert_node(
 def _handle_upsert_edge(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _execute_upsert_edge(arguments, state)
+    return _execute_upsert_edge(arguments, state, context)
 
 
 def _handle_remove_node(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _execute_remove_node(arguments, state)
+    return _execute_remove_node(arguments, state, context)
 
 
 def _handle_remove_edge(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _execute_remove_edge(arguments, state)
+    return _execute_remove_edge(arguments, state, context)
 
 
 def _handle_set_metadata(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _execute_set_metadata(arguments, state)
+    return _execute_set_metadata(arguments, state, context)
 
 
 def _execute_upsert_node(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
+    context: ToolContext,
 ) -> ToolResult:
     """Add or update a pipeline node."""
     validated = cast(_UpsertNodeArgumentsModel, _validate_mutation_arguments(_UpsertNodeArgumentsModel, args, "upsert_node arguments"))
@@ -192,7 +189,7 @@ def _execute_upsert_node(
     # structural, not plugin-driven), so the "and plugin is not None" guard covers them.
     # NodeSpec documents this: "plugin: Plugin name. None for gates and coalesces."
     if node_type in ("transform", "aggregation") and plugin is not None:
-        plugin_error = _validate_plugin_name(catalog, "transform", plugin)
+        plugin_error = _validate_plugin_name(context.catalog, "transform", plugin)
         if plugin_error is not None:
             return _failure_result(state, plugin_error)
 
@@ -260,6 +257,7 @@ def _execute_upsert_node(
 def _execute_upsert_edge(
     args: dict[str, Any],
     state: CompositionState,
+    context: ToolContext,
 ) -> ToolResult:
     """Add or update an edge.
 
@@ -267,6 +265,7 @@ def _execute_upsert_edge(
     node's connection field so that generate_yaml() produces a
     working pipeline.  Edges to non-output nodes are visual only.
     """
+    del context  # unused; signature uniformity with the other handlers.
     validated = cast(_UpsertEdgeArgumentsModel, _validate_mutation_arguments(_UpsertEdgeArgumentsModel, args, "upsert_edge arguments"))
     from_node = validated.from_node
     to_node = validated.to_node
@@ -327,8 +326,10 @@ def _execute_upsert_edge(
 def _execute_remove_node(
     args: dict[str, Any],
     state: CompositionState,
+    context: ToolContext,
 ) -> ToolResult:
     """Remove a node and its edges."""
+    del context  # unused; signature uniformity with the other handlers.
     validated = cast(_RemoveByIdArgumentsModel, _validate_mutation_arguments(_RemoveByIdArgumentsModel, args, "remove_node arguments"))
     node_id = validated.id
 
@@ -349,8 +350,10 @@ def _execute_remove_node(
 def _execute_remove_edge(
     args: dict[str, Any],
     state: CompositionState,
+    context: ToolContext,
 ) -> ToolResult:
     """Remove an edge."""
+    del context  # unused; signature uniformity with the other handlers.
     validated = cast(_RemoveByIdArgumentsModel, _validate_mutation_arguments(_RemoveByIdArgumentsModel, args, "remove_edge arguments"))
     edge_id = validated.id
 
@@ -370,8 +373,10 @@ def _execute_remove_edge(
 def _execute_set_metadata(
     args: dict[str, Any],
     state: CompositionState,
+    context: ToolContext,
 ) -> ToolResult:
     """Update pipeline metadata."""
+    del context  # unused; signature uniformity with the other handlers.
     validated = cast(_SetMetadataArgumentsModel, _validate_mutation_arguments(_SetMetadataArgumentsModel, args, "set_metadata arguments"))
     patch = validated.patch.model_dump(exclude_none=True)
 
@@ -415,6 +420,7 @@ def _node_routing_option_patch_error(patch: Mapping[str, Any]) -> str | None:
 def _execute_patch_node_options(
     args: dict[str, Any],
     state: CompositionState,
+    context: ToolContext,
 ) -> ToolResult:
     """Apply a merge-patch to a node's plugin options.
 
@@ -434,6 +440,7 @@ def _execute_patch_node_options(
     it runs AFTER Pydantic validation — same discipline as
     ``set_pipeline``'s blob_id/inline_blob mutual-exclusion check.
     """
+    del context  # unused; signature uniformity with the other handlers.
     try:
         validated = PatchNodeOptionsArgumentsModel.model_validate(args)
     except PydanticValidationError as exc:
@@ -465,24 +472,7 @@ def _execute_patch_node_options(
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
-    new_node = NodeSpec(
-        id=current.id,
-        node_type=current.node_type,
-        plugin=current.plugin,
-        input=current.input,
-        on_success=current.on_success,
-        on_error=current.on_error,
-        options=new_options,
-        condition=current.condition,
-        routes=current.routes,
-        fork_to=current.fork_to,
-        branches=current.branches,
-        policy=current.policy,
-        merge=current.merge,
-        trigger=current.trigger,
-        output_mode=current.output_mode,
-        expected_output_count=current.expected_output_count,
-    )
+    new_node = replace(current, options=new_options)
     new_state = state.with_node(new_node)
     return _mutation_result(new_state, (node_id,))
 
@@ -490,23 +480,27 @@ def _execute_patch_node_options(
 def _handle_patch_node_options(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    result = _execute_patch_node_options(arguments, state)
+    # _execute_patch_node_options validates arguments via the Pydantic model
+    # and re-raises as ToolArgumentError; PydanticValidationError cannot
+    # escape into this caller. Re-validation on the success branch is
+    # deterministic by the same model.
+    result = _execute_patch_node_options(arguments, state, context)
     if not result.success:
         return result
-    try:
-        validated = PatchNodeOptionsArgumentsModel.model_validate(arguments)
-    except PydanticValidationError:
-        return result
+    validated = PatchNodeOptionsArgumentsModel.model_validate(arguments)
     node_id = validated.node_id
     node = next((n for n in result.updated_state.nodes if n.id == node_id), None)
-    if node is None:
-        return result
+    # Offensive programming: _execute_patch_node_options succeeded above, so
+    # the node it just upserted MUST be on the post-mutation state. Absence
+    # here would be a bug in state.with_node, not a runtime condition.
+    assert node is not None, (
+        f"_execute_patch_node_options succeeded for node '{node_id}' but the post-mutation state does not contain it — invariant violation."
+    )
     return _attach_post_call_hints(
         result,
-        catalog,
+        context.catalog,
         plugin_type="transform",
         tool_name="patch_node_options",
         plugin_name=node.plugin,

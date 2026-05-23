@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from elspeth.contracts.freeze import deep_thaw
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.state import (
     CompositionState,
-    NodeSpec,
-    OutputSpec,
-    SourceSpec,
 )
 from elspeth.web.composer.tools._common import (
+    ToolContext,
     ToolResult,
     _discovery_result,
     _failure_result,
@@ -21,21 +18,15 @@ from elspeth.web.composer.tools._common import (
     _secret_ref_placement_error,
 )
 
-SecretToolHandler = Callable[..., ToolResult]
-
 
 def _handle_list_secret_refs(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    secret_service: Any | None = None,
-    user_id: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    if secret_service is None or user_id is None:
+    if context.secret_service is None or context.user_id is None:
         return _failure_result(state, "Secret tools require secret service context.")
-    items = secret_service.list_refs(user_id)
+    items = context.secret_service.list_refs(context.user_id)
     # Return inventory dicts — NEVER include values
     data = [{"name": item.name, "scope": item.scope, "available": item.available} for item in items]
     return _discovery_result(state, data)
@@ -44,29 +35,21 @@ def _handle_list_secret_refs(
 def _handle_validate_secret_ref(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    secret_service: Any | None = None,
-    user_id: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    if secret_service is None or user_id is None:
+    if context.secret_service is None or context.user_id is None:
         return _failure_result(state, "Secret tools require secret service context.")
     name = arguments["name"]
-    available = secret_service.has_ref(user_id, name)
+    available = context.secret_service.has_ref(context.user_id, name)
     return _discovery_result(state, {"name": name, "available": available})
 
 
 def _execute_wire_secret_ref(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    secret_service: Any | None = None,
-    user_id: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    if secret_service is None or user_id is None:
+    if context.secret_service is None or context.user_id is None:
         return _failure_result(state, "Secret tools require secret service context.")
 
     name = arguments["name"]
@@ -75,7 +58,7 @@ def _execute_wire_secret_ref(
     target_id = arguments.get("target_id")
 
     # Validate the secret ref exists
-    if not secret_service.has_ref(user_id, name):
+    if not context.secret_service.has_ref(context.user_id, name):
         return _failure_result(state, f"Secret reference '{name}' not found or not accessible.")
 
     marker = {"secret_ref": name}
@@ -88,12 +71,7 @@ def _execute_wire_secret_ref(
         placement_error = _secret_ref_placement_error("source", state.source.plugin, patched_options)
         if placement_error is not None:
             return _failure_result(state, placement_error)
-        new_source = SourceSpec(
-            plugin=state.source.plugin,
-            on_success=state.source.on_success,
-            options=patched_options,
-            on_validation_failure=state.source.on_validation_failure,
-        )
+        new_source = replace(state.source, options=patched_options)
         new_state = state.with_source(new_source)
         return _mutation_result(new_state, ("source",))
 
@@ -113,24 +91,7 @@ def _execute_wire_secret_ref(
         placement_error = _secret_ref_placement_error("transform", node.plugin, patched_options)
         if placement_error is not None:
             return _failure_result(state, placement_error)
-        new_node = NodeSpec(
-            id=node.id,
-            node_type=node.node_type,
-            plugin=node.plugin,
-            input=node.input,
-            on_success=node.on_success,
-            on_error=node.on_error,
-            options=patched_options,
-            condition=node.condition,
-            routes=deep_thaw(node.routes) if node.routes is not None else None,
-            fork_to=node.fork_to,
-            branches=node.branches,
-            policy=node.policy,
-            merge=node.merge,
-            trigger=deep_thaw(node.trigger) if node.trigger is not None else None,
-            output_mode=node.output_mode,
-            expected_output_count=node.expected_output_count,
-        )
+        new_node = replace(node, options=patched_options)
         new_state = state.with_node(new_node)
         return _mutation_result(new_state, (target_id,))
 
@@ -145,12 +106,7 @@ def _execute_wire_secret_ref(
         placement_error = _secret_ref_placement_error("sink", output.plugin, patched_options)
         if placement_error is not None:
             return _failure_result(state, placement_error)
-        new_output = OutputSpec(
-            name=output.name,
-            plugin=output.plugin,
-            options=patched_options,
-            on_write_failure=output.on_write_failure,
-        )
+        new_output = replace(output, options=patched_options)
         new_state = state.with_output(new_output)
         return _mutation_result(new_state, (target_id,))
 

@@ -35,7 +35,7 @@ import hmac
 import os
 import tempfile
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,7 +56,6 @@ from elspeth.web.blobs.service import (
     content_hash,
     sanitize_filename,
 )
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     CreateBlobArgumentsModel,
@@ -66,6 +65,7 @@ from elspeth.web.composer.state import (
     CompositionState,
 )
 from elspeth.web.composer.tools._common import (
+    ToolContext,
     ToolResult,
     _discovery_result,
     _failure_result,
@@ -197,12 +197,10 @@ def _sync_list_blobs(engine: Engine, session_id: str) -> list[dict[str, Any]]:
 def _handle_list_blobs(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
+    session_engine = context.session_engine
+    session_id = context.session_id
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
     blobs = _sync_list_blobs(session_engine, session_id)
@@ -212,12 +210,10 @@ def _handle_list_blobs(
 def _handle_get_blob_metadata(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
+    session_engine = context.session_engine
+    session_id = context.session_id
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
     blob = _sync_get_blob(session_engine, arguments["blob_id"], session_id)
@@ -502,13 +498,7 @@ def _blob_create_payload(prepared: _PreparedBlobCreate) -> BlobCreatePayload:
 def _execute_create_blob(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
-    user_message_id: str | None = None,
-    max_blob_storage_per_session_bytes: int | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Create a new blob (file) in the session from inline content.
 
@@ -531,9 +521,11 @@ def _execute_create_blob(
     Tier-3 checks (value-based) that Pydantic's type validation cannot
     express.
     """
+    session_engine = context.session_engine
+    session_id = context.session_id
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
-    if data_dir is None:
+    if context.data_dir is None:
         return _failure_result(state, "Blob tools require data_dir for storage.")
 
     try:
@@ -562,17 +554,17 @@ def _execute_create_blob(
     # triggered the LLM's response, so the audit walk works today.
     prepared = _prepare_blob_create(
         validated.model_dump(),
-        data_dir=data_dir,
+        data_dir=context.data_dir,
         session_id=session_id,
         creation_modality=CreationModality.VERBATIM,
-        created_from_message_id=user_message_id,
+        created_from_message_id=context.user_message_id,
     )
 
     quota_error = _persist_prepared_blob_create(
         prepared,
         session_engine=session_engine,
         session_id=session_id,
-        max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
+        max_blob_storage_per_session_bytes=context.max_blob_storage_per_session_bytes,
     )
     if quota_error is not None:
         return _failure_result(state, quota_error)
@@ -724,12 +716,7 @@ class _BlobUpdateBlockedByActiveRun(Exception):
 def _execute_update_blob(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
-    max_blob_storage_per_session_bytes: int | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Update the content of an existing blob.
 
@@ -757,6 +744,8 @@ def _execute_update_blob(
     the validation MUST precede lock acquisition here, not merely
     precede the begin-transaction block.
     """
+    session_engine = context.session_engine
+    session_id = context.session_id
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
 
@@ -891,7 +880,7 @@ def _execute_update_blob(
                             conn,
                             session_id,
                             size_delta,
-                            quota_bytes=max_blob_storage_per_session_bytes,
+                            quota_bytes=context.max_blob_storage_per_session_bytes,
                         )
                         if quota_error is not None:
                             # Raising inside the ``with`` rolls the DB
@@ -1011,13 +1000,11 @@ def _execute_update_blob(
 def _execute_delete_blob(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Delete a blob and its storage file."""
+    session_engine = context.session_engine
+    session_id = context.session_id
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
 
@@ -1143,11 +1130,7 @@ def _verify_blob_content_integrity(blob: BlobToolRecord, data: bytes) -> None:
 def _execute_get_blob_content(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Retrieve the content of a blob for inspection.
 
@@ -1180,6 +1163,8 @@ def _execute_get_blob_content(
     and ``BlobServiceImpl.read_blob_content`` is caught by
     ``TestGetBlobContentGuards`` at CI time.
     """
+    session_engine = context.session_engine
+    session_id = context.session_id
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
 
@@ -1238,8 +1223,6 @@ def _execute_get_blob_content(
     )
 
 
-BlobToolHandler = Callable[..., ToolResult]
-
 _BLOB_QUOTA_MUTATION_TOOLS: frozenset[str] = frozenset(
     {
         "create_blob",
@@ -1255,14 +1238,10 @@ _BLOB_PROVENANCE_MUTATION_TOOLS: frozenset[str] = frozenset(
     }
 )
 
-_BLOB_STORE_ONLY_MUTATION_TOOLS: frozenset[str] = frozenset({"create_blob", "update_blob", "delete_blob"})
-
-
-def is_blob_store_only_mutation_tool(name: str) -> bool:
-    """Return True for blob-store side-effect tools that never advance CompositionState.
-
-    See ``_BLOB_STORE_ONLY_MUTATION_TOOLS`` for the rationale on excluding
-    these from the ``trust_mode == "explicit_approve"`` proposal-interception
-    gate.
-    """
-    return name in _BLOB_STORE_ONLY_MUTATION_TOOLS
+# ``_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES`` and the matching predicate
+# ``is_blob_store_only_mutation_tool`` are declared in
+# ``elspeth.web.composer.tools.discovery``. Import that module to get the
+# canonical declaration. The ``_BLOB_QUOTA_MUTATION_TOOLS`` and
+# ``_BLOB_PROVENANCE_MUTATION_TOOLS`` frozensets above are kwarg-shape
+# distinctions (which dispatch path receives which extended kwargs), not
+# tool-classification sets, so they stay here next to the blob handlers.

@@ -2221,84 +2221,6 @@ allow_hits:
   safety: Malformed data returns structured HTTP errors or preserves the primary exception;
     recovery catches are narrow and record class-name-only diagnostics.
   expires: '2026-08-20'
-- key: web/sessions/service.py:R6:SessionServiceImpl:_sync:fp=f65ffe2b6eacead7
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:_sync:fp=5d64d769907cac14
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_sync:fp=807f122d01342885
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_sync:fp=71b7e715f93ea4d1
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/sessions/routes/messages.py:R6:send_message:fp=6ffa502bacb1e244
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=474724286b6fc63a
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=1daeec53b4aa6f66
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=802e95754f05458c
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=1c17d4cb4392323d
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=d17d24f1f658545c
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=6b3ff8aad2eb5cb2
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/secrets.py:R1:_execute_wire_secret_ref:fp=6e9e2beb8d5c3d8a
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/recipes.py:R5:_execute_apply_pipeline_recipe:fp=38345076cf12cf03
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
 - key: web/composer/tools/sources.py:R1:_resolve_source_blob:fp=981fb7ee6e925c26
   owner: TODO
   reason: TODO — fingerprint rotation without matching stale entry; review whether
@@ -2312,222 +2234,6 @@ allow_hits:
   safety: TODO
   expires: null
 - key: web/composer/tools/sources.py:R6:_execute_inspect_source:fp=948d1b6adfb8742d
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/blobs.py:R1:_prepare_blob_create:fp=d4374e536c80d8d4
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=395e5be3ad09deeb
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=6b8220b09146a904
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/blobs.py:R6:_execute_update_blob:fp=346027a1e2a489dc
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=302de45b445253d6
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=ce8c53eb04fd5d3b
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=3adad1de5bfe4b96
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=f141a4caec5e37f8
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=2e855da3d753ac56
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=766329a9f8aa05ad
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=a2826811d73510f1
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=c4f809710602eb15
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_is_full_state_component_alias:fp=905e0c9218835c34
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_execute_get_pipeline_state:fp=439e0132d268e2ad
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_assert_affected_llm_node:fp=11c936f94655c012
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_assert_affected_llm_node:fp=9f64fc1a037061e3
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_assert_affected_llm_node:fp=251ceae6d210c3e8
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=ab1cf4b10a88bdba
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=4ece4587ae937b03
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=447b3adb44e3f029
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=b9e5fbee9f339072
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=77916045544e9616
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=e47ca1f12b03986e
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders_typed:fp=d519cd112efe378b
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=c05969c59ea12b1c
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=2e820372d01b81fb
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=ab2c18c19c051908
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_common.py:R1:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=54a7ff3de6a5481d
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_common.py:R5:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=ac9610f465774b09
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/_common.py:R1:validate_composer_file_sink_collision_policy:fp=18250521a8f8f9db
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/generation.py:R1:_execute_get_plugin_assistance:fp=c22a21d252b8c2c5
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=a1c784eead38371e
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=a70926372357c264
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=ac2824b17af57239
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=485694a51385973d
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
-  expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=b0512b4ba6599035
   owner: TODO
   reason: TODO — fingerprint rotation without matching stale entry; review whether
     this is a new violation that needs an explicit allowlist entry or a fix
@@ -2695,17 +2401,260 @@ allow_hits:
     this is a new violation that needs an explicit allowlist entry or a fix
   safety: TODO
   expires: null
-- key: web/composer/tools/transforms.py:R5:_execute_upsert_node:fp=a6cb126be5c76f54
-  owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=9f9fc10f9f0f9c8d
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: handler = all_handlers.get(tool_name)'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
   expires: null
-- key: web/composer/tools/transforms.py:R1:_execute_upsert_edge:fp=2719d07e0b36fa9d
+- key: web/composer/tools/secrets.py:R1:_execute_wire_secret_ref:fp=05b9c08a1e37f7c4
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: target_id = arguments.get("target_id")'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/recipes.py:R5:_execute_apply_pipeline_recipe:fp=e2ac48d6cb8a7d31
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: elif isinstance(existing_data, Mapping):'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/blobs.py:R1:_prepare_blob_create:fp=977992ac10ad9640
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: description=arguments.get("description"),'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=6bb82f46d96b8250
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: lock = _SESSION_BLOB_LOCKS.get(session_id)'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=54f2a423966305da
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: lock = _SESSION_BLOB_LOCKS.get(session_id)'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/blobs.py:R6:_execute_update_blob:fp=19ffd22ba1a1b63d
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Exception swallowed without re-raise or explicit error: except OSError as rollback_exc:'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=c6645125ea900f8f
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Exception swallowed without re-raise or explicit error: except OSError as rollback_exc:'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=f75fadaf37093bbe
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if isinstance(resolved, ToolResult):'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=88a4025c8ccea605
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: mime_entry = _MIME_TO_SOURCE.get(prepared_inline_blob.mime_type)'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=e260241c1412a970
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: raw_outputs = args.get("outputs") if isinstance(args, Mapping) else None'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=3f6018434f7512e5
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: raw_outputs = args.get("outputs") if isinstance(args, Mapping) else None'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=ba672d0b34c39efa
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if isinstance(raw_outputs, list) and 0 <= index < len(raw_outputs):'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=b12ee12639ca385c
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if isinstance(raw_entry, Mapping):'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=95e837a85e7ab019
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: branches = dict(n.branches) if isinstance(n.branches, Mapping) else tuple(n.branc'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_is_full_state_component_alias:fp=e0527326fb4a2cfd
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: return isinstance(component, str) and component.strip().lower() in _FULL_STATE_CO'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_execute_get_pipeline_state:fp=e3408f1a0c094113
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: component = args.get("component")'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_assert_affected_llm_node:fp=889d29f091a4abbb
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: prompt_template = options.get("prompt_template") if isinstance(options, Mapping) '
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_assert_affected_llm_node:fp=0479064d642b70d3
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: prompt_template = options.get("prompt_template") if isinstance(options, '
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_assert_affected_llm_node:fp=0ba3e0524286b3de
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if not isinstance(prompt_template, str) or not prompt_template:'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=df54d2333968b5a4
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if not isinstance(node, Mapping):'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=d6518fdb3d470288
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: if node.get("kind") != "llm":'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=67db7a0d4dd32f00
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: options = node.get("options")'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=1af133a959c06660
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: prompt_template = options.get("prompt_template") if isinstance(options, Mapping) '
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=827b1ce26ceb1a2b
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: prompt_template = options.get("prompt_template") if isinstance(options, '
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=f8d370d7b9ee773c
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if not isinstance(prompt_template, str):'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders_typed:fp=64cda3faf407cc4a
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if not isinstance(prompt_template, str):'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/_common.py:R9:_apply_merge_patch:fp=0adfa79b4f617196
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — dict.pop() with default hides missing keys: result.pop(key, None)'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=6b236f556b236d1c
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if isinstance(value, Mapping) and len(value) == 1 and "secret_ref" in value and i'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=4489ee1263d5df73
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if isinstance(value, Mapping) and len(value) == 1 and "secret_ref" in value and i'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=deef2c0b87cd4a5d
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if not isinstance(cause, PydanticValidationError):'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/_common.py:R1:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=f350173c56a0f3bc
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: prompt_template = options.get("prompt_template")'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/_common.py:R5:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=262ad13037de1734
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if not isinstance(prompt_template, str):'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/_common.py:R1:validate_composer_file_sink_collision_policy:fp=5fccbd9e60b2ca2c
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: mode = options.get("mode", "write")'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_get_plugin_assistance:fp=7438aaa931c598e5
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: issue_code = args.get("issue_code")'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=cd58a09c6cf05f6e
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: provider = args.get("provider")'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=efbe1ef49b29d7b2
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: limit = args.get("limit", 50)'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=4b0e29ebc009b94c
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if not isinstance(limit, int) or limit < 1:'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=c643bfda82c8511d
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: if provider is not None and isinstance(provider, str):'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=f1796a7d4c33f598
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: providers[prefix] = providers.get(prefix, 0) + 1'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/transforms.py:R5:_execute_upsert_node:fp=6dbbe113913c6d20
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — isinstance() used: branches = dict(validated.branches) if isinstance(validated.branches, Mapping) el'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/composer/tools/transforms.py:R1:_execute_upsert_edge:fp=930ea2901121f4ea
+  owner: composer-tools-rearchitect
+  reason: 'Pattern reified by ToolContext refactor — Potential dict.get() usage: if routes.get(route_key) != to_node:'
+  safety: Tier-3 trust-boundary or in-scope dict/isinstance check inside composer tool; unchanged semantics post-refactor
+  expires: null
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=f65ffe2b6eacead7
   owner: TODO
-  reason: TODO — fingerprint rotation without matching stale entry; review whether
-    this is a new violation that needs an explicit allowlist entry or a fix
-  safety: TODO
+  reason: Fingerprint rotation after composer-tools-rearchitect merge — pre-existing pattern, AST shift in unrelated commit rotated the fp
+  safety: Unchanged from prior allowlisted state; pattern is owned by the file's original team and predates this refactor
+  expires: null
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=5d64d769907cac14
+  owner: TODO
+  reason: Fingerprint rotation after composer-tools-rearchitect merge — pre-existing pattern, AST shift in unrelated commit rotated the fp
+  safety: Unchanged from prior allowlisted state; pattern is owned by the file's original team and predates this refactor
+  expires: null
+- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=2776823d39a788ae
+  owner: TODO
+  reason: Fingerprint rotation after composer-tools-rearchitect merge — pre-existing pattern, AST shift in unrelated commit rotated the fp
+  safety: Unchanged from prior allowlisted state; pattern is owned by the file's original team and predates this refactor
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=807f122d01342885
+  owner: TODO
+  reason: Fingerprint rotation after composer-tools-rearchitect merge — pre-existing pattern, AST shift in unrelated commit rotated the fp
+  safety: Unchanged from prior allowlisted state; pattern is owned by the file's original team and predates this refactor
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=71b7e715f93ea4d1
+  owner: TODO
+  reason: Fingerprint rotation after composer-tools-rearchitect merge — pre-existing pattern, AST shift in unrelated commit rotated the fp
+  safety: Unchanged from prior allowlisted state; pattern is owned by the file's original team and predates this refactor
+  expires: null
+- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=4cfc107b881f53c8
+  owner: TODO
+  reason: Fingerprint rotation after composer-tools-rearchitect merge — pre-existing pattern, AST shift in unrelated commit rotated the fp
+  safety: Unchanged from prior allowlisted state; pattern is owned by the file's original team and predates this refactor
+  expires: null
+- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=be313c147c5a50be
+  owner: TODO
+  reason: Fingerprint rotation after composer-tools-rearchitect merge — pre-existing pattern, AST shift in unrelated commit rotated the fp
+  safety: Unchanged from prior allowlisted state; pattern is owned by the file's original team and predates this refactor
+  expires: null
+- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=1a85561c51205f0c
+  owner: TODO
+  reason: Fingerprint rotation after composer-tools-rearchitect merge — pre-existing pattern, AST shift in unrelated commit rotated the fp
+  safety: Unchanged from prior allowlisted state; pattern is owned by the file's original team and predates this refactor
+  expires: null
+- key: web/sessions/routes/messages.py:R6:register_message_routes:send_message:fp=6ffa502bacb1e244
+  owner: TODO
+  reason: Fingerprint rotation after composer-tools-rearchitect merge — pre-existing pattern, AST shift in unrelated commit rotated the fp
+  safety: Unchanged from prior allowlisted state; pattern is owned by the file's original team and predates this refactor
   expires: null
 per_file_rules:
 - pattern: web/composer/guided/chat_solver.py

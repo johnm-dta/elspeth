@@ -7,9 +7,7 @@ from dataclasses import replace
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import Engine
 
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
     RecipeValidationError,
@@ -23,6 +21,7 @@ from elspeth.web.composer.state import (
     CompositionState,
 )
 from elspeth.web.composer.tools._common import (
+    ToolContext,
     ToolResult,
     _discovery_result,
     _failure_result,
@@ -35,23 +34,17 @@ from elspeth.web.composer.tools.sessions import (
 def _execute_list_recipes(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Return discovery metadata for every registered pipeline recipe."""
+    del context  # unused; signature uniformity with the other handlers.
     return _discovery_result(state, {"recipes": list_recipes()})
 
 
 def _execute_apply_pipeline_recipe(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
-    user_message_id: str | None = None,
-    max_blob_storage_per_session_bytes: int | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
 
@@ -117,16 +110,7 @@ def _execute_apply_pipeline_recipe(
     # Delegate to the existing set_pipeline executor — recipes produce the
     # exact arguments shape set_pipeline accepts, so validation and state
     # mutation flow through the canonical mutation path.
-    result = _execute_set_pipeline(
-        pipeline_args,
-        state,
-        catalog,
-        data_dir,
-        session_engine=session_engine,
-        session_id=session_id,
-        user_message_id=user_message_id,
-        max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
-    )
+    result = _execute_set_pipeline(pipeline_args, state, context)
 
     # Only annotate successful replacements over a non-empty prior state.
     # On failure, set_pipeline returned ``state`` unchanged and the note

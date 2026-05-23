@@ -31,6 +31,7 @@ from elspeth.web.composer.guided.state_machine import (
 )
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools import (
+    ToolContext,
     ToolResult,
     _execute_apply_pipeline_recipe,
     _execute_set_output,
@@ -110,7 +111,7 @@ def handle_step_1_source(
         "on_validation_failure": "discard",
     }
 
-    tool_result = _execute_set_source(args, state, catalog, data_dir)
+    tool_result = _execute_set_source(args, state, ToolContext(catalog=catalog, data_dir=data_dir))
 
     if not tool_result.success:
         return StepHandlerResult(
@@ -185,7 +186,7 @@ def handle_step_2_sink(
             "options": dict(output.options),
             "on_write_failure": "discard",
         }
-        tool_result = _execute_set_output(args, current_state, catalog, data_dir)
+        tool_result = _execute_set_output(args, current_state, ToolContext(catalog=catalog, data_dir=data_dir))
         if not tool_result.success:
             return StepHandlerResult(
                 state=entry_state,
@@ -243,10 +244,12 @@ def handle_step_2_5_recipe_apply(
     tool_result = _execute_apply_pipeline_recipe(
         arguments,
         state,
-        catalog,
-        data_dir,
-        session_engine=session_engine,
-        session_id=session_id,
+        ToolContext(
+            catalog=catalog,
+            data_dir=data_dir,
+            session_engine=session_engine,
+            session_id=session_id,
+        ),
     )
 
     if not tool_result.success:
@@ -365,10 +368,12 @@ def handle_step_3_chain_accept(
     tool_result = _execute_set_pipeline(
         arguments,
         state,
-        catalog,
-        data_dir,
-        session_engine=session_engine,
-        session_id=session_id,
+        ToolContext(
+            catalog=catalog,
+            data_dir=data_dir,
+            session_engine=session_engine,
+            session_id=session_id,
+        ),
     )
 
     if not tool_result.success:

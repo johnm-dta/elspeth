@@ -33,6 +33,7 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_create_blob, _execute_set_source_from_blob
+from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -104,9 +105,11 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             _execute_set_source_from_blob(
                 {},
                 _empty_state(),
-                _mock_catalog(),
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -121,9 +124,11 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
                     "options": "column=text",
                 },
                 _empty_state(),
-                _mock_catalog(),
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -133,9 +138,11 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             _execute_set_source_from_blob(
                 {"blob_id": "anything"},
                 _empty_state(),
-                _mock_catalog(),
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -150,9 +157,11 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
                     "content": "hello",  # belongs on create_blob/update_blob
                 },
                 _empty_state(),
-                _mock_catalog(),
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -166,13 +175,16 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
         engine, session_id = _session_engine_with_session()
         catalog = _mock_catalog()
 
-        create_result = _execute_create_blob(
-            {"filename": "seed.txt", "mime_type": "text/plain", "content": "hello"},
-            _empty_state(),
-            catalog,
+        ctx = ToolContext(
+            catalog=catalog,
             data_dir=str(tmp_path),
             session_engine=engine,
             session_id=session_id,
+        )
+        create_result = _execute_create_blob(
+            {"filename": "seed.txt", "mime_type": "text/plain", "content": "hello"},
+            _empty_state(),
+            ctx,
         )
         assert create_result.success is True
         blob_id = create_result.data["blob_id"]
@@ -184,10 +196,7 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
                 "options": {"column": "text", "schema": {"mode": "observed"}},
             },
             _empty_state(),
-            catalog,
-            data_dir=str(tmp_path),
-            session_engine=engine,
-            session_id=session_id,
+            ctx,
         )
         assert bind_result.success is True
         assert bind_result.updated_state.source is not None

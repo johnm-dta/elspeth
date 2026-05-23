@@ -29,6 +29,7 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_create_blob, _execute_update_blob
+from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -96,9 +97,11 @@ class TestPromoteUpdateBlobArgErrorRouting:
             _execute_update_blob(
                 {},
                 _empty_state(),
-                _mock_catalog(),
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -115,9 +118,11 @@ class TestPromoteUpdateBlobArgErrorRouting:
             _execute_update_blob(
                 {"blob_id": "anything", "content": 42},
                 _empty_state(),
-                _mock_catalog(),
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -127,9 +132,11 @@ class TestPromoteUpdateBlobArgErrorRouting:
             _execute_update_blob(
                 {"content": "new content"},
                 _empty_state(),
-                _mock_catalog(),
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -144,9 +151,11 @@ class TestPromoteUpdateBlobArgErrorRouting:
                     "filename": "x.txt",  # belongs on create_blob
                 },
                 _empty_state(),
-                _mock_catalog(),
-                session_engine=engine,
-                session_id=session_id,
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
@@ -160,10 +169,12 @@ class TestPromoteUpdateBlobArgErrorRouting:
         create_result = _execute_create_blob(
             {"filename": "seed.txt", "mime_type": "text/plain", "content": "old"},
             _empty_state(),
-            catalog,
-            data_dir=str(tmp_path),
-            session_engine=engine,
-            session_id=session_id,
+            ToolContext(
+                catalog=catalog,
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+            ),
         )
         assert create_result.success is True
         blob_id = create_result.data["blob_id"]
@@ -171,10 +182,12 @@ class TestPromoteUpdateBlobArgErrorRouting:
         update_result = _execute_update_blob(
             {"blob_id": blob_id, "content": "new contents"},
             _empty_state(),
-            catalog,
-            data_dir=str(tmp_path),
-            session_engine=engine,
-            session_id=session_id,
+            ToolContext(
+                catalog=catalog,
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+            ),
         )
         assert update_result.success is True
         assert update_result.data is not None

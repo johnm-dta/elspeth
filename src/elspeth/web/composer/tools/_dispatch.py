@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any, Final, cast
 
 from sqlalchemy import Engine
 
@@ -18,20 +18,28 @@ from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
     _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
     RuntimePreflight,
+    ToolContext,
     ToolHandler,
     ToolResult,
     _failure_result,
 )
 from elspeth.web.composer.tools.blobs import (
-    _BLOB_PROVENANCE_MUTATION_TOOLS,
-    _BLOB_QUOTA_MUTATION_TOOLS,
-    BlobToolHandler,
     _execute_create_blob,
     _execute_delete_blob,
     _execute_get_blob_content,
     _execute_update_blob,
     _handle_get_blob_metadata,
     _handle_list_blobs,
+)
+from elspeth.web.composer.tools.discovery import (
+    _BLOB_DISCOVERY_TOOL_NAMES,
+    _BLOB_MUTATION_TOOL_NAMES,
+    _CACHEABLE_DISCOVERY_TOOL_NAMES,
+    _DISCOVERY_TOOL_NAMES,
+    _MUTATION_TOOL_NAMES,
+    _SECRET_DISCOVERY_TOOL_NAMES,
+    _SECRET_MUTATION_TOOL_NAMES,
+    _SESSION_AWARE_TOOL_NAMES,
 )
 from elspeth.web.composer.tools.generation import (
     _execute_diff_pipeline,
@@ -53,7 +61,6 @@ from elspeth.web.composer.tools.recipes import (
     _execute_list_recipes,
 )
 from elspeth.web.composer.tools.secrets import (
-    SecretToolHandler,
     _execute_wire_secret_ref,
     _handle_list_secret_refs,
     _handle_validate_secret_ref,
@@ -62,7 +69,6 @@ from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_VALUES,
     _execute_get_pipeline_state,
-    _execute_set_pipeline,
     _handle_set_pipeline,
 )
 from elspeth.web.composer.tools.sinks import (
@@ -1149,11 +1155,11 @@ _DISCOVERY_TOOLS: dict[str, ToolHandler] = {
     "diff_pipeline": _execute_diff_pipeline,
 }
 
-_CACHEABLE_DISCOVERY_TOOLS: frozenset[str] = frozenset(_DISCOVERY_TOOLS.keys()) - {
-    "diff_pipeline",
-    "get_pipeline_state",
-    "preview_pipeline",
-}
+# Backwards-compatible alias — the canonical declaration lives in
+# ``tools.discovery``. Re-exported here because ``tools/__init__.py`` and a
+# few external call sites historically imported the name from
+# ``_dispatch``.
+_CACHEABLE_DISCOVERY_TOOLS: frozenset[str] = _CACHEABLE_DISCOVERY_TOOL_NAMES
 
 
 _MUTATION_TOOLS: dict[str, ToolHandler] = {
@@ -1172,7 +1178,7 @@ _MUTATION_TOOLS: dict[str, ToolHandler] = {
     "clear_source": _handle_clear_source,
 }
 
-_BLOB_DISCOVERY_TOOLS: dict[str, BlobToolHandler] = {
+_BLOB_DISCOVERY_TOOLS: dict[str, ToolHandler] = {
     "list_blobs": _handle_list_blobs,
     "get_blob_metadata": _handle_get_blob_metadata,
     "get_blob_content": _execute_get_blob_content,
@@ -1180,7 +1186,7 @@ _BLOB_DISCOVERY_TOOLS: dict[str, BlobToolHandler] = {
 }
 
 
-_BLOB_MUTATION_TOOLS: dict[str, BlobToolHandler] = {
+_BLOB_MUTATION_TOOLS: dict[str, ToolHandler] = {
     "set_source_from_blob": _execute_set_source_from_blob,
     "create_blob": _execute_create_blob,
     "update_blob": _execute_update_blob,
@@ -1188,51 +1194,58 @@ _BLOB_MUTATION_TOOLS: dict[str, BlobToolHandler] = {
     "apply_pipeline_recipe": _execute_apply_pipeline_recipe,
 }
 
-_SECRET_DISCOVERY_TOOLS: dict[str, SecretToolHandler] = {
+_SECRET_DISCOVERY_TOOLS: dict[str, ToolHandler] = {
     "list_secret_refs": _handle_list_secret_refs,
     "validate_secret_ref": _handle_validate_secret_ref,
 }
 
 
-_SECRET_MUTATION_TOOLS: dict[str, SecretToolHandler] = {
+_SECRET_MUTATION_TOOLS: dict[str, ToolHandler] = {
     "wire_secret_ref": _execute_wire_secret_ref,
 }
 
-_all_tools = (
-    set(_DISCOVERY_TOOLS)
-    | set(_MUTATION_TOOLS)
-    | set(_BLOB_DISCOVERY_TOOLS)
-    | set(_BLOB_MUTATION_TOOLS)
-    | set(_SECRET_DISCOVERY_TOOLS)
-    | set(_SECRET_MUTATION_TOOLS)
+# Registry-vs-declaration parity assertions — the canonical name sets live in
+# ``tools.discovery``; the handler maps above are subordinate. A regression
+# in either direction (a name in the registry without a declaration, or a
+# declaration without a registered handler) fails the build at import time.
+assert set(_DISCOVERY_TOOLS) == _DISCOVERY_TOOL_NAMES, (
+    "_DISCOVERY_TOOLS keys diverge from _DISCOVERY_TOOL_NAMES: "
+    f"+{set(_DISCOVERY_TOOLS) - _DISCOVERY_TOOL_NAMES} "
+    f"-{_DISCOVERY_TOOL_NAMES - set(_DISCOVERY_TOOLS)}"
 )
-assert len(_all_tools) == (
-    len(_DISCOVERY_TOOLS)
-    + len(_MUTATION_TOOLS)
-    + len(_BLOB_DISCOVERY_TOOLS)
-    + len(_BLOB_MUTATION_TOOLS)
-    + len(_SECRET_DISCOVERY_TOOLS)
-    + len(_SECRET_MUTATION_TOOLS)
-), "Tool registry overlap detected"
-
-assert set(_DISCOVERY_TOOLS) >= _CACHEABLE_DISCOVERY_TOOLS, (
-    f"Cacheable tools not in discovery registry: {_CACHEABLE_DISCOVERY_TOOLS - set(_DISCOVERY_TOOLS)}"
+assert set(_MUTATION_TOOLS) == _MUTATION_TOOL_NAMES, (
+    "_MUTATION_TOOLS keys diverge from _MUTATION_TOOL_NAMES: "
+    f"+{set(_MUTATION_TOOLS) - _MUTATION_TOOL_NAMES} "
+    f"-{_MUTATION_TOOL_NAMES - set(_MUTATION_TOOLS)}"
 )
-
-
-def is_discovery_tool(name: str) -> bool:
-    """Return True if the tool is a discovery (read-only) tool."""
-    return name in _DISCOVERY_TOOLS or name in _BLOB_DISCOVERY_TOOLS or name in _SECRET_DISCOVERY_TOOLS
-
-
-def is_mutation_tool(name: str) -> bool:
-    """Return True when a composer tool can mutate session state or owned artifacts."""
-    return name in _MUTATION_TOOLS or name in _BLOB_MUTATION_TOOLS or name in _SECRET_MUTATION_TOOLS
-
-
-def is_cacheable_discovery_tool(name: str) -> bool:
-    """Return True if the tool's results can be cached within a compose() call."""
-    return name in _CACHEABLE_DISCOVERY_TOOLS
+assert set(_BLOB_DISCOVERY_TOOLS) == _BLOB_DISCOVERY_TOOL_NAMES, (
+    "_BLOB_DISCOVERY_TOOLS keys diverge from _BLOB_DISCOVERY_TOOL_NAMES: "
+    f"+{set(_BLOB_DISCOVERY_TOOLS) - _BLOB_DISCOVERY_TOOL_NAMES} "
+    f"-{_BLOB_DISCOVERY_TOOL_NAMES - set(_BLOB_DISCOVERY_TOOLS)}"
+)
+assert set(_BLOB_MUTATION_TOOLS) == _BLOB_MUTATION_TOOL_NAMES, (
+    "_BLOB_MUTATION_TOOLS keys diverge from _BLOB_MUTATION_TOOL_NAMES: "
+    f"+{set(_BLOB_MUTATION_TOOLS) - _BLOB_MUTATION_TOOL_NAMES} "
+    f"-{_BLOB_MUTATION_TOOL_NAMES - set(_BLOB_MUTATION_TOOLS)}"
+)
+assert set(_SECRET_DISCOVERY_TOOLS) == _SECRET_DISCOVERY_TOOL_NAMES, (
+    "_SECRET_DISCOVERY_TOOLS keys diverge from _SECRET_DISCOVERY_TOOL_NAMES: "
+    f"+{set(_SECRET_DISCOVERY_TOOLS) - _SECRET_DISCOVERY_TOOL_NAMES} "
+    f"-{_SECRET_DISCOVERY_TOOL_NAMES - set(_SECRET_DISCOVERY_TOOLS)}"
+)
+assert set(_SECRET_MUTATION_TOOLS) == _SECRET_MUTATION_TOOL_NAMES, (
+    "_SECRET_MUTATION_TOOLS keys diverge from _SECRET_MUTATION_TOOL_NAMES: "
+    f"+{set(_SECRET_MUTATION_TOOLS) - _SECRET_MUTATION_TOOL_NAMES} "
+    f"-{_SECRET_MUTATION_TOOL_NAMES - set(_SECRET_MUTATION_TOOLS)}"
+)
+assert set(_SESSION_AWARE_TOOL_HANDLERS) == _SESSION_AWARE_TOOL_NAMES, (
+    "_SESSION_AWARE_TOOL_HANDLERS keys diverge from _SESSION_AWARE_TOOL_NAMES: "
+    f"+{set(_SESSION_AWARE_TOOL_HANDLERS) - _SESSION_AWARE_TOOL_NAMES} "
+    f"-{_SESSION_AWARE_TOOL_NAMES - set(_SESSION_AWARE_TOOL_HANDLERS)}"
+)
+assert set(_DISCOVERY_TOOLS) >= _CACHEABLE_DISCOVERY_TOOL_NAMES, (
+    f"Cacheable tools not in discovery registry: {_CACHEABLE_DISCOVERY_TOOL_NAMES - set(_DISCOVERY_TOOLS)}"
+)
 
 
 def _inject_prior_validation(
@@ -1247,6 +1260,13 @@ def _inject_prior_validation(
     if result.success and result.prior_validation is None:
         return replace(result, prior_validation=prior)
     return result
+
+
+# Tools that must scope their context with the live ValidationSummary so
+# they can produce a delta against the caller's pre-mutation state. Every
+# tool in the union of the three mutation registries; aliased here for the
+# ``_inject_prior_validation`` wrap step in ``execute_tool``.
+_ALL_MUTATION_TOOL_NAMES: Final[frozenset[str]] = _MUTATION_TOOL_NAMES | _BLOB_MUTATION_TOOL_NAMES | _SECRET_MUTATION_TOOL_NAMES
 
 
 def execute_tool(
@@ -1267,9 +1287,21 @@ def execute_tool(
 ) -> ToolResult:
     """Execute a composition tool by name.
 
-    Dispatches via registry dict. Discovery tools return data without
-    modifying state. Mutation tools return ToolResult with updated state
-    and validation. Unknown tool names return a failure result.
+    Dispatches via a single registry lookup against the union of all six
+    sync registries (``_DISCOVERY_TOOLS``, ``_MUTATION_TOOLS``,
+    ``_BLOB_DISCOVERY_TOOLS``, ``_BLOB_MUTATION_TOOLS``,
+    ``_SECRET_DISCOVERY_TOOLS``, ``_SECRET_MUTATION_TOOLS``). Every handler
+    accepts the uniform ``(arguments, state, context)`` signature; the
+    per-tool extended kwargs (``runtime_preflight`` for preview,
+    ``baseline`` for diff, ``session_engine`` / ``user_message_id`` for
+    blob tools, ``secret_service`` for secret tools) are threaded through
+    the ``ToolContext`` constructed below from the caller's kwargs.
+
+    Mutation tools are wrapped by ``_inject_prior_validation`` so the
+    returned ToolResult carries the pre-mutation ValidationSummary on
+    ``prior_validation`` (used by the compose loop to compute a delta
+    against the post-mutation validation without re-running
+    ``state.validate()``).
 
     Args:
         data_dir: Base data directory for S2 path allowlist enforcement.
@@ -1291,105 +1323,49 @@ def execute_tool(
             compose loop and injected here as a cheap synchronous callback
             so execute_tool() stays synchronous.
         max_blob_storage_per_session_bytes: Configured per-session blob
-            storage quota for assistant-created session artifacts. Defaults to
-            the historical BlobServiceImpl-compatible value for direct tests
-            and non-web callers.
+            storage quota for assistant-created session artifacts. Defaults
+            to ``None`` so the blob plane can fall back to its historical
+            BlobServiceImpl-compatible value for direct tests and non-web
+            callers.
+        user_message_id: Provenance pointer for blob writes that record
+            ``created_from_message_id``.
     """
-    # preview_pipeline has an extended signature with runtime_preflight kwarg
-    # plus session context (session_engine, session_id) so the proof step
-    # can inspect blob-backed sources.
-    if tool_name == "preview_pipeline":
-        return _execute_preview_pipeline(
-            arguments,
-            state,
-            catalog,
-            data_dir,
-            runtime_preflight=runtime_preflight,
-            session_engine=session_engine,
-            session_id=session_id,
-        )
+    all_handlers: dict[str, ToolHandler] = {
+        **_DISCOVERY_TOOLS,
+        **_MUTATION_TOOLS,
+        **_BLOB_DISCOVERY_TOOLS,
+        **_BLOB_MUTATION_TOOLS,
+        **_SECRET_DISCOVERY_TOOLS,
+        **_SECRET_MUTATION_TOOLS,
+    }
+    handler = all_handlers.get(tool_name)
+    if handler is None:
+        return _failure_result(state, f"Unknown tool: {tool_name}")
 
-    # diff_pipeline has an extended signature with baseline kwarg
-    if tool_name == "diff_pipeline":
-        return _execute_diff_pipeline(
-            arguments,
-            state,
-            catalog,
-            data_dir,
-            baseline=baseline,
-            current_validation=prior_validation,
-        )
+    # ``current_validation`` carries the live state's ValidationSummary
+    # into ``diff_pipeline`` so its delta against the baseline is computed
+    # using the caller's pre-mutation validation rather than re-running
+    # ``state.validate()`` inside the handler. For every other handler,
+    # the field is unused.
+    context = ToolContext(
+        catalog=catalog,
+        data_dir=data_dir,
+        session_engine=session_engine,
+        session_id=session_id,
+        secret_service=secret_service,
+        user_id=user_id,
+        baseline=baseline,
+        current_validation=prior_validation,
+        runtime_preflight=runtime_preflight,
+        max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
+        user_message_id=user_message_id,
+    )
 
-    # set_pipeline has the standard mutation shape for ordinary sources, but
-    # can also own source.inline_blob, which requires session context to create
-    # the backing blob before returning the new state.
-    if tool_name == "set_pipeline":
+    if tool_name in _ALL_MUTATION_TOOL_NAMES:
         prior = prior_validation if prior_validation is not None else state.validate()
-        result = _execute_set_pipeline(
-            arguments,
-            state,
-            catalog,
-            data_dir,
-            session_engine=session_engine,
-            session_id=session_id,
-            user_message_id=user_message_id,
-            max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
-        )
+        result = handler(arguments, state, context)
         return _inject_prior_validation(result, prior)
-
-    # Check standard tools first
-    discovery_handler = _DISCOVERY_TOOLS.get(tool_name)
-    if discovery_handler is not None:
-        return discovery_handler(arguments, state, catalog, data_dir)
-
-    mutation_handler = _MUTATION_TOOLS.get(tool_name)
-    if mutation_handler is not None:
-        prior = prior_validation if prior_validation is not None else state.validate()
-        result = mutation_handler(arguments, state, catalog, data_dir)
-        return _inject_prior_validation(result, prior)
-
-    # Check blob tools (extended signature with session context)
-    blob_discovery = _BLOB_DISCOVERY_TOOLS.get(tool_name)
-    if blob_discovery is not None:
-        return blob_discovery(arguments, state, catalog, data_dir, session_engine=session_engine, session_id=session_id)
-
-    blob_mutation = _BLOB_MUTATION_TOOLS.get(tool_name)
-    if blob_mutation is not None:
-        prior = prior_validation if prior_validation is not None else state.validate()
-        blob_kwargs: dict[str, Any] = {
-            "session_engine": session_engine,
-            "session_id": session_id,
-        }
-        if tool_name in _BLOB_QUOTA_MUTATION_TOOLS:
-            blob_kwargs["max_blob_storage_per_session_bytes"] = max_blob_storage_per_session_bytes
-        # ``create_blob`` writes the blob row with a
-        # ``created_from_message_id`` provenance pointer. Only tools that
-        # actually persist a new blob need the kwarg; ``set_source_from_blob``,
-        # ``delete_blob``, and ``update_blob`` operate on existing rows
-        # whose provenance is fixed at create time.
-        if tool_name in _BLOB_PROVENANCE_MUTATION_TOOLS:
-            blob_kwargs["user_message_id"] = user_message_id
-        result = blob_mutation(
-            arguments,
-            state,
-            catalog,
-            data_dir,
-            **blob_kwargs,
-        )
-        return _inject_prior_validation(result, prior)
-
-    # Check secret tools (extended signature with secret_service + user_id)
-    secret_discovery = _SECRET_DISCOVERY_TOOLS.get(tool_name)
-    if secret_discovery is not None:
-        return secret_discovery(arguments, state, catalog, data_dir, secret_service=secret_service, user_id=user_id)
-
-    secret_mutation = _SECRET_MUTATION_TOOLS.get(tool_name)
-    if secret_mutation is not None:
-        prior = prior_validation if prior_validation is not None else state.validate()
-        result = secret_mutation(arguments, state, catalog, data_dir, secret_service=secret_service, user_id=user_id)
-        return _inject_prior_validation(result, prior)
-
-    return _failure_result(state, f"Unknown tool: {tool_name}")
+    return handler(arguments, state, context)
 
 
 # Module-level assertions — F-18 dual-registry invariant enforcement.
@@ -1398,7 +1374,7 @@ def execute_tool(
 # handler into a sync registry, or registering one tool name in two registries)
 # fails the build before any compose() call could trigger silent
 # "coroutine was never awaited" warnings or first-registry-wins overrides.
-_all_tools_v2 = (
+_all_tools = (
     set(_DISCOVERY_TOOLS)
     | set(_MUTATION_TOOLS)
     | set(_BLOB_DISCOVERY_TOOLS)
@@ -1407,7 +1383,7 @@ _all_tools_v2 = (
     | set(_SECRET_MUTATION_TOOLS)
     | set(_SESSION_AWARE_TOOL_HANDLERS)
 )
-assert len(_all_tools_v2) == (
+assert len(_all_tools) == (
     len(_DISCOVERY_TOOLS)
     + len(_MUTATION_TOOLS)
     + len(_BLOB_DISCOVERY_TOOLS)

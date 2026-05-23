@@ -334,10 +334,11 @@ class TestPreviewPipelineSemanticContracts:
 
     def test_summary_includes_semantic_contracts(self) -> None:
         from elspeth.web.composer.tools import _execute_preview_pipeline
+        from elspeth.web.composer.tools._common import ToolContext
         from tests.unit.web.composer.test_semantic_validator import _wardline_state
 
         state = _wardline_state(text_separator=" ")
-        result = _execute_preview_pipeline({}, state, catalog=_mock_catalog())
+        result = _execute_preview_pipeline({}, state, ToolContext(catalog=_mock_catalog()))
         assert "semantic_contracts" in result.data
         assert len(result.data["semantic_contracts"]) == 1
         assert result.data["semantic_contracts"][0]["outcome"] == "conflict"
@@ -4018,12 +4019,16 @@ class TestUpdateBlobRollbackPreservesPrimaryException:
             patch.object(Path, "write_bytes", _tripwire_write_bytes),
             pytest.raises(RuntimeError, match=primary_message) as exc_info,
         ):
+            from elspeth.web.composer.tools._common import ToolContext as _UpdateBlobCtx
+
             _execute_update_blob(
                 {"blob_id": self.blob_id, "content": "x" * 100},
                 state,
-                catalog,
-                session_engine=self.engine,
-                session_id=self.session_id,
+                _UpdateBlobCtx(
+                    catalog=catalog,
+                    session_engine=self.engine,
+                    session_id=self.session_id,
+                ),
             )
 
         # Headline is the primary RuntimeError.
@@ -4066,12 +4071,16 @@ class TestUpdateBlobRollbackPreservesPrimaryException:
             patch("elspeth.web.composer.tools.blobs._check_blob_quota", side_effect=_raise_primary),
             pytest.raises(RuntimeError, match=primary_message) as exc_info,
         ):
+            from elspeth.web.composer.tools._common import ToolContext as _UpdateBlobCtx
+
             _execute_update_blob(
                 {"blob_id": self.blob_id, "content": "x" * 100},
                 state,
-                catalog,
-                session_engine=self.engine,
-                session_id=self.session_id,
+                _UpdateBlobCtx(
+                    catalog=catalog,
+                    session_engine=self.engine,
+                    session_id=self.session_id,
+                ),
             )
 
         assert self.storage_path.read_bytes() == self.original_content

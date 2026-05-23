@@ -32,6 +32,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
+    ToolContext,
     ToolResult,
     _apply_merge_patch,
     _attach_post_call_hints,
@@ -57,24 +58,22 @@ from elspeth.web.sessions.models import blobs_table
 def _handle_list_sources(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, catalog.list_sources())
+    return _discovery_result(state, context.catalog.list_sources())
 
 
 def _handle_set_source(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    result = _execute_set_source(arguments, state, catalog, data_dir)
+    result = _execute_set_source(arguments, state, context)
     if result.updated_state.source is None:
         return result
     return _attach_post_call_hints(
         result,
-        catalog,
+        context.catalog,
         plugin_type="source",
         tool_name="set_source",
         plugin_name=result.updated_state.source.plugin,
@@ -214,8 +213,7 @@ def _reject_manual_source_blob_ref(
 def _execute_set_source(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Set or replace the pipeline source.
 
@@ -245,7 +243,7 @@ def _execute_set_source(
     options = validated.options
 
     # Validate plugin exists in catalog
-    plugin_error = _validate_plugin_name(catalog, "source", plugin)
+    plugin_error = _validate_plugin_name(context.catalog, "source", plugin)
     if plugin_error is not None:
         return _failure_result(state, plugin_error)
 
@@ -268,7 +266,7 @@ def _execute_set_source(
         return credential_error
 
     # S2: Validate source path allowlist
-    path_error = _validate_source_path(options, data_dir)
+    path_error = _validate_source_path(options, context.data_dir)
     if path_error is not None:
         return _failure_result(state, path_error)
 
@@ -290,11 +288,7 @@ def _execute_set_source(
 def _execute_set_source_from_blob(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Bind the pipeline source to an existing blob.
 
@@ -338,9 +332,9 @@ def _execute_set_source_from_blob(
         caller_options=validated.options,
         on_validation_failure=on_vf,
         state=state,
-        catalog=catalog,
-        session_engine=session_engine,
-        session_id=session_id,
+        catalog=context.catalog,
+        session_engine=context.session_engine,
+        session_id=context.session_id,
     )
     if isinstance(resolved, ToolResult):
         return resolved
@@ -421,11 +415,7 @@ def _header_only_inline_csv_conflict(
 def _execute_inspect_source(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Inspect a blob-backed source and return bounded structural facts.
 
@@ -437,11 +427,11 @@ def _execute_inspect_source(
     Never returns raw row content — only summary facts (headers, inferred
     types, URL candidates, warnings, redacted identity).
     """
-    if session_engine is None or session_id is None:
+    if context.session_engine is None or context.session_id is None:
         return _failure_result(state, "Blob tools require session context.")
 
     blob_id = arguments["blob_id"]
-    blob = _sync_get_blob(session_engine, blob_id, session_id)
+    blob = _sync_get_blob(context.session_engine, blob_id, context.session_id)
     if blob is None:
         return _failure_result(state, f"Blob '{blob_id}' not found.")
 
@@ -487,7 +477,7 @@ def _execute_inspect_source(
 def _execute_patch_source_options(
     args: dict[str, Any],
     state: CompositionState,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Apply a merge-patch to the current source options.
 
@@ -545,7 +535,7 @@ def _execute_patch_source_options(
         return credential_error
 
     # S2: Validate patched source paths against allowlist
-    path_error = _validate_source_path(new_options, data_dir)
+    path_error = _validate_source_path(new_options, context.data_dir)
     if path_error is not None:
         return _failure_result(state, path_error)
 
@@ -558,12 +548,7 @@ def _execute_patch_source_options(
     if prevalidation_error is not None:
         return _failure_result(state, prevalidation_error)
 
-    new_source = SourceSpec(
-        plugin=state.source.plugin,
-        options=new_options,
-        on_success=state.source.on_success,
-        on_validation_failure=state.source.on_validation_failure,
-    )
+    new_source = replace(state.source, options=new_options)
     new_state = state.with_source(new_source)
     return _mutation_result(new_state, ("source",))
 
@@ -571,15 +556,14 @@ def _execute_patch_source_options(
 def _handle_patch_source_options(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    result = _execute_patch_source_options(arguments, state, data_dir)
+    result = _execute_patch_source_options(arguments, state, context)
     if result.updated_state.source is None:
         return result
     return _attach_post_call_hints(
         result,
-        catalog,
+        context.catalog,
         plugin_type="source",
         tool_name="patch_source_options",
         plugin_name=result.updated_state.source.plugin,
@@ -590,8 +574,10 @@ def _handle_patch_source_options(
 def _execute_clear_source(
     args: dict[str, Any],
     state: CompositionState,
+    context: ToolContext,
 ) -> ToolResult:
     """Remove the pipeline source."""
+    del context  # unused; signature uniformity with the other handlers.
     if state.source is None:
         return _failure_result(state, "No source configured to clear.")
     new_state = state.without_source()
@@ -601,7 +587,6 @@ def _execute_clear_source(
 def _handle_clear_source(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _execute_clear_source(arguments, state)
+    return _execute_clear_source(arguments, state, context)

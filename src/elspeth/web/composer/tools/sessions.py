@@ -10,11 +10,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import Engine
 
 from elspeth.contracts.composer_interpretation import InterpretationEventRecord, InterpretationSource
 from elspeth.contracts.enums import CreationModality
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     SetPipelineArgumentsModel,
@@ -36,6 +34,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
+    ToolContext,
     ToolResult,
     _credential_wiring_contract_failure,
     _discovery_result,
@@ -126,13 +125,7 @@ class _RequestInterpretationReviewArgumentsModel(BaseModel):
 def _execute_set_pipeline(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    *,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
-    user_message_id: str | None = None,
-    max_blob_storage_per_session_bytes: int | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Atomically replace the entire pipeline composition state.
 
@@ -166,6 +159,13 @@ def _execute_set_pipeline(
     (type vs semantic) — same pattern as
     :class:`SetSourceArgumentsModel` plugin-not-in-catalog handling.
     """
+    catalog = context.catalog
+    data_dir = context.data_dir
+    session_engine = context.session_engine
+    session_id = context.session_id
+    user_message_id = context.user_message_id
+    max_blob_storage_per_session_bytes = context.max_blob_storage_per_session_bytes
+
     try:
         validated = SetPipelineArgumentsModel.model_validate(args)
     except PydanticValidationError as exc:
@@ -523,10 +523,9 @@ def _execute_set_pipeline(
 def _handle_set_pipeline(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _execute_set_pipeline(arguments, state, catalog, data_dir)
+    return _execute_set_pipeline(arguments, state, context)
 
 
 def _is_full_state_component_alias(component: Any) -> bool:
@@ -554,8 +553,7 @@ def _serialize_full_pipeline_state(state: CompositionState, *, requested_compone
 def _execute_get_pipeline_state(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Return full pipeline state including all options.
 
@@ -563,6 +561,7 @@ def _execute_get_pipeline_state(
     Otherwise returns the full state: source, all nodes with options, all
     outputs with options, edges, and metadata.
     """
+    del context  # unused; signature uniformity with the other handlers.
     component = args.get("component")
 
     if component == "source":
@@ -975,12 +974,7 @@ _SESSION_AWARE_TOOL_HANDLERS: dict[str, SessionAwareToolHandler] = {
     "request_interpretation_review": _handle_request_interpretation_review,
 }
 
-
-def is_session_aware_tool(name: str) -> bool:
-    """Return True if the tool requires async dispatch with session context.
-
-    Session-aware tools are intercepted in the compose loop BEFORE
-    ``execute_tool`` is called — they cannot be dispatched through the
-    synchronous worker because they await session-service methods.
-    """
-    return name in _SESSION_AWARE_TOOL_HANDLERS
+# The ``is_session_aware_tool`` predicate lives in
+# ``elspeth.web.composer.tools.discovery`` alongside the other classification
+# predicates so the tool-name vocabulary has one source of truth. Import it
+# from there.

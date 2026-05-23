@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.state import (
     CompositionState,
 )
 from elspeth.web.composer.tools._common import (
+    ToolContext,
     ToolResult,
     _discovery_result,
 )
@@ -17,7 +17,6 @@ from elspeth.web.composer.tools._common import (
 def _handle_list_sinks(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, catalog.list_sinks())
+    return _discovery_result(state, context.catalog.list_sinks())

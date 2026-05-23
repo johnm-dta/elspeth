@@ -29,6 +29,7 @@ from typing import Any, Final, TypedDict
 
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy import Engine
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.core.config import TriggerConfig
@@ -1178,10 +1179,69 @@ def _prevalidate_sink(plugin_name: str, options: dict[str, Any]) -> str | None:
 # Type aliases shared by ``_dispatch`` and ``generation`` (and any plane that
 # needs to talk about runtime-preflight callables or generic tool handlers).
 
+RuntimePreflight = Callable[[CompositionState], ValidationResult]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolContext:
+    """Immutable per-call context threaded through every ``execute_tool``
+    dispatch.
+
+    Collapsing the previously-divergent kwarg surfaces of the six sync tool
+    registries (and the three hardcoded ``if tool_name == ...`` branches for
+    ``preview_pipeline`` / ``diff_pipeline`` / ``set_pipeline``) into a
+    single frozen dataclass means every handler takes the same shape:
+    ``(arguments, state, context) -> ToolResult``. The previous per-registry
+    kwarg gymnastics (``BlobToolHandler`` vs ``SecretToolHandler`` vs the
+    plain ``ToolHandler``) is reduced to "the handler reads what it needs
+    off ``context``".
+
+    Fields:
+        catalog: The catalog service the tool consults for plugin metadata.
+        data_dir: Base data directory enforced for S2 path allowlist checks
+            on source/sink options. ``None`` when the caller is not a web
+            request (legacy direct tests).
+        session_engine: SQLAlchemy engine for the session database. Required
+            for blob tools to perform synchronous lookups; ``None`` for
+            non-session callers.
+        session_id: Current session ID. Required for blob tools.
+        secret_service: ``WebSecretService`` instance. Required for secret
+            tools. Typed ``Any`` because the public ``Protocol`` is wired in
+            elsewhere in the package and a typed reference here would create
+            a layer-import cycle. See ticket elspeth-40a47d57e6 B3.
+        user_id: Current user ID. Required for secret tools.
+        baseline: Baseline state for ``diff_pipeline`` comparisons.
+        current_validation: Pre-computed validation of the live state, used
+            by ``diff_pipeline`` so its delta is computed against the same
+            ValidationSummary the caller is already holding.
+        runtime_preflight: Optional callback for runtime-equivalent
+            preflight, applied only to ``preview_pipeline``. Pre-computed in
+            the async compose loop and injected here as a cheap synchronous
+            callback so ``execute_tool`` stays synchronous.
+        max_blob_storage_per_session_bytes: Configured per-session blob
+            storage quota for assistant-created session artifacts. Defaults
+            to ``None`` (no override) so the blob plane can fall back to its
+            historical BlobServiceImpl-compatible value for direct tests
+            and non-web callers.
+        user_message_id: Provenance pointer for blob writes that record
+            ``created_from_message_id``. Only handlers that actually persist
+            a new blob row read it.
+    """
+
+    catalog: CatalogService
+    data_dir: str | None = None
+    session_engine: Engine | None = None
+    session_id: str | None = None
+    secret_service: Any = None
+    user_id: str | None = None
+    baseline: CompositionState | None = None
+    current_validation: ValidationSummary | None = None
+    runtime_preflight: RuntimePreflight | None = None
+    max_blob_storage_per_session_bytes: int | None = None
+    user_message_id: str | None = None
+
+
 ToolHandler = Callable[
-    [dict[str, Any], CompositionState, CatalogService, str | None],
+    [dict[str, Any], CompositionState, ToolContext],
     ToolResult,
 ]
-
-
-RuntimePreflight = Callable[[CompositionState], ValidationResult]

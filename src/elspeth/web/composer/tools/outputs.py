@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict
 from pydantic import ValidationError as PydanticValidationError
 
-from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     PatchOutputOptionsArgumentsModel,
@@ -17,6 +17,7 @@ from elspeth.web.composer.state import (
     OutputSpec,
 )
 from elspeth.web.composer.tools._common import (
+    ToolContext,
     ToolResult,
     _apply_merge_patch,
     _attach_post_call_hints,
@@ -49,32 +50,29 @@ class _RemoveOutputArgumentsModel(BaseModel):
 def _handle_set_output(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _execute_set_output(arguments, state, catalog, data_dir)
+    return _execute_set_output(arguments, state, context)
 
 
 def _handle_remove_output(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    return _execute_remove_output(arguments, state)
+    return _execute_remove_output(arguments, state, context)
 
 
 def _execute_set_output(
     args: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Add or replace a pipeline output (sink)."""
     validated = cast(_SetOutputArgumentsModel, _validate_mutation_arguments(_SetOutputArgumentsModel, args, "set_output arguments"))
     plugin = validated.plugin
     # Validate plugin exists in catalog
-    plugin_error = _validate_plugin_name(catalog, "sink", plugin)
+    plugin_error = _validate_plugin_name(context.catalog, "sink", plugin)
     if plugin_error is not None:
         return _failure_result(state, plugin_error)
 
@@ -88,7 +86,7 @@ def _execute_set_output(
     )
     if credential_error is not None:
         return credential_error
-    path_error = _validate_sink_path(sink_options, data_dir)
+    path_error = _validate_sink_path(sink_options, context.data_dir)
     if path_error is not None:
         return _failure_result(state, path_error)
 
@@ -98,7 +96,7 @@ def _execute_set_output(
     collision_error = validate_composer_file_sink_collision_policy(
         plugin,
         sink_options,
-        require_explicit=data_dir is not None,
+        require_explicit=context.data_dir is not None,
     )
     if collision_error is not None:
         return _failure_result(state, collision_error)
@@ -116,8 +114,10 @@ def _execute_set_output(
 def _execute_remove_output(
     args: dict[str, Any],
     state: CompositionState,
+    context: ToolContext,
 ) -> ToolResult:
     """Remove a pipeline output (sink) by name."""
+    del context  # unused; signature uniformity with the other handlers.
     validated = cast(
         _RemoveOutputArgumentsModel, _validate_mutation_arguments(_RemoveOutputArgumentsModel, args, "remove_output arguments")
     )
@@ -131,7 +131,7 @@ def _execute_remove_output(
 def _execute_patch_output_options(
     args: dict[str, Any],
     state: CompositionState,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
     """Apply a merge-patch to an output's plugin options.
 
@@ -169,7 +169,7 @@ def _execute_patch_output_options(
         return credential_error
 
     # S2: Validate patched sink paths against allowlist
-    path_error = _validate_sink_path(new_options, data_dir)
+    path_error = _validate_sink_path(new_options, context.data_dir)
     if path_error is not None:
         return _failure_result(state, path_error)
 
@@ -179,17 +179,12 @@ def _execute_patch_output_options(
     collision_error = validate_composer_file_sink_collision_policy(
         current.plugin,
         new_options,
-        require_explicit=data_dir is not None,
+        require_explicit=context.data_dir is not None,
     )
     if collision_error is not None:
         return _failure_result(state, collision_error)
 
-    new_output = OutputSpec(
-        name=current.name,
-        plugin=current.plugin,
-        options=new_options,
-        on_write_failure=current.on_write_failure,
-    )
+    new_output = replace(current, options=new_options)
     new_state = state.with_output(new_output)
     return _mutation_result(new_state, (sink_name,))
 
@@ -197,23 +192,29 @@ def _execute_patch_output_options(
 def _handle_patch_output_options(
     arguments: dict[str, Any],
     state: CompositionState,
-    catalog: CatalogService,
-    data_dir: str | None = None,
+    context: ToolContext,
 ) -> ToolResult:
-    result = _execute_patch_output_options(arguments, state, data_dir)
+    # _execute_patch_output_options validates arguments via the Pydantic model
+    # and re-raises as ToolArgumentError; PydanticValidationError cannot
+    # escape into this caller. Re-validation on the success branch is
+    # deterministic by the same model.
+    result = _execute_patch_output_options(arguments, state, context)
     if not result.success:
         return result
-    try:
-        validated = PatchOutputOptionsArgumentsModel.model_validate(arguments)
-    except PydanticValidationError:
-        return result
+    validated = PatchOutputOptionsArgumentsModel.model_validate(arguments)
     sink_name = validated.sink_name
     output = next((o for o in result.updated_state.outputs if o.name == sink_name), None)
-    if output is None:
-        return result
+    # Offensive programming: _execute_patch_output_options succeeded above, so
+    # the output it just upserted MUST be on the post-mutation state. Absence
+    # here would be a bug in _execute_patch_output_options' state-update path
+    # (or in CompositionState.with_output), not a recoverable runtime branch.
+    assert output is not None, (
+        f"_execute_patch_output_options succeeded for output '{sink_name}' but "
+        "the post-mutation state does not contain it — invariant violation."
+    )
     return _attach_post_call_hints(
         result,
-        catalog,
+        context.catalog,
         plugin_type="sink",
         tool_name="patch_output_options",
         plugin_name=output.plugin,

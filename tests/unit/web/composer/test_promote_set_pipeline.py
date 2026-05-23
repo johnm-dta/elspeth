@@ -49,6 +49,7 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_set_pipeline
+from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -135,7 +136,7 @@ class TestPromoteSetPipelineArgErrorRouting:
     def test_empty_arguments_raise_tool_argument_error(self) -> None:
         """A bare ``{}`` is missing all four top-level required fields."""
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_set_pipeline({}, _empty_state(), _mock_catalog())
+            _execute_set_pipeline({}, _empty_state(), ToolContext(catalog=_mock_catalog()))
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_missing_source_plugin_raises_tool_argument_error(self) -> None:
@@ -143,7 +144,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         args = _minimal_valid_args()
         del args["source"]["plugin"]
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+            _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
         cause = exc_info.value.__cause__
         assert isinstance(cause, PydanticValidationError)
         # The structured path is preserved on __cause__ for audit, NOT
@@ -160,7 +161,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         args = _minimal_valid_args()
         args["filename"] = "stray.csv"
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+            _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_extra_field_on_source_raises_tool_argument_error(self) -> None:
@@ -171,7 +172,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         args = _minimal_valid_args()
         args["source"]["label"] = "Source A"
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+            _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_partial_inline_blob_raises_with_nested_path(self) -> None:
@@ -187,7 +188,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         args = _minimal_valid_args()
         args["source"]["inline_blob"] = {"filename": "data.csv"}  # missing mime_type + content
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+            _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
         cause = exc_info.value.__cause__
         assert isinstance(cause, PydanticValidationError)
         missing_locs = {err["loc"] for err in cause.errors() if err["type"] == "missing"}
@@ -206,7 +207,7 @@ class TestPromoteSetPipelineArgErrorRouting:
             "extra_field": "stray",
         }
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+            _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
     def test_node_missing_required_input_raises(self) -> None:
@@ -214,7 +215,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         args = _minimal_valid_args()
         args["nodes"] = [{"id": "t1", "node_type": "transform"}]  # missing input
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+            _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
         cause = exc_info.value.__cause__
         assert isinstance(cause, PydanticValidationError)
         assert any(err["loc"] == ("nodes", 0, "input") for err in cause.errors())
@@ -224,7 +225,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         args = _minimal_valid_args()
         args["edges"] = [{"id": "e1", "from_node": "a", "edge_type": "on_success"}]
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+            _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
         cause = exc_info.value.__cause__
         assert isinstance(cause, PydanticValidationError)
         assert any(err["loc"] == ("edges", 0, "to_node") for err in cause.errors())
@@ -234,7 +235,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         args = _minimal_valid_args()
         args["outputs"] = [{"sink_name": "main"}]
         with pytest.raises(ToolArgumentError) as exc_info:
-            _execute_set_pipeline(args, _empty_state(), _mock_catalog())
+            _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
         cause = exc_info.value.__cause__
         assert isinstance(cause, PydanticValidationError)
         assert any(err["loc"] == ("outputs", 0, "plugin") for err in cause.errors())
@@ -287,10 +288,12 @@ class TestPromoteSetPipelineArgErrorRouting:
         result = _execute_set_pipeline(
             args,
             _empty_state(),
-            catalog,
-            data_dir=str(tmp_path),
-            session_engine=engine,
-            session_id=session_id,
+            ToolContext(
+                catalog=catalog,
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+            ),
         )
         assert result.success is True
         assert result.updated_state.source is not None
@@ -341,10 +344,12 @@ class TestPromoteSetPipelineArgErrorRouting:
         result = _execute_set_pipeline(
             args,
             _empty_state(),
-            _mock_catalog(),
-            data_dir=str(tmp_path),
-            session_engine=engine,
-            session_id=session_id,
+            ToolContext(
+                catalog=_mock_catalog(),
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+            ),
         )
 
         assert result.success is True, result.data

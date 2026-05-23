@@ -3619,10 +3619,9 @@ class ComposerServiceImpl:
         """
         if session_id is None:
             return frozenset()
-        loaded = self._schemas_loaded_by_session.get(session_id)
-        if loaded is None:
+        if session_id not in self._schemas_loaded_by_session:
             return frozenset()
-        return frozenset(loaded)
+        return frozenset(self._schemas_loaded_by_session[session_id])
 
     def _mark_plugin_schema_loaded(
         self,
@@ -3638,8 +3637,9 @@ class ComposerServiceImpl:
         """
         if session_id is None:
             return
-        bucket = self._schemas_loaded_by_session.setdefault(session_id, set())
-        bucket.add((plugin_type, plugin_name))
+        if session_id not in self._schemas_loaded_by_session:
+            self._schemas_loaded_by_session[session_id] = set()
+        self._schemas_loaded_by_session[session_id].add((plugin_type, plugin_name))
 
     def _build_messages(
         self,

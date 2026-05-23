@@ -498,11 +498,19 @@ def _execute_list_models(
             "truncated": truncated,
         }
     else:
-        # Group by provider prefix to avoid token waste
+        # Group by provider prefix to avoid token waste. ``providers`` is our
+        # own freshly-constructed accumulator dict, not a Tier-3 boundary, so
+        # the offensive-programming rule rejects ``providers.get(prefix, 0)``
+        # as a defensive read on data we wrote. Initialize the slot
+        # explicitly before increment instead. (``Counter`` would also work
+        # but introduces an import-shift that cascades fingerprint rotations
+        # across this whole module — keep the diff local.)
         providers: dict[str, int] = {}
         for m in all_models:
             prefix = m.split("/", 1)[0] if "/" in m else ""
-            providers[prefix] = providers.get(prefix, 0) + 1
+            if prefix not in providers:
+                providers[prefix] = 0
+            providers[prefix] += 1
         data = {
             "providers": providers,
             "total_models": len(all_models),

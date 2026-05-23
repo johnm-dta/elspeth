@@ -7,7 +7,7 @@ with appropriate settings for each.
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, NewType, Self, cast
 from urllib.parse import quote
 
 from sqlalchemy import Connection, create_engine, event, text
@@ -18,6 +18,21 @@ from sqlalchemy.engine.url import make_url
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.journal import LandscapeJournal
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+
+# Tier-1 branded Engine type.
+#
+# ``Tier1Engine`` is a NewType wrapper around :class:`sqlalchemy.engine.Engine`
+# that carries a static guarantee: the engine was created through
+# :class:`LandscapeDB` and passed the PRAGMA integrity probe
+# (:meth:`LandscapeDB._verify_sqlite_pragmas`).  The wrapper has zero runtime
+# overhead (``NewType`` is erased at runtime); it is a type-checker signal only.
+#
+# Only :meth:`LandscapeDB.engine` may mint a ``Tier1Engine`` via ``cast()``.
+# Call sites that accept ``Tier1Engine`` (e.g.
+# :class:`~elspeth.core.landscape.scheduler_repository.TokenSchedulerRepository`)
+# are guaranteed to receive a probe-verified engine — any call site that tries
+# to pass a bare :class:`Engine` will be caught by mypy.
+Tier1Engine = NewType("Tier1Engine", Engine)
 
 # Canonical SQLite PRAGMA invariants for the Landscape audit DB.
 #
@@ -812,11 +827,23 @@ class LandscapeDB:
             )
 
     @property
-    def engine(self) -> Engine:
-        """Get the SQLAlchemy engine."""
+    def engine(self) -> "Tier1Engine":
+        """Return the SQLAlchemy engine, branded as Tier1Engine.
+
+        ``Tier1Engine`` is a :func:`typing.NewType` over
+        :class:`~sqlalchemy.engine.Engine` that carries the static guarantee
+        that the engine passed the PRAGMA integrity probe
+        (:meth:`_verify_sqlite_pragmas`).  The only place in the codebase that
+        may produce a ``Tier1Engine`` is this property — the ``cast()`` here
+        is the single gated mint point.
+
+        Raises:
+            RuntimeError: If the database is not initialized (i.e. after
+                :meth:`close` is called).
+        """
         if self._engine is None:
             raise RuntimeError("Database not initialized")
-        return self._engine
+        return cast("Tier1Engine", self._engine)
 
     def close(self) -> None:
         """Close database connection."""

@@ -12,7 +12,7 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Engine, and_, func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
@@ -20,6 +20,7 @@ from elspeth.contracts.errors import AuditIntegrityError, SchedulerLeaseLostErro
 from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.canonical import canonical_json
+from elspeth.core.landscape.database import Tier1Engine
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.schema import nodes_table, rows_table, token_work_items_table, tokens_table
 
@@ -29,7 +30,38 @@ class TokenSchedulerRepository:
 
     _SCRUBBED_ROW_PAYLOAD_JSON = canonical_json({"row_payload": "purged", "payload_hash": None})
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Tier1Engine) -> None:
+        # Runtime PRAGMA probe — defence in depth against a caller that slips
+        # past the type checker (e.g. a ``cast()`` in test code or a mypy
+        # suppression).  Tier-1 doctrine: the scheduler touches the audit DB;
+        # we must refuse to proceed if the engine's SQLite guarantees are unmet.
+        #
+        # The probe mirrors :meth:`LandscapeDB._verify_sqlite_pragmas`.  We
+        # check only ``foreign_keys`` and ``journal_mode`` here — they are the
+        # invariants most likely to be missing on a bare ``create_engine()``
+        # call that bypassed ``LandscapeDB._configure_sqlite``.  If either is
+        # wrong the scheduler would silently operate without referential
+        # integrity or without crash-safe journalling, which is unacceptable
+        # for the audit record.
+        with engine.connect() as conn:
+            fk_result = conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one_or_none()
+            jm_result = conn.exec_driver_sql("PRAGMA journal_mode").scalar_one_or_none()
+
+        foreign_keys = "" if fk_result is None else str(fk_result).lower()
+        journal_mode = "" if jm_result is None else str(jm_result).lower()
+
+        violations: list[str] = []
+        if foreign_keys != "1":
+            violations.append(f"PRAGMA foreign_keys: expected '1', observed {foreign_keys!r}")
+        if journal_mode not in ("wal", "memory"):
+            violations.append(f"PRAGMA journal_mode: expected 'wal' (or 'memory' for :memory: DBs), observed {journal_mode!r}")
+
+        if violations:
+            raise AuditIntegrityError(
+                "TokenSchedulerRepository received an engine that does not meet Tier-1 audit-integrity "
+                "requirements; the engine was not opened through LandscapeDB. " + "; ".join(violations)
+            )
+
         self._engine = engine
 
     def enqueue_ready(

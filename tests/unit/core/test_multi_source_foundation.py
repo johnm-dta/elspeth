@@ -14,6 +14,7 @@ from elspeth.contracts import NodeType, RoutingMode
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.config import SourceSettings, load_settings_from_yaml_string
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
+from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
 from elspeth.core.landscape.schema import (
     metadata,
     nodes_table,
@@ -1354,7 +1355,7 @@ def test_scheduler_claims_ready_work_and_recovers_expired_leases() -> None:
     from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -1443,7 +1444,7 @@ def test_scheduler_recover_expired_leases_skips_caller_owned_leases() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -1563,7 +1564,7 @@ def test_scheduler_recover_expired_leases_skips_pending_sink_row_with_fresh_leas
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -1656,7 +1657,7 @@ def test_scheduler_recover_expired_leases_reaps_null_owner_wedged_row() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -1703,7 +1704,7 @@ def test_scheduler_claimed_transition_rejects_stale_lease_owner_after_reclaim(tr
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -1777,7 +1778,7 @@ def test_scheduler_claim_ready_raises_when_selected_row_was_already_claimed() ->
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -1825,7 +1826,7 @@ def test_scheduler_claim_ready_two_workers_claim_distinct_items() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -1886,7 +1887,7 @@ def test_scheduler_claim_ready_tiebreaks_by_work_item_id_on_same_tick() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -1974,6 +1975,26 @@ def _apply_scheduler_transition(
     if transition == "failed":
         return repo.mark_failed(work_item_id=work_item_id, now=now, expected_lease_owner=expected_lease_owner)
     raise AssertionError(f"Unhandled scheduler transition {transition!r}")
+
+
+def _make_tier1_engine() -> Tier1Engine:
+    """Create a Tier-1-compliant in-memory SQLite engine for scheduler tests.
+
+    Mirrors :meth:`LandscapeDB.in_memory` but without creating schema or a
+    LandscapeDB instance — the engine is passed directly to
+    :class:`~elspeth.core.landscape.scheduler_repository.TokenSchedulerRepository`
+    in tests that need to control schema setup themselves.
+
+    ``LandscapeDB._configure_sqlite`` + ``LandscapeDB._verify_sqlite_pragmas``
+    guarantee the engine satisfies the Tier-1 PRAGMA invariants the scheduler
+    requires (``foreign_keys=ON``, ``journal_mode=wal/memory``).
+    """
+    from sqlalchemy import create_engine as _create_engine
+
+    engine = _create_engine("sqlite:///:memory:", echo=False)
+    LandscapeDB._configure_sqlite(engine)
+    LandscapeDB._verify_sqlite_pragmas(engine, "sqlite:///:memory:")
+    return Tier1Engine(engine)
 
 
 def _insert_scheduler_owner_records(
@@ -2067,7 +2088,7 @@ def test_scheduler_repository_rejects_token_from_other_run() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     _insert_scheduler_owner_records(engine, run_id="run-A", token_specs=(), node_ids=("normalize",))
     _insert_scheduler_owner_records(engine, run_id="run-B", token_specs=(("token-cross", "row-cross", 0),), node_ids=())
@@ -2092,7 +2113,7 @@ def test_scheduler_repository_rejects_node_from_other_run() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     _insert_scheduler_owner_records(engine, run_id="run-A", token_specs=(("token-1", "row-1", 0),), node_ids=())
     _insert_scheduler_owner_records(engine, run_id="run-B", token_specs=(), node_ids=("normalize",))
@@ -2117,7 +2138,7 @@ def test_scheduler_repository_rejects_ready_work_with_wrong_ingest_sequence() ->
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     _insert_scheduler_owner_records(engine, token_specs=(("token-1", "row-1", 7),), node_ids=("normalize",))
     repo = TokenSchedulerRepository(engine)
@@ -2141,7 +2162,7 @@ def test_scheduler_repository_rejects_checkpoint_block_with_wrong_ingest_sequenc
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     _insert_scheduler_owner_records(engine, token_specs=(("token-1", "row-1", 3),), node_ids=("coalesce_node",))
     repo = TokenSchedulerRepository(engine)
@@ -2168,7 +2189,7 @@ def test_scheduler_repository_allows_terminal_cursor_without_fake_node() -> None
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     _insert_scheduler_owner_records(engine, token_specs=(("token-terminal", "row-terminal", 0),), node_ids=())
     repo = TokenSchedulerRepository(engine)
@@ -2197,7 +2218,7 @@ def test_scheduler_repository_idempotently_accepts_duplicate_enqueue_with_identi
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     _insert_scheduler_owner_records(engine, token_specs=(("token-1", "row-1", 0),), node_ids=("normalize",))
     repo = TokenSchedulerRepository(engine)
@@ -2238,7 +2259,7 @@ def test_scheduler_repository_rejects_duplicate_enqueue_with_incompatible_cursor
     from elspeth.core.landscape.errors import LandscapeRecordError
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     _insert_scheduler_owner_records(engine, token_specs=(("token-1", "row-1", 0),), node_ids=("normalize",))
     repo = TokenSchedulerRepository(engine)
@@ -2282,7 +2303,7 @@ def test_scheduler_repository_rejects_duplicate_enqueue_with_incompatible_cursor
 def test_scheduler_transitions_raise_for_missing_work_item(transition: _SchedulerTransition) -> None:
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
     _enqueue_scheduler_test_item(repo, engine=engine, now=now)
@@ -2295,7 +2316,7 @@ def test_scheduler_transitions_raise_for_missing_work_item(transition: _Schedule
 def test_scheduler_transitions_raise_when_work_item_already_in_target_status(transition: _SchedulerTransition) -> None:
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
     item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
@@ -2312,7 +2333,7 @@ def test_scheduler_transitions_raise_when_work_item_already_in_target_status(tra
 def test_scheduler_transitions_raise_when_work_item_is_not_leased(transition: _SchedulerTransition) -> None:
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
     item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
@@ -2324,7 +2345,7 @@ def test_scheduler_transitions_raise_when_work_item_is_not_leased(transition: _S
 def test_scheduler_marks_failed_clears_lease_and_blocks_reclaim() -> None:
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
     item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
@@ -2351,7 +2372,7 @@ def test_scheduler_marks_failed_clears_lease_and_blocks_reclaim() -> None:
 def test_scheduler_marks_failed_from_ready() -> None:
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
     item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
@@ -2368,7 +2389,7 @@ def test_scheduler_requeues_waits_blocks_and_marks_terminal_with_leased_ownershi
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -2462,7 +2483,7 @@ def test_scheduler_barrier_completion_only_terminalizes_consumed_tokens() -> Non
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -2539,7 +2560,7 @@ def test_scheduler_mark_blocked_rejects_missing_release_keys() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -2814,7 +2835,7 @@ def test_scheduler_barrier_terminal_raises_when_live_tokens_missing_from_durable
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -2871,7 +2892,7 @@ def test_scheduler_barrier_terminal_raises_when_durable_blocked_token_set_is_dis
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -2929,7 +2950,7 @@ def test_scheduler_barrier_terminal_rejects_empty_live_token_set() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -2986,7 +3007,7 @@ def test_checkpoint_restore_rejects_existing_blocked_work_with_stale_resume_payl
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -3056,7 +3077,7 @@ def test_checkpoint_restore_rejects_existing_blocked_work_with_stale_resume_payl
 def test_scheduler_heartbeat_lease_extends_expires_at_for_held_lease() -> None:
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -3102,7 +3123,7 @@ def test_scheduler_heartbeat_lease_prevents_peer_reaper_from_reaping_alive_slow_
     """
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -3154,7 +3175,7 @@ def test_scheduler_heartbeat_lease_does_not_block_reaping_dead_worker() -> None:
     """
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -3200,7 +3221,7 @@ def test_scheduler_heartbeat_lease_raises_lease_lost_when_lease_was_reaped() -> 
     from elspeth.contracts.errors import SchedulerLeaseLostError
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -3243,7 +3264,7 @@ def test_scheduler_heartbeat_lease_raises_lease_lost_for_non_owner_caller() -> N
     from elspeth.contracts.errors import SchedulerLeaseLostError
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)
@@ -3274,7 +3295,7 @@ def test_scheduler_heartbeat_lease_composes_with_peer_active_leases() -> None:
     """
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
-    engine = create_engine("sqlite:///:memory:")
+    engine = _make_tier1_engine()
     metadata.create_all(engine)
     repo = TokenSchedulerRepository(engine)
     now = datetime.now(UTC)

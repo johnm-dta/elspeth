@@ -49,6 +49,7 @@ from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import yaml_generator
 from elspeth.web.composer._compose_loop_carriers import (
     _CallModelOutcome,
+    _TerminateOutcome,
 )
 from elspeth.web.composer._required_paths_validator import (
     _TOOL_REQUIRED_PATHS,
@@ -2000,6 +2001,143 @@ class ComposerServiceImpl:
             has_tool_calls=bool(assistant_message.tool_calls),
         )
 
+    async def _try_terminate_no_tools(
+        self,
+        *,
+        assistant_message: Any,
+        message: str,
+        llm_messages: list[dict[str, Any]],
+        state: CompositionState,
+        session_id: str | None,
+        initial_version: int,
+        user_id: str | None,
+        last_runtime_preflight: ValidationResult | None,
+        runtime_preflight_cache: _RuntimePreflightCache,
+        session_scope: str,
+        mutation_success_seen: bool,
+        recorder: BufferingRecorder,
+        progress: ComposerProgressSink | None,
+        repair_turns_used: int,
+        persisted_assistant_message_id: str | None,
+        persisted_tool_call_turn: bool,
+    ) -> _TerminateOutcome:
+        """Phase P2 of the compose loop — handle the no-tool-calls branch.
+
+        Called only when the assistant emitted no tool calls. Either:
+
+        * Appends a repair-prompt to ``llm_messages`` and returns a
+          ``_TerminateOutcome(action="continue", repair_turns_delta=1)``,
+          asking the driver to bump its repair counter and re-enter P1.
+        * Or finalizes the response via ``_finalize_no_tool_response`` and
+          returns ``_TerminateOutcome(action="return", result=...)``. The
+          ``result`` is already threaded with ``repair_turns_used``,
+          ``persisted_assistant_message_id`` and ``persisted_tool_call_turn``
+          so the driver only has to ``return outcome.result``.
+        """
+        if (
+            repair_turns_used < _MAX_REPAIR_TURNS
+            and _user_request_expects_pipeline_mutation(message)
+            and _state_is_structurally_empty(state)
+            and _last_failure_was_pre_state_interpretation_review(recorder.invocations)
+        ):
+            llm_messages.append(
+                {
+                    "role": "user",
+                    "content": _pre_state_interpretation_review_repair_message(
+                        next_turn=repair_turns_used + 1,
+                    ),
+                }
+            )
+            return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        if repair_turns_used < _MAX_REPAIR_TURNS:
+            missing_interpretation_sites = await self._missing_pending_interpretation_review_sites(
+                state,
+                session_id=session_id,
+            )
+            if missing_interpretation_sites:
+                llm_messages.append(
+                    {
+                        "role": "user",
+                        "content": _pending_interpretation_review_repair_message(
+                            missing_interpretation_sites,
+                            next_turn=repair_turns_used + 1,
+                        ),
+                    }
+                )
+                return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        if await self._attempt_empty_state_uploaded_blob_repair(
+            state=state,
+            llm_messages=llm_messages,
+            session_id=session_id,
+            repair_turns_used=repair_turns_used,
+        ):
+            return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        # Forced-repair gate: when the model claims completion but
+        # the proof step still has blocking diagnostics, inject a
+        # repair message and continue. Capped at _MAX_REPAIR_TURNS so
+        # the loop can never spin indefinitely. NEVER catches plugin
+        # exceptions — only repairs configurations.
+        #
+        # The gate fires whenever the proof step is applicable —
+        # i.e. there is a blob-backed source to inspect. The earlier
+        # ``state.version > initial_version`` guard skipped the gate
+        # on the first compose turn of a resumed session whose
+        # blob-backed source was bound on a prior turn (state already
+        # carries the source, no mutation this turn). That is exactly
+        # the cross-turn scenario the gate exists to catch (e.g.
+        # ``csv_fixed_schema_omits_observed_columns`` blockers
+        # surviving session resume). For chat-only turns where the
+        # source is absent or not blob-backed, ``_attempt_proof_repair``
+        # short-circuits cheaply via ``compute_proof_diagnostics``'s
+        # own early return.
+        if _proof_repair_is_applicable(state) and self._attempt_proof_repair(
+            state=state,
+            llm_messages=llm_messages,
+            session_id=session_id,
+            repair_turns_used=repair_turns_used,
+        ):
+            return _TerminateOutcome(action="continue", repair_turns_delta=1)
+
+        await _emit_progress(
+            progress,
+            ComposerProgressEvent(
+                phase="complete",
+                headline="The composer response is ready.",
+                evidence=("The model did not request any more pipeline tools.",),
+                likely_next="ELSPETH will save any accepted pipeline update.",
+                reason="composer_complete",
+            ),
+        )
+        result = await self._finalize_no_tool_response(
+            content=assistant_message.content or "",
+            state=state,
+            initial_version=initial_version,
+            user_id=user_id,
+            last_runtime_preflight=last_runtime_preflight,
+            runtime_preflight_cache=runtime_preflight_cache,
+            session_scope=session_scope,
+            user_message=message,
+            mutation_success_seen=mutation_success_seen,
+            tool_invocations=recorder.invocations,
+            llm_calls=recorder.llm_calls,
+        )
+        # Thread repair_turns_used through to the result so the
+        # route handler can persist it onto the new
+        # ``composition_states.composer_meta`` row (and the API state
+        # response can surface ``composer_meta.repair_turns_used``)
+        # — see web/sessions/routes.py::_state_data_from_composer_state
+        # call sites in the compose / recompose paths.
+        threaded = replace(
+            result,
+            repair_turns_used=repair_turns_used,
+            persisted_assistant_message_id=persisted_assistant_message_id,
+            persisted_tool_call_turn=persisted_tool_call_turn,
+        )
+        return _TerminateOutcome(action="return", result=threaded)
+
     async def _compose_loop(
         self,
         message: str,
@@ -2137,113 +2275,30 @@ class ComposerServiceImpl:
             assistant_tool_calls = call_model.assistant_tool_calls
 
             # If no tool calls, the LLM is done — apply the final gate and return
-            if not assistant_message.tool_calls:
-                if (
-                    repair_turns_used < _MAX_REPAIR_TURNS
-                    and _user_request_expects_pipeline_mutation(message)
-                    and _state_is_structurally_empty(state)
-                    and _last_failure_was_pre_state_interpretation_review(recorder.invocations)
-                ):
-                    llm_messages.append(
-                        {
-                            "role": "user",
-                            "content": _pre_state_interpretation_review_repair_message(
-                                next_turn=repair_turns_used + 1,
-                            ),
-                        }
-                    )
-                    repair_turns_used += 1
-                    continue
-
-                if repair_turns_used < _MAX_REPAIR_TURNS:
-                    missing_interpretation_sites = await self._missing_pending_interpretation_review_sites(
-                        state,
-                        session_id=session_id,
-                    )
-                    if missing_interpretation_sites:
-                        llm_messages.append(
-                            {
-                                "role": "user",
-                                "content": _pending_interpretation_review_repair_message(
-                                    missing_interpretation_sites,
-                                    next_turn=repair_turns_used + 1,
-                                ),
-                            }
-                        )
-                        repair_turns_used += 1
-                        continue
-
-                if await self._attempt_empty_state_uploaded_blob_repair(
-                    state=state,
+            if not call_model.has_tool_calls:
+                terminate = await self._try_terminate_no_tools(
+                    assistant_message=assistant_message,
+                    message=message,
                     llm_messages=llm_messages,
-                    session_id=session_id,
-                    repair_turns_used=repair_turns_used,
-                ):
-                    repair_turns_used += 1
-                    continue
-
-                # Forced-repair gate: when the model claims completion but
-                # the proof step still has blocking diagnostics, inject a
-                # repair message and continue. Capped at _MAX_REPAIR_TURNS so
-                # the loop can never spin indefinitely. NEVER catches plugin
-                # exceptions — only repairs configurations.
-                #
-                # The gate fires whenever the proof step is applicable —
-                # i.e. there is a blob-backed source to inspect. The earlier
-                # ``state.version > initial_version`` guard skipped the gate
-                # on the first compose turn of a resumed session whose
-                # blob-backed source was bound on a prior turn (state already
-                # carries the source, no mutation this turn). That is exactly
-                # the cross-turn scenario the gate exists to catch (e.g.
-                # ``csv_fixed_schema_omits_observed_columns`` blockers
-                # surviving session resume). For chat-only turns where the
-                # source is absent or not blob-backed, ``_attempt_proof_repair``
-                # short-circuits cheaply via ``compute_proof_diagnostics``'s
-                # own early return.
-                if _proof_repair_is_applicable(state) and self._attempt_proof_repair(
                     state=state,
-                    llm_messages=llm_messages,
                     session_id=session_id,
-                    repair_turns_used=repair_turns_used,
-                ):
-                    repair_turns_used += 1
-                    continue
-
-                await _emit_progress(
-                    progress,
-                    ComposerProgressEvent(
-                        phase="complete",
-                        headline="The composer response is ready.",
-                        evidence=("The model did not request any more pipeline tools.",),
-                        likely_next="ELSPETH will save any accepted pipeline update.",
-                        reason="composer_complete",
-                    ),
-                )
-                result = await self._finalize_no_tool_response(
-                    content=assistant_message.content or "",
-                    state=state,
                     initial_version=initial_version,
                     user_id=user_id,
                     last_runtime_preflight=last_runtime_preflight,
                     runtime_preflight_cache=runtime_preflight_cache,
                     session_scope=session_scope,
-                    user_message=message,
                     mutation_success_seen=mutation_success_seen,
-                    tool_invocations=recorder.invocations,
-                    llm_calls=recorder.llm_calls,
-                )
-                # Thread repair_turns_used through to the result so the
-                # route handler can persist it onto the new
-                # ``composition_states.composer_meta`` row (and the API state
-                # response can surface ``composer_meta.repair_turns_used``)
-                # — see web/sessions/routes.py::_state_data_from_composer_state
-                # call sites in the compose / recompose paths.
-                return replace(
-                    result,
+                    recorder=recorder,
+                    progress=progress,
                     repair_turns_used=repair_turns_used,
                     persisted_assistant_message_id=persisted_assistant_message_id,
                     persisted_tool_call_turn=persisted_tool_call_turn,
                 )
+                if terminate.action == "return":
+                    assert terminate.result is not None
+                    return terminate.result
+                repair_turns_used += terminate.repair_turns_delta
+                continue
 
             await _emit_progress(
                 progress,

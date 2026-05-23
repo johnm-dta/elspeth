@@ -3206,6 +3206,279 @@ class TestDurableSchedulerResumeDrain:
         assert status == "leased"
         assert lease_owner == "resume-worker"
 
+    def test_resume_drains_all_pending_sink_rows_in_single_call(self) -> None:
+        """Multiple pre-existing PENDING_SINK rows must all drain in a single resume call.
+
+        Regression for elspeth-5c5e88b071 (G3): the ``created_pending_sink_this_drain``
+        gate previously short-circuited the ``claim_pending_sink`` fallback after
+        the first pending-sink emission. When a prior crashed worker left N
+        sink-bound rows durable, only one was recovered per ``drain_scheduled_work``
+        call, leaving the rest stranded and tripping
+        ``OrchestrationInvariantError`` at run completion.
+        """
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        pending_token_ids: list[str] = []
+        for idx in range(3):
+            source_payload = make_row({"value": idx})
+            row = factory.data_flow.create_row(
+                run_id="test-run",
+                source_node_id="source-0",
+                row_index=idx,
+                source_row_index=idx,
+                ingest_sequence=idx,
+                data=source_payload.to_dict(),
+            )
+            token_id = f"token-pending-{idx}"
+            pending_token_ids.append(token_id)
+            token = factory.data_flow.create_token(row.row_id, token_id=token_id)
+            factory.scheduler.enqueue_ready(
+                run_id="test-run",
+                token_id=token.token_id,
+                row_id=row.row_id,
+                node_id=str(transform_node),
+                step_index=1,
+                ingest_sequence=idx,
+                row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+                available_at=datetime.now(UTC),
+            )
+
+        # Stage 1: simulate the crashed worker that drove the transform to
+        # success on every token. Each token ends in PENDING_SINK because
+        # sink durability never completed.
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        crashed_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="crashed-worker",
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        def crashed_executor(*, transform, token, ctx, attempt=0):
+            return (
+                TransformResult.success(
+                    make_row({**token.row_data.to_dict(), "resumed": True}),
+                    success_reason={"action": "crashed_worker_transform"},
+                ),
+                token,
+                None,
+            )
+
+        with patch.object(crashed_processor._transform_executor, "execute_transform", side_effect=crashed_executor):
+            crashed_processor.drain_scheduled_work(ctx)
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            statuses = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
+            )
+        assert sorted(statuses) == ["pending_sink"] * 3, (
+            f"Expected three PENDING_SINK rows after the crashed worker drained transform work; got {sorted(statuses)}."
+        )
+
+        # Stage 2: fresh resume worker. The bug: only one PENDING_SINK row
+        # emits a RowResult; the other two stay PENDING_SINK because the gate
+        # blocks the recovery branch after the first claim.
+        resume_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="resume-worker",
+        )
+        with patch.object(
+            resume_processor._transform_executor,
+            "execute_transform",
+            side_effect=AssertionError("transform replayed during pending-sink recovery"),
+        ):
+            results = resume_processor.drain_scheduled_work(ctx)
+
+        recovered_token_ids = sorted(result.token.token_id for result in results)
+        assert recovered_token_ids == sorted(pending_token_ids), (
+            f"All pre-existing PENDING_SINK rows must be re-emitted in a single drain call; got {recovered_token_ids}."
+        )
+
+        with db.connection() as conn:
+            statuses_after = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
+            )
+        # Every row is now LEASED by the resume worker awaiting the sink
+        # callback; none remain in PENDING_SINK status.
+        assert sorted(statuses_after) == ["leased"] * 3
+
+    def test_drain_emits_pending_sink_recovery_without_duplicating_fresh_work(self) -> None:
+        """Mixed pre-existing PENDING_SINK + new READY work must not double-emit.
+
+        Discriminating regression for elspeth-5c5e88b071 (G3): the naive fix —
+        deleting the gate and putting ``claim_pending_sink`` inside the main
+        loop — would re-claim PENDING_SINK rows that the current drain just
+        produced via ``mark_pending_sink`` and emit a duplicate RowResult via
+        ``_row_result_from_pending_sink`` for work already represented by the
+        original sink-bound RowResult. Pre-existing pending-sinks must be
+        drained up front; newly-marked pending-sinks must only be terminalized
+        by the sink callback, never re-claimed inside the same drain.
+        """
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        # Two pre-existing pending-sink rows from a prior crashed worker.
+        pre_existing_token_ids: list[str] = []
+        for idx in range(2):
+            source_payload = make_row({"value": idx})
+            row = factory.data_flow.create_row(
+                run_id="test-run",
+                source_node_id="source-0",
+                row_index=idx,
+                source_row_index=idx,
+                ingest_sequence=idx,
+                data=source_payload.to_dict(),
+            )
+            token_id = f"token-pre-{idx}"
+            pre_existing_token_ids.append(token_id)
+            token = factory.data_flow.create_token(row.row_id, token_id=token_id)
+            factory.scheduler.enqueue_ready(
+                run_id="test-run",
+                token_id=token.token_id,
+                row_id=row.row_id,
+                node_id=str(transform_node),
+                step_index=1,
+                ingest_sequence=idx,
+                row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+                available_at=datetime.now(UTC),
+            )
+
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        # Stage 1: crashed worker pushes the pre-existing rows to PENDING_SINK.
+        crashed_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="crashed-worker",
+        )
+
+        def crashed_executor(*, transform, token, ctx, attempt=0):
+            return (
+                TransformResult.success(
+                    make_row({**token.row_data.to_dict(), "resumed": True}),
+                    success_reason={"action": "crashed_worker_transform"},
+                ),
+                token,
+                None,
+            )
+
+        with patch.object(crashed_processor._transform_executor, "execute_transform", side_effect=crashed_executor):
+            crashed_processor.drain_scheduled_work(ctx)
+
+        # Stage 2: enqueue a brand new READY token that the resume worker
+        # will process to completion (ending in PENDING_SINK durably and
+        # emitting one sink-bound RowResult).
+        fresh_payload = make_row({"value": 99})
+        fresh_row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=99,
+            source_row_index=99,
+            ingest_sequence=99,
+            data=fresh_payload.to_dict(),
+        )
+        fresh_token_id = "token-fresh"
+        fresh_token = factory.data_flow.create_token(fresh_row.row_id, token_id=fresh_token_id)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=fresh_token.token_id,
+            row_id=fresh_row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=99,
+            row_payload_json=factory.scheduler.serialize_row_payload(fresh_payload),
+            available_at=datetime.now(UTC),
+        )
+
+        # Stage 3: resume worker drains everything in one call. Pre-existing
+        # rows recover via _row_result_from_pending_sink; the fresh row
+        # processes through the transform and emits the sink-bound RowResult
+        # directly. Neither path may emit the same token twice.
+        resume_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            first_transform_node_id=transform_node,
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="resume-worker",
+        )
+
+        def resume_executor(*, transform, token, ctx, attempt=0):
+            # Pre-existing tokens must NOT re-enter the transform (their
+            # transform work is durable from the crashed worker).
+            assert token.token_id == fresh_token_id, f"transform replayed for {token.token_id!r} during recovery drain"
+            return (
+                TransformResult.success(
+                    make_row({**token.row_data.to_dict(), "fresh_processed": True}),
+                    success_reason={"action": "resume_worker_transform"},
+                ),
+                token,
+                None,
+            )
+
+        with patch.object(resume_processor._transform_executor, "execute_transform", side_effect=resume_executor):
+            results = resume_processor.drain_scheduled_work(ctx)
+
+        emitted_token_ids = [result.token.token_id for result in results]
+        assert len(emitted_token_ids) == len(set(emitted_token_ids)), (
+            f"Duplicate RowResults emitted for the same token_id: {emitted_token_ids}. "
+            "claim_pending_sink must not re-claim rows produced by mark_pending_sink "
+            "within the same drain call."
+        )
+        assert sorted(emitted_token_ids) == sorted([*pre_existing_token_ids, fresh_token_id])
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            statuses_after = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
+            )
+        # All three rows now sit in non-terminal states awaiting the sink
+        # callback. The pre-existing two are LEASED (claim_pending_sink
+        # transition); the fresh one is PENDING_SINK (mark_pending_sink
+        # transition without a subsequent claim).
+        assert sorted(statuses_after) == ["leased", "leased", "pending_sink"]
+
     def test_drain_scheduler_transitions_use_injected_clock(self) -> None:
         """Durable scheduler state transitions must be deterministic under MockClock."""
         db, factory = _make_factory()

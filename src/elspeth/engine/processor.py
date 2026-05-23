@@ -2698,13 +2698,44 @@ class RowProcessor:
         pending_items: dict[str, WorkItem],
         recover_pending_sinks: bool,
     ) -> list[RowResult]:
-        """Claim and advance scheduler work until no READY work remains."""
+        """Claim and advance scheduler work until no READY work remains.
+
+        When ``recover_pending_sinks=True`` (the resume entry point), any
+        PENDING_SINK rows left durable by a prior crashed worker are drained
+        up front via ``claim_pending_sink`` BEFORE the main claim_ready loop
+        runs. This is the only path that re-claims PENDING_SINK rows inside
+        a drain.
+
+        PENDING_SINK rows produced by the main loop itself (via
+        ``mark_pending_sink`` after a transform success at sink handoff) are
+        NOT re-claimed by this drain — their RowResult is already in
+        ``results`` from the ``claim_ready`` path that produced them, and
+        their durable scheduler row is terminalized later by
+        ``mark_sink_bound_scheduler_terminal`` via the sink-write callback
+        (``_make_checkpoint_after_sink_factory`` in orchestrator/core.py).
+        Re-claiming them here would emit a duplicate
+        ``_row_result_from_pending_sink`` for the same token_id. See
+        filigree elspeth-5c5e88b071 (G3).
+
+        Note: if a prior worker's lease on a sink-bound row is still active
+        (not yet expired), ``claim_pending_sink`` won't find it (status is
+        LEASED, not PENDING_SINK) and ``recover_expired_leases`` won't touch
+        it (lease not yet expired). It will be stranded until the lease
+        ages out, at which point a subsequent ``drain_scheduled_work`` call
+        from a later resume attempt recovers it. That is correct behavior:
+        the prior worker may still be alive and finishing the sink write.
+        Forcing recovery here would race against an in-flight sink writer
+        and risk duplicate sink emission.
+        """
         if self._scheduler is None:
             raise OrchestrationInvariantError("Cannot claim scheduler work without a scheduler repository")
 
         results: list[RowResult] = []
+
+        if recover_pending_sinks:
+            self._drain_preexisting_pending_sinks(results)
+
         iterations = 0
-        created_pending_sink_this_drain = False
 
         while True:
             iterations += 1
@@ -2730,16 +2761,6 @@ class RowProcessor:
                         f"Scheduler has {len(pending_items)} in-memory continuations for run {self._run_id!r} "
                         "but no READY work item could be claimed"
                     )
-                if recover_pending_sinks and not created_pending_sink_this_drain:
-                    pending_sink = self._scheduler.claim_pending_sink(
-                        run_id=self._run_id,
-                        lease_owner=self._scheduler_lease_owner,
-                        lease_seconds=self._scheduler_lease_seconds,
-                        now=now,
-                    )
-                    if pending_sink is not None:
-                        results.append(self._row_result_from_pending_sink(pending_sink))
-                        continue
                 break
 
             if claimed.work_item_id in pending_items:
@@ -2813,7 +2834,6 @@ class RowProcessor:
                     now=self._clock.now_utc(),
                     expected_lease_owner=claimed_lease_owner,
                 )
-                created_pending_sink_this_drain = True
             else:
                 self._scheduler.mark_terminal(
                     work_item_id=claimed.work_item_id,
@@ -2822,6 +2842,56 @@ class RowProcessor:
                 )
 
         return results
+
+    def _drain_preexisting_pending_sinks(self, results: list[RowResult]) -> None:
+        """Re-emit PENDING_SINK rows left durable by a prior crashed worker.
+
+        Called once at the top of a recovery drain (``recover_pending_sinks=True``).
+        Each claim transitions a PENDING_SINK row to LEASED under this worker's
+        lease_owner and appends a reconstructed RowResult to ``results``;
+        terminalization happens later via the sink-write callback
+        (``mark_sink_bound_scheduler_terminal``).
+
+        ``recover_expired_leases`` is run on every iteration so that a prior
+        worker's expired sink-bound lease (recovered as PENDING_SINK by
+        scheduler_repository.recover_expired_leases) is picked up in the same
+        drain pass. Iteration is bounded by ``MAX_WORK_QUEUE_ITERATIONS``
+        because real fault-injected runs can produce hundreds of stranded
+        pending-sinks; the cap prevents an unbounded loop if some other code
+        path keeps recreating PENDING_SINK rows behind us.
+
+        Only the resume entry point (``drain_scheduled_work``) calls into this
+        path. Inside the main claim_ready loop, PENDING_SINK rows produced by
+        ``mark_pending_sink`` MUST NOT be re-claimed here — see
+        ``_drain_scheduler_claims`` docstring.
+        """
+        if self._scheduler is None:
+            raise OrchestrationInvariantError("Cannot drain pending sinks without a scheduler repository")
+
+        iterations = 0
+        while True:
+            iterations += 1
+            if iterations > MAX_WORK_QUEUE_ITERATIONS:
+                raise RuntimeError(
+                    f"Pending-sink recovery exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. "
+                    "Possible infinite loop in PENDING_SINK recovery."
+                )
+
+            now = self._clock.now_utc()
+            self._scheduler.recover_expired_leases(
+                run_id=self._run_id,
+                now=now,
+                caller_owner=self._scheduler_lease_owner,
+            )
+            pending_sink = self._scheduler.claim_pending_sink(
+                run_id=self._run_id,
+                lease_owner=self._scheduler_lease_owner,
+                lease_seconds=self._scheduler_lease_seconds,
+                now=now,
+            )
+            if pending_sink is None:
+                return
+            results.append(self._row_result_from_pending_sink(pending_sink))
 
     def mark_sink_bound_scheduler_terminal(self, token_id: str) -> None:
         """Terminalize scheduler work after sink outcome durability."""

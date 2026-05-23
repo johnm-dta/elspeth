@@ -26,13 +26,25 @@
 
 .bubble .markdown-body {
   line-height: inherit;
+  /* The bubble uses white-space: pre-wrap so plain-text content (e.g. user
+     messages, system notices) preserves authored newlines. Markdown-rendered
+     content already structures its breaks via block elements, and the
+     pre-wrap leak rendered the HTML whitespace between sibling <li>s as
+     visible blank lines — bullets sat ~2x line-height apart for no reason.
+     Reset to normal whitespace handling inside markdown blocks. */
+  white-space: normal;
 }
 
 .bubble .markdown-body p,
 .bubble .markdown-body ul,
 .bubble .markdown-body ol {
-  margin-top: 3px;
-  margin-bottom: 3px;
+  /* Traditional paragraph break: 12px is the chat-density compromise between
+     Slack's ~6-8px (feels cramped on prose) and GitHub's 16px (feels loose
+     in a chat panel). Adjacent block margins collapse to max(top, bottom)
+     = 12px, which sits clearly above the ~7px line-gap inside a paragraph
+     and reads as a genuine "new paragraph" break. */
+  margin-top: var(--space-md);
+  margin-bottom: var(--space-md);
 }
 
 .bubble-user {
@@ -627,7 +639,12 @@
 .message-bubble-content {
   max-width: 80%;
   font-size: var(--font-size-base);
-  line-height: var(--line-height-normal);
+  /* Was --line-height-normal (1.5). .message-bubble-content has the same
+     specificity as .bubble but appears later in source, so it overrides
+     the .bubble line-height. Aligning both to --line-height-snug (1.35)
+     gives the tighter chat-bubble leading the operator asked for and
+     prevents a silent two-class override conflict. */
+  line-height: var(--line-height-snug);
   word-break: break-word;
   position: relative;
 }

@@ -103,6 +103,17 @@
   margin-bottom: 2px;
 }
 
+/* Loose-list mitigation: CommonMark wraps list-item text in <p> when the
+   source has blank lines between items. Without this override the
+   .markdown-body p { margin: 4px 0 } rule above compounds with the
+   <li> margin, giving each bullet ~1× line-height of dead air. Strip the
+   inner-<p> margin so list items render tight regardless of whether the
+   LLM emits a loose or tight markdown list. Standard idiom — GitHub,
+   Slack, Discord all do the same. */
+.markdown-body li > p {
+  margin: 0;
+}
+
 .markdown-body table {
   border-collapse: collapse;
   margin: 8px 0;

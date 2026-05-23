@@ -490,9 +490,83 @@ class TestNestedScopeLeakRegression:
         # arguments.get(raw) which IS rooted at arguments (suppressed),
         # so the only R1 we expect is the outer call.
         outer_calls = [f for f in r1 if "raw.get" in (f.message or "")]
-        assert outer_calls, (
-            f"Expected R1 on outer ``raw.get('k')``; got R1 findings: "
-            f"{[(f.line, f.message[:80]) for f in r1]}"
+        assert outer_calls, f"Expected R1 on outer ``raw.get('k')``; got R1 findings: {[(f.line, f.message[:80]) for f in r1]}"
+
+
+# =============================================================================
+# Regression: C5-1 — class-body scope leak in walk_function_own_scope
+# =============================================================================
+#
+# Before the fix, ``walk_function_own_scope`` short-circuited only at
+# ``FunctionDef``, ``AsyncFunctionDef``, and ``Lambda`` boundaries. A
+# nested ``class`` definition inside a decorated function was descended
+# into — its class-body assignments (``raw = arguments["x"]``) were seen
+# as if they bound names in the outer function's scope. The outer
+# ``derived`` set grew to include the class-attribute name, and any
+# outer-scope ``raw.get(...)`` was then falsely treated as rooted at
+# ``arguments`` and suppressed.
+#
+# Python class bodies execute in a fresh namespace: assignments become
+# class attributes, NOT bindings in the enclosing function's locals. A
+# scope-respecting walker for the outer function's own scope must
+# short-circuit at ``ClassDef`` exactly as it does at ``FunctionDef``.
+#
+# The fix adds ``ast.ClassDef`` to the short-circuit tuple in
+# ``ast_walker._NESTED_SCOPE_TYPES``. Both ``walk_function_own_scope``
+# (used by tier_model's ``compute_derived_names``) and ``iter_own_scope``
+# (used by the scope and tests rules) consume the shared tuple, so the
+# fix lands in every analyzer that walks function bodies.
+# =============================================================================
+
+
+class TestClassBodyScopeLeakRegression:
+    """Pinning the C5-1 fix: class-body assignments must not taint outer names."""
+
+    def test_nested_class_assignment_does_not_leak_to_outer(self) -> None:
+        """Outer fn defines a nested class that assigns from ``arguments``;
+        the outer ``raw`` must NOT inherit that taint.
+
+        Before the fix: ``walk_function_own_scope`` descended into the
+        ``class Helper`` body, saw ``raw = arguments["x"]``, and added
+        ``raw`` to the outer function's ``derived`` set. The outer
+        ``raw.get("k")`` was then falsely treated as rooted at
+        ``arguments`` and the R1 finding was suppressed.
+
+        After the fix: the class body is never visited by the outer
+        walk, so ``raw`` is bound only as a class attribute (in the
+        class's own namespace). The outer-scope ``raw = {"k": "v"}``
+        is an ordinary literal-dict assignment; ``raw.get("k")`` on
+        the outer ``raw`` is NOT rooted at ``arguments`` and the R1
+        finding fires.
+        """
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="x",
+            )
+            def outer(arguments):
+                class Helper:
+                    # Class-body assignment. ``raw`` here is a class
+                    # attribute on ``Helper``, NOT a binding in
+                    # ``outer``'s locals. The outer function's
+                    # ``derived`` set must NOT pick this up.
+                    raw = arguments["x"]
+                raw = {"k": "v"}             # outer 'raw' is unrelated
+                return raw.get("k")           # FALSELY suppressed before fix
+        """)
+        findings = _findings(source)
+        r1 = _findings_by_rule(findings, "R1")
+        # The outer raw.get("k") must fire R1. The class-body subscript
+        # is not an R1 violation (subscript access != .get with
+        # default), so the only expected R1 is the outer call.
+        assert len(r1) == 1, (
+            f"Expected exactly one R1 finding on the outer ``raw.get('k')``; "
+            f"got {len(r1)}: {[(f.rule_id, f.line, f.message[:60]) for f in r1]}"
         )
 
 
@@ -549,15 +623,11 @@ class TestUnauthorisedSuppressRules:
         # Message should name the offending rule ids so the operator can
         # locate them without re-reading the source.
         assert "R2" in malformed[0].message and "R8" in malformed[0].message, (
-            f"R_TB_MALFORMED message must name the unauthorised rule IDs; got: "
-            f"{malformed[0].message}"
+            f"R_TB_MALFORMED message must name the unauthorised rule IDs; got: {malformed[0].message}"
         )
         # And the decorator is inert: R1 on arguments.get fires.
         r1 = _findings_by_rule(findings, "R1")
-        assert len(r1) == 1, (
-            f"Expected R1 to fire (decorator is inert under M4); got R1: "
-            f"{[(f.line, f.message[:80]) for f in r1]}"
-        )
+        assert len(r1) == 1, f"Expected R1 to fire (decorator is inert under M4); got R1: {[(f.line, f.message[:80]) for f in r1]}"
 
     def test_decorator_with_mixed_authorised_and_unauthorised_is_inert(self) -> None:
         """``suppresses=("R1", "R3")`` — even a partial match is rejected.

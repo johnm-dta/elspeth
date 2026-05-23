@@ -10,7 +10,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from elspeth_lints.core.ast_walker import ParsedPythonFile, PythonSyntaxError, walk_python_files
+from elspeth_lints.core.ast_walker import (
+    ParsedPythonFile,
+    PythonFileReadError,
+    PythonSyntaxError,
+    walk_python_files,
+)
 from elspeth_lints.core.emitters.github import render_github
 from elspeth_lints.core.emitters.json import render_json
 from elspeth_lints.core.emitters.sarif import render_sarif
@@ -432,6 +437,27 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
                         column=item.column,
                         message=item.message,
                         fingerprint=f"syntax:{item.line}:{item.column}",
+                    )
+                )
+                continue
+            if isinstance(item, PythonFileReadError):
+                # Surface I/O / decoding failures as per-file diagnostic
+                # findings so the operator sees that the file was not
+                # analysed. A silent ``continue`` here would mean a
+                # permission-denied or invalid-UTF-8 file became an
+                # invisible gap in coverage — exactly the failure mode
+                # ticket C6-6 prevents on the upstream side (no
+                # whole-scan abort) needs to remain visible at the
+                # report surface. line/column are 0 because an I/O
+                # failure has no position inside the (unreadable) file.
+                findings.append(
+                    Finding(
+                        rule_id="read-error",
+                        file_path=str(item.path),
+                        line=0,
+                        column=0,
+                        message=f"{item.error_type}: {item.message}",
+                        fingerprint=f"read:{item.error_type}",
                     )
                 )
                 continue

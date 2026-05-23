@@ -12,7 +12,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from elspeth_lints.core.ast_walker import ParsedPythonFile, PythonSyntaxError, parse_python_file, walk_python_files
+from elspeth_lints.core.ast_walker import (
+    ParsedPythonFile,
+    PythonFileReadError,
+    PythonSyntaxError,
+    parse_python_file,
+    walk_python_files,
+)
 from elspeth_lints.core.emitters.json import render_json
 from elspeth_lints.core.protocols import Finding, Rule, RuleContext, RuleScope
 from elspeth_lints.core.registry import RuleRegistry
@@ -132,12 +138,19 @@ def _run_fixture_case(case: RuleFixtureCase) -> list[Finding]:
         parsed = parse_python_file(case.fixture_path)
         if isinstance(parsed, PythonSyntaxError):
             raise AssertionError(f"{case.name}: fixture has syntax error: {parsed.message}")
+        if isinstance(parsed, PythonFileReadError):
+            # A fixture should always be readable; if it isn't, the test
+            # setup is broken — fail loudly so the test author fixes it
+            # rather than silently exercising the empty case.
+            raise AssertionError(f"{case.name}: fixture I/O error ({parsed.error_type}): {parsed.message}")
         findings.extend(rule.analyze(parsed.tree, parsed.path, context))
         return findings
 
     for parsed in walk_python_files(case.fixture_path):
         if isinstance(parsed, PythonSyntaxError):
             raise AssertionError(f"{case.name}: fixture has syntax error: {parsed.message}")
+        if isinstance(parsed, PythonFileReadError):
+            raise AssertionError(f"{case.name}: fixture I/O error ({parsed.error_type}): {parsed.message}")
         findings.extend(_run_incremental_rule(rule, parsed, context))
     return findings
 

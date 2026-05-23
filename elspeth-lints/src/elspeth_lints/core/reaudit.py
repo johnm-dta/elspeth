@@ -597,6 +597,7 @@ def _scan_via_rule_analyze(
     """
     from elspeth_lints.core.ast_walker import (
         ParsedPythonFile,
+        PythonFileReadError,
         PythonSyntaxError,
         parse_python_file,
     )
@@ -615,6 +616,12 @@ def _scan_via_rule_analyze(
 
     parsed = parse_python_file(target_file)
     if isinstance(parsed, PythonSyntaxError):
+        return []
+    if isinstance(parsed, PythonFileReadError):
+        # Reaudit replays prior findings on a single file. If that file
+        # is unreadable now (UTF-8 corruption, permission change, file
+        # vanished), we cannot pretend the prior findings are still
+        # valid — return empty, matching the syntax-error policy.
         return []
     if not isinstance(parsed, ParsedPythonFile):  # narrow for type checker
         raise ReauditError(f"parse_python_file returned unexpected type {type(parsed).__name__}")

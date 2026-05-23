@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from elspeth_lints.core.allowlist import Allowlist, FindingKey, load_allowlist
-from elspeth_lints.core.ast_walker import ParsedPythonFile, PythonSyntaxError, walk_python_files
+from elspeth_lints.core.ast_walker import (
+    ParsedPythonFile,
+    PythonFileReadError,
+    PythonSyntaxError,
+    walk_python_files,
+)
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.audit_evidence.guard_symmetry.metadata import LEGACY_RULE_ID, RULE_ID, RULE_METADATA, SUGGESTION
 from elspeth_lints.rules.audit_evidence.shared import allowlist_path_for_root, display_path
@@ -96,7 +101,7 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
     dataclasses: list[DataclassInfo] = []
     loaders: list[LoaderInfo] = []
     for item in walk_python_files(root):
-        if isinstance(item, PythonSyntaxError):
+        if isinstance(item, (PythonSyntaxError, PythonFileReadError)):
             continue
         visitor = _scan_parsed(item, root)
         dataclasses.extend(visitor.dataclasses)

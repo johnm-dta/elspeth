@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from elspeth_lints.core.allowlist import Allowlist, FindingKey, load_allowlist
-from elspeth_lints.core.ast_walker import ParsedPythonFile, PythonSyntaxError, walk_python_files
+from elspeth_lints.core.ast_walker import (
+    ParsedPythonFile,
+    PythonFileReadError,
+    PythonSyntaxError,
+    walk_python_files,
+)
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.immutability.freeze_guards.metadata import RULE_ID, RULE_METADATA, RULES
 from elspeth_lints.rules.immutability.shared import (
@@ -221,7 +226,7 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
     allowlist = load_allowlist(allowlist_dir, valid_rule_ids=_ALL_RULE_IDS)
     findings: list[Finding] = []
     for item in walk_python_files(root):
-        if isinstance(item, PythonSyntaxError):
+        if isinstance(item, (PythonSyntaxError, PythonFileReadError)):
             continue
         findings.extend(_analyze_parsed_file(item, root))
     return [finding for finding in findings if _allowlist_match(allowlist, finding) is None]

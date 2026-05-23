@@ -1822,7 +1822,19 @@ class Orchestrator:
             # Sources have get_schema_contract() method that returns their output contract
             output_contract = None
             if node_info.node_type == NodeType.SOURCE:
-                source_name = str(node_info.config["source_name"] if "source_name" in node_info.config else "source")
+                # Per ADR-025 §2, the DAG builder unconditionally sets
+                # ``source_name`` on every source node (``core/dag/builder.py``).
+                # A missing key is a graph-construction bug, not a recoverable
+                # state — crash informatively instead of silently fabricating
+                # a ``"source"`` key that would mis-attribute output_contract
+                # registration in the Landscape audit trail.
+                if "source_name" not in node_info.config:
+                    raise OrchestrationInvariantError(
+                        f"DAG source node '{node_info.node_id}' is missing 'source_name' in its config. "
+                        f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
+                        f"This is a graph-construction bug — node config keys: {sorted(node_info.config.keys())}."
+                    )
+                source_name = str(node_info.config["source_name"])
                 output_contract = config.sources[source_name].get_schema_contract()
 
             factory.data_flow.register_node(
@@ -1870,7 +1882,17 @@ class Orchestrator:
         source_id_map: dict[str, NodeID] = {}
         for candidate_source_id in graph.get_sources():
             source_info = graph.get_node_info(candidate_source_id)
-            source_name = str(source_info.config["source_name"] if "source_name" in source_info.config else "source")
+            # Per ADR-025 §2, the DAG builder unconditionally sets
+            # ``source_name`` on every source node. A missing key would
+            # collide ``source_id_map["source"] = ...`` across multiple
+            # sources, silently overwriting earlier entries.
+            if "source_name" not in source_info.config:
+                raise OrchestrationInvariantError(
+                    f"DAG source node {candidate_source_id!r} is missing 'source_name' in its config. "
+                    f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
+                    f"This is a graph-construction bug — node config keys: {sorted(source_info.config.keys())}."
+                )
+            source_name = str(source_info.config["source_name"])
             source_id_map[source_name] = candidate_source_id
         # Per ADR-025 §3, this ``source_id`` is the run-level singleton scaffold
         # used only as a fallback for resume-shutdown checkpoint identity
@@ -2189,7 +2211,17 @@ class Orchestrator:
         source_id_map: dict[str, NodeID] = {}
         for candidate_source_id in graph.get_sources():
             source_info = graph.get_node_info(candidate_source_id)
-            source_name = str(source_info.config["source_name"] if "source_name" in source_info.config else "source")
+            # Per ADR-025 §2, the DAG builder unconditionally sets
+            # ``source_name`` on every source node. On resume scaffolding a
+            # missing key would silently mis-attribute
+            # ``shutdown_checkpoint_source_id`` against the wrong source.
+            if "source_name" not in source_info.config:
+                raise OrchestrationInvariantError(
+                    f"DAG source node {candidate_source_id!r} is missing 'source_name' in its config. "
+                    f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
+                    f"This is a graph-construction bug — node config keys: {sorted(source_info.config.keys())}."
+                )
+            source_name = str(source_info.config["source_name"])
             source_id_map[source_name] = candidate_source_id
         # Per ADR-025 §3, this ``source_id`` is resume-scaffolding (carried
         # on the ResumePoint as ``shutdown_checkpoint_source_id`` so a

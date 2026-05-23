@@ -89,17 +89,35 @@ class RedactionRecord:
     pattern name. Mirrors the project's "record what we got" stance —
     if the scrubber matched, we record what kind of match it was.
 
-    ``byte_count`` is the length of the matched substring in bytes
-    (UTF-8). Operators can correlate the deficit against the original
-    excerpt's size to estimate how much of the window was redacted.
+    ``byte_count`` is the length of the redacted substring in bytes
+    (UTF-8). When ``_Pattern.redact_group`` is 0 this is the full
+    matched substring; when a capture-group is configured (e.g. the
+    ``authorization_bearer`` token-only redaction) the byte count
+    measures only the redacted token, not the surrounding label. The
+    operator can correlate the deficit against the original excerpt's
+    size to estimate how much of the window was redacted.
 
     ``redacted_hash`` is the first 16 hex chars of SHA-256 of the
-    matched substring. Sufficient for audit replay correlation (an
-    operator with access to the unredacted source can re-derive the
-    hash and confirm what was redacted) without persisting the secret
-    itself. Per the project's hash-survives-payload-deletion principle:
-    the hash is the durable handle to a value the audit trail
-    deliberately does NOT carry.
+    redacted substring, salted with the file's SHA-256 fingerprint when
+    the redaction was performed via ``extract_safe_excerpt``. Sufficient
+    for audit replay correlation (an operator with access to the
+    unredacted source can re-derive the salted hash and confirm what
+    was redacted) without persisting the secret itself. The salt scopes
+    brute-force cost per-file-fingerprint rather than across the whole
+    audit corpus: a leaked ``PASSWORD=hunter12`` would otherwise be
+    recoverable in seconds against an unsalted 64-bit SHA-256 prefix;
+    salting forces the attacker to brute-force per file, raising cost
+    by orders of magnitude per leak. Per the project's
+    hash-survives-payload-deletion principle: the hash is the durable
+    handle to a value the audit trail deliberately does NOT carry.
+
+    Direct callers of ``scrub_secrets`` who pass no salt produce an
+    unsalted hash — preserved for the grep-equality cross-excerpt
+    correlation use case (same secret across two files redacted in
+    isolation produces the same token). The two regimes are kept
+    distinct: the salted regime is the production path through
+    ``extract_safe_excerpt`` and the only one that reaches the audit
+    YAML/JSONL; the unsalted regime supports diagnostic use only.
     """
 
     pattern_name: str
@@ -125,10 +143,20 @@ class SafeExcerpt:
     ``reaudit._reaudit_one_entry`` stores it on the
     ``ReauditOutcome`` and the sidecar writer serialises it into the
     JSONL trail.
+
+    ``file_fingerprint`` is the SHA-256 hex digest of the source
+    file's bytes (the same primitive C8-3 uses for entry binding). It
+    is exposed here so the caller does not re-read the file: the
+    judge-write path in ``cli._run_justify`` consumes this value
+    directly into the YAML's ``file_fingerprint:`` binding field. It
+    is also the salt the scrubber used for ``RedactionRecord.redacted_hash``
+    — a single source of truth removes the risk of the binding
+    fingerprint and the salting fingerprint drifting out of sync.
     """
 
     text: str
     redactions: tuple[RedactionRecord, ...]
+    file_fingerprint: str
 
 
 # =========================================================================
@@ -188,6 +216,30 @@ def resolve_safe_excerpt_path(*, root: Path, target_file: Path) -> Path:
 # order and applies redactions cumulatively — a generic catch-all
 # fires only on text the specific patterns missed.
 #
+# Two pattern shapes are supported:
+#
+# * Whole-match redaction (``redact_group=0``, the default). The full
+#   regex match is replaced with the ``[REDACTED-SECRET-<hash>]``
+#   token. Used for patterns where the match itself is the secret
+#   (Stripe ``sk_live_…``, AWS ``AKIA…``, OAuth-style tokens).
+#
+# * Group-bounded redaction (``redact_group=N``). Only the Nth capture
+#   group is replaced; surrounding text is preserved. Used for HTTP-
+#   header / URL-suffix shapes where a fixed prefix carries no
+#   sensitive content but the trailing token does — currently only
+#   ``Authorization: Bearer <token>``. The byte_count and redacted_hash
+#   measure ONLY the group, not the whole match.
+#
+# A separate ``path_hint_required`` field gates patterns that are too
+# permissive to run unconditionally but unambiguous given filesystem
+# context — currently the bare-base64 SSH-key body, which without the
+# ``.pem`` / ``.key`` / ``id_rsa`` filename hint would false-positive
+# on every long base64 chunk (sourcemaps, embedded crypto material,
+# minified JS). The hint is a substring match against the lowercased
+# file path supplied at ``extract_safe_excerpt`` time; if no hint is
+# supplied (direct ``scrub_secrets`` callers) these patterns are
+# skipped.
+#
 # The 32+ char generic-key pattern is proximity-gated to label words
 # (``key``, ``token``, ``secret``, ``password``, ``passwd``, ``auth``,
 # ``bearer``, ``api_key``, ``access_key``, ``private_key``) so it does
@@ -196,13 +248,34 @@ def resolve_safe_excerpt_path(*, root: Path, target_file: Path) -> Path:
 # the scrubber. Without that gate the legitimate-suppression workflow
 # would drown in false positives and operators would learn to ignore
 # the scrubber report — which is exactly the failure mode "audit by
-# habit" produces.
+# habit" produces. Note that the simpler ``dotenv_secret_assignment``
+# pattern (label = quoted-value) can FP on prose-like values: a line
+# ``secret = "this is a quite long description"`` matches because the
+# value floor is 8 chars and the regex does not constrain
+# entropy. This is the conscious trade-off: under-redaction is the
+# security failure, over-redaction is the LLM-context failure. The
+# scrubber biases toward over-redaction inside label-proximity zones
+# and toward under-redaction outside them.
 
 
 @dataclass(frozen=True, slots=True)
 class _Pattern:
     name: str
     regex: re.Pattern[str]
+    # When non-zero, the regex's Nth capture group is the only segment
+    # redacted; the rest of the match passes through verbatim. The
+    # ``authorization_bearer`` pattern uses this to keep the ``Authorization:
+    # Bearer`` label visible in the prompt while redacting just the
+    # token — operators reading the LLM transcript see the structural
+    # shape of what was carried without seeing the credential.
+    redact_group: int = 0
+    # Pattern is run only when ANY substring in this tuple appears
+    # (case-insensitively) in the path-hint string supplied to
+    # ``scrub_secrets``. Empty tuple = run unconditionally. Used for
+    # the ``ssh_private_key_body`` pattern, which is too permissive to
+    # run on arbitrary source but unambiguous on filesystem paths
+    # matching ``*.pem`` / ``*.key`` / ``id_rsa`` / ``id_ed25519``.
+    path_hint_required: tuple[str, ...] = ()
 
 
 _SECRET_PATTERNS: tuple[_Pattern, ...] = (
@@ -236,10 +309,89 @@ _SECRET_PATTERNS: tuple[_Pattern, ...] = (
         name="github_pat_fine_grained",
         regex=re.compile(r"\bgithub_pat_[A-Za-z0-9_]{82}\b"),
     ),
+    # GitLab personal access tokens and OAuth application secrets.
+    # Format reference: GitLab docs — ``glpat-`` user PATs and
+    # ``gloas-`` OAuth application secrets carry ≥20 url-safe chars.
+    _Pattern(
+        name="gitlab_pat",
+        regex=re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
+    ),
+    _Pattern(
+        name="gitlab_oauth_secret",
+        regex=re.compile(r"\bgloas-[A-Za-z0-9_-]{20,}\b"),
+    ),
     # Slack tokens (bot / user / app / etc.).
     _Pattern(
         name="slack_token",
         regex=re.compile(r"\bxox[baprs]-[A-Za-z0-9-]+"),
+    ),
+    # Stripe API keys. Six prefix variants per Stripe key-format docs:
+    # ``sk_live_`` / ``sk_test_`` (secret keys), ``pk_live_`` /
+    # ``pk_test_`` (publishable — still tied to the account, redact),
+    # ``rk_live_`` (restricted), and ``whsec_`` (webhook signing
+    # secret). Body floor is 24 chars (Stripe's documented minimum)
+    # for ``sk_/pk_/rk_`` shapes and 32 for ``whsec_`` (longer because
+    # webhook secrets carry HMAC-suitable entropy).
+    _Pattern(
+        name="stripe_secret_key",
+        regex=re.compile(r"\bsk_live_[A-Za-z0-9]{24,}\b"),
+    ),
+    _Pattern(
+        name="stripe_test_secret_key",
+        regex=re.compile(r"\bsk_test_[A-Za-z0-9]{24,}\b"),
+    ),
+    _Pattern(
+        name="stripe_publishable_key",
+        regex=re.compile(r"\bpk_live_[A-Za-z0-9]{24,}\b"),
+    ),
+    _Pattern(
+        name="stripe_test_publishable_key",
+        regex=re.compile(r"\bpk_test_[A-Za-z0-9]{24,}\b"),
+    ),
+    _Pattern(
+        name="stripe_restricted_key",
+        regex=re.compile(r"\brk_live_[A-Za-z0-9]{24,}\b"),
+    ),
+    _Pattern(
+        name="stripe_webhook_secret",
+        regex=re.compile(r"\bwhsec_[A-Za-z0-9]{32,}\b"),
+    ),
+    # OpenAI / OpenRouter API keys. Three shapes:
+    # * Legacy ``sk-<48 base62>`` (the classic API key form).
+    # * Project ``sk-proj-<40+ url-safe>`` (the 2024+ project-scoped
+    #   form, variable length).
+    # * Session token ``sess-<40+ base62>`` (used by the dashboard).
+    # ``sk-ant-`` (Anthropic) MUST match before generic ``sk-`` so the
+    # vendor-specific pattern wins the pattern_name tag.
+    _Pattern(
+        name="anthropic_api_key",
+        regex=re.compile(r"\bsk-ant-[A-Za-z0-9_-]{40,}\b"),
+    ),
+    _Pattern(
+        name="openai_project_key",
+        regex=re.compile(r"\bsk-proj-[A-Za-z0-9_-]{40,}\b"),
+    ),
+    _Pattern(
+        name="openai_session_key",
+        regex=re.compile(r"\bsess-[A-Za-z0-9]{40,}\b"),
+    ),
+    _Pattern(
+        name="openai_api_key",
+        regex=re.compile(r"\bsk-[A-Za-z0-9]{48}\b"),
+    ),
+    # HuggingFace user access tokens. Format per HF token docs:
+    # ``hf_`` prefix + 34+ base62 chars.
+    _Pattern(
+        name="huggingface_token",
+        regex=re.compile(r"\bhf_[A-Za-z0-9]{34,}\b"),
+    ),
+    # Google API keys. Format per Google Cloud docs: literal ``AIza``
+    # prefix + exactly 35 url-safe chars. The fixed length is the
+    # distinguishing signal (other AI*-prefixed strings exist but
+    # don't hit the 39-char total).
+    _Pattern(
+        name="google_api_key",
+        regex=re.compile(r"\bAIza[A-Za-z0-9_-]{35}\b"),
     ),
     # JWT shape: three base64url segments joined by '.'. The middle
     # segment carries the claims; the third carries the signature.
@@ -261,11 +413,61 @@ _SECRET_PATTERNS: tuple[_Pattern, ...] = (
         name="ssh_public_key",
         regex=re.compile(r"\b(?:ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-\S+)\s+[A-Za-z0-9+/=]{60,}\b"),
     ),
+    # Discord and Slack incoming-webhook URLs. The URL itself IS the
+    # secret — anyone with the URL can post to the channel. Discord
+    # format reference: ``/api/webhooks/<channel_id>/<token>`` where
+    # token is 40+ url-safe chars. Slack format: ``hooks.slack.com/
+    # services/T.../B.../<token>``. NOTE (operator-visible): legitimate
+    # documentation OF these URL shapes — README examples, format
+    # specs cited in comments — will be redacted by these patterns. The
+    # trade-off is intentional: we cannot distinguish a real webhook
+    # from a docstring example by regex alone, and the cost of
+    # over-redacting documentation in an LLM prompt (small loss of
+    # context) is lower than the cost of leaking an active webhook.
+    _Pattern(
+        name="discord_webhook_url",
+        regex=re.compile(r"https://discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{40,}"),
+    ),
+    _Pattern(
+        name="slack_webhook_url",
+        regex=re.compile(r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{20,}"),
+    ),
+    # HTTP Authorization header carrying a Bearer token. The
+    # ``Authorization:`` label and the literal ``Bearer`` keyword carry
+    # no sensitive content; redacting them would obscure the structural
+    # shape of what the source contains. ``redact_group=1`` confines
+    # the redaction to the token body. Body charset matches RFC 6750
+    # (base64 / base64url / a few delimiters used by JWT-shaped
+    # bearers). Floor at 20 chars to avoid matching the placeholder
+    # ``Bearer <token>`` examples in comments / docs.
+    _Pattern(
+        name="authorization_bearer",
+        regex=re.compile(r"(?i)Authorization:\s*Bearer\s+([A-Za-z0-9._/+=-]{20,})"),
+        redact_group=1,
+    ),
+    # Azure storage account connection-string component. The full
+    # connection string is the secret; the ``AccountKey=`` segment
+    # carries the credential. ``AccountKey`` is the load-bearing
+    # label — other components (``DefaultEndpointsProtocol``, ``AccountName``,
+    # ``EndpointSuffix``) are not sensitive on their own. We redact
+    # the whole ``AccountKey=<base64>`` match so the label is visible
+    # but the credential is gone. Body floor at 40 base64 chars (Azure
+    # keys are 64 chars base64-decoded).
+    _Pattern(
+        name="azure_storage_account_key",
+        regex=re.compile(r"AccountKey=[A-Za-z0-9+/=]{40,}"),
+    ),
     # .env-style label = quoted-value assignments. Catches the common
     # ``SECRET=...``, ``API_KEY=...`` shapes that show up in test
     # fixtures and inline config. Case-insensitive label match, value
     # length floor of 8 to avoid flagging ``password=foo`` in unit
-    # tests that demonstrably aren't secrets.
+    # tests that demonstrably aren't secrets. KNOWN FALSE-POSITIVE:
+    # prose-like values match here — e.g.
+    # ``secret = "this is a quite long description"``. We accept this
+    # over-redaction because the alternative (entropy-gating the
+    # value, or requiring a non-space character class) is fragile and
+    # the under-redaction failure mode is worse than the
+    # over-redaction one.
     _Pattern(
         name="dotenv_secret_assignment",
         regex=re.compile(
@@ -286,24 +488,63 @@ _SECRET_PATTERNS: tuple[_Pattern, ...] = (
             r"['\"]([A-Za-z0-9+/=_\-]{32,})['\"]",
         ),
     ),
+    # Bare SSH / PEM private-key body lines. ONLY runs when the
+    # file-path hint indicates the source is a key file
+    # (``*.pem`` / ``*.key`` / ``id_rsa`` / ``id_ed25519`` / ``id_ecdsa``).
+    # Without the hint this regex would catch every long base64 chunk
+    # (sourcemaps, embedded binaries, minified JS). With the hint, the
+    # file is structurally a key file and every long base64 line in it
+    # is part of the body — the over-redaction failure mode is bounded
+    # to "we don't ship the contents of a key file to the LLM", which
+    # is the correct behaviour. We anchor to the line (``re.MULTILINE``
+    # with ``^...$``) so the match is a full line, preventing
+    # accidental absorption of label characters from line-number
+    # prefixes the renderer adds.
+    _Pattern(
+        name="ssh_private_key_body",
+        regex=re.compile(r"^[A-Za-z0-9+/=]{60,}$", re.MULTILINE),
+        path_hint_required=(".pem", ".key", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"),
+    ),
 )
 
 
-def scrub_secrets(text: str) -> SafeExcerpt:
+def scrub_secrets(
+    text: str,
+    *,
+    salt: str | None = None,
+    path_hint: str | None = None,
+) -> SafeExcerpt:
     """Apply the curated secret-pattern set to ``text``.
 
-    Returns the redacted text plus a tuple of ``RedactionRecord``
-    capturing each match in source order. Patterns are applied in
-    declaration order; later patterns operate on already-redacted
-    text, so a match that overlaps a prior redaction is silently
-    absorbed (the redacted token does not itself match any pattern).
+    Returns a ``SafeExcerpt`` whose ``text`` is the redaction-applied
+    excerpt and whose ``redactions`` tuple captures each match in source
+    order. Patterns are applied in declaration order; later patterns
+    operate on already-redacted text, so a match that overlaps a prior
+    redaction is silently absorbed (the redacted token does not itself
+    match any pattern). The returned ``file_fingerprint`` is the salt
+    string when supplied, else the empty string — direct ``scrub_secrets``
+    callers that pass no salt are diagnostic-only and the
+    ``SafeExcerpt.file_fingerprint`` field is correspondingly empty.
 
     Each match is replaced with ``[REDACTED-SECRET-<hash16>]`` where
-    ``<hash16>`` is the first 16 hex chars of SHA-256 of the matched
-    substring. The hash is stable across runs so the same secret
-    redacted in two different excerpts produces the same token —
-    operators can grep the audit trail for repeated leakage of the
-    same value.
+    ``<hash16>`` is the first 16 hex chars of SHA-256 over the
+    matched bytes plus the ``salt`` string (UTF-8 encoded). The salt
+    scopes brute-force cost per-file-fingerprint when the production
+    path through ``extract_safe_excerpt`` supplies it. Without the
+    salt the hash is stable across runs, so the same secret redacted
+    in two different excerpts produces the same token — operators can
+    grep the unsalted-mode audit trail for repeated leakage of the
+    same value. Both regimes are deterministic; the salted regime
+    breaks cross-file grep equality on purpose (the security property
+    the salt provides).
+
+    ``path_hint`` is a file-path string used to gate
+    ``path_hint_required`` patterns (currently ``ssh_private_key_body``).
+    Hint matching is a case-insensitive substring check; supply
+    ``str(target_file)`` from ``extract_safe_excerpt`` to enable. Without
+    a hint, path-gated patterns are skipped (the bare ``scrub_secrets``
+    surface is diagnostic-only and the gated patterns would otherwise
+    false-positive on arbitrary source).
 
     The empty-text case returns an empty ``SafeExcerpt`` with an empty
     redactions tuple; callers can rely on the dataclass shape being
@@ -311,26 +552,56 @@ def scrub_secrets(text: str) -> SafeExcerpt:
     """
     records: list[RedactionRecord] = []
     out = text
+    salt_bytes = salt.encode("utf-8") if salt is not None else b""
+    lowered_hint = path_hint.lower() if path_hint is not None else ""
     for pattern in _SECRET_PATTERNS:
+        # Skip path-gated patterns unless the supplied path hint
+        # contains one of the required substrings. Empty/absent hint
+        # means "diagnostic call without filesystem context" and the
+        # pattern is skipped — see ``_Pattern.path_hint_required``.
+        if pattern.path_hint_required and not any(hint in lowered_hint for hint in pattern.path_hint_required):
+            continue
+
         # ``re.sub`` with a callback gives us the matched substring so
         # we can hash it and emit a record. Walking each pattern across
         # the (potentially already-redacted) accumulator means later
         # patterns can't re-match a token we already replaced — the
         # replacement token doesn't contain a base64 secret shape.
-        def _replace(match: re.Match[str], _name: str = pattern.name) -> str:
-            matched = match.group(0)
-            digest = hashlib.sha256(matched.encode("utf-8")).hexdigest()[:16]
+        def _replace(
+            match: re.Match[str],
+            _name: str = pattern.name,
+            _redact_group: int = pattern.redact_group,
+        ) -> str:
+            # ``redact_group=0`` is the default: redact the whole match.
+            # Otherwise we redact only the named capture group and rebuild
+            # the output with the surrounding text intact.
+            redacted_segment = match.group(_redact_group)
+            digest = hashlib.sha256(redacted_segment.encode("utf-8") + salt_bytes).hexdigest()[:16]
             records.append(
                 RedactionRecord(
                     pattern_name=_name,
-                    byte_count=len(matched.encode("utf-8")),
+                    byte_count=len(redacted_segment.encode("utf-8")),
                     redacted_hash=digest,
                 )
             )
-            return f"[REDACTED-SECRET-{digest}]"
+            token = f"[REDACTED-SECRET-{digest}]"
+            if _redact_group == 0:
+                return token
+            # Group-bounded redaction: splice the token in place of the
+            # group within the whole match. ``match.start/end`` give
+            # absolute offsets in the underlying string; we want them
+            # relative to ``match.group(0)``.
+            whole = match.group(0)
+            group_start = match.start(_redact_group) - match.start(0)
+            group_end = match.end(_redact_group) - match.start(0)
+            return whole[:group_start] + token + whole[group_end:]
 
         out = pattern.regex.sub(_replace, out)
-    return SafeExcerpt(text=out, redactions=tuple(records))
+    return SafeExcerpt(
+        text=out,
+        redactions=tuple(records),
+        file_fingerprint=salt if salt is not None else "",
+    )
 
 
 # =========================================================================
@@ -354,14 +625,21 @@ def extract_safe_excerpt(
        inside ``root`` (else raises
        ``SourceExcerptPathOutsideRootError``). Uses ``strict=True``
        resolution so a missing file raises ``FileNotFoundError``.
-    2. The resolved file is read once. Excerpt window is
-       ``[line - context_lines, line + context_lines]`` clamped to
-       valid line indices (1-based), mirroring the original
+    2. The resolved file is read once as bytes and hashed (SHA-256)
+       to produce the ``file_fingerprint``. The bytes are then decoded
+       as UTF-8 for the excerpt window. The single read + single hash
+       is the source of truth for both the C8-3 binding fingerprint
+       (consumed by ``cli._run_justify`` directly off the returned
+       ``SafeExcerpt``) AND the scrubber's per-file hash salt.
+    3. Excerpt window is ``[line - context_lines, line + context_lines]``
+       clamped to valid line indices (1-based), mirroring the original
        ``_extract_surrounding_code`` shape so the judge sees the same
        ±N-line window with the same ``>>``-prefixed marker line.
-    3. The rendered window is fed through ``scrub_secrets``, returning
-       a ``SafeExcerpt`` whose ``text`` is the already-redacted string
-       safe to pass into ``JudgeRequest.surrounding_code``.
+    4. The rendered window is fed through ``scrub_secrets`` with the
+       file fingerprint as salt and the resolved target's path-string
+       as the path hint. The salt scopes brute-force cost per file;
+       the hint enables the ``ssh_private_key_body`` pattern only on
+       structurally-key files.
 
     The two-step "render-then-scrub" order (rather than "scrub-then-
     render") is deliberate: the scrubber operates on the line-number-
@@ -372,7 +650,9 @@ def extract_safe_excerpt(
     impeding scrubber accuracy.
     """
     resolved = resolve_safe_excerpt_path(root=root, target_file=target_file)
-    text = resolved.read_text(encoding="utf-8")
+    raw_bytes = resolved.read_bytes()
+    file_fingerprint = hashlib.sha256(raw_bytes).hexdigest()
+    text = raw_bytes.decode("utf-8")
     lines = text.splitlines()
     start = max(1, line - context_lines)
     end = min(len(lines), line + context_lines)
@@ -381,4 +661,4 @@ def extract_safe_excerpt(
         marker = ">>" if line_num == line else "  "
         rendered_lines.append(f"{marker} {line_num:5d}  {lines[line_num - 1]}")
     rendered = "\n".join(rendered_lines)
-    return scrub_secrets(rendered)
+    return scrub_secrets(rendered, salt=file_fingerprint, path_hint=str(resolved))

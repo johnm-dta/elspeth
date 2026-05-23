@@ -44,6 +44,7 @@ from elspeth_lints.core.source_excerpt import (
     RedactionRecord,
     SafeExcerpt,
     SourceExcerptPathOutsideRootError,
+    extract_safe_excerpt,
     resolve_safe_excerpt_path,
     scrub_secrets,
 )
@@ -639,34 +640,90 @@ def test_no_other_prompt_builder_constructs_judge_request_without_scrubber() -> 
     """Static guard: every JudgeRequest constructor must be paired with extract_safe_excerpt.
 
     This is the structural bypass-resistance check the task plan
-    calls for. The grep is intentionally narrow: any file in the
-    elspeth_lints.core surface that builds a JudgeRequest must do so
-    only after extract_safe_excerpt has produced the surrounding_code
-    value. If a future contributor adds a third call site that bypasses
-    the helper, this test fails.
+    calls for. The scan walks the ENTIRE elspeth_lints package — not
+    just ``core/`` — so a future contributor who adds a
+    ``JudgeRequest(...)`` builder in ``rules/`` (or any sibling
+    package) cannot slip past the gate. The pre-T8b version of this
+    test only swept ``core/*.py``, missing exactly that class of
+    bypass; T8b broadens the radius.
 
-    The check is dual: every JudgeRequest(...) construction has, in
-    the same file, an extract_safe_excerpt call. The two production
-    sites in this commit are cli._run_justify and reaudit._reaudit_one_entry.
+    The check is dual: every ``JudgeRequest(...)`` construction site
+    has, in the SAME FILE, an ``extract_safe_excerpt`` call. The
+    same-file requirement is deliberate over a project-wide grep — a
+    file that constructs the request must locally evidence that its
+    ``surrounding_code`` value came from the scrubber. The two
+    production sites in this commit are ``cli._run_justify`` and
+    ``reaudit._reaudit_one_entry``; both are in ``core/``.
+
+    The dataclass definition itself (``judge.py``) is excluded — it
+    declares the class but builds no instances. Test fixtures /
+    helpers under ``tests/`` are excluded because they are not the
+    production trust boundary (test code may legitimately construct
+    a request to exercise downstream consumers).
     """
-    core_dir = Path(__file__).resolve().parents[3] / "elspeth-lints" / "src" / "elspeth_lints" / "core"
+    package_root = Path(__file__).resolve().parents[3] / "elspeth-lints" / "src" / "elspeth_lints"
+    assert package_root.is_dir(), f"elspeth_lints package not found at {package_root}"
     offending_files: list[str] = []
-    for py_file in core_dir.glob("*.py"):
+    for py_file in package_root.rglob("*.py"):
         text = py_file.read_text(encoding="utf-8")
         if "JudgeRequest(" not in text:
             continue
-        # The dataclass definition itself lives in judge.py; that file
-        # builds no instances, only declares the class.
         if py_file.name == "judge.py":
             continue
         if "extract_safe_excerpt" not in text:
-            offending_files.append(py_file.name)
+            # Report a stable, project-relative path so the failure
+            # message points at the offending file regardless of
+            # where the package tree lives.
+            offending_files.append(str(py_file.relative_to(package_root)))
     assert offending_files == [], (
         f"these files construct JudgeRequest without going through "
         f"extract_safe_excerpt: {offending_files}. Every code path "
         f"that builds a judge prompt MUST funnel the surrounding_code "
         f"through the scrubber — see source_excerpt.py for the contract."
     )
+
+
+def test_bypass_resistance_grep_fires_when_injected_file_lacks_scrubber(tmp_path: Path) -> None:
+    """The bypass-resistance grep CATCHES a planted offender.
+
+    Defends against the test-is-vacuous failure mode: if the grep is
+    incorrectly scoped or the helper string changes, the static guard
+    could pass silently while production drifts. We construct a
+    miniature package tree under ``tmp_path``, plant a file containing
+    a ``JudgeRequest(...)`` call WITHOUT ``extract_safe_excerpt``, and
+    assert the same grep logic flags it. This pins the grep's
+    semantics to a deliberate failure case rather than just the
+    happy-path production tree.
+    """
+    fake_pkg = tmp_path / "fake_elspeth_lints"
+    (fake_pkg / "rules" / "bad").mkdir(parents=True)
+    (fake_pkg / "core").mkdir()
+    # Clean file (the production shape) — has the scrubber call.
+    (fake_pkg / "core" / "good.py").write_text(
+        "from elspeth_lints.core.judge import JudgeRequest\n"
+        "from elspeth_lints.core.source_excerpt import extract_safe_excerpt\n"
+        "def f():\n"
+        "    excerpt = extract_safe_excerpt(root=..., target_file=..., line=1, context_lines=15)\n"
+        "    return JudgeRequest(surrounding_code=excerpt.text)\n",
+        encoding="utf-8",
+    )
+    # Offending file in a non-core package — what the broadened grep
+    # is supposed to catch.
+    (fake_pkg / "rules" / "bad" / "rogue.py").write_text(
+        "from elspeth_lints.core.judge import JudgeRequest\ndef f():\n    return JudgeRequest(surrounding_code='raw unscrubbed bytes')\n",
+        encoding="utf-8",
+    )
+    # Apply the same grep logic the bypass-resistance test uses.
+    offending_files: list[str] = []
+    for py_file in fake_pkg.rglob("*.py"):
+        text = py_file.read_text(encoding="utf-8")
+        if "JudgeRequest(" not in text:
+            continue
+        if py_file.name == "judge.py":
+            continue
+        if "extract_safe_excerpt" not in text:
+            offending_files.append(str(py_file.relative_to(fake_pkg)))
+    assert offending_files == ["rules/bad/rogue.py"]
 
 
 def test_reaudit_records_redactions_on_outcome(tmp_path: Path) -> None:
@@ -769,3 +826,280 @@ def test_resolve_safe_excerpt_path_rejects_symlink_escape(tmp_path: Path) -> Non
     symlink.symlink_to(escape_target)
     with pytest.raises(SourceExcerptPathOutsideRootError):
         resolve_safe_excerpt_path(root=root, target_file=symlink)
+
+
+# =====================================================================
+# 2c. T8b expanded coverage — bare-prefix high-value secrets
+# =====================================================================
+#
+# The T8 commit's pattern set required a label proximity gate for the
+# generic high-entropy catch-all. That gate misses the most-common
+# leaked-credential shapes: bare ``sk_live_…`` / ``sk-ant-…`` /
+# ``AIza…`` strings appear in source unaccompanied by a label word
+# (assigned to bare variables, embedded in URLs, pasted into
+# comments). Each test below plants exactly the unlabelled shape T8
+# would have shipped unredacted, asserts the scrubber catches it, and
+# pins the pattern_name into the audit vocabulary.
+
+
+@pytest.mark.parametrize(
+    ("pattern_label", "planted_text"),
+    [
+        # Stripe — six prefix variants. Bodies are synthetic but match
+        # the regex shape (24+ base62 for sk/pk/rk; 32+ for whsec).
+        ("stripe_secret_key", "sk" + "_live_" + "4eC39HqLyjWDarjtT1zdp7dc"),
+        ("stripe_test_secret_key", "sk" + "_test_" + "4eC39HqLyjWDarjtT1zdp7dc"),
+        ("stripe_publishable_key", "pk" + "_live_" + "TYooMQauvdEDq54NiTphI7jx"),
+        ("stripe_test_publishable_key", "pk" + "_test_" + "TYooMQauvdEDq54NiTphI7jx"),
+        ("stripe_restricted_key", "rk" + "_live_" + "51HG8z0KvU9rT2bWqXm1nP4dF"),
+        ("stripe_webhook_secret", "whsec" + "_" + "5WbX9NheWmkP3FvY1k2nC8oRtZ4vUxJqLmA0pYsBgEdJ"),
+        # OpenAI — three shapes. Legacy 48-char, project-scoped, session.
+        ("openai_api_key", "sk-" + "A" * 48),
+        ("openai_project_key", "sk-proj-Wx7AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCd"),  # secret-scan: allow-this-line
+        ("openai_session_key", "sess-" + "Q" * 45),  # secret-scan: allow-this-line
+        # Anthropic — bound BEFORE the generic openai_api_key pattern.
+        ("anthropic_api_key", "sk-ant-api01-" + "B" * 80),  # secret-scan: allow-this-line
+        # HuggingFace — bare hf_ prefix is uniquely diagnostic.
+        ("huggingface_token", "hf_" + "C" * 36),  # secret-scan: allow-this-line
+        # Google API key — exactly 35 char suffix; the FIXED length is
+        # what disambiguates from other AI*-prefixed identifiers.
+        ("google_api_key", "AIza" + "D" * 35),  # secret-scan: allow-this-line
+        # GitLab PAT and OAuth secret.
+        ("gitlab_pat", "glpat-xyzABC123_-456DEFghIjKlMnOpQ"),  # secret-scan: allow-this-line
+        ("gitlab_oauth_secret", "gloas-applicationSecret_1234567890abcdef"),  # secret-scan: allow-this-line
+        # Discord webhook URL — the URL IS the secret.
+        (
+            "discord_webhook_url",
+            "https://discord.com/api/webhooks/123456789012345678/" + "E" * 60,  # secret-scan: allow-this-line
+        ),
+        # Slack webhook URL — distinct T... / B... segments + token tail.
+        (
+            "slack_webhook_url",
+            "https://hooks.slack.com/services/" + "T01ABCDEFGH/B02ZYXWVUTSR/" + "F" * 24,
+        ),
+    ],
+)
+def test_scrub_secrets_redacts_bare_prefix_pattern(pattern_label: str, planted_text: str) -> None:
+    """Each new bare-prefix pattern fires WITHOUT a label keyword nearby.
+
+    Adversarial: the T8 pattern set required a label-proximity hit for
+    the generic catch-all, so a bare ``KEY = "sk_live_…"`` assignment
+    where the bare-variable name carries no label keyword slipped
+    through unredacted. T8b adds explicit per-provider patterns so
+    these high-value credentials are caught on the prefix alone.
+
+    Each parameter plants the secret on a no-label line so a regression
+    that re-introduces label-proximity gating would fail this test
+    (the line carries only ``var =`` which the dotenv label set does
+    not include).
+    """
+    # Plant the secret on a line whose only identifier is ``var``
+    # (NOT in the dotenv label set: secret/password/passwd/token/
+    # api_key/access_key/private_key/auth/bearer). If the new
+    # specific pattern fires the literal vanishes; if only the
+    # label-proximity-gated catch-all fires we'd miss this shape.
+    excerpt_text = f"line before\nvar = {planted_text!r}\nline after"
+    result = scrub_secrets(excerpt_text)
+    assert planted_text not in result.text, (
+        f"pattern {pattern_label!r} did not redact the literal secret. This is the bare-prefix shape T8b is meant to close."
+    )
+    assert "[REDACTED-SECRET-" in result.text
+    pattern_names = {r.pattern_name for r in result.redactions}
+    assert pattern_label in pattern_names, (
+        f"expected pattern {pattern_label!r} to fire on {planted_text!r}; "
+        f"got {sorted(pattern_names)}. A regression here means the audit "
+        f"vocabulary lost a specific-pattern tag and operators can no "
+        f"longer filter the scrubber report by provider."
+    )
+
+
+def test_scrub_secrets_authorization_bearer_token_only(tmp_path: Path) -> None:
+    """``Authorization: Bearer <token>`` — the label survives, the token is redacted.
+
+    The Bearer pattern uses ``redact_group=1`` to keep the structural
+    shape of the header visible in the LLM prompt (operators reading
+    the transcript see "an HTTP call carrying a Bearer token") while
+    the credential itself is scrubbed. The byte_count and
+    redacted_hash measure ONLY the token, not the surrounding label —
+    confirming the group-bounded redaction path works as designed.
+    """
+    token = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH"
+    # Use the canonical HTTP header form (label, colon, space, "Bearer ", token).
+    # The regex requires a literal colon after ``Authorization``, mirroring
+    # the RFC 7235 header syntax — both because that is the realistic
+    # exfil shape AND because matching ``Authorization`` without a
+    # colon would FP on every prose mention of the word.
+    excerpt_text = f"# Example header\nAuthorization: Bearer {token}\n# next line"
+    result = scrub_secrets(excerpt_text)
+    # Token literal MUST vanish, the label MUST survive.
+    assert token not in result.text
+    assert "Authorization:" in result.text
+    assert "Bearer" in result.text
+    assert "[REDACTED-SECRET-" in result.text
+    # Audit record names the pattern AND measures only the token's
+    # bytes (44 chars * 1 byte each in UTF-8), not the label.
+    matching = [r for r in result.redactions if r.pattern_name == "authorization_bearer"]
+    assert len(matching) == 1
+    assert matching[0].byte_count == len(token)
+
+
+def test_scrub_secrets_azure_account_key_redacted(tmp_path: Path) -> None:
+    """Azure storage ``AccountKey=<base64>`` — the credential is scrubbed.
+
+    The connection string's other components (``DefaultEndpointsProtocol``,
+    ``AccountName``, ``EndpointSuffix``) are not sensitive on their own —
+    we redact only the ``AccountKey=<base64>`` segment so the prompt
+    retains enough context for the judge to understand what shape of
+    config it's looking at without seeing the credential.
+    """
+    account_key = "A" * 64 + "B" * 24 + "=="
+    excerpt_text = f"conn = ('DefaultEndpointsProtocol=https;AccountName=stor1;AccountKey={account_key};EndpointSuffix=core.windows.net')"
+    result = scrub_secrets(excerpt_text)
+    assert account_key not in result.text
+    assert "[REDACTED-SECRET-" in result.text
+    # Surrounding context preserved.
+    assert "DefaultEndpointsProtocol=https" in result.text
+    assert "AccountName=stor1" in result.text
+    assert "EndpointSuffix=core.windows.net" in result.text
+    matching = [r for r in result.redactions if r.pattern_name == "azure_storage_account_key"]
+    assert len(matching) == 1
+
+
+def test_scrub_secrets_ssh_body_requires_path_hint(tmp_path: Path) -> None:
+    """Bare 60+ char base64 lines redact ONLY when path_hint indicates a key file.
+
+    Without the hint (the bare ``scrub_secrets`` diagnostic surface)
+    the pattern is too permissive — every long base64 chunk in source
+    (sourcemaps, embedded crypto material, minified JS) would
+    false-positive. With the hint the file is structurally a key file
+    and over-redaction is the desired behaviour.
+
+    The asymmetry IS the security property: production callers go
+    through ``extract_safe_excerpt`` which always supplies the hint;
+    diagnostic callers passing ``scrub_secrets`` directly opt-out
+    deliberately and accept the under-redaction.
+    """
+    pem_body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDX"  # secret-scan: allow-this-line
+    body_line = pem_body + "X" * (61 - len(pem_body))  # ensure >= 60 chars
+    excerpt_text = f"line before\n{body_line}\nline after"
+    # No hint -> pattern is skipped, literal survives.
+    unguarded = scrub_secrets(excerpt_text)
+    assert body_line in unguarded.text
+    assert all(r.pattern_name != "ssh_private_key_body" for r in unguarded.redactions)
+    # With a path hint matching a key-file extension -> pattern fires.
+    guarded = scrub_secrets(excerpt_text, path_hint="/repo/secrets/id_rsa")
+    assert body_line not in guarded.text
+    assert any(r.pattern_name == "ssh_private_key_body" for r in guarded.redactions)
+    # Other hint extensions also trigger.
+    guarded_pem = scrub_secrets(excerpt_text, path_hint="/repo/keys/cert.pem")
+    assert body_line not in guarded_pem.text
+
+
+# =====================================================================
+# 2d. T8b — file-fingerprint salting of the redacted-hash audit primitive
+# =====================================================================
+
+
+def test_extract_safe_excerpt_salts_redacted_hash_with_file_fingerprint(tmp_path: Path) -> None:
+    """The SAME secret in two DIFFERENT files produces DIFFERENT redacted_hash.
+
+    Adversarial: an internal actor with file-system access to the
+    audit YAML / JSONL would otherwise be able to brute-force the
+    16-hex SHA-256 prefix (64-bit search space). A low-entropy secret
+    (``PASSWORD=hunter12``) is recoverable in seconds. Salting with
+    the file's fingerprint scopes the brute-force cost per file: the
+    same secret in file A and file B produces DIFFERENT redacted
+    hashes, so an attacker must repeat the search per file rather
+    than across the whole corpus.
+
+    This is the load-bearing entropy property — it would silently
+    regress if a future contributor removed the salt argument or
+    changed ``scrub_secrets`` to ignore it.
+    """
+    root = tmp_path / "src_root"
+    (root / "a").mkdir(parents=True)
+    (root / "b").mkdir(parents=True)
+    # Same secret, embedded in two files that differ only by one
+    # extra comment line so the SHA-256 file fingerprints diverge.
+    planted = "AKIAIOSFODNN7EXAMPLE"  # secret-scan: allow-this-line
+    common = f'KEY = "{planted}"\n# R1 on next line\nprint(KEY)\n'
+    (root / "a" / "mod.py").write_text(common, encoding="utf-8")
+    (root / "b" / "mod.py").write_text("# extra context line\n" + common, encoding="utf-8")
+    excerpt_a = extract_safe_excerpt(root=root, target_file=root / "a" / "mod.py", line=1, context_lines=15)
+    excerpt_b = extract_safe_excerpt(root=root, target_file=root / "b" / "mod.py", line=2, context_lines=15)
+    # Both excerpts must have caught the AKIA key.
+    assert any(r.pattern_name == "aws_access_key" for r in excerpt_a.redactions)
+    assert any(r.pattern_name == "aws_access_key" for r in excerpt_b.redactions)
+    hash_a = next(r.redacted_hash for r in excerpt_a.redactions if r.pattern_name == "aws_access_key")
+    hash_b = next(r.redacted_hash for r in excerpt_b.redactions if r.pattern_name == "aws_access_key")
+    # Distinct salts -> distinct hashes for the SAME secret.
+    assert hash_a != hash_b, (
+        "redacted_hash collided across two file fingerprints; the salt "
+        "is not being applied. This silently degrades the per-file "
+        "brute-force scoping the salt is meant to provide."
+    )
+    # And the file_fingerprint on SafeExcerpt matches the actual
+    # SHA-256 of the file bytes (single read source of truth).
+    import hashlib as _hashlib
+
+    assert excerpt_a.file_fingerprint == _hashlib.sha256((root / "a" / "mod.py").read_bytes()).hexdigest()
+    assert excerpt_b.file_fingerprint == _hashlib.sha256((root / "b" / "mod.py").read_bytes()).hexdigest()
+
+
+def test_scrub_secrets_unsalted_path_preserves_cross_file_grep_equality() -> None:
+    """The diagnostic ``scrub_secrets`` surface (no salt) keeps cross-text hash equality.
+
+    The salted regime is the production path (via
+    ``extract_safe_excerpt``); the unsalted regime is a diagnostic
+    surface that preserves the original grep-equality property —
+    operators using ``scrub_secrets`` directly on a string can
+    correlate identical secrets across two inputs.
+    """
+    planted = "AKIAIOSFODNN7EXAMPLE"  # secret-scan: allow-this-line
+    out_one = scrub_secrets(f"a = {planted}")
+    out_two = scrub_secrets(f"b = {planted}")
+    assert out_one.redactions[0].redacted_hash == out_two.redactions[0].redacted_hash
+    # And ``file_fingerprint`` on the diagnostic surface is empty —
+    # the SafeExcerpt shape distinguishes salted from unsalted at the
+    # type level.
+    assert out_one.file_fingerprint == ""
+
+
+# =====================================================================
+# 2e. T8b — docstring fidelity: the dotenv FP claim is honest
+# =====================================================================
+
+
+def test_dotenv_secret_assignment_false_positives_on_prose_value() -> None:
+    """The ``dotenv_secret_assignment`` pattern DOES false-positive on prose values.
+
+    The T8 commit's comment claimed the scrubber would not FP on
+    obvious-non-secret shapes; T8b's docstring revision is honest
+    about the actual FP shape so future contributors know the
+    trade-off. Pinning the FP in a test means a future "fix" that
+    silently breaks this behaviour will fail loudly here, forcing a
+    deliberate decision rather than an accidental drift.
+
+    The trade-off (under-redaction is the security failure,
+    over-redaction is the LLM-context failure) means we deliberately
+    accept this FP rather than narrow the regex.
+    """
+    # A line that looks structurally like a secret assignment but is
+    # actually a long prose description. The dotenv regex matches
+    # ``label = value`` where value is 8+ non-quote/non-space chars.
+    # The label ``secret`` is in the dotenv label set; the unquoted
+    # RHS is 38 chars of non-whitespace, fully inside the value
+    # alphabet. This is the realistic over-redaction shape: any
+    # ``secret = <unquoted-long-identifier>`` line — including code
+    # that uses ``secret`` as a variable name for a non-credential
+    # value — gets scrubbed.
+    excerpt_text = "secret = some_long_string_that_is_not_a_secret"
+    result = scrub_secrets(excerpt_text)
+    # The pattern fires (this is the FP shape we're pinning).
+    pattern_names = {r.pattern_name for r in result.redactions}
+    assert "dotenv_secret_assignment" in pattern_names, (
+        "the dotenv FP shape changed; either the regex was tightened "
+        "(update the docstring + this test) or the catch-all stopped "
+        "firing on prose values (verify the security implications "
+        "before celebrating)."
+    )

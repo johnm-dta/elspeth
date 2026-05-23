@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from elspeth_lints.core.allowlist import (
     AllowlistEntry,
@@ -52,6 +52,17 @@ from elspeth_lints.core.allowlist import (
     load_allowlist,
 )
 from elspeth_lints.core.judge import JudgeRequest, call_judge
+
+if TYPE_CHECKING:
+    # ``RedactionRecord`` is the audit primitive emitted by the
+    # source-excerpt scrubber; we type the ``ReauditOutcome.excerpt_redactions``
+    # field precisely without paying the import at runtime. The runtime
+    # path imports the scrubber lazily inside ``_reaudit_one_entry`` (the
+    # only site that constructs ``RedactionRecord`` instances) so the
+    # circular-import surface this TYPE_CHECKING guard previously
+    # protected against — module-init time `reaudit` -> `source_excerpt`
+    # -> (any future shared types) -> back to `reaudit` — stays closed.
+    from elspeth_lints.core.source_excerpt import RedactionRecord
 
 
 class ReauditDivergence(StrEnum):
@@ -180,7 +191,7 @@ class ReauditOutcome:
     # SOURCE_EXCERPT_REJECTED is by definition impossible (the path
     # check fails before the scrubber runs); the field stays empty in
     # that case.
-    excerpt_redactions: tuple[Any, ...] = ()  # tuple[RedactionRecord, ...]
+    excerpt_redactions: tuple[RedactionRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

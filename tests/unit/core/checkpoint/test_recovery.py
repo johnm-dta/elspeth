@@ -31,7 +31,7 @@ from elspeth.contracts.coalesce_checkpoint import (
     CoalesceTokenCheckpoint,
 )
 from elspeth.contracts.contract_records import ContractAuditRecord
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, EmptyResumeStateError, OrchestrationInvariantError
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint import CheckpointCorruptionError, CheckpointManager, RecoveryManager
@@ -1040,15 +1040,27 @@ def test_verify_contract_integrity_returns_contract(
     assert len(contract.fields) == 1
 
 
-def test_verify_contract_integrity_raises_when_contract_missing(
+def test_verify_contract_integrity_raises_empty_resume_state_when_no_sources_recorded(
     db: LandscapeDB,
     recovery_manager: RecoveryManager,
 ) -> None:
+    """Per ADR-025 §3 (elspeth-241608388f), absence of ``run_sources`` rows
+    is the interpretable ``EmptyResumeStateError`` ("nothing to resume")
+    case — NOT ``CheckpointCorruptionError``. The previous mapping caused
+    the CLI's outer ``try`` (which has no audit-corruption handler) to
+    bubble an unhandled traceback for what should be a clean exit-1
+    "this run is not resumable" message.
+    """
     with db.connection() as conn:
         _insert_run(conn, "run-contract-missing", status=RunStatus.FAILED, with_contract=False)
 
-    with pytest.raises(CheckpointCorruptionError, match="Schema contract is missing"):
+    with pytest.raises(EmptyResumeStateError) as exc_info:
         recovery_manager.verify_contract_integrity("run-contract-missing")
+    assert exc_info.value.run_id == "run-contract-missing"
+    # Subclass relationship is load-bearing: every ``except OrchestrationInvariantError``
+    # catch must still match this exception so callers without explicit
+    # EmptyResumeStateError handling do not silently miss it.
+    assert isinstance(exc_info.value, OrchestrationInvariantError)
 
 
 def test_verify_contract_integrity_raises_on_hash_mismatch(

@@ -5,6 +5,7 @@ Entry point for the elspeth CLI tool.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -1624,6 +1625,38 @@ def _build_resume_graphs(
     return validation_graph, execution_graph
 
 
+def _emit_not_resumable_event(error: EmptyResumeStateError, output_format: str) -> None:
+    """Emit the operator-facing ``not_resumable`` event for an empty-state resume.
+
+    Shared by the ``resume`` command's outer and inner exception handlers so
+    the operator surface is identical regardless of where the empty-state
+    raise originated (``can_resume()`` at recovery time vs.
+    ``Orchestrator.resume()`` at execute time).
+
+    Per ADR-025 §3, empty-state resume is the interpretable "nothing to
+    resume, start fresh" outcome — distinct from the broader Tier-1
+    invariant traceback path. The caller must invoke this *before* the
+    broader ``TIER_1_ERRORS`` handler (when sharing a try block) because
+    :class:`EmptyResumeStateError` is a subclass of
+    ``OrchestrationInvariantError`` and would otherwise be swallowed by
+    the fatal-traceback path.
+    """
+    if output_format == "json":
+        typer.echo(
+            json.dumps(
+                {
+                    "event": "not_resumable",
+                    "run_id": error.run_id,
+                    "reason": "no_recorded_work",
+                    "message": str(error),
+                }
+            ),
+            err=True,
+        )
+    else:
+        typer.echo(f"\nCannot resume run {error.run_id}: {error}", err=True)
+
+
 @app.command()
 def resume(
     run_id: str = typer.Argument(..., help="Run ID to resume"),
@@ -1990,31 +2023,11 @@ def resume(
                 typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
             raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
         except EmptyResumeStateError as e:
-            # ADR-025 §3: empty-state resume is the interpretable
-            # "nothing to resume, start fresh" outcome — distinct from
-            # the broader Tier-1 invariant traceback path below. This
-            # catch MUST precede the TIER_1_ERRORS handler because
-            # EmptyResumeStateError is a subclass of
-            # OrchestrationInvariantError (so existing Tier-1 catches
-            # still match it by type) but the operator-facing surface
-            # is a clean stderr message and exit 1, not a fatal
-            # framework-bug traceback.
-            if output_format == "json":
-                import json as json_mod_empty
-
-                typer.echo(
-                    json_mod_empty.dumps(
-                        {
-                            "event": "not_resumable",
-                            "run_id": e.run_id,
-                            "reason": "no_recorded_work",
-                            "message": str(e),
-                        }
-                    ),
-                    err=True,
-                )
-            else:
-                typer.echo(f"\nCannot resume run {e.run_id}: {e}", err=True)
+            # ADR-025 §3: this catch MUST precede the TIER_1_ERRORS
+            # handler because EmptyResumeStateError is a subclass of
+            # OrchestrationInvariantError. See _emit_not_resumable_event
+            # for the operator-facing contract.
+            _emit_not_resumable_event(e, output_format)
             raise typer.Exit(1) from e
         except contract_errors.TIER_1_ERRORS as e:
             # Tier 1 violations and framework bugs MUST be clearly distinguishable
@@ -2085,6 +2098,19 @@ def resume(
             typer.echo(f"  Rows failed: {result.rows_failed}")
             typer.echo(f"  Status: {result.status.value}")
 
+    except EmptyResumeStateError as e:
+        # ADR-025 §3: catches the empty-state raise from recovery's
+        # ``verify_contract_integrity()`` (reached via ``can_resume``
+        # at line 1780 — dry-run and pre-execute paths). The inner
+        # ``try`` at line 1955 catches the orchestrator-level raise
+        # during ``--execute``. Both deliver the identical
+        # operator-facing surface via ``_emit_not_resumable_event``;
+        # without this outer handler the recovery-time raise would
+        # bubble unhandled and the operator would see a Tier-1
+        # invariant traceback for a benign outcome
+        # (elspeth-241608388f).
+        _emit_not_resumable_event(e, output_format)
+        raise typer.Exit(1) from e
     finally:
         db.close()
 

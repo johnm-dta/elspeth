@@ -822,6 +822,76 @@ class TestStep3BlobDiscoveryTierMigration:
         assert names == {"list_blobs", "get_blob_metadata", "get_blob_content", "inspect_source"}
 
 
+class TestStep3SecretTierMigration:
+    """All 3 secret tools must carry declarations (2 discovery + 1 mutation)."""
+
+    def _get(self, name: str) -> dict[str, object]:
+        return next(d for d in get_tool_definitions() if d["name"] == name)
+
+    def test_list_secret_refs(self) -> None:
+        assert self._get("list_secret_refs") == {
+            "name": "list_secret_refs",
+            "description": "List available secret references (API keys, credentials). Shows names and scopes, never values.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_validate_secret_ref(self) -> None:
+        assert self._get("validate_secret_ref") == {
+            "name": "validate_secret_ref",
+            "description": "Check if a secret reference exists and is accessible to the current user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Secret reference name (e.g. 'OPENROUTER_API_KEY')."},
+                },
+                "required": ["name"],
+            },
+        }
+
+    def test_wire_secret_ref(self) -> None:
+        assert self._get("wire_secret_ref") == {
+            "name": "wire_secret_ref",
+            "description": "Place a secret reference marker in the pipeline config. The secret will be resolved at execution time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Secret reference name."},
+                    "target": {
+                        "type": "string",
+                        "enum": ["source", "node", "output"],
+                        "description": "Which component to wire the secret into.",
+                    },
+                    "target_id": {"type": "string", "description": "Node ID or output name (required for node/output targets)."},
+                    "option_key": {"type": "string", "description": "Config option key to set (e.g. 'api_key')."},
+                },
+                "required": ["name", "target", "option_key"],
+            },
+        }
+
+    def test_secret_tier_kinds(self) -> None:
+        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+
+        discovery = {d.name for d in _REGISTERED_TOOLS if d.kind is ToolKind.SECRET_DISCOVERY}
+        mutation = {d.name for d in _REGISTERED_TOOLS if d.kind is ToolKind.SECRET_MUTATION}
+        assert discovery == {"list_secret_refs", "validate_secret_ref"}
+        assert mutation == {"wire_secret_ref"}
+
+    def test_no_secret_tool_is_cacheable(self) -> None:
+        """Secret state mutates outside the composer; never cache."""
+        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+
+        for d in _REGISTERED_TOOLS:
+            if d.kind in (ToolKind.SECRET_DISCOVERY, ToolKind.SECRET_MUTATION):
+                assert d.cacheable is False, f"{d.name} secret tool must not be cacheable"
+
+    def test_wire_secret_ref_is_last_in_get_tool_definitions(self) -> None:
+        """Cache-marker stability: wire_secret_ref must remain the trailing tool name
+        in get_tool_definitions() so the Anthropic prompt-cache marker stays stable
+        across deploys (see _dispatch.py line ~1001 for the rationale)."""
+        defs = get_tool_definitions()
+        assert defs[-1]["name"] == "wire_secret_ref"
+
+
 class TestToolDeclarationInvariants:
     """The constructor must crash early on inconsistent declarations."""
 

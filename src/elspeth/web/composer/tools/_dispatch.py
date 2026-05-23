@@ -80,6 +80,9 @@ from elspeth.web.composer.tools.recipes import (
     _execute_list_recipes,
 )
 from elspeth.web.composer.tools.secrets import (
+    TOOLS_IN_MODULE as _SECRETS_TOOLS_IN_MODULE,
+)
+from elspeth.web.composer.tools.secrets import (
     _execute_wire_secret_ref,
     _handle_list_secret_refs,
     _handle_validate_secret_ref,
@@ -141,6 +144,7 @@ _REGISTERED_TOOLS: Final[tuple[ToolDeclaration, ...]] = (
     *_RECIPES_TOOLS_IN_MODULE,
     *_TRANSFORMS_TOOLS_IN_MODULE,
     *_OUTPUTS_TOOLS_IN_MODULE,
+    *_SECRETS_TOOLS_IN_MODULE,
 )
 assert_unique_names(_REGISTERED_TOOLS)
 _TOOL_DEFS_BY_NAME: Final[Mapping[str, dict[str, Any]]] = derive_tool_definitions_by_name(_REGISTERED_TOOLS)
@@ -278,22 +282,8 @@ def get_tool_definitions() -> list[dict[str, Any]]:
         _TOOL_DEFS_BY_NAME["apply_pipeline_recipe"],
         _TOOL_DEFS_BY_NAME["inspect_source"],
         # Secret tools
-        {
-            "name": "list_secret_refs",
-            "description": "List available secret references (API keys, credentials). Shows names and scopes, never values.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "validate_secret_ref",
-            "description": "Check if a secret reference exists and is accessible to the current user.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Secret reference name (e.g. 'OPENROUTER_API_KEY')."},
-                },
-                "required": ["name"],
-            },
-        },
+        _TOOL_DEFS_BY_NAME["list_secret_refs"],
+        _TOOL_DEFS_BY_NAME["validate_secret_ref"],
         # Composer-LLM-callable tool surface for surfacing an interpretation
         # of a subjective or under-specified term for user review.
         # The description below is normative documentation for the LLM (mirrored
@@ -341,24 +331,7 @@ def get_tool_definitions() -> list[dict[str, Any]]:
                 },
             },
         },
-        {
-            "name": "wire_secret_ref",
-            "description": "Place a secret reference marker in the pipeline config. The secret will be resolved at execution time.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Secret reference name."},
-                    "target": {
-                        "type": "string",
-                        "enum": ["source", "node", "output"],
-                        "description": "Which component to wire the secret into.",
-                    },
-                    "target_id": {"type": "string", "description": "Node ID or output name (required for node/output targets)."},
-                    "option_key": {"type": "string", "description": "Config option key to set (e.g. 'api_key')."},
-                },
-                "required": ["name", "target", "option_key"],
-            },
-        },
+        _TOOL_DEFS_BY_NAME["wire_secret_ref"],
     ]
 
 

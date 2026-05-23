@@ -2121,7 +2121,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/secrets.py:R1:_execute_wire_secret_ref:fp=05b9c08a1e37f7c4
+- key: web/composer/tools/secrets.py:R1:_execute_wire_secret_ref:fp=49751fbb4184c1e4
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: target_id = arguments.get("target_id")'
@@ -2593,7 +2593,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=1b5bff1ae93bcf45
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=304b7b820822de37
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: handler = all_handlers.get(tool_name)'

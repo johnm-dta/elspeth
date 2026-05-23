@@ -4,11 +4,10 @@
 These tests exercise RunLifecycleRepository directly to pin its contract
 and verify Tier 1 crash paths.
 
-Covers 4 untested branch clusters identified in review:
+Covers 3 untested branch clusters identified in review:
 1. get_source_schema — non-string type rejection
 2. get_source_field_resolution — corruption paths (bad JSON shape, missing key, non-dict mapping, non-string entries)
-3. get_run_contract — missing run, null hash, hash mismatch
-4. set_export_status — COMPLETED/PENDING/FAILED branching logic
+3. set_export_status — COMPLETED/PENDING/FAILED branching logic
 """
 
 from __future__ import annotations
@@ -21,11 +20,9 @@ from sqlalchemy import select, update
 from elspeth.contracts import (
     Determinism,
     ExportStatus,
-    FieldContract,
     NodeType,
     ReproducibilityGrade,
     RunStatus,
-    SchemaContract,
     SecretResolutionInput,
 )
 from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
@@ -541,69 +538,6 @@ class TestRecordSourceFieldResolutionNonexistentRun:
 
 
 # ---------------------------------------------------------------------------
-# get_run_contract — Tier 1 integrity checks
-# ---------------------------------------------------------------------------
-
-
-class TestGetRunContract:
-    """Direct tests for get_run_contract Tier 1 validation."""
-
-    def test_returns_none_when_no_contract_stored(self) -> None:
-        _, repo = _make_repo()
-        assert repo.get_run_contract("run-1") is None
-
-    def test_nonexistent_run_raises(self) -> None:
-        """get_run_contract raises AuditIntegrityError when run_id not found."""
-        _, repo = _make_repo()
-        with pytest.raises(AuditIntegrityError, match="not found"):
-            repo.get_run_contract("nonexistent")
-
-    def test_roundtrip_with_contract(self) -> None:
-        _, repo = _make_repo()
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(
-                FieldContract(normalized_name="name", original_name="name", python_type=str, required=True, source="declared"),
-                FieldContract(normalized_name="age", original_name="age", python_type=int, required=True, source="declared"),
-            ),
-            locked=True,
-        )
-        repo.update_run_contract("run-1", contract)
-        result = repo.get_run_contract("run-1")
-        assert result is not None
-        assert result.mode == "FIXED"
-        assert len(result.fields) == 2
-
-    def test_null_hash_with_json_raises_audit_integrity_error(self) -> None:
-        """Tier 1: JSON present but hash NULL = corruption/tampering."""
-        db, repo = _make_repo()
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(FieldContract(normalized_name="x", original_name="x", python_type=str, required=True, source="declared"),),
-            locked=True,
-        )
-        repo.update_run_contract("run-1", contract)
-        # Corrupt: set hash to NULL while keeping JSON
-        _corrupt_column(db, "run-1", schema_contract_hash=None)
-        with pytest.raises(AuditIntegrityError, match="hash is NULL"):
-            repo.get_run_contract("run-1")
-
-    def test_hash_mismatch_raises_audit_integrity_error(self) -> None:
-        """Tier 1: stored hash != recomputed hash = corruption/tampering."""
-        db, repo = _make_repo()
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(FieldContract(normalized_name="x", original_name="x", python_type=str, required=True, source="declared"),),
-            locked=True,
-        )
-        repo.update_run_contract("run-1", contract)
-        # Corrupt the stored hash
-        _corrupt_column(db, "run-1", schema_contract_hash="tampered-hash-value")
-        with pytest.raises(AuditIntegrityError, match="hash mismatch"):
-            repo.get_run_contract("run-1")
-
-
-# ---------------------------------------------------------------------------
 # complete_run — terminal status validation
 # ---------------------------------------------------------------------------
 
@@ -851,65 +785,6 @@ class TestRecordSecretResolutions:
         # Verify atomicity: zero records should be stored
         stored = repo.get_secret_resolutions_for_run("run-1")
         assert len(stored) == 0
-
-
-# ---------------------------------------------------------------------------
-# update_run_contract — overwrite guard
-# ---------------------------------------------------------------------------
-
-
-class TestUpdateRunContract:
-    """Direct tests for update_run_contract overwrite protection."""
-
-    def test_update_succeeds_when_no_prior_contract(self) -> None:
-        """Normal path: adding contract to a run that has none."""
-        _, repo = _make_repo()
-        contract = SchemaContract(
-            mode="OBSERVED",
-            fields=(FieldContract(normalized_name="x", original_name="x", python_type=str, required=True, source="inferred"),),
-            locked=True,
-        )
-        repo.update_run_contract("run-1", contract)
-        result = repo.get_run_contract("run-1")
-        assert result is not None
-        assert result.mode == "OBSERVED"
-
-    def test_update_nonexistent_run_raises(self) -> None:
-        """Atomic guard: update_run_contract on missing run raises AuditIntegrityError."""
-        _, repo = _make_repo()
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(FieldContract(normalized_name="x", original_name="x", python_type=str, required=True, source="declared"),),
-            locked=True,
-        )
-        with pytest.raises(AuditIntegrityError, match="not found"):
-            repo.update_run_contract("ghost-run", contract)
-
-    def test_overwrite_existing_contract_raises(self) -> None:
-        """Tier 1: overwriting an existing contract is evidence contamination."""
-        db = make_landscape_db()
-        ops = DatabaseOps(db)
-        repo = RunLifecycleRepository(db, ops, RunLoader())
-        # Create run WITH a contract via begin_run
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(FieldContract(normalized_name="y", original_name="y", python_type=int, required=True, source="declared"),),
-            locked=True,
-        )
-        repo.begin_run(
-            config={"key": "value"},
-            canonical_version="v1",
-            run_id="run-with-contract",
-            schema_contract=contract,
-        )
-        # Attempting to update should fail — contract already exists
-        new_contract = SchemaContract(
-            mode="OBSERVED",
-            fields=(FieldContract(normalized_name="z", original_name="z", python_type=str, required=True, source="inferred"),),
-            locked=True,
-        )
-        with pytest.raises(AuditIntegrityError, match="contract already exists"):
-            repo.update_run_contract("run-with-contract", new_contract)
 
 
 # ---------------------------------------------------------------------------

@@ -159,7 +159,6 @@ class RunLifecycleRepository:
         reproducibility_grade: ReproducibilityGrade | None = None,
         status: RunStatus = RunStatus.RUNNING,
         source_schema_json: str | None = None,
-        schema_contract: SchemaContract | None = None,
         initiated_by_user_id: str | None = None,
         auth_provider_type: str | None = None,
         openrouter_catalog_sha256: str,
@@ -176,8 +175,6 @@ class RunLifecycleRepository:
             source_schema_json: Optional serialized source schema for resume type restoration.
                 Should be Pydantic model_json_schema() output. Required for proper resume
                 type fidelity (datetime/Decimal restoration from payload JSON strings).
-            schema_contract: Optional schema contract for audit trail field resolution.
-                Stored via ContractAuditRecord for complete field mapping traceability.
             initiated_by_user_id: Optional authenticated user ID that initiated the run.
             auth_provider_type: Optional auth provider namespace for the initiating user.
             openrouter_catalog_sha256: Canonical sha256 of the OpenRouter
@@ -191,6 +188,17 @@ class RunLifecycleRepository:
 
         Returns:
             Run model with generated run_id
+
+        Notes:
+            Per ADR-025 §3 Decision 5 (G6) schema contracts are stored
+            per-source in the ``run_sources`` table — written by
+            ``record_run_source`` / ``update_run_source_contract`` as each
+            source iterates. The run-level singleton (``runs.schema_contract_json``
+            column and the matching ``schema_contract`` parameter) was deleted
+            because writers and readers had drifted: writers populated the
+            singleton, integrity verification consulted ``run_sources``, and
+            the audit trail recorded contracts in one surface while resume
+            validated against another.
         """
         if status == RunStatus.COMPLETED:
             raise AuditIntegrityError(
@@ -206,14 +214,6 @@ class RunLifecycleRepository:
         settings_json = canonical_json(config)
         config_hash = stable_hash(config)
         timestamp = now()
-
-        # Convert schema contract to audit record if provided
-        schema_contract_json: str | None = None
-        schema_contract_hash: str | None = None
-        if schema_contract is not None:
-            audit_record = ContractAuditRecord.from_contract(schema_contract)
-            schema_contract_json = audit_record.to_json()
-            schema_contract_hash = schema_contract.version_hash()
 
         # ADR-010 §Decision 3 M3: record the declaration +
         # Tier-1 registries that were in force at run start. Canonicalised
@@ -244,8 +244,6 @@ class RunLifecycleRepository:
                 status=run.status.value,
                 reproducibility_grade=run.reproducibility_grade,
                 source_schema_json=source_schema_json,
-                schema_contract_json=schema_contract_json,
-                schema_contract_hash=schema_contract_hash,
                 runtime_val_manifest_json=runtime_val_manifest_json,
                 llm_call_count=None,
                 seeded_from_cache=False,
@@ -905,104 +903,6 @@ class RunLifecycleRepository:
                         f"FAILED/INTERRUPTED runs can be resumed via update_run_status."
                     )
                 raise AuditIntegrityError(f"Cannot update run status to {status.value!r}: run {run_id} not found")
-
-    def update_run_contract(self, run_id: str, contract: SchemaContract) -> None:
-        """Update run with schema contract after first-row inference.
-
-        Called when a source infers schema from the first row during OBSERVED mode.
-        The contract is then locked and stored for all subsequent rows.
-
-        Args:
-            run_id: Run to update
-            contract: SchemaContract with inferred fields (should be locked)
-
-        Raises:
-            AuditIntegrityError: If run already has a contract (overwrite = evidence loss)
-
-        Note:
-            This is the only way to add a contract after begin_run().
-            Used for sources that discover schema during load() rather than from config.
-        """
-        audit_record = ContractAuditRecord.from_contract(contract)
-        schema_contract_json = audit_record.to_json()
-        schema_contract_hash = contract.version_hash()
-
-        # Atomic guard: conditional UPDATE only sets contract when column is NULL.
-        # This prevents TOCTOU races where a concurrent thread could set the contract
-        # between a check-then-write pair. The WHERE clause makes overwrite impossible.
-        with self._db.connection() as conn:
-            result = conn.execute(
-                runs_table.update()
-                .where(runs_table.c.run_id == run_id)
-                .where(runs_table.c.schema_contract_json.is_(None))
-                .values(
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
-                )
-            )
-            if result.rowcount == 0:
-                # Zero rows updated — either run doesn't exist or contract already set.
-                # Distinguish the two cases for a clear error message.
-                existing = conn.execute(select(runs_table.c.schema_contract_json).where(runs_table.c.run_id == run_id)).fetchone()
-                if existing is not None and existing.schema_contract_json is not None:
-                    raise AuditIntegrityError(
-                        f"Cannot update schema contract for run {run_id}: "
-                        f"contract already exists. update_run_contract is only valid "
-                        f"when no contract was set at begin_run()."
-                    )
-                raise AuditIntegrityError(f"Cannot update schema contract: run {run_id} not found")
-
-    def get_run_contract(self, run_id: str) -> SchemaContract | None:
-        """Get schema contract for a run.
-
-        Retrieves the stored schema contract and verifies integrity via hash.
-
-        Args:
-            run_id: Run to query
-
-        Returns:
-            SchemaContract if stored, None if run exists but no contract was stored
-
-        Raises:
-            AuditIntegrityError: If run_id not found, stored contract hash doesn't match
-                recomputed hash, or hash is NULL while JSON is present
-        """
-        query = select(
-            runs_table.c.run_id,
-            runs_table.c.schema_contract_json,
-            runs_table.c.schema_contract_hash,
-        ).where(runs_table.c.run_id == run_id)
-        row = self._ops.execute_fetchone(query)
-
-        if row is None:
-            raise AuditIntegrityError(f"Run {run_id} not found in database")
-
-        schema_contract_json = row.schema_contract_json
-        if schema_contract_json is None:
-            return None
-
-        # Restore via audit record (includes hash verification)
-        audit_record = ContractAuditRecord.from_json(schema_contract_json)
-        contract = audit_record.to_schema_contract()
-
-        # Verify stored hash matches recomputed hash (Tier 1 integrity)
-        # Both begin_run() and update_run_contract() always set JSON and hash together.
-        # NULL hash with non-NULL JSON is itself a corruption signal.
-        stored_hash = row.schema_contract_hash
-        if stored_hash is None:
-            raise AuditIntegrityError(
-                f"Schema contract JSON is present but hash is NULL for run {run_id}. "
-                f"Both fields must be set together — database corruption or tampering."
-            )
-        recomputed_hash = contract.version_hash()
-        if recomputed_hash != stored_hash:
-            raise AuditIntegrityError(
-                f"Schema contract hash mismatch for run {run_id}: "
-                f"stored={stored_hash}, recomputed={recomputed_hash}. "
-                f"This indicates database corruption or tampering."
-            )
-
-        return contract
 
     def record_secret_resolutions(
         self,

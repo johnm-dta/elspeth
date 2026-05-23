@@ -307,7 +307,9 @@ class TestCheckpointRecoveryIntegration:
         contract_json, contract_hash, _contract = _create_test_schema_contract()
 
         with db.engine.connect() as conn:
-            # Create run (failed status)
+            # Create run (failed status). ADR-025 §3 Decision 5 (G6) deleted
+            # the run-level singleton schema-contract columns; the contract is
+            # written below via the per-source ``run_sources`` insert.
             conn.execute(
                 runs_table.insert().values(
                     run_id=run_id,
@@ -316,8 +318,6 @@ class TestCheckpointRecoveryIntegration:
                     settings_json="{}",
                     canonical_version="sha256-rfc8785-v1",
                     status=RunStatus.FAILED,
-                    schema_contract_json=contract_json,
-                    schema_contract_hash=contract_hash,
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
@@ -464,8 +464,8 @@ class TestCheckpointTopologyHashAtomicity:
         )
 
         # Create run
-        _cj, _ch, test_contract = _create_test_schema_contract()
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1", schema_contract=test_contract)
+        _cj, _ch, _test_contract = _create_test_schema_contract()
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1")
 
         # Register nodes in database
         schema_config = SchemaConfig(mode="observed", fields=None)
@@ -547,8 +547,8 @@ class TestCheckpointTopologyHashAtomicity:
         factory = make_factory(db)
 
         # Create minimal run
-        _cj, _ch, test_contract = _create_test_schema_contract()
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1", schema_contract=test_contract)
+        _cj, _ch, _test_contract = _create_test_schema_contract()
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1")
 
         # Register source node
         schema_config = SchemaConfig(mode="observed", fields=None)
@@ -597,8 +597,8 @@ class TestCheckpointTopologyHashAtomicity:
         graph.add_node("existing_node", node_type=NodeType.TRANSFORM, plugin_name="test", config={"schema": {"mode": "observed"}})
 
         # Create minimal run
-        _cj, _ch, test_contract = _create_test_schema_contract()
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1", schema_contract=test_contract)
+        _cj, _ch, _test_contract = _create_test_schema_contract()
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1")
 
         # Register nodes in database (need source for row creation)
         schema_config = SchemaConfig(mode="observed", fields=None)
@@ -701,8 +701,8 @@ class TestResumeCheckpointCleanup:
 
         # Create run and required parent records
         factory = make_factory(db)
-        _cj, _ch, test_contract = _create_test_schema_contract()
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1", schema_contract=test_contract)
+        _cj, _ch, _test_contract = _create_test_schema_contract()
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         now = datetime.now(UTC)
         with db.engine.begin() as conn:
@@ -807,8 +807,8 @@ class TestCanResumeErrorHandling:
         graph.add_edge("source", "transform", label="continue")
 
         # Create run with FAILED status (required for resume eligibility)
-        _cj, _ch, test_contract = _create_test_schema_contract()
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1", schema_contract=test_contract)
+        _cj, _ch, _test_contract = _create_test_schema_contract()
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1")
 
         # Register nodes
         schema_config = SchemaConfig(mode="observed", fields=None)

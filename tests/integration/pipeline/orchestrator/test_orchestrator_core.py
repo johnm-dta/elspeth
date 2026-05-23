@@ -651,9 +651,14 @@ class TestOrchestratorEmptyPipeline:
         assert len(default_sink.results) == 0
         assert len(quarantine_sink.results) == 2
 
+        # Per ADR-025 §3 Decision 5 (G6) schema contracts live exclusively in
+        # ``run_sources``; the single-source assertion below reads through that
+        # surface (the deleted run-level singleton was the asymmetry that
+        # elspeth-97bfe206bb resolved).
         factory = make_factory(landscape_db)
-        contract = factory.run_lifecycle.get_run_contract(run_result.run_id)
-        assert contract is not None
+        source_records = factory.run_lifecycle.get_run_source_resume_records(run_result.run_id)
+        assert len(source_records) == 1
+        contract = next(iter(source_records.values())).schema_contract
         assert contract.mode == "FLEXIBLE"
         assert contract.locked is True
         assert [field.normalized_name for field in contract.fields] == ["id"]

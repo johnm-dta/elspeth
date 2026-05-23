@@ -125,8 +125,18 @@ class TestResumeFinalizesAsFailed:
         # Mock factory to capture finalize_run calls
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.run_lifecycle.get_source_schema.return_value = '{"mode": "observed"}'
-        mock_factory.run_lifecycle.get_run_contract.return_value = MagicMock()
-        mock_factory.run_lifecycle.get_run_source_resume_records.return_value = {}
+        # ADR-025 §3 Decision 5 (G6): the run-level singleton contract was
+        # deleted; ``_reconstruct_resume_state`` now reads per-source records
+        # exclusively, and an empty map raises ``EmptyResumeStateError`` before
+        # we reach the failure path under test. Supply at least one
+        # ``run_sources`` record so the resume gets far enough to execute
+        # ``_process_resumed_rows`` and trip the injected RuntimeError.
+        mock_factory.run_lifecycle.get_run_source_resume_records.return_value = {
+            NodeID("source-node"): SimpleNamespace(
+                source_schema_json='{"properties": {}, "required": []}',
+                schema_contract=MagicMock(name="contract"),
+            ),
+        }
         prepare_for_run()
         mock_factory.run_lifecycle.get_runtime_val_manifest.return_value = canonical_json(build_runtime_val_manifest())
 
@@ -452,7 +462,6 @@ class TestResumeFinalizesAsFailed:
             sinks={"refunds_sink": MagicMock()},
         )
         factory = MagicMock(spec=RecorderFactory)
-        factory.run_lifecycle.get_run_contract.return_value = MagicMock(name="run-contract")
         events: list[str] = []
 
         def _record_run_source(**kwargs):
@@ -502,98 +511,6 @@ class TestResumeFinalizesAsFailed:
         assert events == ["record:loading", "load", "process"]
         factory.run_lifecycle.record_run_source.assert_called_once()
 
-    def test_later_observed_source_records_own_contract_without_overwriting_run_singleton(self) -> None:
-        """Each observed source must backfill its own first-row contract."""
-
-        @contextmanager
-        def _source_operation(*args, **kwargs):
-            yield SimpleNamespace(operation=SimpleNamespace(operation_id="source-op-1"))
-
-        orders_contract = _observed_contract("order_id", int)
-        refunds_contract = _observed_contract("refund_id", str)
-        orch = _make_orchestrator(make_landscape_db())
-        ctx = MagicMock(contract=None)
-        factory = MagicMock(spec=RecorderFactory)
-        factory.run_lifecycle.get_run_contract.side_effect = [None, orders_contract]
-        processor = MagicMock()
-        seen_contracts: list[SchemaContract] = []
-        seen_source_ids: list[NodeID] = []
-
-        def _process_row(**kwargs):
-            seen_contracts.append(kwargs["ctx"].contract)
-            seen_source_ids.append(kwargs["source_node_id"])
-            return []
-
-        processor.process_row.side_effect = _process_row
-
-        def _config(source_name: str, field_name: str, contract: SchemaContract) -> PipelineConfig:
-            source = MagicMock()
-            source.name = "csv"
-            source.config = {"path": f"{source_name}.csv"}
-            source.on_success = "sink"
-            source.output_schema.model_json_schema.return_value = {
-                "type": "object",
-                "properties": {field_name: {"type": "string"}},
-            }
-            source.get_field_resolution.return_value = None
-            # Three calls per source after the schema_contract_recorded pre-flag
-            # was removed (multi-source-token-scheduler Fix 2): the first call
-            # happens inside ``record_run_source(..., lifecycle_state="loading")``
-            # BEFORE iteration begins (the observed source has not seen its
-            # first row yet, so the contract is None); the second happens
-            # inside ``_record_schema_contract`` AFTER the first valid row;
-            # the third happens at the post-loop ``record_run_source(..., lifecycle_state="loaded")``
-            # update once iteration completes (the contract is now locked).
-            source.get_schema_contract.side_effect = [None, contract, contract]
-            return PipelineConfig(
-                sources={source_name: source},
-                transforms=(),
-                sinks={"sink": MagicMock()},
-            )
-
-        def _load_source(run_id_arg, ctx_arg, *, active_source):
-            contract = orders_contract if active_source.config["path"].startswith("orders") else refunds_contract
-            field_name = "order_id" if contract is orders_contract else "refund_id"
-            assert ctx_arg.node_id in {NodeID("source-orders"), NodeID("source-refunds")}
-            assert ctx_arg.operation_id == "source-op-1"
-            return iter((make_source_row({field_name: 1}, contract=contract),))
-
-        with (
-            patch("elspeth.engine.orchestrator.core.track_operation", _source_operation),
-            patch.object(orch, "_load_source_with_events", side_effect=_load_source),
-        ):
-            for source_name, field_name, contract, source_id in [
-                ("orders", "order_id", orders_contract, NodeID("source-orders")),
-                ("refunds", "refund_id", refunds_contract, NodeID("source-refunds")),
-            ]:
-                config = _config(source_name, field_name, contract)
-                loop_ctx = LoopContext(
-                    counters=ExecutionCounters(),
-                    pending_tokens={"sink": []},
-                    processor=processor,
-                    ctx=ctx,
-                    config=config,
-                    agg_transform_lookup={},
-                    coalesce_executor=None,
-                    coalesce_node_map={},
-                )
-                orch._run_main_processing_loop(
-                    loop_ctx,
-                    factory,
-                    run_id="run-1",
-                    source_id=source_id,
-                    edge_map={},
-                    active_source_name=source_name,
-                    active_source=config.sources[source_name],
-                    flush_end_of_input=True,
-                )
-
-        assert seen_source_ids == [NodeID("source-orders"), NodeID("source-refunds")]
-        assert seen_contracts == [orders_contract, refunds_contract]
-        assert factory.run_lifecycle.update_run_source_contract.call_count == 2
-        factory.run_lifecycle.update_run_contract.assert_called_once_with("run-1", orders_contract)
-        assert factory.data_flow.update_node_output_contract.call_count == 2
-
     def test_second_observed_source_persists_resume_contract_before_row_failure(self) -> None:
         """A later source crash must leave source-scoped resume metadata behind."""
 
@@ -620,7 +537,6 @@ class TestResumeFinalizesAsFailed:
             sinks={"refunds_sink": MagicMock()},
         )
         factory = MagicMock(spec=RecorderFactory)
-        factory.run_lifecycle.get_run_contract.return_value = orders_contract
         events: list[str] = []
         factory.run_lifecycle.update_run_source_contract.side_effect = lambda **kwargs: events.append("source_contract")
         factory.data_flow.update_node_output_contract.side_effect = lambda *args, **kwargs: events.append("node_contract")
@@ -663,7 +579,6 @@ class TestResumeFinalizesAsFailed:
             )
 
         assert events == ["source_contract", "node_contract", "process"]
-        factory.run_lifecycle.update_run_contract.assert_not_called()
 
     def test_fresh_run_refuses_success_when_scheduler_work_remains(self) -> None:
         """A fresh multi-source run must not complete with durable scheduler work still active."""
@@ -745,7 +660,6 @@ class TestResumeFinalizesAsFailed:
         refunds_contract = MagicMock(name="refunds-contract")
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.run_lifecycle.get_source_schema.side_effect = AssertionError("run-level source schema must not be used")
-        mock_factory.run_lifecycle.get_run_contract.side_effect = AssertionError("run-level schema contract must not be used")
         prepare_for_run()
         mock_factory.run_lifecycle.get_runtime_val_manifest.return_value = canonical_json(build_runtime_val_manifest())
         mock_factory.run_lifecycle.get_run_source_resume_records.return_value = {

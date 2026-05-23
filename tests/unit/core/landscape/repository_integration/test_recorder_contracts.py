@@ -18,130 +18,10 @@ from elspeth.contracts import (
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.core.landscape.schema import nodes_table, runs_table, validation_errors_table
+from elspeth.core.landscape.schema import nodes_table, validation_errors_table
 
 # Dynamic schema for tests that don't care about specific fields
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
-
-
-class TestBeginRunWithSchemaContract:
-    """Tests for begin_run() with schema_contract parameter."""
-
-    def test_begin_run_stores_schema_contract_json(self) -> None:
-        """begin_run() stores schema_contract_json when provided."""
-        from sqlalchemy import select
-
-        db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
-
-        # Create a schema contract
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(
-                FieldContract(
-                    normalized_name="customer_id",
-                    original_name="Customer ID",
-                    python_type=str,
-                    required=True,
-                    source="declared",
-                ),
-                FieldContract(
-                    normalized_name="amount",
-                    original_name="Amount",
-                    python_type=int,
-                    required=True,
-                    source="declared",
-                ),
-            ),
-            locked=True,
-        )
-
-        run = factory.run_lifecycle.begin_run(
-            config={"source": "test.csv"},
-            canonical_version="v1",
-            schema_contract=contract,
-        )
-
-        # Verify stored in database
-        with db.connection() as conn:
-            result = conn.execute(
-                select(runs_table.c.schema_contract_json, runs_table.c.schema_contract_hash).where(runs_table.c.run_id == run.run_id)
-            )
-            row = result.fetchone()
-
-        assert row is not None
-        assert row.schema_contract_json is not None
-        assert row.schema_contract_hash is not None
-        assert row.schema_contract_hash == contract.version_hash()
-
-        # Verify JSON can be restored
-        restored = ContractAuditRecord.from_json(row.schema_contract_json)
-        assert restored.mode == "FIXED"
-        assert len(restored.fields) == 2
-
-    def test_begin_run_without_schema_contract(self) -> None:
-        """begin_run() leaves contract columns NULL when not provided."""
-        from sqlalchemy import select
-
-        db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
-
-        run = factory.run_lifecycle.begin_run(
-            config={"source": "test.csv"},
-            canonical_version="v1",
-        )
-
-        with db.connection() as conn:
-            result = conn.execute(
-                select(runs_table.c.schema_contract_json, runs_table.c.schema_contract_hash).where(runs_table.c.run_id == run.run_id)
-            )
-            row = result.fetchone()
-
-        assert row is not None
-        assert row.schema_contract_json is None
-        assert row.schema_contract_hash is None
-
-
-class TestUpdateRunContract:
-    """Tests for update_run_contract() method."""
-
-    def test_update_run_contract_stores_contract(self) -> None:
-        """update_run_contract() stores contract after first-row inference."""
-        from sqlalchemy import select
-
-        db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
-
-        # Start run without contract
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
-
-        # After processing first row, source infers schema
-        contract = SchemaContract(
-            mode="OBSERVED",
-            fields=(
-                FieldContract(
-                    normalized_name="inferred_field",
-                    original_name="Inferred Field",
-                    python_type=str,
-                    required=False,
-                    source="inferred",
-                ),
-            ),
-            locked=True,
-        )
-
-        factory.run_lifecycle.update_run_contract(run.run_id, contract)
-
-        # Verify stored
-        with db.connection() as conn:
-            result = conn.execute(
-                select(runs_table.c.schema_contract_json, runs_table.c.schema_contract_hash).where(runs_table.c.run_id == run.run_id)
-            )
-            row = result.fetchone()
-
-        assert row is not None
-        assert row.schema_contract_json is not None
-        assert row.schema_contract_hash == contract.version_hash()
 
 
 class TestUpdateNodeOutputContract:
@@ -208,57 +88,6 @@ class TestUpdateNodeOutputContract:
         assert audit_record.mode == "OBSERVED"
         assert len(audit_record.fields) == 1
         assert audit_record.fields[0].normalized_name == "customer_id"
-
-
-class TestGetRunContract:
-    """Tests for get_run_contract() method."""
-
-    def test_get_run_contract_returns_stored_contract(self) -> None:
-        """get_run_contract() returns the stored schema contract."""
-        db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
-
-        # Store contract via begin_run
-        original_contract = SchemaContract(
-            mode="FLEXIBLE",
-            fields=(
-                FieldContract(
-                    normalized_name="id",
-                    original_name="ID",
-                    python_type=int,
-                    required=True,
-                    source="declared",
-                ),
-            ),
-            locked=True,
-        )
-
-        run = factory.run_lifecycle.begin_run(
-            config={},
-            canonical_version="v1",
-            schema_contract=original_contract,
-        )
-
-        # Retrieve it
-        retrieved = factory.run_lifecycle.get_run_contract(run.run_id)
-
-        assert retrieved is not None
-        assert retrieved.mode == "FLEXIBLE"
-        assert len(retrieved.fields) == 1
-        assert retrieved.fields[0].normalized_name == "id"
-        assert retrieved.fields[0].python_type is int
-        assert retrieved.locked is True
-
-    def test_get_run_contract_returns_none_when_not_stored(self) -> None:
-        """get_run_contract() returns None when no contract is stored."""
-        db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
-
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
-
-        result = factory.run_lifecycle.get_run_contract(run.run_id)
-
-        assert result is None
 
 
 class TestRegisterNodeWithContracts:
@@ -745,51 +574,6 @@ class TestRecordValidationErrorWithContract:
 
 class TestContractIntegrityVerification:
     """Tests for contract integrity verification on retrieval."""
-
-    def test_get_run_contract_verifies_hash(self) -> None:
-        """get_run_contract() verifies hash integrity on retrieval."""
-        from sqlalchemy import select
-
-        from elspeth.core.landscape.schema import runs_table
-
-        db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
-
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(
-                FieldContract(
-                    normalized_name="verified_field",
-                    original_name="Verified Field",
-                    python_type=str,
-                    required=True,
-                    source="declared",
-                ),
-            ),
-            locked=True,
-        )
-
-        run = factory.run_lifecycle.begin_run(
-            config={},
-            canonical_version="v1",
-            schema_contract=contract,
-        )
-
-        # Query database DIRECTLY to get the stored hash
-        with db.connection() as conn:
-            result = conn.execute(select(runs_table.c.schema_contract_hash).where(runs_table.c.run_id == run.run_id)).fetchone()
-            assert result is not None, "Run not found in database"
-            stored_hash = result[0]
-
-        # Retrieve contract via factory
-        retrieved = factory.run_lifecycle.get_run_contract(run.run_id)
-
-        # Verify hash integrity: stored DB hash must match recomputed hash
-        assert retrieved is not None
-        computed_hash = retrieved.version_hash()
-        assert stored_hash == computed_hash, f"Hash integrity violation: stored={stored_hash}, computed={computed_hash}"
-        # Also verify against original (should match if storage is correct)
-        assert computed_hash == contract.version_hash()
 
     def test_get_node_contracts_verifies_hash(self) -> None:
         """get_node_contracts() verifies hash integrity on retrieval."""

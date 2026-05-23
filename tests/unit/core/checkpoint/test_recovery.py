@@ -99,14 +99,13 @@ def _insert_run(
 ) -> None:
     """Insert a ``runs`` row, plus a ``run_sources`` row when a contract is requested.
 
-    Per ADR-025 §3 Decision 5 the schema contract lives on
-    ``run_sources.schema_contract_json``; the legacy ``runs.schema_contract_json``
-    column is still populated here so any straggler reader observes the same
-    value, but ``verify_contract_integrity`` consults ``run_sources``
-    exclusively. The helper auto-creates a SOURCE node "source-node" when a
-    contract is requested so the ``run_sources`` foreign-key constraint
-    holds; callers that need to inspect the source node explicitly insert
-    additional nodes via :func:`_insert_node` after this helper returns.
+    ADR-025 §3 Decision 5 (G6): the schema contract lives exclusively on
+    ``run_sources.schema_contract_json``; the run-level singleton columns
+    were deleted along with their accessors. The helper auto-creates a
+    SOURCE node "source-node" when a contract is requested so the
+    ``run_sources`` foreign-key constraint holds; callers that need to
+    inspect the source node explicitly insert additional nodes via
+    :func:`_insert_node` after this helper returns.
     """
     schema_contract_json: str | None = None
     schema_contract_hash: str | None = None
@@ -125,8 +124,6 @@ def _insert_run(
             settings_json="{}",
             canonical_version="sha256-rfc8785-v1",
             status=status,
-            schema_contract_json=schema_contract_json,
-            schema_contract_hash=schema_contract_hash,
             openrouter_catalog_sha256="0" * 64,
             openrouter_catalog_source="bundled",
         )

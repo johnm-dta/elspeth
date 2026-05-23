@@ -99,14 +99,57 @@ def _create_failed_run(
     *,
     include_contract: bool,
 ) -> str:
-    """Create a FAILED run with source schema, optionally with schema contract."""
+    """Create a FAILED run with source schema, optionally with a per-source contract record.
+
+    ADR-025 §3 Decision 5 (G6): schema contracts now live exclusively in
+    ``run_sources``. ``include_contract=True`` writes a ``run_sources`` row so
+    resume reconstruction can find a per-source contract; ``False`` leaves
+    ``run_sources`` empty so resume refuses with ``EmptyResumeStateError``.
+    """
+    from elspeth.contracts import NodeType
+    from elspeth.contracts.contract_records import ContractAuditRecord
+    from elspeth.contracts.enums import Determinism
+    from elspeth.core.landscape.schema import nodes_table, run_sources_table
+
     run = factory.run_lifecycle.begin_run(
         config={"test": "resume-guardrails"},
         canonical_version="v1",
         status=RunStatus.FAILED,
         source_schema_json=json.dumps(_ResumeSourceSchema.model_json_schema()),
-        schema_contract=_make_schema_contract() if include_contract else None,
     )
+    if include_contract:
+        contract = _make_schema_contract()
+        audit_record = ContractAuditRecord.from_contract(contract)
+        now = datetime.now(UTC)
+        with factory.run_lifecycle._db.connection() as conn:
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id="source-node",
+                    run_id=run.run_id,
+                    plugin_name="list_source",
+                    node_type=NodeType.SOURCE,
+                    plugin_version="1.0.0",
+                    determinism=Determinism.DETERMINISTIC,
+                    config_hash="resume-guardrails",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run.run_id,
+                    source_node_id="source-node",
+                    source_name="primary",
+                    plugin_name="list_source",
+                    lifecycle_state="loaded",
+                    config_hash="resume-guardrails",
+                    schema_json=json.dumps(_ResumeSourceSchema.model_json_schema()),
+                    schema_contract_json=audit_record.to_json(),
+                    schema_contract_hash=contract.version_hash(),
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
     return run.run_id
 
 
@@ -179,7 +222,11 @@ class TestResumeGuardrails:
 
         mock_get_unprocessed.assert_not_called()
         assert exc_info.value.run_id == run_id
-        assert "schema contract was never written" in str(exc_info.value).lower()
+        # ADR-025 §3 Decision 5 (G6): the singleton ``schema_contract_json``
+        # column was deleted. The empty-resume-state precondition now keys on
+        # the presence of ``run_sources`` records — the same observable
+        # condition the legacy NULL-singleton check used to describe.
+        assert "no run_sources records were written" in str(exc_info.value).lower()
         # Subclass relationship is load-bearing — see the typed-error
         # subclass commentary on the companion test below.
         assert isinstance(exc_info.value, OrchestrationInvariantError)
@@ -193,17 +240,20 @@ class TestResumeGuardrails:
         )
         config, graph = _build_pipeline()
 
+        # ADR-025 §3 Decision 5 (G6): resume now reconstructs unprocessed
+        # rows via ``get_unprocessed_row_data_by_source``. Patching the
+        # legacy ``get_unprocessed_row_data`` would silently no-op.
         with (
             patch(
-                "elspeth.core.checkpoint.recovery.RecoveryManager.get_unprocessed_row_data",
-                return_value=[
+                "elspeth.core.checkpoint.recovery.RecoveryManager.get_unprocessed_row_data_by_source",
+                return_value=(
                     ResumedRow(
                         row_id="row-1",
                         row_index=0,
                         source_node_id=NodeID("source-node"),
                         row_data={"id": 1, "value": "alpha"},
                     ),
-                ],
+                ),
             ),
             pytest.raises(AuditIntegrityError, match="has no edges registered") as exc_info,
         ):
@@ -253,27 +303,18 @@ class TestResumeGuardrails:
         assert "contract registry" in str(exc_info.value).lower()
 
     def test_resume_refuses_with_typed_error_when_no_sources_recorded(self, resume_test_env: dict[str, Any]) -> None:
-        """ADR-025 §3: empty resume state is refused with a typed exception.
+        """ADR-025 §3 Decision 5 (G6): empty resume state is refused with a typed exception.
 
-        Previously framed as a "positive control" for the early-exit
-        path (no rows -> clean completion). Under the strict ADR-025 §3
-        reading, ``ResumeState.schema_contracts_by_source`` is non-empty
-        by invariant: a run that failed before any row was committed
-        AND wrote no ``run_sources`` records has nothing to key a
-        contract under, and there is no honest way to construct a
-        ResumeState. ``_reconstruct_resume_state`` must refuse upstream
-        with :class:`EmptyResumeStateError` so the CLI can present a
-        clean "this run is not resumable, start a fresh run" outcome
-        rather than a Tier-1 invariant traceback.
+        A run that failed before any row was committed AND wrote no
+        ``run_sources`` records has nothing to key a contract under, so
+        ``_reconstruct_resume_state`` refuses upstream with
+        :class:`EmptyResumeStateError`. The CLI can then present a clean
+        "this run is not resumable, start a fresh run" outcome rather
+        than a Tier-1 invariant traceback.
 
-        Fixture shape: ``_create_failed_run(include_contract=True)``
-        writes ``runs.contract_json`` but does NOT call
-        ``record_run_source``; combined with the mocked
-        ``get_unprocessed_row_data`` returning ``[]``, the legacy
-        single-source resume path observes zero distinct
-        ``source_node_id`` values and therefore produces an empty
-        contract map — the exact precondition that triggers the
-        strict refuse.
+        Fixture shape: ``_create_failed_run(include_contract=False)``
+        writes the ``runs`` row but does NOT call ``record_run_source``
+        — the exact precondition that triggers the strict refuse.
 
         The genuine "early-exit on empty rows" success path is
         exercised in
@@ -282,7 +323,7 @@ class TestResumeGuardrails:
         contract map (the RC6 shape: run_sources records present,
         unprocessed_rows empty).
         """
-        run_id = _create_failed_run(resume_test_env["factory"], include_contract=True)
+        run_id = _create_failed_run(resume_test_env["factory"], include_contract=False)
         orchestrator = Orchestrator(
             resume_test_env["db"],
             checkpoint_manager=resume_test_env["checkpoint_manager"],
@@ -291,8 +332,8 @@ class TestResumeGuardrails:
 
         with (
             patch(
-                "elspeth.core.checkpoint.recovery.RecoveryManager.get_unprocessed_row_data",
-                return_value=[],
+                "elspeth.core.checkpoint.recovery.RecoveryManager.get_unprocessed_row_data_by_source",
+                return_value=(),
             ),
             pytest.raises(EmptyResumeStateError) as exc_info,
         ):

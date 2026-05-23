@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from unittest.mock import MagicMock
 
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginSchemaInfo,
@@ -50,7 +51,7 @@ def _make_catalog_with_schemas(
     transform_schemas = transform_schemas or {}
     sink_schemas = sink_schemas or {}
 
-    catalog = MagicMock()
+    catalog = MagicMock(spec=CatalogService)
     catalog.list_sources.return_value = [
         PluginSummary(
             name=name,

@@ -309,7 +309,7 @@ class TestGetPluginSchemaMarksLoadedContract:
         from elspeth.web.catalog.schemas import PluginSchemaInfo
         from elspeth.web.composer.tools import execute_tool
 
-        catalog = MagicMock()
+        catalog = MagicMock(spec=CatalogService)
         catalog.list_sources.return_value = []
         catalog.list_transforms.return_value = []
         catalog.list_sinks.return_value = []
@@ -346,7 +346,7 @@ class TestGetPluginSchemaMarksLoadedContract:
 
         from elspeth.web.composer.tools import execute_tool
 
-        catalog = MagicMock()
+        catalog = MagicMock(spec=CatalogService)
         catalog.list_sources.return_value = []
         catalog.list_transforms.return_value = []
         catalog.list_sinks.return_value = []

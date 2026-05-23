@@ -2113,6 +2113,11 @@ class ComposerServiceImpl:
 
         try:
             from litellm.exceptions import APIError as LiteLLMAPIError
+            from litellm.exceptions import (
+                BlockedPiiEntityError,
+                BudgetExceededError,
+                GuardrailRaisedException,
+            )
 
             response = await asyncio.wait_for(
                 self._call_text_llm(messages),
@@ -2120,7 +2125,12 @@ class ComposerServiceImpl:
             )
         except TimeoutError:
             raise ComposerServiceError("Run diagnostics explanation timed out") from None
-        except LiteLLMAPIError as exc:
+        except (
+            LiteLLMAPIError,
+            BudgetExceededError,
+            BlockedPiiEntityError,
+            GuardrailRaisedException,
+        ) as exc:
             raise ComposerServiceError(f"LLM unavailable ({type(exc).__name__})") from exc
 
         content = cast(str | None, response.choices[0].message.content)

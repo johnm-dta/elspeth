@@ -2805,3 +2805,279 @@ def test_checkpoint_restore_rejects_existing_blocked_work_with_stale_resume_payl
             coalesce_node_id="coalesce_node",
             coalesce_name="merge-b",
         )
+
+
+# =============================================================================
+# Lease heartbeat primitive (ADR-026 RC6 multi-worker, filigree elspeth-ddde8144b6)
+# =============================================================================
+# A worker mid-processing extends its own ``lease_expires_at`` periodically so
+# a peer's ``recover_expired_leases`` sweep does NOT reap an alive-but-slow
+# worker. The CAS contract on the heartbeat write raises
+# ``SchedulerLeaseLostError`` when the row has been reaped or reassigned, so
+# the caller can abandon its in-flight work without a follow-up ``mark_*``
+# that would cascade into Tier-1 ``AuditIntegrityError``.
+
+
+def test_scheduler_heartbeat_lease_extends_expires_at_for_held_lease() -> None:
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
+
+    claimed = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
+    assert claimed is not None
+    assert claimed.lease_expires_at == now + timedelta(seconds=30)
+
+    later = now + timedelta(seconds=25)
+    new_expires_at = repo.heartbeat_lease(
+        run_id="run-1",
+        work_item_id=item.work_item_id,
+        lease_owner="worker-a",
+        lease_seconds=30,
+        now=later,
+    )
+    assert new_expires_at == later + timedelta(seconds=30)
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                token_work_items_table.c.status,
+                token_work_items_table.c.lease_owner,
+                token_work_items_table.c.lease_expires_at,
+            ).where(token_work_items_table.c.work_item_id == item.work_item_id)
+        ).one()
+    assert row.status == TokenWorkStatus.LEASED.value
+    assert row.lease_owner == "worker-a"
+    # SQLite returns naive datetimes; compare with tz stripped to avoid coupling
+    # this test to driver-level tzinfo behavior — the unit under test is the
+    # extension write, not datetime canonicalization.
+    persisted = row.lease_expires_at if row.lease_expires_at.tzinfo is not None else row.lease_expires_at.replace(tzinfo=UTC)
+    assert persisted == later + timedelta(seconds=30)
+
+
+def test_scheduler_heartbeat_lease_prevents_peer_reaper_from_reaping_alive_slow_worker() -> None:
+    """Composes with ``recover_expired_leases``: an alive-but-slow worker that
+    heartbeats keeps its lease fresh, so a peer reaper observing the run sees
+    the row as ``LEASED`` with ``lease_expires_at > now`` and does NOT reap
+    it. Pins the single-timestamp design's correctness against the ticket's
+    scenario.
+    """
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
+
+    caller_owner = "row-processor:run-1:alive-slow"
+    peer_owner = "row-processor:run-1:peer-reaper"
+
+    claimed = repo.claim_ready(run_id="run-1", lease_owner=caller_owner, lease_seconds=30, now=now)
+    assert claimed is not None
+
+    # Simulate alive-but-slow: lease window of 30s, but the worker heartbeats
+    # at 25s. By the time the peer reaper sweeps at 28s, the lease was
+    # extended to 25 + 30 = 55s, which is > 28s → no reap.
+    repo.heartbeat_lease(
+        run_id="run-1",
+        work_item_id=item.work_item_id,
+        lease_owner=caller_owner,
+        lease_seconds=30,
+        now=now + timedelta(seconds=25),
+    )
+    recovered = repo.recover_expired_leases(
+        run_id="run-1",
+        now=now + timedelta(seconds=28),
+        caller_owner=peer_owner,
+    )
+    assert recovered == 0, "Heartbeat-fresh lease must NOT be reaped by peer"
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                token_work_items_table.c.work_item_id,
+                token_work_items_table.c.status,
+                token_work_items_table.c.lease_owner,
+                token_work_items_table.c.attempt,
+            ).where(token_work_items_table.c.work_item_id == item.work_item_id)
+        ).one()
+    assert row.work_item_id == item.work_item_id
+    assert row.status == TokenWorkStatus.LEASED.value
+    assert row.lease_owner == caller_owner
+    assert row.attempt == claimed.attempt, "Attempt must NOT bump for heartbeat-fresh lease"
+
+
+def test_scheduler_heartbeat_lease_does_not_block_reaping_dead_worker() -> None:
+    """Negative companion: a worker that did NOT heartbeat is reaped normally.
+
+    Pins the correctness of the dead-worker path — the heartbeat primitive
+    extends the alive case but must not interfere with the dead case.
+    """
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    _enqueue_scheduler_test_item(repo, engine=engine, now=now)
+
+    dead_owner = "row-processor:run-1:dead-worker"
+    peer_owner = "row-processor:run-1:peer-reaper"
+
+    claimed = repo.claim_ready(run_id="run-1", lease_owner=dead_owner, lease_seconds=30, now=now)
+    assert claimed is not None
+
+    # No heartbeat call — the dead worker never wakes up to extend its lease.
+    recovered = repo.recover_expired_leases(
+        run_id="run-1",
+        now=now + timedelta(seconds=31),
+        caller_owner=peer_owner,
+    )
+    assert recovered == 1
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(
+                token_work_items_table.c.status,
+                token_work_items_table.c.lease_owner,
+                token_work_items_table.c.attempt,
+            )
+        ).all()
+    # The original work_item_id was rewritten under a bumped attempt + READY.
+    assert len(rows) == 1
+    surviving = rows[0]
+    assert surviving.status == TokenWorkStatus.READY.value
+    assert surviving.lease_owner is None
+    assert surviving.attempt == claimed.attempt + 1
+
+
+def test_scheduler_heartbeat_lease_raises_lease_lost_when_lease_was_reaped() -> None:
+    """CAS protection: a worker discovering its lease has been reaped must
+    raise ``SchedulerLeaseLostError`` instead of silently succeeding. The
+    drain loop catches this specifically to abandon the in-flight work
+    without a follow-up ``mark_*`` write that would CAS-fail and cascade
+    into Tier-1 ``AuditIntegrityError``.
+    """
+    from elspeth.contracts.errors import SchedulerLeaseLostError
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
+
+    dead_owner = "row-processor:run-1:dead-worker"
+    peer_owner = "row-processor:run-1:peer-reaper"
+
+    claimed = repo.claim_ready(run_id="run-1", lease_owner=dead_owner, lease_seconds=30, now=now)
+    assert claimed is not None
+
+    # Peer reaps the lease while the (no-longer-dead, just slow) worker is
+    # still in-flight. The reaper rewrites work_item_id under a bumped attempt.
+    repo.recover_expired_leases(
+        run_id="run-1",
+        now=now + timedelta(seconds=31),
+        caller_owner=peer_owner,
+    )
+
+    # Slow worker wakes up and tries to heartbeat its old work_item_id /
+    # lease_owner — CAS rowcount=0 → SchedulerLeaseLostError.
+    with pytest.raises(SchedulerLeaseLostError) as exc_info:
+        repo.heartbeat_lease(
+            run_id="run-1",
+            work_item_id=item.work_item_id,
+            lease_owner=dead_owner,
+            lease_seconds=30,
+            now=now + timedelta(seconds=32),
+        )
+    assert exc_info.value.work_item_id == item.work_item_id
+    assert exc_info.value.lease_owner == dead_owner
+    assert exc_info.value.run_id == "run-1"
+
+
+def test_scheduler_heartbeat_lease_raises_lease_lost_for_non_owner_caller() -> None:
+    """CAS protection (positive case still LEASED, but wrong owner): another
+    worker that does not own the lease cannot heartbeat it. Pins the
+    ``lease_owner`` clause of the CAS.
+    """
+    from elspeth.contracts.errors import SchedulerLeaseLostError
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
+
+    claimed = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
+    assert claimed is not None
+
+    # Worker-B tries to heartbeat a lease owned by worker-a.
+    with pytest.raises(SchedulerLeaseLostError):
+        repo.heartbeat_lease(
+            run_id="run-1",
+            work_item_id=item.work_item_id,
+            lease_owner="worker-b",
+            lease_seconds=30,
+            now=now + timedelta(seconds=5),
+        )
+
+
+def test_scheduler_heartbeat_lease_composes_with_peer_active_leases() -> None:
+    """``peer_active_leases`` reads ``lease_expires_at > now``. A heartbeat
+    extends that timestamp, so a peer drain that runs while the original
+    holder has heartbeated sees the lease as active and refuses to start
+    (preserving single-active-resume from commit 63d573c7c). Without
+    heartbeat, a slow worker would silently disappear from peer_active_leases
+    after lease_expires_at and a peer drain would proceed against a still-
+    in-flight original holder.
+    """
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    item = _enqueue_scheduler_test_item(repo, engine=engine, now=now)
+
+    original_owner = "row-processor:run-1:original"
+    peer_owner = "row-processor:run-1:peer"
+
+    claimed = repo.claim_ready(run_id="run-1", lease_owner=original_owner, lease_seconds=30, now=now)
+    assert claimed is not None
+
+    # At now+25s, peer_active_leases (called from peer) sees the original
+    # lease as active (expires at now+30).
+    peers_seen_by_peer = repo.peer_active_leases(
+        run_id="run-1",
+        caller_owner=peer_owner,
+        now=now + timedelta(seconds=25),
+    )
+    assert peers_seen_by_peer == (original_owner,)
+
+    # Original heartbeats at 28s — lease now extends to 58s.
+    repo.heartbeat_lease(
+        run_id="run-1",
+        work_item_id=item.work_item_id,
+        lease_owner=original_owner,
+        lease_seconds=30,
+        now=now + timedelta(seconds=28),
+    )
+
+    # At now+35s (after the original lease window would have expired),
+    # peer_active_leases STILL reports the original as active because the
+    # heartbeat refreshed lease_expires_at. Peer drain must continue to refuse.
+    peers_after_heartbeat = repo.peer_active_leases(
+        run_id="run-1",
+        caller_owner=peer_owner,
+        now=now + timedelta(seconds=35),
+    )
+    assert peers_after_heartbeat == (original_owner,), (
+        "Heartbeat must keep the peer-active-leases check consistent with the "
+        "reaper's view of liveness; otherwise single-active-resume invariant breaks."
+    )

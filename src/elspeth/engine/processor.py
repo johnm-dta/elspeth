@@ -67,6 +67,7 @@ from elspeth.contracts.errors import (
     PassThroughContractViolation,
     PluginContractViolation,
     PluginRetryableError,
+    SchedulerLeaseLostError,
     TransformErrorCategory,
     TransformErrorReason,
 )
@@ -336,6 +337,7 @@ class RowProcessor:
         scheduler: TokenSchedulerRepository | None = None,
         scheduler_lease_owner: str | None = None,
         scheduler_lease_seconds: int = 300,
+        scheduler_heartbeat_seconds: int = 60,
     ) -> None:
         """Initialize processor.
 
@@ -452,6 +454,27 @@ class RowProcessor:
         self._scheduler = scheduler
         self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
         self._scheduler_lease_seconds = scheduler_lease_seconds
+        if scheduler_heartbeat_seconds <= 0:
+            raise OrchestrationInvariantError(
+                f"scheduler_heartbeat_seconds must be positive, got {scheduler_heartbeat_seconds}"
+            )
+        if scheduler_heartbeat_seconds >= scheduler_lease_seconds:
+            raise OrchestrationInvariantError(
+                f"scheduler_heartbeat_seconds ({scheduler_heartbeat_seconds}) must be less than "
+                f"scheduler_lease_seconds ({scheduler_lease_seconds}); otherwise the heartbeat "
+                "cannot refresh the lease before it expires under any slow-work scenario."
+            )
+        self._scheduler_heartbeat_seconds = scheduler_heartbeat_seconds
+        # Active scheduler claim state for in-loop heartbeat refresh
+        # (ADR-026 RC6 multi-worker, filigree elspeth-ddde8144b6). These fields
+        # are non-None only inside ``_drain_scheduler_claims`` between
+        # ``claim_ready``/``claim_pending_sink`` and the terminal ``mark_*``.
+        # ``_process_single_token`` calls ``_heartbeat_active_claim`` on each
+        # node-iteration boundary so an alive-but-slow worker's lease does not
+        # expire under a peer reaper. RowProcessor is single-threaded per row,
+        # so this instance state has no concurrent access.
+        self._active_claim_work_item_id: str | None = None
+        self._last_heartbeat_at: datetime | None = None
 
         # Restore aggregation state if provided (crash recovery / resume).
         # Multiple node_id keys may map to the same state — deduplicate by
@@ -2798,30 +2821,53 @@ class RowProcessor:
             else:
                 item = self._work_item_from_scheduler(claimed)
             claimed_lease_owner = self._claimed_scheduler_lease_owner(claimed)
+            # Mark this claim active so ``_process_single_token``'s per-node
+            # heartbeat refreshes the right lease (filigree elspeth-ddde8144b6).
+            # Initial last_heartbeat_at is now: claim_ready just set
+            # lease_expires_at = now + lease_seconds, so the first heartbeat
+            # only needs to fire once heartbeat_seconds has elapsed.
+            self._active_claim_work_item_id = claimed.work_item_id
+            self._last_heartbeat_at = self._clock.now_utc()
             try:
-                result, child_items = self._process_single_token(
-                    token=item.token,
-                    ctx=ctx,
-                    current_node_id=item.current_node_id,
-                    coalesce_node_id=item.coalesce_node_id,
-                    coalesce_name=item.coalesce_name,
-                    on_success_sink=item.on_success_sink,
-                    attempt_offset=max(claimed.attempt - 1, 0),
-                )
-            except Exception as processing_exc:
                 try:
-                    self._scheduler.mark_failed(
-                        work_item_id=claimed.work_item_id,
-                        now=self._clock.now_utc(),
-                        expected_lease_owner=claimed_lease_owner,
+                    result, child_items = self._process_single_token(
+                        token=item.token,
+                        ctx=ctx,
+                        current_node_id=item.current_node_id,
+                        coalesce_node_id=item.coalesce_node_id,
+                        coalesce_name=item.coalesce_name,
+                        on_success_sink=item.on_success_sink,
+                        attempt_offset=max(claimed.attempt - 1, 0),
                     )
-                except Exception as scheduler_exc:
-                    raise AuditIntegrityError(
-                        f"Scheduler failed to mark work_item_id={claimed.work_item_id!r} failed after original "
-                        f"processing exception {type(processing_exc).__name__}: {processing_exc}. "
-                        f"The scheduler failure write raised {type(scheduler_exc).__name__}: {scheduler_exc}."
-                    ) from scheduler_exc
-                raise
+                except SchedulerLeaseLostError:
+                    # The lease was reaped by a peer mid-processing. The
+                    # original ``work_item_id`` no longer exists (peer rewrote
+                    # it under a bumped attempt) or no longer carries this
+                    # worker's ``lease_owner``. Issuing ``mark_failed`` would
+                    # CAS-fail and cascade into Tier-1 AuditIntegrityError —
+                    # the exact failure mode this primitive exists to
+                    # eliminate. Abandon the in-flight work, do NOT emit the
+                    # (lost) result, and let the drain loop's next iteration
+                    # pick up the row from its new owner (or, if reaped to
+                    # READY, claim it fresh under a new attempt).
+                    continue
+                except Exception as processing_exc:
+                    try:
+                        self._scheduler.mark_failed(
+                            work_item_id=claimed.work_item_id,
+                            now=self._clock.now_utc(),
+                            expected_lease_owner=claimed_lease_owner,
+                        )
+                    except Exception as scheduler_exc:
+                        raise AuditIntegrityError(
+                            f"Scheduler failed to mark work_item_id={claimed.work_item_id!r} failed after original "
+                            f"processing exception {type(processing_exc).__name__}: {processing_exc}. "
+                            f"The scheduler failure write raised {type(scheduler_exc).__name__}: {scheduler_exc}."
+                        ) from scheduler_exc
+                    raise
+            finally:
+                self._active_claim_work_item_id = None
+                self._last_heartbeat_at = None
 
             if result is not None:
                 if type(result) is tuple:
@@ -2997,6 +3043,51 @@ class RowProcessor:
                 "cannot perform an owner-fenced state transition."
             )
         return claimed.lease_owner
+
+    def _heartbeat_active_claim(self) -> None:
+        """Refresh the active scheduler lease if heartbeat interval has elapsed.
+
+        Called from ``_process_single_token`` on every node-iteration boundary
+        (ADR-026 RC6 multi-worker, filigree elspeth-ddde8144b6). The actual
+        DB write fires at most once per ``scheduler_heartbeat_seconds`` so
+        fast plugin chains do not incur a write per node.
+
+        No-op when no scheduler is configured, no claim is active, or the
+        interval has not yet elapsed.
+
+        Raises:
+            SchedulerLeaseLostError: the lease was reaped or reassigned by a
+                peer between the claim and this heartbeat. The caller (the
+                drain loop) catches this specifically and skips both the
+                in-flight result emission and the terminal ``mark_*`` write —
+                issuing either would CAS-fail and cascade into a Tier-1
+                AuditIntegrityError, which is the exact failure mode this
+                primitive exists to eliminate.
+
+        **Single-plugin-call limitation.** This heartbeat fires *between*
+        plugin calls, not *during* a single plugin call. If one plugin call
+        exceeds ``scheduler_lease_seconds`` on its own, the lease still
+        expires while that call is in-flight. The operator must size
+        ``scheduler_lease_seconds`` to bracket the longest expected
+        single-plugin call. Sub-call-level protection (option b watchdog or
+        thread-based heartbeat) is a separate concern and not in scope for
+        the ticket's option (a).
+        """
+        if self._scheduler is None:
+            return
+        if self._active_claim_work_item_id is None:
+            return
+        now = self._clock.now_utc()
+        if self._last_heartbeat_at is not None and (now - self._last_heartbeat_at).total_seconds() < self._scheduler_heartbeat_seconds:
+            return
+        self._scheduler.heartbeat_lease(
+            run_id=self._run_id,
+            work_item_id=self._active_claim_work_item_id,
+            lease_owner=self._scheduler_lease_owner,
+            lease_seconds=self._scheduler_lease_seconds,
+            now=now,
+        )
+        self._last_heartbeat_at = now
 
     def _barrier_key_for_buffered_scheduler_result(self, result: RowResult | tuple[RowResult, ...]) -> str:
         """Resolve the aggregation barrier that owns a BUFFERED scheduler result."""
@@ -3819,6 +3910,13 @@ class RowProcessor:
                     f"Inner traversal exceeded {max_inner_iterations} iterations for token "
                     f"{token.token_id}. Possible cycle in node_to_next map."
                 )
+            # Refresh active scheduler lease (filigree elspeth-ddde8144b6).
+            # No-op when no scheduler is configured or no claim is active
+            # (legacy in-memory queue path, isolated unit tests). Raises
+            # SchedulerLeaseLostError when the lease was reaped by a peer —
+            # propagates up to ``_drain_scheduler_claims`` which catches it
+            # specifically and abandons this iteration cleanly.
+            self._heartbeat_active_claim()
             handled, result = self._maybe_coalesce_token(
                 current_token,
                 current_node_id=node_id,

@@ -16,7 +16,7 @@ from sqlalchemy import Engine, and_, func, select, update
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, SchedulerLeaseLostError
 from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.canonical import canonical_json
@@ -607,6 +607,64 @@ class TokenSchedulerRepository:
                 )
                 recovered += result.rowcount
         return recovered
+
+    def heartbeat_lease(
+        self,
+        *,
+        run_id: str,
+        work_item_id: str,
+        lease_owner: str,
+        lease_seconds: int,
+        now: datetime,
+    ) -> datetime:
+        """Extend a held lease's ``lease_expires_at`` to ``now + lease_seconds``.
+
+        Single-timestamp heartbeat for ADR-026 RC6 multi-worker (filigree
+        elspeth-ddde8144b6). A worker mid-processing calls this periodically
+        from inside the slow work loop so a peer's ``recover_expired_leases``
+        sweep does NOT reap an alive-but-slow worker. ``peer_active_leases``
+        already filters on ``lease_expires_at > now``, so extending that
+        timestamp is sufficient — no second clock and no inconsistency window
+        between heartbeat-fresh-but-lease-expired vs reaper semantics.
+
+        CAS contract (Tier-1 strictness on the write boundary):
+
+        - The UPDATE matches on ``(work_item_id, run_id, status=LEASED,
+          lease_owner)``. If rowcount != 1, the lease has been reaped or
+          reassigned by a peer reaper (``recover_expired_leases`` rewrites the
+          ``work_item_id`` for bumped attempts), and this worker no longer owns
+          the row. Raise ``SchedulerLeaseLostError`` so the caller can abandon
+          its in-flight work cleanly — issuing a follow-up ``mark_*`` would
+          CAS-fail and cascade into a Tier-1 ``AuditIntegrityError``, which is
+          the exact failure mode this primitive exists to eliminate.
+
+        Returns the new ``lease_expires_at`` so the caller can update its
+        local last-heartbeat-attempt clock without re-reading the row.
+        """
+        new_expires_at = now + timedelta(seconds=lease_seconds)
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                update(token_work_items_table)
+                .where(
+                    and_(
+                        token_work_items_table.c.work_item_id == work_item_id,
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.status == TokenWorkStatus.LEASED.value,
+                        token_work_items_table.c.lease_owner == lease_owner,
+                    )
+                )
+                .values(
+                    lease_expires_at=new_expires_at,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount != 1:
+                raise SchedulerLeaseLostError(
+                    work_item_id=work_item_id,
+                    lease_owner=lease_owner,
+                    run_id=run_id,
+                )
+        return new_expires_at
 
     def mark_waiting(
         self,

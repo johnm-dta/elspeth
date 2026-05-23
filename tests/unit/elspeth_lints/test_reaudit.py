@@ -695,14 +695,18 @@ def test_render_json_report_is_valid_json_with_enum_strings() -> None:
     assert payload["outcomes"][0]["original_model_verdict"] == "BLOCKED"
     assert payload["outcomes"][0]["fresh_verdict"] == "ACCEPTED"
     # Summary is a list of {divergence, count} dicts, ordered by severity.
-    # JUDGE_CALL_FAILED outranks WAS_ACCEPTED_NOW_BLOCKED because a
-    # data-collection failure (judge transport rejected the call) is
-    # more urgent than any verdict-change signal — the entry simply
-    # wasn't re-judged. The first verdict-change divergence (the most
-    # urgent operator-actionable verdict signal) is the next slot.
+    # SOURCE_EXCERPT_REJECTED outranks JUDGE_CALL_FAILED because the
+    # former is a security signal (forged path / exfiltration attempt)
+    # while the latter is a transient transport signal. JUDGE_CALL_FAILED
+    # outranks WAS_ACCEPTED_NOW_BLOCKED because a data-collection
+    # failure (judge transport rejected the call) is more urgent than
+    # any verdict-change signal — the entry simply wasn't re-judged.
+    # The first verdict-change divergence (the most urgent operator-
+    # actionable verdict signal) is the next slot.
     summary_names = [s["divergence"] for s in payload["summary"]]
-    assert summary_names[0] == "JUDGE_CALL_FAILED"
-    assert summary_names[1] == "WAS_ACCEPTED_NOW_BLOCKED"
+    assert summary_names[0] == "SOURCE_EXCERPT_REJECTED"
+    assert summary_names[1] == "JUDGE_CALL_FAILED"
+    assert summary_names[2] == "WAS_ACCEPTED_NOW_BLOCKED"
 
 
 def test_render_markdown_report_snapshot() -> None:
@@ -1363,7 +1367,7 @@ def test_t6b_sidecar_happy_path_writes_header_outcomes_trailer(tmp_path: Path, c
     assert lines[0]["type"] == "header"
     assert lines[0]["run_id"] == run_id
     assert lines[0]["total_entries"] == 3
-    assert lines[0]["schema_version"] == 1
+    assert lines[0]["schema_version"] == 2
     assert lines[0]["rule_filter"] == "trust_tier.tier_model"
     outcome_lines = [line for line in lines if line["type"] == "outcome"]
     assert len(outcome_lines) == 3

@@ -105,6 +105,14 @@ class ReauditDivergence(StrEnum):
     PRE_JUDGE_FRESH_ACCEPT = "PRE_JUDGE_FRESH_ACCEPT"
     ENTRY_OBSOLETE = "ENTRY_OBSOLETE"
     JUDGE_CALL_FAILED = "JUDGE_CALL_FAILED"
+    # The entry's path resolved outside ``--root`` after symlink and
+    # ``..`` normalisation. The only way to reach this branch is a
+    # forged or tampered allowlist entry key — an exfiltration attempt
+    # via the source-excerpt channel. Distinct from JUDGE_CALL_FAILED
+    # (which the operator reads as "rerun later"); this signal means
+    # "investigate the YAML for tampering" and never goes away on a
+    # naive rerun. Closes elspeth-ebb2b88753 / C3-4.
+    SOURCE_EXCERPT_REJECTED = "SOURCE_EXCERPT_REJECTED"
 
 
 # Operator-actionable severity ranking. Lower values surface first in
@@ -116,6 +124,13 @@ class ReauditDivergence(StrEnum):
 # more urgent than any verdict-change signal below it. Closes
 # elspeth-9a4e54cc01 / C3-2.
 _DIVERGENCE_ORDER: dict[ReauditDivergence, int] = {
+    # SOURCE_EXCERPT_REJECTED ranks first: a forged path is a SECURITY
+    # signal (exfiltration attempt). It outranks JUDGE_CALL_FAILED
+    # because a transport hiccup may resolve on rerun; a forged path
+    # will not, and the operator's response to it is qualitatively
+    # different (investigate the YAML, not the network). Closes
+    # elspeth-ebb2b88753 / C3-4.
+    ReauditDivergence.SOURCE_EXCERPT_REJECTED: -1,
     ReauditDivergence.JUDGE_CALL_FAILED: 0,
     ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED: 1,
     ReauditDivergence.PRE_JUDGE_FRESH_BLOCK: 2,
@@ -156,6 +171,16 @@ class ReauditOutcome:
     fresh_recorded_at: datetime | None
     divergence: ReauditDivergence
     code_snapshot: str
+    # Secrets-scrubber audit record (closes elspeth-ebb2b88753 / C2-2
+    # on the sweep path). Each entry's source excerpt passes through
+    # ``source_excerpt.scrub_secrets`` before reaching the judge; any
+    # redactions made are captured here so the sidecar trail preserves
+    # "n bytes scrubbed for pattern Y" without persisting the secret
+    # bytes themselves. Empty tuple = scrubber ran clean. Populated for
+    # SOURCE_EXCERPT_REJECTED is by definition impossible (the path
+    # check fails before the scrubber runs); the field stays empty in
+    # that case.
+    excerpt_redactions: tuple[Any, ...] = ()  # tuple[RedactionRecord, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,8 +501,30 @@ def _reaudit_one_entry(
         )
 
     file_path, rule_id, symbol_part, fingerprint = parsed
-    target_file = (root / file_path).resolve()
-    if not target_file.exists():
+
+    # Path-containment gate (closes elspeth-ebb2b88753 / C3-4). The
+    # ``file_path`` segment is attacker-controllable in the same sense
+    # the YAML key is: any actor with write access to the allowlist
+    # could forge a ``../../../etc/passwd`` key. ``resolve_safe_excerpt_path``
+    # raises ``SourceExcerptPathOutsideRootError`` (subclass of
+    # ``ValueError`` so the T6b ``RuntimeError`` net below does NOT
+    # catch it) when the resolved path escapes root. We classify the
+    # entry as SOURCE_EXCERPT_REJECTED and continue the sweep — a
+    # single forged key must not abort 700 legitimate entries, but it
+    # must not silently downgrade to JUDGE_CALL_FAILED ("rerun later")
+    # either. The catch is scoped tightly to the path-resolution call
+    # so a misconfigured ``--root`` (which would manifest as
+    # FileNotFoundError on the root itself) still propagates fatally.
+    from elspeth_lints.core.source_excerpt import (
+        SourceExcerptPathOutsideRootError,
+        extract_safe_excerpt,
+        resolve_safe_excerpt_path,
+    )
+
+    candidate = root / file_path
+    try:
+        target_file = resolve_safe_excerpt_path(root=root, target_file=candidate)
+    except FileNotFoundError:
         return ReauditOutcome(
             entry=entry,
             original_verdict=entry.judge_verdict,
@@ -487,6 +534,17 @@ def _reaudit_one_entry(
             fresh_recorded_at=None,
             divergence=ReauditDivergence.ENTRY_OBSOLETE,
             code_snapshot=f"<source file {file_path!r} no longer exists>",
+        )
+    except SourceExcerptPathOutsideRootError as exc:
+        return ReauditOutcome(
+            entry=entry,
+            original_verdict=entry.judge_verdict,
+            original_model_verdict=entry.judge_model_verdict,
+            fresh_verdict=None,
+            fresh_rationale=str(exc),
+            fresh_recorded_at=None,
+            divergence=ReauditDivergence.SOURCE_EXCERPT_REJECTED,
+            code_snapshot=f"<source-excerpt path rejected for {entry.key!r}; see fresh_rationale>",
         )
 
     findings = _scan_findings_for_file(
@@ -509,7 +567,18 @@ def _reaudit_one_entry(
             code_snapshot=f"<no current finding matches {entry.key!r}>",
         )
 
-    surrounding_code = _extract_surrounding_code(target_file, matching_finding.line, context_lines=15)
+    # Secrets-scrubber gate (closes elspeth-ebb2b88753 / C2-2 on the
+    # sweep path). ``extract_safe_excerpt`` re-runs containment (cheap)
+    # AND scrubs inline secrets from the ±15-line window before the
+    # judge call. The scrubbed text enters the prompt; the redactions
+    # land on the outcome for the sidecar trail.
+    safe_excerpt = extract_safe_excerpt(
+        root=root,
+        target_file=target_file,
+        line=matching_finding.line,
+        context_lines=15,
+    )
+    surrounding_code = safe_excerpt.text
     symbol_for_request = ".".join(symbol_part) if symbol_part else "_module_"
     request = JudgeRequest(
         file_path=file_path,
@@ -566,6 +635,7 @@ def _reaudit_one_entry(
             fresh_recorded_at=None,
             divergence=ReauditDivergence.JUDGE_CALL_FAILED,
             code_snapshot=surrounding_code,
+            excerpt_redactions=safe_excerpt.redactions,
         )
     divergence = _classify_divergence(
         entry_verdict=entry.judge_verdict,
@@ -581,6 +651,7 @@ def _reaudit_one_entry(
         fresh_recorded_at=response.recorded_at,
         divergence=divergence,
         code_snapshot=surrounding_code,
+        excerpt_redactions=safe_excerpt.redactions,
     )
 
 
@@ -812,23 +883,6 @@ def _find_matching_finding(*, findings: Sequence[Any], entry_key: str) -> Any | 
         if finding.canonical_key == entry_key:
             return finding
     return None
-
-
-def _extract_surrounding_code(target_file: Path, line: int, *, context_lines: int) -> str:
-    """Return ~30 lines of code centered on ``line``.
-
-    Mirrors ``cli._extract_surrounding_code`` so the judge sees an
-    identically-shaped excerpt on reaudit as on the original write.
-    """
-    text = target_file.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    start = max(1, line - context_lines)
-    end = min(len(lines), line + context_lines)
-    out: list[str] = []
-    for line_num in range(start, end + 1):
-        marker = ">>" if line_num == line else "  "
-        out.append(f"{marker} {line_num:5d}  {lines[line_num - 1]}")
-    return "\n".join(out)
 
 
 def _valid_rule_ids_for(rule_filter: str) -> frozenset[str]:
@@ -1063,6 +1117,14 @@ def render_report_json(report: ReauditReport) -> str:
                 "fresh_recorded_at": (outcome.fresh_recorded_at.isoformat() if outcome.fresh_recorded_at is not None else None),
                 "divergence": outcome.divergence.value,
                 "code_snapshot": outcome.code_snapshot,
+                "excerpt_redactions": [
+                    {
+                        "pattern_name": r.pattern_name,
+                        "byte_count": r.byte_count,
+                        "redacted_hash": r.redacted_hash,
+                    }
+                    for r in outcome.excerpt_redactions
+                ],
             }
             for outcome in report.outcomes
         ],
@@ -1186,6 +1248,12 @@ def _outcome_notes(outcome: ReauditOutcome) -> str:
         # message in fresh_rationale; surface the full text (not just
         # the first line) so the operator can diagnose without opening
         # the JSON dump.
+        return outcome.fresh_rationale if outcome.fresh_rationale is not None else "<no diagnostic captured>"
+    if outcome.divergence is ReauditDivergence.SOURCE_EXCERPT_REJECTED:
+        # SOURCE_EXCERPT_REJECTED carries the path-containment error
+        # message in fresh_rationale. Surface it verbatim so the
+        # operator sees the offending path without opening the JSON
+        # dump. Triage signal: investigate the YAML for tampering.
         return outcome.fresh_rationale if outcome.fresh_rationale is not None else "<no diagnostic captured>"
     if outcome.fresh_rationale is None:
         return ""

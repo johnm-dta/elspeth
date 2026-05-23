@@ -461,24 +461,33 @@ def test_yaml_inline_scalar_call_sites_are_inventoried() -> None:
     """Pin the set of fields that route through ``_yaml_inline_scalar``.
 
     This is the C2-6 "test the contract, not the symptom" insurance: if
-    a future contributor adds a fifth field to ``_build_yaml_entry_text``
+    a future contributor adds a new field to ``_build_yaml_entry_text``
     that bypasses ``_yaml_inline_scalar`` (and therefore the sentinel
     quoting), this test fails and forces the contributor to either route
     it through the helper or add a written rationale.
 
     The check is byte-grep over ``cli.py`` for the helper's name. The
-    expected count is 4 (owner, judge_model, file_fingerprint, ast_path);
-    update this number deliberately when the inventory legitimately grows.
+    expected count is 6:
+      4 entry-level scalars (owner, judge_model, file_fingerprint,
+        ast_path)
+      2 redaction-record fields per nested ``judge_excerpt_redactions``
+        entry (pattern, redacted_hash) — these route through the same
+        helper because a maliciously-crafted source file could in
+        principle produce a hash collision against a YAML 1.1 sentinel
+        token, and ``pattern_name`` is a fixed vocabulary today but a
+        future addition could trigger the same.
+    Update this number deliberately when the inventory legitimately
+    grows.
     """
     cli_path = Path(__file__).resolve().parents[3] / "elspeth-lints" / "src" / "elspeth_lints" / "core" / "cli.py"
     text = cli_path.read_text(encoding="utf-8")
     # ``def _yaml_inline_scalar(`` matches the definition line; everything
-    # else is a call site. Currently 4 call sites in _build_yaml_entry_text.
+    # else is a call site.
     total_token_matches = text.count("_yaml_inline_scalar(")
     definition_count = text.count("def _yaml_inline_scalar(")
     call_count = total_token_matches - definition_count
-    assert call_count == 4, (
-        f"expected 4 _yaml_inline_scalar(...) call sites in cli.py, found "
+    assert call_count == 6, (
+        f"expected 6 _yaml_inline_scalar(...) call sites in cli.py, found "
         f"{call_count}; if a new field was added, also extend "
         f"test_build_yaml_entry_text_quotes_all_helper_routed_fields above."
     )

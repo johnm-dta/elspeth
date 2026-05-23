@@ -776,6 +776,11 @@ def _run_justify(args: argparse.Namespace) -> int:
         JudgeResponse,
         call_judge,
     )
+    from elspeth_lints.core.source_excerpt import (
+        SourceExcerptPathOutsideRootError,
+        extract_safe_excerpt,
+        resolve_safe_excerpt_path,
+    )
     from elspeth_lints.rules.trust_tier.tier_model.rule import (
         scan_file,
         scan_layer_imports_file,
@@ -790,9 +795,25 @@ def _run_justify(args: argparse.Namespace) -> int:
         sys.stderr.write(f"--allowlist-dir: {allowlist_dir} is not a directory\n")
         return 2
 
-    target_file = _resolve_target_file(root=root, file_path_arg=args.file_path)
-    if target_file is None:
+    # Path-containment gate (closes elspeth-9bbb9df9a5 / C1-2(c)). The
+    # ``--file-path`` arg is operator-supplied here but the same code
+    # path serves writes derived from allowlist YAML elsewhere, and the
+    # principle is identical: the source-excerpt path is a Tier-3 trust
+    # boundary because it determines what bytes are shipped to a
+    # third-party LLM. ``resolve_safe_excerpt_path`` raises
+    # ``SourceExcerptPathOutsideRootError`` if the resolved path escapes
+    # ``--root`` (an absolute ``/etc/passwd`` or a relative
+    # ``../../../etc/passwd``). The check runs before the scanner so
+    # an attacker-supplied path is never even parsed by the rule, let
+    # alone exfiltrated.
+    candidate = Path(args.file_path) if Path(args.file_path).is_absolute() else (root / args.file_path)
+    try:
+        target_file = resolve_safe_excerpt_path(root=root, target_file=candidate)
+    except FileNotFoundError:
         sys.stderr.write(f"--file-path: {args.file_path!r} does not exist under {root}\n")
+        return 2
+    except SourceExcerptPathOutsideRootError as exc:
+        sys.stderr.write(f"--file-path security violation: {exc}\n")
         return 2
 
     symbol_tuple = _parse_symbol(args.symbol)
@@ -848,14 +869,29 @@ def _run_justify(args: argparse.Namespace) -> int:
         )
         return 2
 
-    surrounding_code = _extract_surrounding_code(target_file, finding.line, context_lines=15)
+    # Source-excerpt secrets-scrubber gate (closes elspeth-9bbb9df9a5 /
+    # C2-2). ``extract_safe_excerpt`` is the single chokepoint between
+    # local source bytes and OpenRouter; it path-contains, reads, and
+    # scrubs in one call. The scrubbed ``text`` is what enters the
+    # judge prompt; the ``redactions`` tuple becomes an audit record on
+    # the persisted YAML entry so "n bytes redacted for pattern Y" is
+    # post-hoc inspectable. The path was already proved in-root above,
+    # but extract_safe_excerpt re-validates as defense-in-depth: any
+    # future caller that funnels through this helper alone is also
+    # safe.
+    safe_excerpt = extract_safe_excerpt(
+        root=root,
+        target_file=target_file,
+        line=finding.line,
+        context_lines=15,
+    )
     request = JudgeRequest(
         file_path=finding.file_path,
         rule_id=finding.rule_id,
         symbol=args.symbol,
         fingerprint=finding.fingerprint,
         rationale=args.rationale,
-        surrounding_code=surrounding_code,
+        surrounding_code=safe_excerpt.text,
     )
 
     try:
@@ -904,6 +940,7 @@ def _run_justify(args: argparse.Namespace) -> int:
         model_verdict=model_verdict,
         file_fingerprint=file_fingerprint,
         ast_path=finding.ast_path,
+        excerpt_redactions=safe_excerpt.redactions,
     )
     target_yaml = _suggest_yaml_target(finding=finding, allowlist_dir=allowlist_dir)
 
@@ -919,6 +956,7 @@ def _run_justify(args: argparse.Namespace) -> int:
             yaml_entry=yaml_entry,
             wrote=False,
             blocked=True,
+            excerpt_redactions=safe_excerpt.redactions,
         )
         return 1
 
@@ -931,6 +969,7 @@ def _run_justify(args: argparse.Namespace) -> int:
             yaml_entry=yaml_entry,
             wrote=False,
             blocked=False,
+            excerpt_redactions=safe_excerpt.redactions,
         )
         return 0
 
@@ -943,6 +982,7 @@ def _run_justify(args: argparse.Namespace) -> int:
         yaml_entry=yaml_entry,
         wrote=True,
         blocked=False,
+        excerpt_redactions=safe_excerpt.redactions,
     )
     return 0
 
@@ -960,21 +1000,6 @@ def _parse_symbol(symbol_arg: str) -> tuple[str, ...]:
     if not parts or any(not part for part in parts):
         raise ValueError(f"--symbol: {symbol_arg!r} is not a valid dotted name")
     return parts
-
-
-def _resolve_target_file(*, root: Path, file_path_arg: str) -> Path | None:
-    """Resolve ``--file-path`` against ``--root``, returning an absolute Path or None.
-
-    Accepts both forms the user might supply: a path relative to
-    ``--root`` (the same shape that appears in finding.file_path) or
-    an absolute path. Returns ``None`` if the resolved file does not
-    exist.
-    """
-    candidate = Path(file_path_arg)
-    if candidate.is_absolute():
-        return candidate if candidate.exists() else None
-    resolved = (root / candidate).resolve()
-    return resolved if resolved.exists() else None
 
 
 def _scan_single_file_findings(
@@ -1001,24 +1026,6 @@ def _scan_single_file_findings(
 def _finding_symbol_matches(finding: Any, symbol_tuple: tuple[str, ...]) -> bool:
     """Return True iff the finding's ``symbol_context`` equals the tuple."""
     return tuple(finding.symbol_context) == symbol_tuple
-
-
-def _extract_surrounding_code(target_file: Path, line: int, *, context_lines: int) -> str:
-    """Return ~30 lines of code centered on ``line`` from ``target_file``.
-
-    The judge reads this to verify the rationale honestly describes the
-    site. We include line-number prefixes so the model can correlate
-    its observations with the finding's reported line.
-    """
-    text = target_file.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    start = max(1, line - context_lines)
-    end = min(len(lines), line + context_lines)
-    out: list[str] = []
-    for line_num in range(start, end + 1):
-        marker = ">>" if line_num == line else "  "
-        out.append(f"{marker} {line_num:5d}  {lines[line_num - 1]}")
-    return "\n".join(out)
 
 
 def _suggest_yaml_target(*, finding: Any, allowlist_dir: Path) -> Path:
@@ -1051,6 +1058,7 @@ def _build_yaml_entry_text(
     judge_rationale: str,
     file_fingerprint: str,
     ast_path: str,
+    excerpt_redactions: tuple[Any, ...] = (),  # tuple[RedactionRecord, ...]
     model_verdict: Any = None,  # JudgeVerdict | None; populated only on override
 ) -> str:
     """Render one ``allow_hits`` entry as YAML text.
@@ -1114,6 +1122,18 @@ def _build_yaml_entry_text(
     # source drift. Both are scalars; emit inline.
     lines.append(f"  file_fingerprint: {_yaml_inline_scalar(file_fingerprint)}")
     lines.append(f"  ast_path: {_yaml_inline_scalar(ast_path)}")
+    # Excerpt-redaction audit record (closes elspeth-9bbb9df9a5 / C2-2).
+    # The judge's prompt may have had inline secrets scrubbed by
+    # ``source_excerpt.scrub_secrets`` before transit to OpenRouter;
+    # we persist a per-pattern count + 16-char hash here so an auditor
+    # can reconstruct what was redacted without re-shipping the
+    # original bytes. Absence of the block means "scrubber ran clean".
+    if excerpt_redactions:
+        lines.append("  judge_excerpt_redactions:")
+        for record in excerpt_redactions:
+            lines.append(f"    - pattern: {_yaml_inline_scalar(record.pattern_name)}")
+            lines.append(f"      byte_count: {record.byte_count}")
+            lines.append(f"      redacted_hash: {_yaml_inline_scalar(record.redacted_hash)}")
     return "\n".join(lines) + "\n"
 
 
@@ -1335,8 +1355,17 @@ def _emit_justify_output(
     yaml_entry: str,
     wrote: bool,
     blocked: bool,
+    excerpt_redactions: tuple[Any, ...] = (),  # tuple[RedactionRecord, ...]
 ) -> None:
-    """Render the justify result as text or JSON to stdout."""
+    """Render the justify result as text or JSON to stdout.
+
+    ``excerpt_redactions`` (closes elspeth-9bbb9df9a5 / C2-2) surfaces
+    the per-pattern scrubber audit record to operator-visible output
+    in both JSON and text formats. The redactions are already
+    persisted into the YAML entry by ``_build_yaml_entry_text``; this
+    surface is the immediate "what did the scrubber do on this call?"
+    signal so the operator notices without re-reading the YAML.
+    """
     # ``should_use_decorator`` is the structured "use @trust_boundary
     # instead" nudge from the judge. It is meaningful only paired with a
     # BLOCKED verdict (the parser in ``call_judge`` enforces that
@@ -1367,6 +1396,14 @@ def _emit_justify_output(
             # means caching was on but produced no hit on this call.
             "prompt_tokens_total": judge_response.prompt_tokens_total,
             "prompt_tokens_cached": judge_response.prompt_tokens_cached,
+            "excerpt_redactions": [
+                {
+                    "pattern_name": r.pattern_name,
+                    "byte_count": r.byte_count,
+                    "redacted_hash": r.redacted_hash,
+                }
+                for r in excerpt_redactions
+            ],
         }
         sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
         return
@@ -1392,6 +1429,10 @@ def _emit_justify_output(
         ratio = judge_response.prompt_tokens_cached / judge_response.prompt_tokens_total
         sys.stdout.write(f" ({ratio:.0%} hit)")
     sys.stdout.write("\n")
+    if excerpt_redactions:
+        sys.stdout.write(f"\nExcerpt redactions: {len(excerpt_redactions)}\n")
+        for r in excerpt_redactions:
+            sys.stdout.write(f"  - pattern={r.pattern_name}  bytes={r.byte_count}  hash={r.redacted_hash}\n")
     sys.stdout.write("\nJudge rationale:\n")
     for line in judge_response.judge_rationale.splitlines() or [""]:
         sys.stdout.write(f"  {line}\n")
@@ -1615,18 +1656,23 @@ def _run_reaudit(args: argparse.Namespace) -> int:
 
     _write_report(report, args)
 
-    # Exit-code policy (closes elspeth-9a4e54cc01 / C3-2 + C3-3):
+    # Exit-code policy (closes elspeth-9a4e54cc01 / C3-2 + C3-3 +
+    # elspeth-ebb2b88753 / C3-4):
     #   0 — sweep complete, every entry produced a verdict-based
     #       divergence (including ENTRY_OBSOLETE).
     #   1 — sweep had operator-actionable data-collection gaps:
     #       either entries the sweep never reached
     #       (entries_dispatched < total_entries) OR entries whose
-    #       judge call raised a transport error (JUDGE_CALL_FAILED).
+    #       judge call raised a transport error (JUDGE_CALL_FAILED)
+    #       OR entries whose source-excerpt path failed containment
+    #       (SOURCE_EXCERPT_REJECTED — security signal, must be
+    #       surfaced as failure to the CI driver).
     #       Distinct from the verdict-change cases (which are *signal*,
     #       not failure) — those still exit 0.
     judge_call_failures = sum(1 for outcome in report.outcomes if outcome.divergence is ReauditDivergence.JUDGE_CALL_FAILED)
+    excerpt_rejections = sum(1 for outcome in report.outcomes if outcome.divergence is ReauditDivergence.SOURCE_EXCERPT_REJECTED)
     incomplete = report.entries_dispatched < report.total_entries
-    if judge_call_failures > 0 or incomplete:
+    if judge_call_failures > 0 or excerpt_rejections > 0 or incomplete:
         return 1
     return 0
 

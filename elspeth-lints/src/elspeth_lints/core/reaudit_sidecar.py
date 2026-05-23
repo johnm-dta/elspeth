@@ -71,7 +71,7 @@ from elspeth_lints.core.reaudit import (
 # operator's mid-sweep state is bound to a specific schema, and an
 # upgrade that silently changes line shapes would corrupt
 # reconstruction.
-SIDECAR_SCHEMA_VERSION = 1
+SIDECAR_SCHEMA_VERSION = 2  # v2: outcome records carry excerpt_redactions (closes elspeth-ebb2b88753 / C2-2 on sidecar trail)
 
 SIDECAR_DIRNAME = ".reaudit-state"
 
@@ -471,6 +471,19 @@ def _outcome_to_dict(outcome: ReauditOutcome) -> dict[str, Any]:
         "fresh_recorded_at": outcome.fresh_recorded_at.isoformat() if outcome.fresh_recorded_at is not None else None,
         "divergence": outcome.divergence.value,
         "code_snapshot": outcome.code_snapshot,
+        # Secrets-scrubber audit record (closes elspeth-ebb2b88753 /
+        # C2-2 on the sweep path). Each redaction is captured as a
+        # dict so the JSONL is self-describing without needing the
+        # RedactionRecord dataclass at read time. Empty list when the
+        # scrubber ran clean.
+        "excerpt_redactions": [
+            {
+                "pattern_name": r.pattern_name,
+                "byte_count": r.byte_count,
+                "redacted_hash": r.redacted_hash,
+            }
+            for r in outcome.excerpt_redactions
+        ],
     }
 
 
@@ -502,6 +515,30 @@ def _outcome_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: 
         raise SidecarCorruptError(
             f"sidecar {sidecar_path} line {line_no}: fresh_rationale must be str or null; got {type(fresh_rationale).__name__}"
         )
+    # excerpt_redactions is REQUIRED on every outcome line written
+    # by this version of the writer (sidecar schema v2). Per the
+    # project's Tier-1 doctrine + the No Legacy Code Policy, a v1
+    # sidecar (without the field) crashes the load via the
+    # schema_version check on the header; that is the right
+    # operator-actionable signal ("pick a new run_id and restart").
+    # An empty list is the meaningful "scrubber ran clean" value —
+    # distinct from absence, which would be evidence corruption.
+    raw_redactions = _required(payload, "excerpt_redactions", list, sidecar_path, line_no)
+    redactions: list[Any] = []
+    from elspeth_lints.core.source_excerpt import RedactionRecord
+
+    for r_index, raw_r in enumerate(raw_redactions):
+        if not isinstance(raw_r, dict):
+            raise SidecarCorruptError(
+                f"sidecar {sidecar_path} line {line_no}: excerpt_redactions[{r_index}] must be a JSON object; got {type(raw_r).__name__}"
+            )
+        redactions.append(
+            RedactionRecord(
+                pattern_name=_required(raw_r, "pattern_name", str, sidecar_path, line_no),
+                byte_count=_required(raw_r, "byte_count", int, sidecar_path, line_no),
+                redacted_hash=_required(raw_r, "redacted_hash", str, sidecar_path, line_no),
+            )
+        )
     return ReauditOutcome(
         entry=entry,
         original_verdict=_verdict_from_value(payload.get("original_verdict"), sidecar_path, line_no, "original_verdict"),
@@ -511,6 +548,7 @@ def _outcome_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: 
         fresh_recorded_at=fresh_recorded_at,
         divergence=divergence,
         code_snapshot=_required(payload, "code_snapshot", str, sidecar_path, line_no),
+        excerpt_redactions=tuple(redactions),
     )
 
 

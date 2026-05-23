@@ -1,0 +1,1135 @@
+"""Composer generation plane — preview, diff, explain, plugin schema, proof diagnostics."""
+
+from __future__ import annotations
+
+import ast
+import csv
+import io
+import re
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, Final
+
+from opentelemetry import metrics
+from sqlalchemy import Engine
+
+from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.schema import get_aggregation_contract_options
+from elspeth.web.catalog.protocol import CatalogService, PluginKind
+from elspeth.web.composer.source_inspection import (
+    derive_extra_column_risk,
+    inspect_blob_content,
+)
+from elspeth.web.composer.state import (
+    CompositionState,
+    NodeSpec,
+    SourceSpec,
+    ValidationSummary,
+    _source_options_have_schema,
+    _validate_gate_expression,
+)
+from elspeth.web.composer.tools._common import (
+    _DATA_ERROR_KEY,
+    RuntimePreflight,
+    ToolResult,
+    _discovery_result,
+    _failure_result,
+    diff_states,
+)
+from elspeth.web.composer.tools.blobs import (
+    _sync_get_blob,
+    _verify_blob_content_integrity,
+)
+from elspeth.web.composer.tools.sessions import (
+    _authoring_validation_payload,
+)
+
+_AUTHORING_VALIDATION_COUNTER = metrics.get_meter("elspeth.web.composer.tools").create_counter(
+    "composer.authoring_validation.total",
+    description="Total authoring (Stage 1) validation outcomes from preview_pipeline",
+)
+
+
+_EXPRESSION_GRAMMAR = """\
+Gate Expression Syntax Reference
+=================================
+
+Variables:
+  row      - The current row as a dict. Access fields via row['field_name'].
+
+Field access:
+  row['field_name']       Direct access (raises KeyError if missing)
+  row.get('field_name')   Returns None if missing (NO default argument allowed)
+
+Operators:
+  ==, !=, <, >, <=, >=   Comparison
+  and, or, not            Boolean logic
+  in, not in              Membership test
+  +, -, *, /, //, %       Arithmetic
+
+Built-in functions (only these are allowed):
+  len()    Length of a sequence or string
+  abs()    Absolute value of a number
+
+Type coercion functions (int, str, float, bool) are NOT available.
+Types are guaranteed by the source schema — no coercion is needed in expressions.
+
+Examples:
+  row['confidence'] >= 0.85
+  row['status'] == 'approved'
+  row['category'] in ('A', 'B', 'C')
+  row.get('optional_field') is not None
+  row['score'] > 0.5 and row['status'] != 'rejected'
+  len(row['name']) > 0
+
+Forbidden:
+  row.get('field', default)   Default values fabricate data — use 'is not None' test
+  int(row['x'])               Type coercion — coerce at source schema instead
+  Imports, lambdas, comprehensions, attribute access (except row.get)
+"""
+
+
+def get_expression_grammar() -> str:
+    """Return the gate expression syntax reference."""
+    return _EXPRESSION_GRAMMAR
+
+
+def _handle_get_plugin_schema(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    try:
+        schema = catalog.get_schema(arguments["plugin_type"], arguments["name"])
+        return _discovery_result(state, schema)
+    except (ValueError, KeyError) as exc:
+        # ValueError: catalog contract for "unknown plugin/type"
+        # KeyError: LLM omitted required argument (Tier 3)
+        return _failure_result(state, str(exc))
+
+
+def _handle_get_expression_grammar(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    return _discovery_result(state, get_expression_grammar())
+
+
+_VALIDATION_ERROR_PATTERNS: list[tuple[str, str, str]] = [
+    (
+        r"No source configured",
+        "The pipeline has no data source. Every pipeline needs exactly one source to read input data from.",
+        "Use set_source to configure a source plugin (e.g. csv, json, dataverse).",
+    ),
+    (
+        r"No sinks configured",
+        "The pipeline has no outputs. At least one sink is needed to write results.",
+        "Use set_output to add an output (e.g. csv, json).",
+    ),
+    (
+        r"references unknown node '(.+)' as from_node",
+        "An edge references a node that doesn't exist in the pipeline as its source.",
+        "Check the edge's from_node value. Either add the missing node with upsert_node or fix the edge with upsert_edge.",
+    ),
+    (
+        r"references unknown node '(.+)' as to_node",
+        "An edge references a node or output that doesn't exist in the pipeline as its target.",
+        "Check the edge's to_node value. Either add the missing node/output or fix the edge.",
+    ),
+    (
+        r"Duplicate node ID: '(.+)'",
+        "Two nodes have the same ID. Each node must have a unique identifier.",
+        "Rename one of the duplicate nodes using upsert_node with a different id.",
+    ),
+    (
+        r"Duplicate output name: '(.+)'",
+        "Two outputs have the same name. Each output must have a unique name.",
+        "Rename one of the duplicate outputs using set_output with a different sink_name.",
+    ),
+    (
+        r"Duplicate edge ID: '(.+)'",
+        "Two edges have the same ID. Each edge must have a unique identifier.",
+        "Remove the duplicate edge with remove_edge and re-add with a unique id.",
+    ),
+    (
+        r"Gate '(.+)' is missing required field '(.+)'",
+        "A gate node is missing a required configuration field (condition or routes).",
+        "Update the gate with upsert_node, providing the missing field.",
+    ),
+    (
+        r"Transform '(.+)' must not have '(.+)' field",
+        "A transform node has a field that only gates should have (condition or routes).",
+        "Update the node with upsert_node. Set node_type to 'gate' if routing is needed, or remove the field.",
+    ),
+    (
+        r"Coalesce '(.+)' is missing required field '(.+)'",
+        "A coalesce node is missing a required field (branches or policy).",
+        "Update the coalesce node with upsert_node, providing the missing field.",
+    ),
+    (
+        r"Aggregation '(.+)' is missing required field 'plugin'",
+        "An aggregation node needs a plugin to define its aggregation behaviour.",
+        "Update the aggregation with upsert_node, specifying the plugin name.",
+    ),
+    (
+        r"input '(.+)' is not reachable",
+        "A node's input connection point is not produced by the runtime routing fields.",
+        "Set source.on_success or an upstream node's on_success/on_error/route/fork_to so it matches this node's input.",
+    ),
+    (
+        r"Unknown .+ plugin '(.+)'",
+        "The specified plugin name is not available in the catalog.",
+        "Use list_sources, list_transforms, or list_sinks to see available plugins.",
+    ),
+    (
+        r"Path violation \(S2\).*[Ss]ource",
+        "The source file path is outside the allowed directories.",
+        "Source paths must be under the blobs/ directory. Upload a file first or use set_source_from_blob.",
+    ),
+    (
+        r"Path violation \(S2\).*[Ss]ink",
+        "The sink output path is outside the allowed directories.",
+        "Sink output paths must be under the outputs/ or blobs/ directory.",
+    ),
+    (
+        r"Path violation \(S2\)",
+        "A file path is outside the allowed directories.",
+        "Source paths must be under the blobs/ directory. Sink output paths must be under the outputs/ or blobs/ directory.",
+    ),
+    (
+        r"Invalid options for source '(.+)':",
+        "The source plugin configuration is invalid. A required option may be missing or have an invalid value.",
+        "Use get_pipeline_state with component='source' to see current options, then use patch_source_options to fix.",
+    ),
+    (
+        r"Invalid options for transform '(.+)':",
+        "A transform node has invalid configuration. A required option may be missing or have an invalid value.",
+        "Use get_pipeline_state to see the node's current options, then use patch_node_options to fix.",
+    ),
+    (
+        r"Invalid options for sink '(.+)':",
+        "A sink output has invalid configuration. A required option may be missing (e.g. path for file-based sinks).",
+        "Use get_pipeline_state to see the output's current options, then use patch_output_options to fix.",
+    ),
+    (
+        r"Schema contract violation: '.*' -> 'output:[^']+'",
+        "A sink schema requires fields that its upstream producer does not guarantee.",
+        "Call preview_pipeline to inspect edge_contracts, then either relax the sink schema with patch_output_options or update the upstream schema with patch_source_options or patch_node_options and re-preview until the edge shows satisfied=true.",
+    ),
+    (
+        r"Schema contract violation:",
+        "A downstream node requires fields that its upstream producer does not guarantee.",
+        "Call preview_pipeline to inspect edge_contracts, then update the upstream schema with patch_source_options or patch_node_options and re-preview until the edge shows satisfied=true.",
+    ),
+]
+
+
+def _extract_validator_expected_hint(error_text: str) -> str | None:
+    """Pull the ``Expected ...`` span out of a validator error string.
+
+    Pydantic and our schema-spec validators frequently emit errors like
+    ``"Field spec at index 0 is a dict with 2 keys. Expected single-key
+    dict like {'field_name': 'type'} or a string like 'field_name: type'."``.
+    The static catalogue fix below the substring discards that hint, so
+    the model only sees ``"Use get_pipeline_state ... patch_source_options"``
+    — which doesn't tell it what shape to actually emit. Returning the
+    ``Expected ...`` span verbatim lets the caller append it to
+    ``suggested_fix`` so the model can copy the shape directly.
+
+    The hint terminates at the next sentence boundary (``.`` followed by
+    whitespace or end-of-string) so a trailing ``"Got X. Other noise."``
+    doesn't get swept up.
+    """
+    idx = error_text.find("Expected ")
+    if idx == -1:
+        return None
+    rest = error_text[idx:]
+    end = len(rest)
+    for i, ch in enumerate(rest):
+        if ch == "." and (i + 1 == len(rest) or rest[i + 1].isspace()):
+            end = i + 1
+            break
+    return rest[:end].strip()
+
+
+def _augment_with_expected_hint(fix: str, error_text: str) -> str:
+    """Append the validator ``Expected ...`` hint to ``fix`` when present."""
+    hint = _extract_validator_expected_hint(error_text)
+    if hint is None:
+        return fix
+    return f"{fix} {hint}"
+
+
+def _execute_explain_validation_error(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    """Explain a validation error with human-readable diagnosis and fix."""
+    error_text = args["error_text"]
+    for pattern, explanation, fix in _VALIDATION_ERROR_PATTERNS:
+        if re.search(pattern, error_text):
+            return ToolResult(
+                success=True,
+                updated_state=state,
+                validation=state.validate(),
+                affected_nodes=(),
+                data={
+                    "error_text": error_text,
+                    "explanation": explanation,
+                    "suggested_fix": _augment_with_expected_hint(fix, error_text),
+                },
+            )
+    # No match — return a generic response
+    return ToolResult(
+        success=True,
+        updated_state=state,
+        validation=state.validate(),
+        affected_nodes=(),
+        data={
+            "error_text": error_text,
+            "explanation": "This error is not in the known pattern catalogue.",
+            "suggested_fix": _augment_with_expected_hint(
+                "Review the error message and the pipeline structure. Use get_pipeline_state to inspect the current composition.",
+                error_text,
+            ),
+        },
+    )
+
+
+def _serialize_plugin_assistance_example(
+    example: Any,
+) -> dict[str, Any]:
+    """Serialize a PluginAssistanceExample for LLM consumption.
+
+    Mirrors the serialize-at-the-boundary pattern used by
+    ``_semantic_edge_contract_to_payload`` (composer_mcp/server.py) and
+    ``serialize_semantic_contracts`` (web/execution/_semantic_helpers.py):
+    L0 contract types intentionally have no ``.to_dict()``; the rendering
+    site owns the JSON shape so contracts stay free of encoding concerns.
+    """
+    return {
+        "title": example.title,
+        "before": deep_thaw(example.before) if example.before is not None else None,
+        "after": deep_thaw(example.after) if example.after is not None else None,
+    }
+
+
+def _execute_get_plugin_assistance(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    """Return plugin-owned guidance for a source, transform, or sink.
+
+    Dual-use by ``issue_code``:
+
+    * ``issue_code is None`` (or absent) — discovery-time guidance. The
+      plugin returns a one-line ``summary`` and ``composer_hints``
+      (same surface that list_* and get_plugin_schema already carry).
+    * ``issue_code is not None`` — failure-time guidance. The
+      semantic validator emits ``requirement_code`` values like
+      ``line_explode.source_field.line_framed_text``; the agent echoes
+      that code in to retrieve ``suggested_fixes`` + example
+      before/after configs.
+
+    When the plugin has no assistance to publish, returns success with
+    a "no assistance published" payload (summary=None, empty lists)
+    rather than failing — the absence is itself a useful signal.
+
+    Unknown plugin name or invalid plugin_type surfaces here as a tool
+    failure with the original message so the agent can correct the call.
+    """
+    from elspeth.plugins.infrastructure.manager import (
+        PluginNotFoundError,
+        get_shared_plugin_manager,
+    )
+
+    plugin_type_raw = args["plugin_type"]
+    plugin_name = args["plugin_name"]
+    issue_code = args.get("issue_code")
+
+    if plugin_type_raw not in ("source", "transform", "sink"):
+        return _failure_result(
+            state,
+            f"Unknown plugin_type: {plugin_type_raw!r}. Must be one of: 'source', 'transform', 'sink'.",
+        )
+    plugin_type: PluginKind = plugin_type_raw
+
+    manager = get_shared_plugin_manager()
+    try:
+        if plugin_type == "source":
+            plugin_cls: Any = manager.get_source_by_name(plugin_name)
+        elif plugin_type == "transform":
+            plugin_cls = manager.get_transform_by_name(plugin_name)
+        else:
+            plugin_cls = manager.get_sink_by_name(plugin_name)
+    except PluginNotFoundError as exc:
+        return _failure_result(state, str(exc))
+
+    assistance = plugin_cls.get_agent_assistance(issue_code=issue_code)
+
+    if assistance is None:
+        payload: dict[str, Any] = {
+            "plugin_type": plugin_type,
+            "plugin_name": plugin_name,
+            "issue_code": issue_code,
+            "summary": None,
+            "suggested_fixes": [],
+            "examples": [],
+            "composer_hints": [],
+        }
+        return _discovery_result(state, payload)
+
+    payload = {
+        "plugin_type": plugin_type,
+        "plugin_name": assistance.plugin_name,
+        "issue_code": assistance.issue_code,
+        "summary": assistance.summary,
+        "suggested_fixes": list(assistance.suggested_fixes),
+        "examples": [_serialize_plugin_assistance_example(ex) for ex in assistance.examples],
+        "composer_hints": list(assistance.composer_hints),
+    }
+    return _discovery_result(state, payload)
+
+
+def _execute_get_audit_info(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    """Return constant facts about the Landscape audit trail.
+
+    Audit is mandatory (`LandscapeSettings` rejects `enabled=false` at
+    config validation time) and the backend URL is operator-managed via
+    `WebSettings.get_landscape_url()` — security fix S1, see
+    `web/composer/yaml_generator.py:179`. Letting the composer set the
+    audit backend would let a user prompt redirect the audit trail to an
+    attacker DB, disable encryption, or split audit across stores.
+
+    The returned payload is a constant — no `WebSettings` access — so
+    operator-internal config (URL, backend type, encryption-key env var)
+    never reaches the LLM context. The model paraphrases `summary`; it
+    does not need the URL itself.
+    """
+    payload = {
+        "enabled": True,
+        "composer_modifiable": False,
+        "summary": (
+            "Landscape audit is mandatory and always on for every pipeline run. "
+            "The audit backend (database type, location, encryption) is configured "
+            "by the operator at deploy time and is intentionally NOT addressable "
+            "from the composer — letting the composer set it would be a security "
+            "regression (audit-DSN injection, encryption bypass, audit split-brain). "
+            "When a user asks for 'audit logging', 'SQLite audit', or similar: "
+            "acknowledge that audit is already enabled for every run, do NOT add a "
+            "sink shape for it, and do NOT silently remove an audit-shaped node by "
+            "treating it as 'unconnected'. To inspect past runs, point the user at "
+            "the Landscape MCP forensic tools."
+        ),
+        "audit_export_summary": (
+            "A separate optional feature ('landscape.export') can copy each run's "
+            "audit data to an additional sink for offline review. This is also "
+            "operator-configured and is not currently composer-controllable. If a "
+            "user asks for 'export the audit data to a file', explain that this is "
+            "an operator-side configuration and is not part of the pipeline the "
+            "composer is building."
+        ),
+    }
+    return _discovery_result(state, payload)
+
+
+def _execute_list_models(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    """List available LLM model identifiers.
+
+    Without a provider filter, returns provider names and model counts
+    to avoid dumping hundreds of entries. With a provider filter,
+    returns matching model IDs capped at ``limit``.
+
+    Reads via :func:`read_litellm_model_list` so this tool and the
+    value-source compliance walker share a single source of truth for
+    what counts as "a known model."
+    """
+    from elspeth.plugins.transforms.llm.model_catalog import read_litellm_model_list
+
+    all_models: list[str] = list(read_litellm_model_list())
+
+    provider = args.get("provider")
+    limit = args.get("limit", 50)
+    if not isinstance(limit, int) or limit < 1:
+        limit = 50
+
+    if provider is not None and isinstance(provider, str):
+        if provider == "":
+            # Empty string means "models without a provider prefix"
+            filtered = [m for m in all_models if "/" not in m]
+        else:
+            filtered = [m for m in all_models if m.startswith(provider)]
+        # OpenRouter consumers (the actual HTTP API at /chat/completions)
+        # expect un-prefixed slugs (e.g. ``openai/gpt-4o``, not
+        # ``openrouter/openai/gpt-4o``). The litellm representation carries
+        # an ``openrouter/`` routing prefix that ELSPETH's
+        # OpenRouterLLMProvider does not strip — so the tool returns the
+        # un-prefixed form to match what the user must put in their YAML
+        # and what the value-source compliance validator accepts. The
+        # OPENROUTER_LITELLM_PREFIX constant lives next to the catalog
+        # reader so both sites strip identically.
+        from elspeth.plugins.transforms.llm.model_catalog import OPENROUTER_LITELLM_PREFIX
+
+        normalised = provider.rstrip("/")
+        if normalised == OPENROUTER_LITELLM_PREFIX.rstrip("/"):
+            prefix_len = len(OPENROUTER_LITELLM_PREFIX)
+            filtered = [m[prefix_len:] for m in filtered]
+        truncated = len(filtered) > limit
+        data: dict[str, Any] = {
+            "models": filtered[:limit],
+            "count": len(filtered),
+            "truncated": truncated,
+        }
+    else:
+        # Group by provider prefix to avoid token waste
+        providers: dict[str, int] = {}
+        for m in all_models:
+            prefix = m.split("/", 1)[0] if "/" in m else ""
+            providers[prefix] = providers.get(prefix, 0) + 1
+        data = {
+            "providers": providers,
+            "total_models": len(all_models),
+            "hint": "Use provider parameter to list models for a specific provider. An empty string key means models without a provider prefix.",
+        }
+
+    return _discovery_result(state, data)
+
+
+_BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "aggregation_numeric_value_field_type_mismatch_against_source_schema",
+        "csv_duplicate_headers",
+        "csv_fixed_schema_omits_observed_columns",
+        "gate_expression_type_mismatch_against_source_schema",
+        "text_source_url_without_web_scrape",
+        "source_inspection_failed",
+    }
+)
+
+
+def _blocking_diagnostic(
+    *,
+    code: str,
+    message: str,
+    suggested_repair: str,
+    evidence_locator: dict[str, Any],
+) -> dict[str, Any]:
+    """Construct a blocking diagnostic dict and assert the code is registered.
+
+    Offensive: a contributor who adds a new blocker without registering it in
+    ``_BLOCKING_DIAGNOSTIC_CODES`` (and the matching skill-markdown vocabulary)
+    crashes immediately rather than shipping an unrecognised code into the
+    audit trail and the LLM's repair-message context.
+    """
+    if code not in _BLOCKING_DIAGNOSTIC_CODES:
+        raise AssertionError(
+            f"blocking diagnostic code {code!r} is not registered in "
+            f"_BLOCKING_DIAGNOSTIC_CODES. Add it there (and to the skill-"
+            f"markdown vocabulary the composer LLM consumes) before emitting "
+            f"a blocking diagnostic with this code."
+        )
+    return {
+        "code": code,
+        "severity": "blocking",
+        "message": message,
+        "suggested_repair": suggested_repair,
+        "evidence_locator": evidence_locator,
+    }
+
+
+def _source_schema_mode(source: SourceSpec) -> str | None:
+    schema = source.options.get("schema")
+    if not isinstance(schema, Mapping):
+        return None
+    mode = schema.get("mode")
+    if not isinstance(mode, str):
+        return None
+    return mode.strip().lower()
+
+
+def _sample_csv_rows(content: bytes, *, filename: str, max_rows: int = 100) -> tuple[dict[str, str], ...]:
+    text = content[: 8 * 1024].decode("utf-8", errors="replace")
+    delimiter = "\t" if filename.lower().endswith(".tsv") else ","
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    rows: list[dict[str, str]] = []
+    for index, row in enumerate(reader):
+        if index >= max_rows:
+            break
+        rows.append({key: value for key, value in row.items() if isinstance(key, str) and value is not None})
+    return tuple(rows)
+
+
+def _row_fields_referenced_by_condition(condition: str) -> tuple[str, ...]:
+    tree = ast.parse(condition, mode="eval")
+    fields: list[str] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "row"
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        ):
+            fields.append(node.slice.value)
+            continue
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "row"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            fields.append(node.args[0].value)
+    return tuple(dict.fromkeys(fields))
+
+
+def _gate_expression_type_diagnostics_for_observed_csv(
+    state: CompositionState,
+    source: SourceSpec,
+    *,
+    blob_id: str,
+    filename: str,
+    content: bytes,
+) -> list[dict[str, Any]]:
+    """Evaluate direct source-fed gates against sampled observed CSV rows.
+
+    Observed CSV sources emit raw strings because there are no declared field
+    types to coerce against. A gate such as ``row['amount'] >= 1000`` is
+    syntactically valid but fails at runtime when the evaluator compares
+    ``str`` with ``int``. This preview proof step uses the same expression
+    evaluator against bounded raw rows and reports the type mismatch without
+    surfacing row values.
+    """
+    if _source_schema_mode(source) != "observed":
+        return []
+
+    rows = _sample_csv_rows(content, filename=filename)
+    if not rows:
+        return []
+
+    from elspeth.core.expression_parser import ExpressionEvaluationError, ExpressionParser
+
+    diagnostics: list[dict[str, Any]] = []
+    direct_gate_nodes = (
+        node for node in state.nodes if node.node_type == "gate" and node.input == source.on_success and node.condition is not None
+    )
+    for node in direct_gate_nodes:
+        condition = node.condition
+        if condition is None:
+            continue
+        if _validate_gate_expression(condition) is not None:
+            continue
+        parser = ExpressionParser(condition)
+        fields = _row_fields_referenced_by_condition(condition)
+        field = fields[0] if fields else None
+        for row_index, row in enumerate(rows):
+            try:
+                parser.evaluate(row)
+            except ExpressionEvaluationError as exc:
+                diagnostics.append(
+                    _blocking_diagnostic(
+                        code="gate_expression_type_mismatch_against_source_schema",
+                        message=(
+                            f"Gate '{node.id}' condition {condition!r} fails against sampled observed CSV "
+                            f"rows before runtime: {exc}. Observed CSV source values are strings unless the "
+                            "source schema declares explicit field types."
+                        ),
+                        suggested_repair=(
+                            "Patch the source schema to declare the compared field with an explicit numeric "
+                            "type, for example schema.mode='fixed' or 'flexible' with schema.fields including "
+                            f"{field + ': int' if field is not None else '<field>: int'}, then re-run preview_pipeline."
+                        ),
+                        evidence_locator={
+                            "source": "blob",
+                            "blob_id": str(blob_id),
+                            "node_id": node.id,
+                            "field": field,
+                            "fields": list(fields),
+                            "sample_row_index": row_index,
+                            "source_schema_mode": "observed",
+                        },
+                    )
+                )
+                break
+    return diagnostics
+
+
+_NUMERIC_VALUE_FIELD_AGGREGATION_PLUGINS: Final[frozenset[str]] = frozenset(
+    {
+        "batch_distribution_profile",
+        "batch_outlier_annotator",
+        "batch_stats",
+        "batch_threshold_summary",
+    }
+)
+
+
+def _value_transform_preserves_field(node: NodeSpec, field_name: str) -> bool:
+    operations = node.options.get("operations")
+    if not isinstance(operations, (list, tuple)):
+        return False
+    for operation in operations:
+        if not isinstance(operation, Mapping):
+            return False
+        target = operation.get("target")
+        if target == field_name:
+            return False
+    return True
+
+
+def _source_field_reaches_connection_without_type_change(
+    state: CompositionState,
+    connection_name: str,
+    *,
+    field_name: str,
+) -> bool:
+    """Return True when a source field flows to a connection unchanged.
+
+    This intentionally recognises only field-preserving nodes. Unknown
+    transforms may coerce, overwrite, delete, or synthesize the field, so the
+    proof step abstains instead of emitting a false positive.
+    """
+    from elspeth.web.composer._producer_resolver import ProducerResolver
+
+    resolver = ProducerResolver.build(
+        source=state.source,
+        nodes=state.nodes,
+        sink_names=frozenset(output.name for output in state.outputs),
+    )
+    current = connection_name
+    visited: set[str] = set()
+    while True:
+        if current in visited:
+            return False
+        visited.add(current)
+
+        producer = resolver.find_producer_for(current)
+        if producer is None:
+            return False
+        if producer.producer_id == "source":
+            return True
+
+        node = resolver.get_node(producer.producer_id)
+        if node is None:
+            return False
+        if node.node_type == "gate":
+            current = node.input
+            continue
+        if node.plugin == "value_transform" and _value_transform_preserves_field(node, field_name):
+            current = node.input
+            continue
+        if node.plugin == "passthrough":
+            current = node.input
+            continue
+        return False
+
+
+def _numeric_aggregation_diagnostics_for_observed_csv(
+    state: CompositionState,
+    source: SourceSpec,
+    *,
+    blob_id: str,
+    inferred_types: Mapping[str, str] | None,
+    observed_headers: tuple[str, ...] | None,
+) -> list[dict[str, Any]]:
+    """Block observed CSV strings before numeric aggregation runtime failures."""
+    if _source_schema_mode(source) != "observed" or observed_headers is None:
+        return []
+
+    observed_header_set = set(observed_headers)
+    diagnostics: list[dict[str, Any]] = []
+    for node in state.nodes:
+        if node.node_type != "aggregation" or node.plugin not in _NUMERIC_VALUE_FIELD_AGGREGATION_PLUGINS:
+            continue
+        options, _owner = get_aggregation_contract_options(node.options, owner=f"node:{node.id}")
+        value_field = options.get("value_field")
+        if type(value_field) is not str or not value_field.strip():
+            continue
+        value_field = value_field.strip()
+        if value_field not in observed_header_set:
+            continue
+        if not _source_field_reaches_connection_without_type_change(state, node.input, field_name=value_field):
+            continue
+
+        inferred_type = inferred_types.get(value_field) if inferred_types is not None else None
+        diagnostics.append(
+            _blocking_diagnostic(
+                code="aggregation_numeric_value_field_type_mismatch_against_source_schema",
+                message=(
+                    f"Aggregation '{node.id}' ({node.plugin}) uses numeric value_field '{value_field}', "
+                    "but it is flowing from an observed CSV source. Observed CSV source values are strings "
+                    "unless the source schema declares explicit field types or an upstream type_coerce node "
+                    "converts the field before aggregation."
+                ),
+                suggested_repair=(
+                    "Patch the source schema to declare the aggregated field with an explicit numeric type "
+                    f"(for example {value_field}: float), or insert a type_coerce node upstream of the aggregation. "
+                    "If the field is categorical and you want counts/frequencies, use batch_top_k instead of a "
+                    "numeric aggregation."
+                ),
+                evidence_locator={
+                    "source": "blob",
+                    "blob_id": str(blob_id),
+                    "node_id": node.id,
+                    "plugin": node.plugin,
+                    "field": value_field,
+                    "observed_type": "str",
+                    "inferred_sample_type": inferred_type or "unknown",
+                    "source_runtime_type": "str",
+                    "source_schema_mode": "observed",
+                },
+            )
+        )
+
+    return diagnostics
+
+
+def compute_proof_diagnostics(
+    state: CompositionState,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Compute machine-readable proof diagnostics for a composer state.
+
+    Promotes ``preview_pipeline`` from a "state validates" check into a
+    "state is plausibly runnable against observed input" proof. Returns a
+    machine-readable list of diagnostics — each entry has::
+
+        {
+            "code": "csv_fixed_schema_omits_observed_columns",
+            "severity": "blocking" | "warning" | "info",
+            "message": "human-readable description",
+            "suggested_repair": "tool/options the LLM should call",
+            "evidence_locator": {"source": "...", "node_id": "...", ...},
+        }
+
+    Diagnostics surfaced:
+
+      * ``csv_fixed_schema_omits_observed_columns`` — fixed CSV schema +
+        on_validation_failure=discard + at least one observed column
+        absent from declared fields. The combination silently discards
+        every row, which is the #1 historical convergence-failure mode.
+      * ``text_source_url_without_web_scrape`` — text source whose blob
+        content is a single URL but no web_scrape node downstream. The
+        URL string itself reaches sinks instead of the URL's content.
+      * ``gate_expression_type_mismatch_against_source_schema`` — observed
+        CSV source values are still strings, and a direct source-fed gate
+        condition fails when evaluated against sampled rows before runtime.
+      * ``aggregation_numeric_value_field_type_mismatch_against_source_schema`` —
+        observed CSV strings flow unchanged into a numeric aggregation
+        ``value_field`` before runtime can reject the batch.
+      * ``source_inspection_warning`` — every warning surfaced by
+        ``inspect_blob_content`` is mirrored here at ``info`` severity
+        so the model sees them in the same array as blocking issues.
+
+    Bounded I/O: at most one blob read per call, bounded by
+    ``inspect_blob_content``'s 8 KiB / 100 row caps.
+
+    No-op (returns an empty list) if the source is not blob-backed or
+    if session context is absent.
+    """
+    diagnostics: list[dict[str, Any]] = []
+
+    source = state.source
+    if source is None:
+        return diagnostics
+
+    # Only blob-backed sources are inspectable from preview_pipeline; for
+    # path-based sources we have no bytes to peek at. SourceSpec.options is
+    # internally typed as Mapping[str, Any] (Tier-1 dataclass invariant — no
+    # isinstance probe needed); see _proof_repair_is_applicable for the
+    # canonical pattern this site mirrors.
+    blob_id = source.options.get("blob_ref")
+    if blob_id is None or session_engine is None or session_id is None:
+        return diagnostics
+
+    blob = _sync_get_blob(session_engine, str(blob_id), session_id)
+    # ``blob`` is a BlobToolRecord (TypedDict produced by
+    # ``_blob_row_to_tool_dict`` from a validated blobs row). Direct
+    # subscript access is mandatory — a missing key is a Tier-1
+    # contract violation in our own dict shape, not external data.
+    if blob is None or blob["status"] != "ready":
+        return diagnostics
+
+    storage_path = Path(blob["storage_path"])
+    if not storage_path.exists():
+        diagnostics.append(
+            _blocking_diagnostic(
+                code="source_inspection_failed",
+                message=(f"Source blob '{blob_id}' storage file is missing — pipeline cannot run until the blob is re-uploaded."),
+                suggested_repair="create_blob with the original content and re-wire via set_source_from_blob",
+                evidence_locator={"source": "blob", "blob_id": str(blob_id)},
+            )
+        )
+        return diagnostics
+
+    # Tier 1 (our data, our file): an OSError between exists() and
+    # read_bytes() is a real anomaly (concurrent delete, fs corruption,
+    # permission revocation). Per CLAUDE.md offensive-programming
+    # policy, let it propagate so the operator sees an informative
+    # exception rather than a synthesised soft-degraded diagnostic
+    # that could let downstream act on absent bytes.
+    content = storage_path.read_bytes()
+
+    # Tier 1 integrity verification — same shared helper as the two
+    # other composer-tool blob readers. Without this, the proof step
+    # would feed unverified bytes into ``inspect_blob_content`` and
+    # repair-loop, undermining the audit trail's "decisions made on
+    # verified inputs" invariant.
+    _verify_blob_content_integrity(blob, content)
+
+    facts = inspect_blob_content(
+        content=content,
+        filename=blob["filename"],
+        mime_type=blob["mime_type"],
+        content_hash=blob["content_hash"],
+    )
+
+    # 1. Fixed CSV schema omits observed columns + discard => silent all-row drop.
+    if facts.source_kind in {"csv", "json", "jsonl"}:
+        # source.options is Tier-1 (Mapping[str, Any]); the *value* at "schema"
+        # is unstructured and may be absent, so the inner shape probes below
+        # remain.
+        schema = source.options.get("schema")
+        if isinstance(schema, Mapping) and schema.get("mode") == "fixed":
+            declared = schema.get("fields") or ()
+            if isinstance(declared, (list, tuple)):
+                missing = derive_extra_column_risk(facts, tuple(declared))
+                if missing and source.on_validation_failure == "discard":
+                    diagnostics.append(
+                        _blocking_diagnostic(
+                            code="csv_fixed_schema_omits_observed_columns",
+                            message=(
+                                f"Source schema is mode=fixed but omits observed columns "
+                                f"{list(missing)} (observed: {list(facts.observed_headers or ())}). "
+                                "Combined with on_validation_failure='discard', every row will be "
+                                "dropped because each contains an undeclared column."
+                            ),
+                            suggested_repair=(
+                                "patch_source_options with schema.mode='flexible' to accept extra "
+                                "columns, OR add the missing columns to schema.fields, OR set "
+                                "on_validation_failure to a configured output for inspection."
+                            ),
+                            evidence_locator={
+                                "source": "blob",
+                                "blob_id": str(blob_id),
+                                "missing_columns": list(missing),
+                                "observed_columns": list(facts.observed_headers or ()),
+                            },
+                        )
+                    )
+
+    # 2. Observed CSV + numeric gate predicate => preview/runtime agreement gap.
+    if facts.source_kind == "csv":
+        diagnostics.extend(
+            _gate_expression_type_diagnostics_for_observed_csv(
+                state,
+                source,
+                blob_id=str(blob_id),
+                filename=blob["filename"],
+                content=content,
+            )
+        )
+        diagnostics.extend(
+            _numeric_aggregation_diagnostics_for_observed_csv(
+                state,
+                source,
+                blob_id=str(blob_id),
+                inferred_types=facts.inferred_types,
+                observed_headers=facts.observed_headers,
+            )
+        )
+
+    # 3. Text source containing a single URL but no web_scrape downstream.
+    if facts.source_kind == "text" and facts.url_candidates:
+        node_plugins = {(n.plugin or "").lower() for n in state.nodes}
+        if "web_scrape" not in node_plugins:
+            diagnostics.append(
+                _blocking_diagnostic(
+                    code="text_source_url_without_web_scrape",
+                    message=(
+                        f"Source blob contains URL(s) {list(facts.url_candidates)} but no "
+                        "web_scrape transform is wired downstream. The URL string itself will "
+                        "flow to sinks, not the URL's content."
+                    ),
+                    suggested_repair=(
+                        "upsert_node({node_type: 'transform', plugin: 'web_scrape', "
+                        "input: <source on_success>, options: {url_field: '<column>'}}) and route "
+                        "the source on_success to it."
+                    ),
+                    evidence_locator={
+                        "source": "blob",
+                        "blob_id": str(blob_id),
+                        "url_candidates": list(facts.url_candidates),
+                    },
+                )
+            )
+
+    # 4. Surface inspection warnings as info-severity diagnostics so the model
+    #    sees them in the same array as blocking issues. These are *advisory*
+    #    only — the model can ignore them if the operator's intent justifies.
+    #
+    #    Exception: ``csv_duplicate_headers`` is promoted to blocking. Duplicate
+    #    headers cause silent column collapse in csv.DictReader (last-write-
+    #    wins) and similar libraries, fabricating a single column from multiple
+    #    source columns. That is a Tier-1 audit-integrity violation — the
+    #    audit trail would silently contain data that "looks single-column"
+    #    when the source had two — and must force the repair loop, not pass
+    #    through as advisory. The repair vocabulary is: rename headers,
+    #    declare ``columns`` explicitly, configure ``field_mapping``, or set
+    #    ``on_validation_failure`` to a configured quarantine output.
+    for warning in facts.warnings:
+        if warning.startswith("csv_duplicate_headers:"):
+            diagnostics.append(
+                _blocking_diagnostic(
+                    code="csv_duplicate_headers",
+                    message=warning,
+                    suggested_repair=(
+                        "Rename the duplicate header(s) at the source, OR declare "
+                        "explicit `columns` in the source options, OR configure "
+                        "`field_mapping` to disambiguate the collapsed names, OR "
+                        "set `on_validation_failure` to a configured quarantine "
+                        "output so the silent column collapse does not poison the "
+                        "audit trail."
+                    ),
+                    evidence_locator={"source": "blob", "blob_id": str(blob_id)},
+                )
+            )
+            continue
+        diagnostics.append(
+            {
+                "code": "source_inspection_warning",
+                "severity": "info",
+                "message": warning,
+                "suggested_repair": None,
+                "evidence_locator": {"source": "blob", "blob_id": str(blob_id)},
+            }
+        )
+
+    return diagnostics
+
+
+def _execute_preview_pipeline(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    *,
+    runtime_preflight: RuntimePreflight | None = None,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+) -> ToolResult:
+    """Preview pipeline configuration — dry-run validation with source summary.
+
+    Returns ``authoring_validation`` (Stage 1), ``runtime_preflight``
+    (Stage 2 from the caller-supplied callback), and ``proof_diagnostics``
+    (Stage 3 — operator-input-aware proof against the observed source
+    blob). The presence of any blocking ``proof_diagnostics`` entry means
+    ``is_valid=False`` even when authoring + runtime checks pass.
+    """
+    validation = state.validate()
+    _AUTHORING_VALIDATION_COUNTER.add(
+        1,
+        {"outcome": "valid" if validation.is_valid else "invalid"},
+    )
+    authoring_payload = _authoring_validation_payload(state, validation)
+    runtime_result = runtime_preflight(state) if runtime_preflight is not None else None
+
+    proof_diagnostics = compute_proof_diagnostics(
+        state,
+        session_engine=session_engine,
+        session_id=session_id,
+    )
+    has_blocking_proof = any(d["severity"] == "blocking" for d in proof_diagnostics)
+
+    is_valid = validation.is_valid
+    if runtime_result is not None:
+        is_valid = is_valid and runtime_result.is_valid
+    if has_blocking_proof:
+        is_valid = False
+
+    summary: dict[str, Any] = {
+        "is_valid": is_valid,
+        "errors": authoring_payload["errors"],
+        "warnings": authoring_payload["warnings"],
+        "suggestions": authoring_payload["suggestions"],
+        "edge_contracts": authoring_payload["edge_contracts"],
+        "semantic_contracts": authoring_payload["semantic_contracts"],
+        "graph_repair_suggestions": authoring_payload["graph_repair_suggestions"],
+        "authoring_validation": authoring_payload,
+        "runtime_preflight": runtime_result.model_dump() if runtime_result is not None else None,
+        "proof_diagnostics": proof_diagnostics,
+        "source": None,
+        "node_count": len(state.nodes),
+        "output_count": len(state.outputs),
+        "nodes": [{"id": n.id, "node_type": n.node_type, "plugin": n.plugin} for n in state.nodes],
+        "outputs": [{"name": o.name, "plugin": o.plugin} for o in state.outputs],
+    }
+
+    if state.source is not None:
+        summary["source"] = {
+            "plugin": state.source.plugin,
+            "on_success": state.source.on_success,
+            "has_schema_config": _source_options_have_schema(state.source.options),
+        }
+
+    return ToolResult(
+        success=True,
+        updated_state=state,
+        validation=validation,
+        affected_nodes=(),
+        data=summary,
+        runtime_preflight=runtime_result,
+    )
+
+
+def _execute_diff_pipeline(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    *,
+    baseline: CompositionState | None = None,
+    current_validation: ValidationSummary | None = None,
+) -> ToolResult:
+    """Compute a diff/change summary against a baseline state.
+
+    The baseline is passed explicitly by the MCP server or web composer.
+    If no baseline is available, returns a notice instead.
+
+    Args:
+        current_validation: Pre-computed validation for the current state.
+            Threaded from the caller to avoid redundant recomputation.
+    """
+    if baseline is None:
+        return _discovery_result(
+            state,
+            {
+                _DATA_ERROR_KEY: "No baseline available. Load or create a session first.",
+                "current_version": state.version,
+            },
+        )
+
+    changes = diff_states(baseline, state, current_validation=current_validation)
+    return _discovery_result(state, changes)

@@ -3132,7 +3132,7 @@ class TestBlobTools:
         # Patch _check_blob_quota to raise inside the DB transaction
         with (
             patch(
-                "elspeth.web.composer.tools._check_blob_quota",
+                "elspeth.web.composer.tools.blobs._check_blob_quota",
                 side_effect=RuntimeError("simulated DB failure"),
             ),
             pytest.raises(RuntimeError, match="simulated DB failure"),
@@ -3720,7 +3720,7 @@ class TestUpdateBlobQuota:
         state = _empty_state()
         catalog = _mock_catalog()
         # Set quota to a tiny value so any growth exceeds it
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 10):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 10):
             result = execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "x" * 100},
@@ -3737,7 +3737,7 @@ class TestUpdateBlobQuota:
 
         state = _empty_state()
         catalog = _mock_catalog()
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 10):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 10):
             execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "x" * 100},
@@ -3765,7 +3765,7 @@ class TestUpdateBlobQuota:
         assert result.success is True
 
         # Now set quota very low — shrinking should still succeed
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 10):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 10):
             result = execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "tiny"},
@@ -3817,7 +3817,7 @@ class TestUpdateBlobQuota:
         state = _empty_state()
         catalog = _mock_catalog()
         # New content: 15 bytes. Delta = 15 - 5 = 10. Total after = 490 + 10 = 500.
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 500):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 500):
             result = execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "x" * 15},
@@ -3835,7 +3835,7 @@ class TestUpdateBlobQuota:
         state = _empty_state()
         catalog = _mock_catalog()
         # Quota exactly matches current total (5 bytes)
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", len(self.original_content)):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", len(self.original_content)):
             result = execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "x"},  # 1 byte < 5 bytes
@@ -3882,8 +3882,8 @@ class TestUpdateBlobQuota:
         # (But _check_blob_quota reads SUM which already includes the 50,
         #  so stale delta of 55 → 50 + 55 = 105 > 70 → wrongly rejected.)
         with (
-            patch("elspeth.web.composer.tools._sync_get_blob", side_effect=_get_then_concurrent_write),
-            patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 70),
+            patch("elspeth.web.composer.tools.blobs._sync_get_blob", side_effect=_get_then_concurrent_write),
+            patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 70),
         ):
             result = execute_tool(
                 "update_blob",
@@ -4014,7 +4014,7 @@ class TestUpdateBlobRollbackPreservesPrimaryException:
         catalog = _mock_catalog()
 
         with (
-            patch("elspeth.web.composer.tools._check_blob_quota", side_effect=_raise_primary),
+            patch("elspeth.web.composer.tools.blobs._check_blob_quota", side_effect=_raise_primary),
             patch.object(Path, "write_bytes", _tripwire_write_bytes),
             pytest.raises(RuntimeError, match=primary_message) as exc_info,
         ):
@@ -4063,7 +4063,7 @@ class TestUpdateBlobRollbackPreservesPrimaryException:
         catalog = _mock_catalog()
 
         with (
-            patch("elspeth.web.composer.tools._check_blob_quota", side_effect=_raise_primary),
+            patch("elspeth.web.composer.tools.blobs._check_blob_quota", side_effect=_raise_primary),
             pytest.raises(RuntimeError, match=primary_message) as exc_info,
         ):
             _execute_update_blob(
@@ -4402,7 +4402,7 @@ class TestUpdateBlobQuotaRollbackDivergence:
 
         # Quota 10 bytes; new content 100 bytes → delta 85 exceeds quota.
         with (
-            patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 10),
+            patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 10),
             patch.object(Path, "write_bytes", _tripwire_write_bytes),
         ):
             result = execute_tool(
@@ -4439,7 +4439,7 @@ class TestUpdateBlobQuotaRollbackDivergence:
         state = _empty_state()
         catalog = _mock_catalog()
 
-        with patch("elspeth.web.composer.tools._BLOB_QUOTA_BYTES", 10):
+        with patch("elspeth.web.composer.tools.blobs._BLOB_QUOTA_BYTES", 10):
             result = execute_tool(
                 "update_blob",
                 {"blob_id": self.blob_id, "content": "x" * 100},

@@ -760,6 +760,7 @@ class OrchestrationInvariantError(Exception):
     pass
 
 
+# TIER-2: Operator-interpretable refuse signal — audit DB is intact and truthful (records that no rows were committed); not a corruption or framework bug. Inherits OrchestrationInvariantError so the broad catch still matches, but the semantic tier is Tier-2 (clean refuse with run_id), not Tier-1 (invariant violation).
 class EmptyResumeStateError(OrchestrationInvariantError):
     """Raised when resume is attempted for a run with no recorded work.
 

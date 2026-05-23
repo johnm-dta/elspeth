@@ -2593,10 +2593,14 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=a54277793e8c59e5
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=aa65c110246c7f63
   owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: handler = all_handlers.get(tool_name)'
+  reason: 'AST shift after the 2026-05-23 four-agent review remediation
+    (deep-freeze of _TOOL_DEFS_BY_NAME, import-time MANIFEST/trailing-pin
+    invariants, assert->raise conversion, dead-enum + alias deletion).
+    Pattern preserved: Potential dict.get() usage: handler = all_handlers.get(tool_name).
+    Tier-3 boundary: tool_name is LLM-supplied; .get() returning None
+    routes to _failure_result for the unknown-tool path.'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null

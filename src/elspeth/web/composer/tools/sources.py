@@ -96,6 +96,37 @@ def _handle_set_source(
     )
 
 
+_SET_SOURCE_DECLARATION = ToolDeclaration(
+    name="set_source",
+    handler=_handle_set_source,
+    kind=ToolKind.MUTATION,
+    description="Set or replace the pipeline source.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "plugin": {"type": "string", "description": "Source plugin name."},
+            "on_success": {
+                "type": "string",
+                "description": (
+                    "Connection-name string this source PUBLISHES. Some downstream consumer "
+                    "(transform 'input' or output 'sink_name') MUST equal this value for wiring "
+                    "to resolve. The runtime matches strings, not graph topology — pick any "
+                    "name unique within the pipeline; it does not need to be the downstream "
+                    "node's id."
+                ),
+                "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
+            },
+            "options": {"type": "object", "description": "Plugin-specific config."},
+            "on_validation_failure": {
+                "type": "string",
+                "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+            },
+        },
+        "required": ["plugin", "on_success", "options", "on_validation_failure"],
+    },
+)
+
+
 _MIME_TO_SOURCE: dict[str, tuple[str, dict[str, str]]] = {
     "text/csv": ("csv", {}),
     "application/json": ("json", {}),
@@ -634,6 +665,26 @@ def _handle_patch_source_options(
     )
 
 
+_PATCH_SOURCE_OPTIONS_DECLARATION = ToolDeclaration(
+    name="patch_source_options",
+    handler=_handle_patch_source_options,
+    kind=ToolKind.MUTATION,
+    description="Apply a shallow merge-patch to the current source options. "
+    "Keys in the patch overwrite existing keys. "
+    "Keys set to null are deleted. Missing keys are unchanged.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "patch": {
+                "type": "object",
+                "description": "Merge-patch to apply to source options.",
+            },
+        },
+        "required": ["patch"],
+    },
+)
+
+
 def _execute_clear_source(
     args: dict[str, Any],
     state: CompositionState,
@@ -655,8 +706,20 @@ def _handle_clear_source(
     return _execute_clear_source(arguments, state, context)
 
 
+_CLEAR_SOURCE_DECLARATION = ToolDeclaration(
+    name="clear_source",
+    handler=_handle_clear_source,
+    kind=ToolKind.MUTATION,
+    description="Remove the source from the pipeline composition state.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+)
+
+
 TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
     _LIST_SOURCES_DECLARATION,
+    _SET_SOURCE_DECLARATION,
+    _PATCH_SOURCE_OPTIONS_DECLARATION,
+    _CLEAR_SOURCE_DECLARATION,
     _SET_SOURCE_FROM_BLOB_DECLARATION,
 )
 """Every tool declared in this module, in stable order.

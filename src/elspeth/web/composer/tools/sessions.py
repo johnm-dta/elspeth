@@ -40,6 +40,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
+    _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
     ToolContext,
     ToolResult,
     _credential_wiring_contract_failure,
@@ -698,6 +699,208 @@ def _handle_set_pipeline(
     return _execute_set_pipeline(arguments, state, context)
 
 
+_SET_PIPELINE_DECLARATION = ToolDeclaration(
+    name="set_pipeline",
+    handler=_handle_set_pipeline,
+    kind=ToolKind.MUTATION,
+    description="Atomically replace the entire pipeline. Provide the "
+    "complete source, nodes, edges, outputs, and metadata in one call. "
+    "This is more efficient than calling set_source + upsert_node + "
+    "upsert_edge + set_output sequentially.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "source": {
+                "type": "object",
+                "description": (
+                    "Source configuration: {plugin, on_success, options?, on_validation_failure?, blob_id?, inline_blob?}. "
+                    "Use blob_id to bind an already uploaded session blob, or inline_blob to "
+                    "materialize user-provided literal data while atomically setting the full pipeline."
+                ),
+                "properties": {
+                    "plugin": {"type": "string"},
+                    "blob_id": {
+                        "type": "string",
+                        "description": (
+                            "Existing ready session blob ID to bind as this source. "
+                            "The tool resolves path/blob_ref authoritatively exactly like set_source_from_blob."
+                        ),
+                    },
+                    "options": {
+                        "type": "object",
+                        "description": (
+                            "Plugin-specific source config. Required by most file/data sources even though "
+                            "the schema leaves it optional so the handler can return plugin-specific repair "
+                            "feedback instead of a generic missing-argument error."
+                        ),
+                    },
+                    "on_success": {
+                        "type": "string",
+                        "description": (
+                            "Connection-name string the source PUBLISHES. Some downstream "
+                            "consumer (node 'input' or output 'sink_name') MUST equal this. "
+                            "Connections match by string, not by node id."
+                        ),
+                        "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
+                    },
+                    "on_validation_failure": {
+                        "type": "string",
+                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+                    },
+                    "inline_blob": {
+                        "type": "object",
+                        "description": (
+                            "Optional inline source content to create as a session blob before binding the source. "
+                            "Fields mirror create_blob: filename, mime_type, content, and optional description."
+                        ),
+                        "properties": {
+                            "filename": {"type": "string"},
+                            "mime_type": {
+                                "type": "string",
+                                "enum": [
+                                    "text/plain",
+                                    "application/json",
+                                    "text/csv",
+                                    "application/x-jsonlines",
+                                    "application/jsonl",
+                                    "text/jsonl",
+                                ],
+                            },
+                            "content": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["filename", "mime_type", "content"],
+                    },
+                },
+                "required": ["plugin", "on_success"],
+            },
+            "nodes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "node_type": {"type": "string"},
+                        "plugin": {"type": "string"},
+                        "input": {
+                            "type": "string",
+                            "description": (
+                                "Connection-name string this node CONSUMES. MUST equal some "
+                                "upstream's on_success/routes value/on_error. NOT the upstream "
+                                "node's id. If source.on_success='raw_url_rows', this node sets "
+                                "input='raw_url_rows'."
+                            ),
+                            "examples": ["raw_url_rows", "fetched_text", "scored_rows"],
+                        },
+                        "on_success": {
+                            "type": "string",
+                            "description": (
+                                "Connection-name string this node PUBLISHES (transform/aggregation/"
+                                "coalesce). Some downstream input/sink_name MUST equal this. Omit "
+                                "for gates (routing is via condition+routes)."
+                            ),
+                            "examples": ["fetched_text", "scored_rows", "lines_out"],
+                        },
+                        "on_error": {"type": "string"},
+                        "options": {"type": "object"},
+                        "condition": {"type": "string"},
+                        "routes": {
+                            "type": "object",
+                            "description": (
+                                "Gate route mapping to sink names, downstream connection names, 'fork', or "
+                                "'discard' for an audited terminal drop."
+                            ),
+                        },
+                        "fork_to": {"type": "array", "items": {"type": "string"}},
+                        "branches": {
+                            "type": ["array", "object"],
+                            "items": {"type": "string"},
+                            "additionalProperties": {"type": "string"},
+                        },
+                        "policy": {"type": "string"},
+                        "merge": {"type": "string"},
+                        "trigger": {"type": "object"},
+                        "output_mode": {"type": "string"},
+                        "expected_output_count": {"type": "integer"},
+                    },
+                    "required": ["id", "node_type", "input"],
+                },
+                "description": "Array of node specs: [{id, input, plugin?, node_type, options?, on_success?, on_error?, condition?, routes?, fork_to?, branches?, policy?, merge?, trigger?, output_mode?, expected_output_count?}]",
+            },
+            "edges": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "from_node": {"type": "string"},
+                        "to_node": {"type": "string"},
+                        "edge_type": {"type": "string"},
+                        "label": {"type": "string"},
+                    },
+                    "required": ["id", "from_node", "to_node", "edge_type"],
+                },
+                "description": "Array of edge specs: [{id, from_node, to_node, edge_type}]",
+            },
+            "outputs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "sink_name": {
+                            "type": "string",
+                            "description": (
+                                "Sink name. BOTH the sink's identifier AND the connection-name "
+                                "the sink consumes — it MUST equal some upstream's on_success "
+                                "value. Pick a descriptive name; it does not need to match an "
+                                "upstream node's id."
+                            ),
+                            "examples": ["lines_out", "scored_results", "errors_quarantine"],
+                        },
+                        "plugin": {"type": "string"},
+                        "options": {
+                            "type": "object",
+                            "description": (
+                                "Plugin-specific sink config. For csv/json file sinks in runnable web "
+                                "pipelines, include path, schema, and explicit collision_policy."
+                            ),
+                        },
+                        "on_write_failure": {"type": "string"},
+                    },
+                    "required": ["sink_name", "plugin"],
+                    "examples": [
+                        {
+                            "sink_name": "results",
+                            "plugin": "json",
+                            "options": {
+                                "path": "outputs/results.json",
+                                "schema": {"mode": "observed"},
+                                "collision_policy": "auto_increment",
+                            },
+                            "on_write_failure": "discard",
+                        }
+                    ],
+                },
+                "description": (
+                    "Array of output specs: [{sink_name, plugin, options, on_write_failure?}]. "
+                    "For csv/json file sinks in runnable web pipelines, options must include "
+                    "path, schema, and explicit collision_policy."
+                ),
+            },
+            "metadata": {
+                "type": "object",
+                "description": "Pipeline metadata: {name?, description?}",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+            },
+        },
+        "required": ["source", "nodes", "edges", "outputs"],
+    },
+)
+
+
 def _is_full_state_component_alias(component: Any) -> bool:
     """Return whether a component argument explicitly requests full state."""
     return isinstance(component, str) and component.strip().lower() in _FULL_STATE_COMPONENT_ALIAS_SET
@@ -1185,6 +1388,7 @@ _SESSION_AWARE_TOOL_HANDLERS: dict[str, SessionAwareToolHandler] = {
 
 TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
     _GET_PIPELINE_STATE_DECLARATION,
+    _SET_PIPELINE_DECLARATION,
     _APPLY_PIPELINE_RECIPE_DECLARATION,
 )
 """Every tool declared in this module, in stable order.

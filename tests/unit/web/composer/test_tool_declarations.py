@@ -574,6 +574,181 @@ class TestStep3DiscoveryTierMigration:
         assert "diff_pipeline" not in cacheable
 
 
+class TestStep3MutationTierMigration:
+    """All 13 standard mutation tools must carry declarations with byte-identical schemas.
+
+    These tests pin the post-migration JSON shape so a future drift cannot silently
+    re-author the LLM-facing schema. The schemas for ``upsert_node`` and ``set_pipeline``
+    are particularly load-bearing — they document the connection-name vocabulary the
+    LLM uses to wire pipelines, and any drift would break composer convergence.
+    """
+
+    def _get(self, name: str) -> dict[str, object]:
+        return next(d for d in get_tool_definitions() if d["name"] == name)
+
+    def test_set_source_kind_and_handler(self) -> None:
+        from elspeth.web.composer.tools.sources import _SET_SOURCE_DECLARATION, _handle_set_source
+
+        assert _SET_SOURCE_DECLARATION.kind is ToolKind.MUTATION
+        assert _SET_SOURCE_DECLARATION.handler is _handle_set_source
+        assert _SET_SOURCE_DECLARATION.cacheable is False
+
+    def test_clear_source(self) -> None:
+        assert self._get("clear_source") == {
+            "name": "clear_source",
+            "description": "Remove the source from the pipeline composition state.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_remove_node(self) -> None:
+        assert self._get("remove_node") == {
+            "name": "remove_node",
+            "description": "Remove a node and all its edges.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Node ID to remove."},
+                },
+                "required": ["id"],
+            },
+        }
+
+    def test_remove_edge(self) -> None:
+        assert self._get("remove_edge") == {
+            "name": "remove_edge",
+            "description": "Remove an edge by ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Edge ID to remove."},
+                },
+                "required": ["id"],
+            },
+        }
+
+    def test_remove_output(self) -> None:
+        assert self._get("remove_output") == {
+            "name": "remove_output",
+            "description": "Remove a pipeline output (sink) by name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sink_name": {"type": "string", "description": "Sink name to remove."},
+                },
+                "required": ["sink_name"],
+            },
+        }
+
+    def test_set_metadata(self) -> None:
+        assert self._get("set_metadata") == {
+            "name": "set_metadata",
+            "description": "Update pipeline metadata (name and description only).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "object",
+                        "description": "Partial metadata update. Only included fields are changed.",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                    },
+                },
+                "required": ["patch"],
+            },
+        }
+
+    def test_patch_source_options(self) -> None:
+        assert self._get("patch_source_options") == {
+            "name": "patch_source_options",
+            "description": "Apply a shallow merge-patch to the current source options. "
+            "Keys in the patch overwrite existing keys. "
+            "Keys set to null are deleted. Missing keys are unchanged.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "object",
+                        "description": "Merge-patch to apply to source options.",
+                    },
+                },
+                "required": ["patch"],
+            },
+        }
+
+    def test_set_source_description_byte_identity(self) -> None:
+        """The set_source description references _SOURCE_VALIDATION_FAILURE_DESCRIPTION;
+        verify the resolved value lands byte-identical in the emitted def."""
+        from elspeth.web.composer.tools._common import _SOURCE_VALIDATION_FAILURE_DESCRIPTION
+
+        defn = self._get("set_source")
+        params = defn["parameters"]
+        assert isinstance(params, dict)
+        properties = params["properties"]
+        assert isinstance(properties, dict)
+        on_vf = properties["on_validation_failure"]
+        assert isinstance(on_vf, dict)
+        assert on_vf["description"] == _SOURCE_VALIDATION_FAILURE_DESCRIPTION
+
+    def test_set_pipeline_source_validation_failure_resolved(self) -> None:
+        """set_pipeline carries the same constant; same drift check."""
+        from elspeth.web.composer.tools._common import _SOURCE_VALIDATION_FAILURE_DESCRIPTION
+
+        defn = self._get("set_pipeline")
+        params = defn["parameters"]
+        assert isinstance(params, dict)
+        source = params["properties"]["source"]  # type: ignore[index]
+        assert isinstance(source, dict)
+        on_vf = source["properties"]["on_validation_failure"]  # type: ignore[index]
+        assert isinstance(on_vf, dict)
+        assert on_vf["description"] == _SOURCE_VALIDATION_FAILURE_DESCRIPTION
+
+    def test_set_pipeline_required_top_level(self) -> None:
+        """set_pipeline.required is exactly ['source', 'nodes', 'edges', 'outputs']."""
+        defn = self._get("set_pipeline")
+        params = defn["parameters"]
+        assert isinstance(params, dict)
+        assert params["required"] == ["source", "nodes", "edges", "outputs"]
+
+    def test_upsert_node_required(self) -> None:
+        defn = self._get("upsert_node")
+        params = defn["parameters"]
+        assert isinstance(params, dict)
+        assert params["required"] == ["id", "node_type", "input"]
+
+    def test_upsert_edge_required(self) -> None:
+        defn = self._get("upsert_edge")
+        params = defn["parameters"]
+        assert isinstance(params, dict)
+        assert params["required"] == ["id", "from_node", "to_node", "edge_type"]
+
+    def test_no_mutation_tool_is_cacheable(self) -> None:
+        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+
+        mutations = [d for d in _REGISTERED_TOOLS if d.kind is ToolKind.MUTATION]
+        for d in mutations:
+            assert d.cacheable is False, f"{d.name} mutation must not be cacheable"
+        # Confirm we have all 13 standard mutations.
+        names = {d.name for d in mutations}
+        expected = {
+            "set_source",
+            "upsert_node",
+            "upsert_edge",
+            "remove_node",
+            "remove_edge",
+            "set_metadata",
+            "set_output",
+            "remove_output",
+            "patch_source_options",
+            "patch_node_options",
+            "patch_output_options",
+            "set_pipeline",
+            "clear_source",
+        }
+        assert names == expected
+
+
 class TestToolDeclarationInvariants:
     """The constructor must crash early on inconsistent declarations."""
 

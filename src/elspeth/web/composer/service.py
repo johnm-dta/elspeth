@@ -47,6 +47,9 @@ from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import yaml_generator
+from elspeth.web.composer._compose_loop_carriers import (
+    _CallModelOutcome,
+)
 from elspeth.web.composer._required_paths_validator import (
     _TOOL_REQUIRED_PATHS,
     _find_missing_required_paths,
@@ -1940,6 +1943,63 @@ class ComposerServiceImpl:
             llm_calls=(),
         )
 
+    async def _call_model_turn(
+        self,
+        *,
+        llm_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        state: CompositionState,
+        initial_version: int,
+        deadline: float,
+        recorder: BufferingRecorder,
+        progress: ComposerProgressSink | None,
+        message: str,
+        composition_turns_used: int,
+        discovery_turns_used: int,
+    ) -> _CallModelOutcome:
+        """Phase P1 of the compose loop — one LLM call with cap enforcement.
+
+        Emits the model-call progress event, calls the provider before the
+        cooperative deadline, and enforces ``_max_tool_calls_per_turn``.
+        A cap breach raises :class:`ComposerConvergenceError` with the
+        ``tool_call_cap_exceeded`` reason directly; no carrier is returned
+        in that case.
+        """
+        await _emit_progress(progress, _model_call_progress_event(message))
+        response = await self._call_llm_before_deadline(
+            llm_messages,
+            tools,
+            state,
+            initial_version,
+            deadline,
+            recorder=recorder,
+        )
+        assistant_message = response.choices[0].message
+        raw_assistant_content = assistant_message.content
+        assistant_tool_calls = assistant_message.tool_calls or ()
+        if len(assistant_tool_calls) > self._max_tool_calls_per_turn:
+            self._telemetry.tool_call_cap_exceeded_total.add(1)
+            raise ComposerConvergenceError.capture(
+                max_turns=composition_turns_used + discovery_turns_used,
+                budget_exhausted="composition",
+                state=state,
+                initial_version=initial_version,
+                tool_invocations=recorder.invocations,
+                llm_calls=recorder.llm_calls,
+                reason="tool_call_cap_exceeded",
+                evidence={
+                    "observed": len(assistant_tool_calls),
+                    "cap": self._max_tool_calls_per_turn,
+                },
+            )
+        return _CallModelOutcome(
+            response=response,
+            assistant_message=assistant_message,
+            raw_assistant_content=raw_assistant_content,
+            assistant_tool_calls=tuple(assistant_tool_calls),
+            has_tool_calls=bool(assistant_message.tool_calls),
+        )
+
     async def _compose_loop(
         self,
         message: str,
@@ -2059,33 +2119,22 @@ class ComposerServiceImpl:
             # The compose-loop audit path captures the state id observed
             # before the provider call and passes this exact value to
             # persist_compose_turn_async as expected_current_state_id.
-            await _emit_progress(progress, _model_call_progress_event(message))
-            response = await self._call_llm_before_deadline(
-                llm_messages,
-                tools,
-                state,
-                initial_version,
-                deadline,
+            call_model = await self._call_model_turn(
+                llm_messages=llm_messages,
+                tools=tools,
+                state=state,
+                initial_version=initial_version,
+                deadline=deadline,
                 recorder=recorder,
+                progress=progress,
+                message=message,
+                composition_turns_used=composition_turns_used,
+                discovery_turns_used=discovery_turns_used,
             )
-            assistant_message = response.choices[0].message
-            raw_assistant_content = assistant_message.content
-            assistant_tool_calls = assistant_message.tool_calls or ()
-            if len(assistant_tool_calls) > self._max_tool_calls_per_turn:
-                self._telemetry.tool_call_cap_exceeded_total.add(1)
-                raise ComposerConvergenceError.capture(
-                    max_turns=composition_turns_used + discovery_turns_used,
-                    budget_exhausted="composition",
-                    state=state,
-                    initial_version=initial_version,
-                    tool_invocations=recorder.invocations,
-                    llm_calls=recorder.llm_calls,
-                    reason="tool_call_cap_exceeded",
-                    evidence={
-                        "observed": len(assistant_tool_calls),
-                        "cap": self._max_tool_calls_per_turn,
-                    },
-                )
+            response = call_model.response
+            assistant_message = call_model.assistant_message
+            raw_assistant_content = call_model.raw_assistant_content
+            assistant_tool_calls = call_model.assistant_tool_calls
 
             # If no tool calls, the LLM is done — apply the final gate and return
             if not assistant_message.tool_calls:

@@ -313,7 +313,7 @@ class TestStep2RegistryAggregation:
     """All five blob-mutation declarations are aggregated into _REGISTERED_TOOLS at import time."""
 
     def test_all_blob_mutation_tools_are_declared(self) -> None:
-        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
 
         declared = {d.name for d in _REGISTERED_TOOLS if d.kind is ToolKind.BLOB_MUTATION}
         expected = {
@@ -326,7 +326,7 @@ class TestStep2RegistryAggregation:
         assert declared == expected
 
     def test_registered_tools_count_at_least_five(self) -> None:
-        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
 
         # Step 2 registered the five blob-mutation tools. Step 3 adds more
         # tiers (discovery first); the count strictly grows as tiers migrate.
@@ -551,7 +551,7 @@ class TestStep3DiscoveryTierMigration:
     def test_cacheable_subset_is_correct(self) -> None:
         """The 10 discovery tools that should be cacheable are; the 3
         session-mutable ones are not."""
-        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
         from elspeth.web.composer.tools.declarations import derive_cacheable_names
 
         cacheable = derive_cacheable_names(_REGISTERED_TOOLS)
@@ -724,7 +724,7 @@ class TestStep3MutationTierMigration:
         assert params["required"] == ["id", "from_node", "to_node", "edge_type"]
 
     def test_no_mutation_tool_is_cacheable(self) -> None:
-        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
 
         mutations = [d for d in _REGISTERED_TOOLS if d.kind is ToolKind.MUTATION]
         for d in mutations:
@@ -816,7 +816,7 @@ class TestStep3BlobDiscoveryTierMigration:
         }
 
     def test_all_four_blob_discovery_tools_registered(self) -> None:
-        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
 
         names = {d.name for d in _REGISTERED_TOOLS if d.kind is ToolKind.BLOB_DISCOVERY}
         assert names == {"list_blobs", "get_blob_metadata", "get_blob_content", "inspect_source"}
@@ -869,7 +869,7 @@ class TestStep3SecretTierMigration:
         }
 
     def test_secret_tier_kinds(self) -> None:
-        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
 
         discovery = {d.name for d in _REGISTERED_TOOLS if d.kind is ToolKind.SECRET_DISCOVERY}
         mutation = {d.name for d in _REGISTERED_TOOLS if d.kind is ToolKind.SECRET_MUTATION}
@@ -878,7 +878,7 @@ class TestStep3SecretTierMigration:
 
     def test_no_secret_tool_is_cacheable(self) -> None:
         """Secret state mutates outside the composer; never cache."""
-        from elspeth.web.composer.tools._dispatch import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
 
         for d in _REGISTERED_TOOLS:
             if d.kind in (ToolKind.SECRET_DISCOVERY, ToolKind.SECRET_MUTATION):

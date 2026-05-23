@@ -4,16 +4,16 @@ This module is the public-API surface composer plumbing uses to ask "is
 this tool a discovery tool / a mutation / cacheable / session-aware?".
 The per-kind name frozensets are **derived from ``_REGISTERED_TOOLS``** in
 ``_registry.py`` (single source of truth: every plane's
-``TOOLS_IN_MODULE`` tuple). This module re-exports them under their
-historical names and adds the membership predicates.
+``TOOLS_IN_MODULE`` tuple). Consumers that need a name frozenset directly
+should reach for ``_registry``; this module is the predicate surface.
 
 Layering:
 
 - ``_registry.py`` is a leaf relative to ``discovery.py`` — it imports
   every plane module to aggregate declarations.
 - ``discovery.py`` imports from ``_registry`` and exposes the predicates.
-- ``_dispatch.py`` imports both ``_registry`` (for handler maps) and
-  ``discovery`` (for predicates).
+- ``_dispatch.py`` imports both ``_registry`` (for handler maps and the
+  derived name frozensets) and ``discovery`` (for ``_SESSION_AWARE_TOOL_NAMES``).
 
 Session-aware carve-out
 -----------------------
@@ -40,23 +40,10 @@ from elspeth.web.composer.tools._registry import (
     _MUTATION_TOOL_NAMES,
     _SECRET_DISCOVERY_TOOL_NAMES,
     _SECRET_MUTATION_TOOL_NAMES,
-    _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES,
 )
 
-# Re-export so external consumers and intra-package tests that import these
-# names from ``elspeth.web.composer.tools.discovery`` continue to work
-# unchanged. The single source of truth lives in ``_registry``.
 __all__ = [
-    "_BLOB_DISCOVERY_TOOL_NAMES",
-    "_BLOB_MUTATION_TOOL_NAMES",
-    "_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES",
-    "_CACHEABLE_DISCOVERY_TOOL_NAMES",
-    "_DISCOVERY_TOOL_NAMES",
-    "_MUTATION_TOOL_NAMES",
-    "_SECRET_DISCOVERY_TOOL_NAMES",
-    "_SECRET_MUTATION_TOOL_NAMES",
     "_SESSION_AWARE_TOOL_NAMES",
-    "_SESSION_MUTABLE_DISCOVERY_TOOL_NAMES",
     "is_blob_store_only_mutation_tool",
     "is_cacheable_discovery_tool",
     "is_discovery_tool",

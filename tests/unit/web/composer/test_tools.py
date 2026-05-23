@@ -2373,12 +2373,9 @@ class TestToolRegistry:
         the opt-OUT pattern the production code deliberately moved away
         from in commit e34f53c30.
         """
-        from elspeth.web.composer.tools import (
-            _CACHEABLE_DISCOVERY_TOOLS,
-            _DISCOVERY_TOOLS,
-        )
-        from elspeth.web.composer.tools.discovery import (
+        from elspeth.web.composer.tools._registry import (
             _CACHEABLE_DISCOVERY_TOOL_NAMES,
+            _DISCOVERY_TOOLS,
             _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES,
         )
 
@@ -2399,17 +2396,13 @@ class TestToolRegistry:
         # decision per tool).
         assert frozenset(_DISCOVERY_TOOLS.keys()) == (_CACHEABLE_DISCOVERY_TOOL_NAMES | _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES)
 
-        # The compiled export from the dispatch facade matches the
-        # discovery-module source of truth.
-        assert _CACHEABLE_DISCOVERY_TOOLS == _CACHEABLE_DISCOVERY_TOOL_NAMES
-
     def test_cacheable_is_subset_of_discovery(self) -> None:
         from elspeth.web.composer.tools import (
-            _CACHEABLE_DISCOVERY_TOOLS,
+            _CACHEABLE_DISCOVERY_TOOL_NAMES,
             _DISCOVERY_TOOLS,
         )
 
-        assert set(_DISCOVERY_TOOLS.keys()) >= _CACHEABLE_DISCOVERY_TOOLS
+        assert set(_DISCOVERY_TOOLS.keys()) >= _CACHEABLE_DISCOVERY_TOOL_NAMES
 
     def test_is_discovery_tool(self) -> None:
         from elspeth.web.composer.tools import is_discovery_tool

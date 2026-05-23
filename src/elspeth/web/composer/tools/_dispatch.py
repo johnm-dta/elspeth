@@ -5,13 +5,14 @@ imports every plane's ``TOOLS_IN_MODULE`` tuple and derives the per-kind
 handler maps and name sets). This module hosts the dispatcher
 (``execute_tool``), the LLM-facing tool-definitions emitter
 (``get_tool_definitions``), and the import-time invariants on async / sync
-registry separation.
+registry separation, trailing-tool cache pin, and MANIFEST<->registry
+set-equality.
 
-The per-kind registries (``_DISCOVERY_TOOLS``, ``_MUTATION_TOOLS``, ...)
-are re-exported from this module under their historical names so external
-consumers (tests, ``tools/__init__.py`` facade) continue to import them
-from ``elspeth.web.composer.tools._dispatch``. Their canonical home is
-``_registry``.
+Imports from ``_registry`` and ``discovery`` are for internal use inside
+this module. Consumers needing the per-kind handler maps or name sets
+should reach for ``_registry`` directly — ``_dispatch.__all__`` lists
+only what this module defines (``execute_tool``, ``get_tool_definitions``,
+``_inject_prior_validation``).
 """
 
 from __future__ import annotations
@@ -41,51 +42,24 @@ from elspeth.web.composer.tools._common import (
 )
 from elspeth.web.composer.tools._registry import (
     _BLOB_DISCOVERY_TOOLS,
+    _BLOB_MUTATION_TOOL_NAMES,
     _BLOB_MUTATION_TOOLS,
     _DISCOVERY_TOOLS,
+    _MUTATION_TOOL_NAMES,
     _MUTATION_TOOLS,
     _REGISTERED_TOOLS,
     _SECRET_DISCOVERY_TOOLS,
+    _SECRET_MUTATION_TOOL_NAMES,
     _SECRET_MUTATION_TOOLS,
     _TOOL_DEFS_BY_NAME,
 )
-from elspeth.web.composer.tools.discovery import (
-    _BLOB_MUTATION_TOOL_NAMES,
-    _CACHEABLE_DISCOVERY_TOOL_NAMES,
-    _MUTATION_TOOL_NAMES,
-    _SECRET_MUTATION_TOOL_NAMES,
-    _SESSION_AWARE_TOOL_NAMES,
-)
+from elspeth.web.composer.tools.discovery import _SESSION_AWARE_TOOL_NAMES
 from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_VALUES,
 )
 
-# Backwards-compatible alias — the canonical name set lives in
-# ``_registry._CACHEABLE_DISCOVERY_TOOL_NAMES``. ``tools/__init__.py``
-# re-exports ``_CACHEABLE_DISCOVERY_TOOLS`` from here for external
-# consumers historically reaching for it.
-_CACHEABLE_DISCOVERY_TOOLS: Final[frozenset[str]] = _CACHEABLE_DISCOVERY_TOOL_NAMES
-
-
-# The six sync per-kind registries (``_DISCOVERY_TOOLS`` etc.) are now
-# derived in ``_registry`` from the declaration tuple; this module imports
-# them above and re-exports them. ``_REGISTERED_TOOLS`` is referenced by
-# the async/sync separation invariants below to validate every declared
-# handler.
-
-# Re-export the public ``ADVISOR_TRIGGER_VALUES`` constant — historically
-# imported from ``_dispatch`` by callers reading the advisor schema. The
-# canonical declaration lives in ``sessions.py``.
 __all__ = [
-    "ADVISOR_TRIGGER_VALUES",
-    "_BLOB_DISCOVERY_TOOLS",
-    "_BLOB_MUTATION_TOOLS",
-    "_CACHEABLE_DISCOVERY_TOOLS",
-    "_DISCOVERY_TOOLS",
-    "_MUTATION_TOOLS",
-    "_SECRET_DISCOVERY_TOOLS",
-    "_SECRET_MUTATION_TOOLS",
     "_inject_prior_validation",
     "execute_tool",
     "get_tool_definitions",

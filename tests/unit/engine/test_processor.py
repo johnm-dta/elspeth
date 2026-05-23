@@ -4404,6 +4404,242 @@ class TestDurableSchedulerResumeDrain:
             stray_token.token_id: "blocked",
         }
 
+    def test_drain_refuses_when_peer_worker_holds_active_lease(self) -> None:
+        """A peer worker's unexpired lease must block a second drain on the same run.
+
+        Regression for elspeth-66be4216cd (G3): ``_drain_preexisting_pending_sinks``
+        relied on a docstring-only single-active-resume-per-run invariant. Under
+        a hypothetical multi-worker resume, peer worker A claims a row (LEASED
+        under owner-A); peer worker B then enters ``drain_scheduled_work``. If
+        A's lease expires before A's sink-write callback runs (long LLM/HTTP
+        call), B's ``recover_expired_leases`` would flip the row back to
+        PENDING_SINK and B's ``claim_pending_sink`` would re-emit a RowResult
+        already produced by A — a duplicate audit-trail entry, a Tier-1
+        violation.
+
+        Per ADR-026 Precondition #9, RC6 cannot ship N>1 workers until the
+        multi-worker deployment-shape ADR lands; until then, this precondition
+        check at ``drain_scheduled_work`` entry mechanically enforces the
+        invariant. Today no code path spawns concurrent ``RowProcessor``
+        instances on the same ``run_id``; this test simulates the violating
+        scenario by direct scheduler manipulation to prove the guard is
+        mechanical, not documentation.
+        """
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 1})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-peer-held")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+
+        # Peer worker A claims the row under its own lease_owner. Lease window
+        # is wide enough that ``peer_active_leases`` sees it as unexpired.
+        peer_claim_now = datetime.now(UTC)
+        peer_claim = factory.scheduler.claim_ready(
+            run_id="test-run",
+            lease_owner="peer-worker-A",
+            lease_seconds=600,
+            now=peer_claim_now,
+        )
+        assert peer_claim is not None
+        assert peer_claim.lease_owner == "peer-worker-A"
+
+        # Worker B constructs its processor with a distinct lease_owner and
+        # attempts to drain — the precondition must crash before any work
+        # claim or RowResult emission.
+        worker_b_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="peer-worker-B",
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with pytest.raises(AuditIntegrityError, match=r"peer worker\(s\) \['peer-worker-A'\]"):
+            worker_b_processor.drain_scheduled_work(ctx)
+
+        # Defence-in-depth: the row is still owned by peer-worker-A and was
+        # never re-emitted; no terminal/sink-bound state recorded by B.
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, lease_owner = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                    token_work_items_table.c.token_id == "token-peer-held"
+                )
+            ).one()
+        assert status == "leased"
+        assert lease_owner == "peer-worker-A"
+
+    def test_drain_proceeds_when_peer_lease_expired(self) -> None:
+        """An expired peer lease is recoverable, not a precondition violation.
+
+        Single-active-resume blocks unexpired peer leases. An expired peer lease
+        is the normal crashed-prior-worker recovery path: the surviving worker
+        sweeps it via ``recover_expired_leases`` and proceeds. This test pins
+        that the precondition does NOT over-reject — only unexpired peers are
+        treated as live.
+        """
+        clock = MockClock(start=1_700_000_000.0)
+        _db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 1})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-stale-peer")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=clock.now_utc(),
+        )
+
+        # Crashed peer A held a short lease that has since expired.
+        factory.scheduler.claim_ready(
+            run_id="test-run",
+            lease_owner="crashed-peer",
+            lease_seconds=30,
+            now=clock.now_utc(),
+        )
+        clock.advance(60.0)
+
+        success_result = TransformResult.success(
+            make_row({"value": 1, "resumed": True}),
+            success_reason={"action": "resume_drain"},
+        )
+        worker_b_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="recovery-worker",
+            clock=clock,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
+            return (success_result, token, None)
+
+        with patch.object(worker_b_processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            results = worker_b_processor.drain_scheduled_work(ctx)
+
+        # Expired peer lease was recovered; row drained under recovery-worker.
+        assert len(results) == 1
+        assert results[0].token.token_id == "token-stale-peer"
+
+    def test_drain_ignores_callers_own_active_lease(self) -> None:
+        """A caller's own unexpired lease must not trigger the peer precondition.
+
+        ``peer_active_leases`` filters ``lease_owner != caller_owner``. A worker
+        re-entering its own drain (e.g. after a transform that left its own row
+        LEASED in an earlier iteration) must not self-block.
+        """
+        _db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 1})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-self-held")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+
+        # The caller's lease_owner pre-claims the row before the drain entry.
+        factory.scheduler.claim_ready(
+            run_id="test-run",
+            lease_owner="own-worker",
+            lease_seconds=600,
+            now=datetime.now(UTC),
+        )
+
+        worker_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="own-worker",
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        # peer_active_leases must return () because the only LEASED row is
+        # owned by the caller; drain must not raise. It will reach the
+        # claim_ready loop, find no READY work (the row is LEASED by self),
+        # and exit cleanly with an empty result list.
+        results = worker_processor.drain_scheduled_work(ctx)
+        assert results == []
+
 
 # =============================================================================
 # _process_single_token: Inner Traversal Cycle Guard

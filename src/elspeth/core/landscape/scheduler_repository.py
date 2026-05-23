@@ -828,6 +828,52 @@ class TokenSchedulerRepository:
                 )
         return int(rowcount)
 
+    def peer_active_leases(
+        self,
+        *,
+        run_id: str,
+        caller_owner: str,
+        now: datetime,
+    ) -> tuple[str, ...]:
+        """Return distinct lease_owners of unexpired LEASED rows held by peers.
+
+        A "peer" is any ``lease_owner`` other than ``caller_owner``. A lease is
+        "active" if ``lease_expires_at > now``; rows whose lease has expired are
+        recoverable via ``recover_expired_leases`` and do not contribute to the
+        peer set.
+
+        This is the single-active-resume precondition surface for
+        ``drain_scheduled_work``: a resume drain run while a peer holds an
+        unexpired lease on the same ``run_id`` would race against the peer's
+        sink-bound RowResult emission (PENDING_SINK can transition to LEASED
+        under the peer's identity and the helper would re-emit a duplicate
+        RowResult on a later iteration once the lease expires). See
+        filigree elspeth-66be4216cd (G3 single-active-resume invariant).
+
+        Under ADR-026 Precondition #9 (multi-worker deployment-shape ADR not
+        yet authored), no code path exists today that spawns concurrent
+        ``RowProcessor`` instances on the same ``run_id``; this method returns
+        ``()`` for every supported deployment. The check exists as an offensive
+        guard so that any future code that violates the precondition crashes
+        with a Tier-1 audit-integrity error instead of silently emitting
+        duplicate RowResults into the audit trail.
+        """
+        with self._engine.connect() as conn:
+            owners = (
+                conn.execute(
+                    select(token_work_items_table.c.lease_owner)
+                    .distinct()
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
+                    .where(token_work_items_table.c.lease_owner != caller_owner)
+                    .where(token_work_items_table.c.lease_expires_at > now)
+                    .order_by(token_work_items_table.c.lease_owner)
+                )
+                .scalars()
+                .all()
+            )
+        return tuple(owner for owner in owners if owner is not None)
+
     def count_active_work(self, *, run_id: str) -> int:
         """Count non-terminal scheduler work for a run."""
         active_statuses = (

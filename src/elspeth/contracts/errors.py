@@ -716,6 +716,42 @@ class AuditIntegrityError(Exception):
         self.failed_turn = failed_turn
 
 
+# TIER-2: Multi-worker lease coordination signal — the worker's lease was reaped
+# by a peer (lease expired AND peer-reaper succeeded), so this worker no longer
+# owns the row. The audit trail is intact (the peer-recovered row is a new
+# attempt under a new ``work_item_id``); the original holder must abandon its
+# in-flight work WITHOUT a follow-up ``mark_failed`` (CAS would fail, cascading
+# into a Tier-1 ``AuditIntegrityError``). The drain loop catches this
+# specifically and skips both the result emission and the failure write.
+# Distinct from ``AuditIntegrityError`` because it represents legitimate
+# coordination under multi-worker N>1 (alive-but-slow worker reaped by peer),
+# not framework corruption. See filigree elspeth-ddde8144b6.
+class SchedulerLeaseLostError(Exception):
+    """Raised when a heartbeat or transition discovers the lease was reaped.
+
+    The lease was either expired (peer reaper claimed the row under a bumped
+    ``attempt`` and new ``work_item_id``) or transferred (peer worker captured
+    the row directly). Either way, this worker no longer owns the row and must
+    abandon its in-flight processing cleanly.
+
+    Attributes:
+        work_item_id: The original work_item_id this worker held the lease on.
+        lease_owner: The lease_owner identity this worker claimed under.
+        run_id: The run_id the lease belonged to.
+    """
+
+    def __init__(self, *, work_item_id: str, lease_owner: str, run_id: str) -> None:
+        self.work_item_id = work_item_id
+        self.lease_owner = lease_owner
+        self.run_id = run_id
+        super().__init__(
+            f"Scheduler lease lost for work_item_id={work_item_id!r} under "
+            f"lease_owner={lease_owner!r} on run_id={run_id!r}: the row has been "
+            "reaped or reassigned by a peer worker. This worker must abandon "
+            "its in-flight processing without a follow-up scheduler write."
+        )
+
+
 # TIER-2: Config-elected enforcement failure (union collision policy = fail). Not a system corruption; pipeline author chose fail-fast on merge conflicts.
 class CoalesceCollisionError(Exception):
     """Raised when union_collision_policy=fail and a field collision occurs.

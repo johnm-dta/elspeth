@@ -106,17 +106,70 @@ _SESSION_AWARE_TOOL_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Cacheable discovery tools — discovery tools whose result depends only on
-# the catalog and current state (no time-varying or external inputs). The
-# three tools subtracted here either consult runtime preflight
-# (``preview_pipeline``), depend on a baseline diff (``diff_pipeline``), or
-# materialise the live state at call time in a way the compose-loop cache
-# cannot safely reuse (``get_pipeline_state``).
-_CACHEABLE_DISCOVERY_TOOL_NAMES: Final[frozenset[str]] = _DISCOVERY_TOOL_NAMES - {
-    "diff_pipeline",
-    "get_pipeline_state",
-    "preview_pipeline",
-}
+# Cacheable discovery tools — **EXPLICIT OPT-IN** set.
+#
+# Audit-integrity rule: any new discovery tool MUST be added here on
+# purpose. The previous opt-out construction (subtract the known-unsafe
+# names from ``_DISCOVERY_TOOL_NAMES``) silently auto-cached every newly
+# added discovery tool, which is the wrong default when the failure mode
+# is stale data being served from cache and recorded as the live answer.
+# Session-mutable-state tools — currently ``diff_pipeline``,
+# ``get_pipeline_state``, and ``preview_pipeline`` — MUST remain absent
+# from this set (the import-time assertion below enforces that).
+#
+# To add a new entry: confirm the tool's result is a pure function of
+# the catalog and the *committed* CompositionState (no runtime preflight,
+# no baseline-diff inputs, no live-state materialisation that the
+# compose-loop cache could not safely reuse), then add the name here.
+_CACHEABLE_DISCOVERY_TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "list_sources",
+        "list_transforms",
+        "list_sinks",
+        "get_plugin_schema",
+        "get_expression_grammar",
+        "explain_validation_error",
+        "get_plugin_assistance",
+        "list_models",
+        "get_audit_info",
+        "list_recipes",
+    }
+)
+
+# Names that must NEVER appear in ``_CACHEABLE_DISCOVERY_TOOL_NAMES``
+# because their result depends on session-mutable state — caching would
+# serve stale audit-trail data. Tracked explicitly so the import-time
+# assertion below can detect accidental inclusion (e.g. a copy-paste edit
+# moving one of these names into the opt-in set).
+_SESSION_MUTABLE_DISCOVERY_TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "diff_pipeline",
+        "get_pipeline_state",
+        "preview_pipeline",
+    }
+)
+
+# Import-time assertion: every cacheable name must be a registered
+# discovery tool, and the cacheable set must not intersect the
+# session-mutable forbidden set. ``_dispatch.py`` separately asserts that
+# every cacheable name appears in the live ``_DISCOVERY_TOOLS`` handler
+# registry; this check enforces the audit-integrity contract at the name
+# layer so a stale ``discovery.py`` edit cannot pass through review.
+assert _CACHEABLE_DISCOVERY_TOOL_NAMES <= _DISCOVERY_TOOL_NAMES, (
+    "_CACHEABLE_DISCOVERY_TOOL_NAMES contains names that are not declared "
+    "discovery tools: "
+    f"{_CACHEABLE_DISCOVERY_TOOL_NAMES - _DISCOVERY_TOOL_NAMES}"
+)
+assert _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES <= _DISCOVERY_TOOL_NAMES, (
+    "_SESSION_MUTABLE_DISCOVERY_TOOL_NAMES contains names that are not "
+    "declared discovery tools: "
+    f"{_SESSION_MUTABLE_DISCOVERY_TOOL_NAMES - _DISCOVERY_TOOL_NAMES}"
+)
+assert not (_CACHEABLE_DISCOVERY_TOOL_NAMES & _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES), (
+    "Session-mutable discovery tools must NEVER be cacheable — caching "
+    "them would serve stale audit-trail data. Intersection: "
+    f"{_CACHEABLE_DISCOVERY_TOOL_NAMES & _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES}"
+)
 
 # Blob-store side-effect tools that never advance ``CompositionState``.
 # Excluded from the ``trust_mode == "explicit_approve"`` proposal-interception

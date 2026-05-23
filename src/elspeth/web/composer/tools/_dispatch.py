@@ -1,4 +1,18 @@
-"""Composer dispatch + registry — the tool execution surface (merges every plane's handlers)."""
+"""Composer dispatch — the tool execution surface.
+
+Tool registration is aggregated in ``_registry.py`` (the single site that
+imports every plane's ``TOOLS_IN_MODULE`` tuple and derives the per-kind
+handler maps and name sets). This module hosts the dispatcher
+(``execute_tool``), the LLM-facing tool-definitions emitter
+(``get_tool_definitions``), and the import-time invariants on async / sync
+registry separation.
+
+The per-kind registries (``_DISCOVERY_TOOLS``, ``_MUTATION_TOOLS``, ...)
+are re-exported from this module under their historical names so external
+consumers (tests, ``tools/__init__.py`` facade) continue to import them
+from ``elspeth.web.composer.tools._dispatch``. Their canonical home is
+``_registry``.
+"""
 
 from __future__ import annotations
 
@@ -24,470 +38,228 @@ from elspeth.web.composer.tools._common import (
     build_plugin_schemas_for_failure,
     should_augment_with_plugin_schemas,
 )
-from elspeth.web.composer.tools.blobs import (
-    TOOLS_IN_MODULE as _BLOBS_TOOLS_IN_MODULE,
-)
-from elspeth.web.composer.tools.blobs import (
-    _execute_create_blob,
-    _execute_delete_blob,
-    _execute_get_blob_content,
-    _execute_update_blob,
-    _handle_get_blob_metadata,
-    _handle_list_blobs,
-)
-from elspeth.web.composer.tools.declarations import (
-    ToolDeclaration,
-    ToolKind,
-    assert_unique_names,
-    derive_tool_definitions_by_name,
+from elspeth.web.composer.tools._registry import (
+    _BLOB_DISCOVERY_TOOLS,
+    _BLOB_MUTATION_TOOLS,
+    _DISCOVERY_TOOLS,
+    _MUTATION_TOOLS,
+    _REGISTERED_TOOLS,
+    _SECRET_DISCOVERY_TOOLS,
+    _SECRET_MUTATION_TOOLS,
+    _TOOL_DEFS_BY_NAME,
 )
 from elspeth.web.composer.tools.discovery import (
-    _BLOB_DISCOVERY_TOOL_NAMES,
     _BLOB_MUTATION_TOOL_NAMES,
-    _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES,
     _CACHEABLE_DISCOVERY_TOOL_NAMES,
-    _DISCOVERY_TOOL_NAMES,
     _MUTATION_TOOL_NAMES,
-    _SECRET_DISCOVERY_TOOL_NAMES,
     _SECRET_MUTATION_TOOL_NAMES,
     _SESSION_AWARE_TOOL_NAMES,
-)
-from elspeth.web.composer.tools.generation import (
-    TOOLS_IN_MODULE as _GENERATION_TOOLS_IN_MODULE,
-)
-from elspeth.web.composer.tools.generation import (
-    _execute_diff_pipeline,
-    _execute_explain_validation_error,
-    _execute_get_audit_info,
-    _execute_get_plugin_assistance,
-    _execute_list_models,
-    _execute_preview_pipeline,
-    _handle_get_expression_grammar,
-    _handle_get_plugin_schema,
-)
-from elspeth.web.composer.tools.outputs import (
-    TOOLS_IN_MODULE as _OUTPUTS_TOOLS_IN_MODULE,
-)
-from elspeth.web.composer.tools.outputs import (
-    _handle_patch_output_options,
-    _handle_remove_output,
-    _handle_set_output,
-)
-from elspeth.web.composer.tools.recipes import (
-    TOOLS_IN_MODULE as _RECIPES_TOOLS_IN_MODULE,
-)
-from elspeth.web.composer.tools.recipes import (
-    _execute_list_recipes,
-)
-from elspeth.web.composer.tools.secrets import (
-    TOOLS_IN_MODULE as _SECRETS_TOOLS_IN_MODULE,
-)
-from elspeth.web.composer.tools.secrets import (
-    _execute_wire_secret_ref,
-    _handle_list_secret_refs,
-    _handle_validate_secret_ref,
 )
 from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_VALUES,
-    _execute_apply_pipeline_recipe,
-    _execute_get_pipeline_state,
-    _handle_set_pipeline,
-)
-from elspeth.web.composer.tools.sessions import (
-    TOOLS_IN_MODULE as _SESSIONS_TOOLS_IN_MODULE,
-)
-from elspeth.web.composer.tools.sources import (
-    TOOLS_IN_MODULE as _SOURCES_TOOLS_IN_MODULE,
-)
-from elspeth.web.composer.tools.sources import (
-    _execute_inspect_source,
-    _execute_set_source_from_blob,
-    _handle_clear_source,
-    _handle_list_sources,
-    _handle_patch_source_options,
-    _handle_set_source,
-)
-from elspeth.web.composer.tools.transforms import (
-    TOOLS_IN_MODULE as _TRANSFORMS_TOOLS_IN_MODULE,
-)
-from elspeth.web.composer.tools.transforms import (
-    _handle_list_sinks,
-    _handle_list_transforms,
-    _handle_patch_node_options,
-    _handle_remove_edge,
-    _handle_remove_node,
-    _handle_set_metadata,
-    _handle_upsert_edge,
-    _handle_upsert_node,
 )
 
+# Backwards-compatible alias — the canonical name set lives in
+# ``_registry._CACHEABLE_DISCOVERY_TOOL_NAMES``. ``tools/__init__.py``
+# re-exports ``_CACHEABLE_DISCOVERY_TOOLS`` from here for external
+# consumers historically reaching for it.
+_CACHEABLE_DISCOVERY_TOOLS: Final[frozenset[str]] = _CACHEABLE_DISCOVERY_TOOL_NAMES
+
+
+# The six sync per-kind registries (``_DISCOVERY_TOOLS`` etc.) are now
+# derived in ``_registry`` from the declaration tuple; this module imports
+# them above and re-exports them. ``_REGISTERED_TOOLS`` is referenced by
+# the async/sync separation invariants below to validate every declared
+# handler.
+
+# Re-export the public ``ADVISOR_TRIGGER_VALUES`` constant — historically
+# imported from ``_dispatch`` by callers reading the advisor schema. The
+# canonical declaration lives in ``sessions.py``.
+__all__ = [
+    "ADVISOR_TRIGGER_VALUES",
+    "_BLOB_DISCOVERY_TOOLS",
+    "_BLOB_MUTATION_TOOLS",
+    "_CACHEABLE_DISCOVERY_TOOLS",
+    "_DISCOVERY_TOOLS",
+    "_MUTATION_TOOLS",
+    "_SECRET_DISCOVERY_TOOLS",
+    "_SECRET_MUTATION_TOOLS",
+    "_inject_prior_validation",
+    "execute_tool",
+    "get_tool_definitions",
+]
+
+
 # ---------------------------------------------------------------------------
-# Registered tool declarations
+# LLM-facing tool catalogue
 #
-# This is the single aggregation site for every plane's TOOLS_IN_MODULE tuple
-# (ticket elspeth-6c9972ccbf). Aggregation lives here — not in
-# ``declarations.py`` — to break the import cycle that would otherwise let
-# a plane module observe an empty registry during partial-module-load.
+# The bulk of the catalogue is derived from ``_TOOL_DEFS_BY_NAME``. Two tools
+# are dispatched *outside* ``execute_tool`` and therefore do not carry a
+# ``ToolDeclaration``:
 #
-# Step 1 of the migration registers only ``blobs.TOOLS_IN_MODULE``; Steps 2/3
-# extend the tuple plane-by-plane. ``assert_unique_names`` fires at import
-# time so two declarations with the same name fail the build, not silently
-# at dispatch.
+# - ``request_advisor_hint`` — intercepted in ``service.py`` before dispatch.
+# - ``request_interpretation_review`` — session-aware async handler in
+#   ``sessions._SESSION_AWARE_TOOL_HANDLERS``; widening the declaration's
+#   handler typing to admit async is deferred to ``elspeth-f5da936747``.
+#
+# These two definitions are emitted inline below.  ``wire_secret_ref`` is
+# placed last so the Anthropic prompt-cache marker (pinned by
+# ``test_trailing_tool_name_is_locked``) stays attached to it across deploys.
 # ---------------------------------------------------------------------------
 
-_REGISTERED_TOOLS: Final[tuple[ToolDeclaration, ...]] = (
-    *_BLOBS_TOOLS_IN_MODULE,
-    *_SOURCES_TOOLS_IN_MODULE,
-    *_SESSIONS_TOOLS_IN_MODULE,
-    *_GENERATION_TOOLS_IN_MODULE,
-    *_RECIPES_TOOLS_IN_MODULE,
-    *_TRANSFORMS_TOOLS_IN_MODULE,
-    *_OUTPUTS_TOOLS_IN_MODULE,
-    *_SECRETS_TOOLS_IN_MODULE,
-)
-assert_unique_names(_REGISTERED_TOOLS)
-_TOOL_DEFS_BY_NAME: Final[Mapping[str, dict[str, Any]]] = derive_tool_definitions_by_name(_REGISTERED_TOOLS)
+_REQUEST_ADVISOR_HINT_DEFINITION: Final[dict[str, Any]] = {
+    "name": "request_advisor_hint",
+    "description": (
+        "ESCAPE HATCH — call when one of the declared trigger criteria applies: "
+        "reactive validation-loop recovery after two or more unchanged failures, "
+        "proactive security/safety wiring review before `set_pipeline`, or "
+        "proactive red-listed plugin review before `set_pipeline`. The proactive "
+        "security trigger covers content moderation, prompt-injection defence, "
+        "secret routing, PII/regulatory sinks, and externally fetched content "
+        "flowing toward LLMs. Forwards your problem statement and context to a "
+        "frontier model and returns guidance text. The reply is ADVICE, not "
+        "configuration — you must still call the appropriate mutation tool "
+        "yourself to apply any change. Budget is finite (sized per compose "
+        "request, not per session lifetime) and exhausting it returns a "
+        "structured error rather than crashing — inspect budget_remaining "
+        "in each response. Do NOT call this tool in a loop, do NOT use it "
+        "as a substitute for reading validator output. Disabled by default; "
+        "only available when the operator has explicitly enabled it."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "trigger": {
+                "type": "string",
+                "enum": list(ADVISOR_TRIGGER_VALUES),
+                "description": (
+                    "Why this advisor call is allowed. Use reactive_validation_loop "
+                    "only after the recovery sequence and at least two unchanged "
+                    "validator failures. Use proactive_security_safety before "
+                    "set_pipeline for security/safety-sensitive flows. Use "
+                    "proactive_red_listed_plugin before set_pipeline when the plan "
+                    "uses a red-listed plugin such as llm, database, dataverse, "
+                    "Azure safety transforms, RAG retrieval, or Chroma sinks."
+                ),
+            },
+            "problem_summary": {
+                "type": "string",
+                "description": (
+                    "Your own statement of what you are trying to do and "
+                    "why you are stuck. One or two sentences. Be specific: "
+                    "'I cannot get llm transform options to validate against "
+                    "the Azure provider schema' is useful; 'help' is not."
+                ),
+            },
+            "recent_errors": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": ("The last validator error messages verbatim, most recent first. Include up to 5; do not paraphrase."),
+            },
+            "attempted_actions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "What you have already tried, one item per attempt. "
+                    "Include the tool name and a one-line summary of the "
+                    "argument shape. The advisor uses this to avoid "
+                    "suggesting things you have already ruled out."
+                ),
+            },
+            "schema_excerpt": {
+                "type": "string",
+                "description": (
+                    "Optional — the relevant plugin schema snippet you are "
+                    "working against, as returned by `get_plugin_schema`. "
+                    "Including this lets the advisor give field-level "
+                    "guidance grounded in the exact contract."
+                ),
+            },
+        },
+        "required": ["trigger", "problem_summary", "recent_errors", "attempted_actions"],
+    },
+}
+
+
+# The description below is normative documentation for the LLM (mirrored
+# in the composer skill markdown) and is reviewed by the audit panel as
+# part of the request_interpretation_review event row's provenance.
+_REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[dict[str, Any]] = {
+    "name": "request_interpretation_review",
+    "description": (
+        "Ask the user to review your interpretation of a subjective or "
+        "underspecified term they used. Call this BEFORE you finalise "
+        "the prompt template for any LLM transform whose prompt depends "
+        "on the term. Surface ONE term per call. The composition state "
+        "MUST already contain the affected LLM transform (call upsert_node "
+        "first) and its prompt_template MUST contain the placeholder "
+        "{{interpretation:<term>}}. The user will see your draft and "
+        "either accept it or amend it. Do not ask the user in assistant "
+        "prose; this tool is the review surface. If no composition state "
+        "exists yet, stage the LLM transform with a placeholder first, "
+        "wait for that tool result, then call this tool. Do not call this "
+        "for concrete operators (e.g., 'rate 1-10') or for terms the "
+        "user already defined in the conversation."
+    ),
+    "parameters": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["affected_node_id", "user_term", "llm_draft"],
+        "properties": {
+            "affected_node_id": {
+                "type": "string",
+                "description": "node_id of the LLM transform whose prompt template depends on this term",
+            },
+            "user_term": {
+                "type": "string",
+                "description": "The user-provided term, verbatim (e.g., 'cool', 'important', 'risky')",
+            },
+            "llm_draft": {
+                "type": "string",
+                "description": "Your draft interpretation of the term, in your own words, suitable to embed as a phrase in the prompt template",
+            },
+        },
+    },
+}
 
 
 def get_tool_definitions() -> list[dict[str, Any]]:
     """Return JSON Schema tool definitions for the LLM.
 
     Returns 39 tools: 13 discovery + 13 mutation + 9 blob tools + 3 secret
-    tools + 1 advisor tool. ``request_advisor_hint`` is the only tool that
-    is filtered out of the LLM-visible list when the operator's
-    ``composer_advisor_enabled`` flag is False (the default) — see
-    ``ComposerServiceImpl._get_litellm_tools``.
+    tools + 1 advisor tool + 1 session-aware interpretation-review tool.
+    ``request_advisor_hint`` is filtered out of the LLM-visible list when
+    the operator's ``composer_advisor_enabled`` flag is False (the default)
+    — see ``ComposerServiceImpl._get_litellm_tools``.
+
+    The tool catalogue is derived from ``_TOOL_DEFS_BY_NAME`` (every
+    declared tool) plus two inline definitions for the dispatch-outside-
+    execute_tool carve-outs (``request_advisor_hint`` and
+    ``request_interpretation_review``). The trailing entry is pinned to
+    ``wire_secret_ref`` by ``test_trailing_tool_name_is_locked`` —
+    Anthropic prompt-cache markers attach to the last tool, and reordering
+    invalidates the cache for every follow-up turn.
 
     The skill at ``src/elspeth/web/composer/skills/pipeline_composer.md``
     enumerates the same tool set in its Foundation-knowledge section
-    (under "## CRITICAL: Tool Schema Availability"). The drift gate
-    ``TestComposerToolNameDrift::test_skill_tool_inventory_matches_get_tool_definitions``
-    in ``tests/unit/web/composer/test_skill_drift.py`` enforces equality
-    between the runtime list returned here and the skill's bulleted
-    categories — adding a tool without updating both sides fails CI.
+    (under "## CRITICAL: Tool Schema Availability"). Any skill ↔ runtime
+    drift is caught by the per-tool prose tests in ``test_skill_drift.py``;
+    the older inventory-parser drift gate (which existed because
+    ``get_tool_definitions()`` was hand-maintained) was retired when
+    declarations became the source of truth.
     """
+    # ``dict(defn)`` defensively copies each declaration-emitted dict so
+    # the caller cannot mutate the registry's frozen-by-convention values
+    # via the returned list. ``derive_tool_definitions_by_name`` already
+    # deep-thaws to plain dicts, so this is shallow-copy-cheap.
+    declared = [dict(defn) for name, defn in _TOOL_DEFS_BY_NAME.items() if name != "wire_secret_ref"]
     return [
-        # Discovery tools
-        _TOOL_DEFS_BY_NAME["list_sources"],
-        _TOOL_DEFS_BY_NAME["list_transforms"],
-        _TOOL_DEFS_BY_NAME["list_sinks"],
-        _TOOL_DEFS_BY_NAME["get_plugin_schema"],
-        _TOOL_DEFS_BY_NAME["get_expression_grammar"],
-        # Mutation tools
-        _TOOL_DEFS_BY_NAME["set_source"],
-        _TOOL_DEFS_BY_NAME["upsert_node"],
-        _TOOL_DEFS_BY_NAME["upsert_edge"],
-        _TOOL_DEFS_BY_NAME["remove_node"],
-        _TOOL_DEFS_BY_NAME["remove_edge"],
-        _TOOL_DEFS_BY_NAME["set_metadata"],
-        _TOOL_DEFS_BY_NAME["set_output"],
-        _TOOL_DEFS_BY_NAME["remove_output"],
-        _TOOL_DEFS_BY_NAME["patch_source_options"],
-        _TOOL_DEFS_BY_NAME["patch_node_options"],
-        _TOOL_DEFS_BY_NAME["patch_output_options"],
-        _TOOL_DEFS_BY_NAME["set_pipeline"],
-        # Source-reset and validation-explanation tools.
-        _TOOL_DEFS_BY_NAME["clear_source"],
-        _TOOL_DEFS_BY_NAME["explain_validation_error"],
-        {
-            "name": "request_advisor_hint",
-            "description": (
-                "ESCAPE HATCH — call when one of the declared trigger criteria applies: "
-                "reactive validation-loop recovery after two or more unchanged failures, "
-                "proactive security/safety wiring review before `set_pipeline`, or "
-                "proactive red-listed plugin review before `set_pipeline`. The proactive "
-                "security trigger covers content moderation, prompt-injection defence, "
-                "secret routing, PII/regulatory sinks, and externally fetched content "
-                "flowing toward LLMs. Forwards your problem statement and context to a "
-                "frontier model and returns guidance text. The reply is ADVICE, not "
-                "configuration — you must still call the appropriate mutation tool "
-                "yourself to apply any change. Budget is finite (sized per compose "
-                "request, not per session lifetime) and exhausting it returns a "
-                "structured error rather than crashing — inspect budget_remaining "
-                "in each response. Do NOT call this tool in a loop, do NOT use it "
-                "as a substitute for reading validator output. Disabled by default; "
-                "only available when the operator has explicitly enabled it."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "trigger": {
-                        "type": "string",
-                        "enum": list(ADVISOR_TRIGGER_VALUES),
-                        "description": (
-                            "Why this advisor call is allowed. Use reactive_validation_loop "
-                            "only after the recovery sequence and at least two unchanged "
-                            "validator failures. Use proactive_security_safety before "
-                            "set_pipeline for security/safety-sensitive flows. Use "
-                            "proactive_red_listed_plugin before set_pipeline when the plan "
-                            "uses a red-listed plugin such as llm, database, dataverse, "
-                            "Azure safety transforms, RAG retrieval, or Chroma sinks."
-                        ),
-                    },
-                    "problem_summary": {
-                        "type": "string",
-                        "description": (
-                            "Your own statement of what you are trying to do and "
-                            "why you are stuck. One or two sentences. Be specific: "
-                            "'I cannot get llm transform options to validate against "
-                            "the Azure provider schema' is useful; 'help' is not."
-                        ),
-                    },
-                    "recent_errors": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "The last validator error messages verbatim, most recent first. Include up to 5; do not paraphrase."
-                        ),
-                    },
-                    "attempted_actions": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "What you have already tried, one item per attempt. "
-                            "Include the tool name and a one-line summary of the "
-                            "argument shape. The advisor uses this to avoid "
-                            "suggesting things you have already ruled out."
-                        ),
-                    },
-                    "schema_excerpt": {
-                        "type": "string",
-                        "description": (
-                            "Optional — the relevant plugin schema snippet you are "
-                            "working against, as returned by `get_plugin_schema`. "
-                            "Including this lets the advisor give field-level "
-                            "guidance grounded in the exact contract."
-                        ),
-                    },
-                },
-                "required": ["trigger", "problem_summary", "recent_errors", "attempted_actions"],
-            },
-        },
-        _TOOL_DEFS_BY_NAME["get_plugin_assistance"],
-        _TOOL_DEFS_BY_NAME["list_models"],
-        _TOOL_DEFS_BY_NAME["get_audit_info"],
-        _TOOL_DEFS_BY_NAME["preview_pipeline"],
-        _TOOL_DEFS_BY_NAME["get_pipeline_state"],
-        _TOOL_DEFS_BY_NAME["diff_pipeline"],
-        # Blob tools
-        _TOOL_DEFS_BY_NAME["list_blobs"],
-        _TOOL_DEFS_BY_NAME["get_blob_metadata"],
-        _TOOL_DEFS_BY_NAME["set_source_from_blob"],
-        _TOOL_DEFS_BY_NAME["create_blob"],
-        _TOOL_DEFS_BY_NAME["update_blob"],
-        _TOOL_DEFS_BY_NAME["delete_blob"],
-        _TOOL_DEFS_BY_NAME["get_blob_content"],
-        _TOOL_DEFS_BY_NAME["list_recipes"],
-        _TOOL_DEFS_BY_NAME["apply_pipeline_recipe"],
-        _TOOL_DEFS_BY_NAME["inspect_source"],
-        # Secret tools
-        _TOOL_DEFS_BY_NAME["list_secret_refs"],
-        _TOOL_DEFS_BY_NAME["validate_secret_ref"],
-        # Composer-LLM-callable tool surface for surfacing an interpretation
-        # of a subjective or under-specified term for user review.
-        # The description below is normative documentation for the LLM (mirrored
-        # in the composer skill markdown) and is reviewed by the audit panel as
-        # part of the request_interpretation_review event row's provenance.
-        #
-        # Position note: this tool is inserted BEFORE ``wire_secret_ref`` so
-        # the trailing tool name remains ``wire_secret_ref`` — the Anthropic
-        # cache-marker test (``test_trailing_tool_name_is_locked``) pins the
-        # trailing position to preserve prompt-cache stability across deploys.
-        {
-            "name": "request_interpretation_review",
-            "description": (
-                "Ask the user to review your interpretation of a subjective or "
-                "underspecified term they used. Call this BEFORE you finalise "
-                "the prompt template for any LLM transform whose prompt depends "
-                "on the term. Surface ONE term per call. The composition state "
-                "MUST already contain the affected LLM transform (call upsert_node "
-                "first) and its prompt_template MUST contain the placeholder "
-                "{{interpretation:<term>}}. The user will see your draft and "
-                "either accept it or amend it. Do not ask the user in assistant "
-                "prose; this tool is the review surface. If no composition state "
-                "exists yet, stage the LLM transform with a placeholder first, "
-                "wait for that tool result, then call this tool. Do not call this "
-                "for concrete operators (e.g., 'rate 1-10') or for terms the "
-                "user already defined in the conversation."
-            ),
-            "parameters": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["affected_node_id", "user_term", "llm_draft"],
-                "properties": {
-                    "affected_node_id": {
-                        "type": "string",
-                        "description": "node_id of the LLM transform whose prompt template depends on this term",
-                    },
-                    "user_term": {
-                        "type": "string",
-                        "description": "The user-provided term, verbatim (e.g., 'cool', 'important', 'risky')",
-                    },
-                    "llm_draft": {
-                        "type": "string",
-                        "description": "Your draft interpretation of the term, in your own words, suitable to embed as a phrase in the prompt template",
-                    },
-                },
-            },
-        },
-        _TOOL_DEFS_BY_NAME["wire_secret_ref"],
+        *declared,
+        dict(_REQUEST_ADVISOR_HINT_DEFINITION),
+        dict(_REQUEST_INTERPRETATION_REVIEW_DEFINITION),
+        dict(_TOOL_DEFS_BY_NAME["wire_secret_ref"]),
     ]
-
-
-_DISCOVERY_TOOLS: dict[str, ToolHandler] = {
-    "list_sources": _handle_list_sources,
-    "list_transforms": _handle_list_transforms,
-    "list_sinks": _handle_list_sinks,
-    "get_plugin_schema": _handle_get_plugin_schema,
-    "get_expression_grammar": _handle_get_expression_grammar,
-    "explain_validation_error": _execute_explain_validation_error,
-    "get_plugin_assistance": _execute_get_plugin_assistance,
-    "list_models": _execute_list_models,
-    "get_audit_info": _execute_get_audit_info,
-    "list_recipes": _execute_list_recipes,
-    "get_pipeline_state": _execute_get_pipeline_state,
-    "preview_pipeline": _execute_preview_pipeline,
-    "diff_pipeline": _execute_diff_pipeline,
-}
-
-# Backwards-compatible alias — the canonical declaration lives in
-# ``tools.discovery``. Re-exported here because ``tools/__init__.py`` and a
-# few external call sites historically imported the name from
-# ``_dispatch``.
-_CACHEABLE_DISCOVERY_TOOLS: frozenset[str] = _CACHEABLE_DISCOVERY_TOOL_NAMES
-
-
-_MUTATION_TOOLS: dict[str, ToolHandler] = {
-    "set_source": _handle_set_source,
-    "upsert_node": _handle_upsert_node,
-    "upsert_edge": _handle_upsert_edge,
-    "remove_node": _handle_remove_node,
-    "remove_edge": _handle_remove_edge,
-    "set_metadata": _handle_set_metadata,
-    "set_output": _handle_set_output,
-    "remove_output": _handle_remove_output,
-    "patch_source_options": _handle_patch_source_options,
-    "patch_node_options": _handle_patch_node_options,
-    "patch_output_options": _handle_patch_output_options,
-    "set_pipeline": _handle_set_pipeline,
-    "clear_source": _handle_clear_source,
-}
-
-_BLOB_DISCOVERY_TOOLS: dict[str, ToolHandler] = {
-    "list_blobs": _handle_list_blobs,
-    "get_blob_metadata": _handle_get_blob_metadata,
-    "get_blob_content": _execute_get_blob_content,
-    "inspect_source": _execute_inspect_source,
-}
-
-
-_BLOB_MUTATION_TOOLS: dict[str, ToolHandler] = {
-    "set_source_from_blob": _execute_set_source_from_blob,
-    "create_blob": _execute_create_blob,
-    "update_blob": _execute_update_blob,
-    "delete_blob": _execute_delete_blob,
-    "apply_pipeline_recipe": _execute_apply_pipeline_recipe,
-}
-
-_SECRET_DISCOVERY_TOOLS: dict[str, ToolHandler] = {
-    "list_secret_refs": _handle_list_secret_refs,
-    "validate_secret_ref": _handle_validate_secret_ref,
-}
-
-
-_SECRET_MUTATION_TOOLS: dict[str, ToolHandler] = {
-    "wire_secret_ref": _execute_wire_secret_ref,
-}
-
-# Registry-vs-declaration parity assertions — the canonical name sets live in
-# ``tools.discovery``; the handler maps above are subordinate. A regression
-# in either direction (a name in the registry without a declaration, or a
-# declaration without a registered handler) fails the build at import time.
-assert set(_DISCOVERY_TOOLS) == _DISCOVERY_TOOL_NAMES, (
-    "_DISCOVERY_TOOLS keys diverge from _DISCOVERY_TOOL_NAMES: "
-    f"+{set(_DISCOVERY_TOOLS) - _DISCOVERY_TOOL_NAMES} "
-    f"-{_DISCOVERY_TOOL_NAMES - set(_DISCOVERY_TOOLS)}"
-)
-assert set(_MUTATION_TOOLS) == _MUTATION_TOOL_NAMES, (
-    "_MUTATION_TOOLS keys diverge from _MUTATION_TOOL_NAMES: "
-    f"+{set(_MUTATION_TOOLS) - _MUTATION_TOOL_NAMES} "
-    f"-{_MUTATION_TOOL_NAMES - set(_MUTATION_TOOLS)}"
-)
-assert set(_BLOB_DISCOVERY_TOOLS) == _BLOB_DISCOVERY_TOOL_NAMES, (
-    "_BLOB_DISCOVERY_TOOLS keys diverge from _BLOB_DISCOVERY_TOOL_NAMES: "
-    f"+{set(_BLOB_DISCOVERY_TOOLS) - _BLOB_DISCOVERY_TOOL_NAMES} "
-    f"-{_BLOB_DISCOVERY_TOOL_NAMES - set(_BLOB_DISCOVERY_TOOLS)}"
-)
-assert set(_BLOB_MUTATION_TOOLS) == _BLOB_MUTATION_TOOL_NAMES, (
-    "_BLOB_MUTATION_TOOLS keys diverge from _BLOB_MUTATION_TOOL_NAMES: "
-    f"+{set(_BLOB_MUTATION_TOOLS) - _BLOB_MUTATION_TOOL_NAMES} "
-    f"-{_BLOB_MUTATION_TOOL_NAMES - set(_BLOB_MUTATION_TOOLS)}"
-)
-assert set(_SECRET_DISCOVERY_TOOLS) == _SECRET_DISCOVERY_TOOL_NAMES, (
-    "_SECRET_DISCOVERY_TOOLS keys diverge from _SECRET_DISCOVERY_TOOL_NAMES: "
-    f"+{set(_SECRET_DISCOVERY_TOOLS) - _SECRET_DISCOVERY_TOOL_NAMES} "
-    f"-{_SECRET_DISCOVERY_TOOL_NAMES - set(_SECRET_DISCOVERY_TOOLS)}"
-)
-assert set(_SECRET_MUTATION_TOOLS) == _SECRET_MUTATION_TOOL_NAMES, (
-    "_SECRET_MUTATION_TOOLS keys diverge from _SECRET_MUTATION_TOOL_NAMES: "
-    f"+{set(_SECRET_MUTATION_TOOLS) - _SECRET_MUTATION_TOOL_NAMES} "
-    f"-{_SECRET_MUTATION_TOOL_NAMES - set(_SECRET_MUTATION_TOOLS)}"
-)
-assert set(_SESSION_AWARE_TOOL_HANDLERS) == _SESSION_AWARE_TOOL_NAMES, (
-    "_SESSION_AWARE_TOOL_HANDLERS keys diverge from _SESSION_AWARE_TOOL_NAMES: "
-    f"+{set(_SESSION_AWARE_TOOL_HANDLERS) - _SESSION_AWARE_TOOL_NAMES} "
-    f"-{_SESSION_AWARE_TOOL_NAMES - set(_SESSION_AWARE_TOOL_HANDLERS)}"
-)
-assert set(_DISCOVERY_TOOLS) >= _CACHEABLE_DISCOVERY_TOOL_NAMES, (
-    f"Cacheable tools not in discovery registry: {_CACHEABLE_DISCOVERY_TOOL_NAMES - set(_DISCOVERY_TOOLS)}"
-)
-
-
-# ---------------------------------------------------------------------------
-# Declaration ↔ hand-maintained registry parity (migration safety net)
-#
-# For every ToolDeclaration registered in this build, assert that the
-# declaration's data agrees with the still-canonical hand-maintained
-# surfaces for that tool (registry handler dict, blob-store-only set).
-# A mismatch fails the build before any dispatch runs — protecting against
-# a declaration that drifts away from the registry partway through the
-# migration. Once every tool has a declaration (Step 3/4), the assertion
-# inverts: the hand-maintained registries are decommissioned and the
-# declarations become the canonical source the dispatcher reads.
-# ---------------------------------------------------------------------------
-
-_REGISTRY_BY_KIND: Final[Mapping[ToolKind, Mapping[str, ToolHandler]]] = {
-    ToolKind.DISCOVERY: _DISCOVERY_TOOLS,
-    ToolKind.MUTATION: _MUTATION_TOOLS,
-    ToolKind.BLOB_DISCOVERY: _BLOB_DISCOVERY_TOOLS,
-    ToolKind.BLOB_MUTATION: _BLOB_MUTATION_TOOLS,
-    ToolKind.SECRET_DISCOVERY: _SECRET_DISCOVERY_TOOLS,
-    ToolKind.SECRET_MUTATION: _SECRET_MUTATION_TOOLS,
-}
-
-for _decl in _REGISTERED_TOOLS:
-    if _decl.kind is ToolKind.SESSION_AWARE:
-        # Session-aware handlers live in ``_SESSION_AWARE_TOOL_HANDLERS`` and
-        # are dispatched outside ``execute_tool``; their parity assertion
-        # belongs in a later migration step.
-        continue
-    _registry = _REGISTRY_BY_KIND[_decl.kind]
-    assert _decl.name in _registry, (
-        f"ToolDeclaration({_decl.name!r}) has no entry in the hand-maintained registry for {_decl.kind.value!r}."
-    )
-    assert _registry[_decl.name] is _decl.handler, (
-        f"ToolDeclaration({_decl.name!r}).handler diverges from the hand-maintained registry's handler for {_decl.kind.value!r}."
-    )
-    if _decl.kind is ToolKind.BLOB_MUTATION:
-        assert (_decl.name in _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES) == _decl.blob_store_only, (
-            f"ToolDeclaration({_decl.name!r}).blob_store_only "
-            f"({_decl.blob_store_only}) disagrees with "
-            f"_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES membership "
-            f"({_decl.name in _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES})."
-        )
-
-del _decl  # keep module namespace clean
 
 
 def _inject_prior_validation(
@@ -651,32 +423,41 @@ def execute_tool(
     return _augment_with_plugin_schemas(result, tool_name, catalog)
 
 
-# Module-level assertions — F-18 dual-registry invariant enforcement.
+# ---------------------------------------------------------------------------
+# Module-level invariants — F-18 dual-registry invariant enforcement.
 #
 # These execute at module import, so a regression (e.g., copy-pasting an async
 # handler into a sync registry, or registering one tool name in two registries)
 # fails the build before any compose() call could trigger silent
 # "coroutine was never awaited" warnings or first-registry-wins overrides.
-_all_tools = (
-    set(_DISCOVERY_TOOLS)
-    | set(_MUTATION_TOOLS)
-    | set(_BLOB_DISCOVERY_TOOLS)
-    | set(_BLOB_MUTATION_TOOLS)
-    | set(_SECRET_DISCOVERY_TOOLS)
-    | set(_SECRET_MUTATION_TOOLS)
-    | set(_SESSION_AWARE_TOOL_HANDLERS)
+#
+# The six sync per-kind registries are derived in ``_registry`` from
+# ``_REGISTERED_TOOLS``; ``derive_handler_map_for`` partitions by kind so
+# within-kind overlap is impossible by construction. The cross-kind overlap
+# (a name appearing under two kinds) is prevented by ``assert_unique_names``
+# in ``_registry``. The session-aware-vs-sync overlap below catches the
+# remaining gap: a tool name shared between ``_SESSION_AWARE_TOOL_HANDLERS``
+# (hand-maintained in ``sessions.py``) and any declared sync handler.
+# ---------------------------------------------------------------------------
+
+# Session-aware ↔ declared name parity. The hand-maintained
+# ``_SESSION_AWARE_TOOL_HANDLERS`` dict in ``sessions.py`` is the source of
+# truth for session-aware handlers; ``_SESSION_AWARE_TOOL_NAMES`` in
+# ``discovery.py`` enumerates the same set. Drift would mean a tool is
+# dispatched without a name-set membership (or vice versa).
+assert set(_SESSION_AWARE_TOOL_HANDLERS) == _SESSION_AWARE_TOOL_NAMES, (
+    "_SESSION_AWARE_TOOL_HANDLERS keys diverge from _SESSION_AWARE_TOOL_NAMES: "
+    f"+{set(_SESSION_AWARE_TOOL_HANDLERS) - _SESSION_AWARE_TOOL_NAMES} "
+    f"-{_SESSION_AWARE_TOOL_NAMES - set(_SESSION_AWARE_TOOL_HANDLERS)}"
 )
-assert len(_all_tools) == (
-    len(_DISCOVERY_TOOLS)
-    + len(_MUTATION_TOOLS)
-    + len(_BLOB_DISCOVERY_TOOLS)
-    + len(_BLOB_MUTATION_TOOLS)
-    + len(_SECRET_DISCOVERY_TOOLS)
-    + len(_SECRET_MUTATION_TOOLS)
-    + len(_SESSION_AWARE_TOOL_HANDLERS)
-), (
-    "Tool registry overlap detected — a tool name appears in more than one of "
-    "_DISCOVERY_TOOLS / _MUTATION_TOOLS / blob / secret / _SESSION_AWARE_TOOL_HANDLERS"
+
+# No tool name may be both a declared sync handler and a session-aware
+# async handler. Detects the regression of a sync handler being given the
+# same name as an existing session-aware async one.
+_sync_declared_names: frozenset[str] = frozenset(decl.name for decl in _REGISTERED_TOOLS)
+assert not (_sync_declared_names & set(_SESSION_AWARE_TOOL_HANDLERS)), (
+    "Tool name appears in both _REGISTERED_TOOLS and _SESSION_AWARE_TOOL_HANDLERS: "
+    f"{_sync_declared_names & set(_SESSION_AWARE_TOOL_HANDLERS)}"
 )
 
 # Every session-aware handler must be a coroutine function. A sync function
@@ -687,14 +468,22 @@ for _name, _handler in _SESSION_AWARE_TOOL_HANDLERS.items():
         f"_SESSION_AWARE_TOOL_HANDLERS[{_name!r}] is not async; sync handlers belong in _MUTATION_TOOLS / _DISCOVERY_TOOLS instead."
     )
 
-# Every sync-registry handler must NOT be a coroutine. Catches the reverse
-# regression: an async handler dropped into the sync dispatch path that
-# would return a coroutine object as if it were a ToolResult.
-#
-# The six sync registries have heterogeneous handler value-types (the blob
-# and secret registries carry handlers with extra session-context kwargs),
-# so the local ``_sync_registry`` is typed broadly as
-# ``Mapping[str, Callable[..., Any]]`` for the duration of this check.
+# Every declared (non-session-aware) handler must NOT be a coroutine.
+# Catches the reverse regression: an async handler dropped into a
+# ``ToolDeclaration`` with a sync kind that would return a coroutine
+# object as if it were a ToolResult.
+for _decl in _REGISTERED_TOOLS:
+    assert not asyncio.iscoroutinefunction(_decl.handler), (
+        f"ToolDeclaration({_decl.name!r}).handler is async but kind={_decl.kind.value!r} is a sync kind. "
+        "Async handlers belong in _SESSION_AWARE_TOOL_HANDLERS instead."
+    )
+
+del _decl  # keep module namespace clean
+
+# Cast the heterogeneous-handler-typed sync registries to a uniform
+# ``Mapping[str, Callable[..., Any]]`` for the async-detection sweep
+# below.  Kept for parity with the historical assertion shape even though
+# the per-declaration sweep above is the authoritative check.
 _sync_registries_for_check: tuple[tuple[str, Mapping[str, Callable[..., Any]]], ...] = (
     ("_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _DISCOVERY_TOOLS)),
     ("_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _MUTATION_TOOLS)),

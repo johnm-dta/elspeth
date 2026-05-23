@@ -35,7 +35,8 @@ per_file_rules:
 - pattern: telemetry/manager.py
   rules:
   - R5
-  reason: TELEMETRY_TRANSPORT_ERRORS and stored-exception raiseability guards for inverted exception pattern
+  reason: TELEMETRY_TRANSPORT_ERRORS and stored-exception raiseability guards for
+    inverted exception pattern
   expires: null
   max_hits: 5
 allow_hits:
@@ -43,64 +44,81 @@ allow_hits:
   owner: architecture
   reason: Queue.get() is stdlib API, not dict access
   safety: Code reviewed - legitimate pattern
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:_export_loop:fp=32610a7c35236337
   owner: architecture
   reason: TelemetryExporterError stored for re-raise on flush() — not silently swallowed
   safety: Stored exception re-raised on main thread via flush()/close()
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R4:TelemetryManager:_export_loop:fp=dab16ec747e74f86
   owner: architecture
-  reason: Inverted transport-error pattern — only transport errors swallowed, all others re-raise
+  reason: Inverted transport-error pattern — only transport errors swallowed, all
+    others re-raise
   safety: Non-transport exceptions stored and re-raised on main thread
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R1:TelemetryManager:_dispatch_to_exporters:fp=ffa2333c72f0c3ed
   owner: architecture
   reason: Counter increment with dict.get() default — standard Python counter pattern
   safety: Code reviewed - legitimate pattern
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=8d294302ec31bc67
   owner: architecture
   reason: Silent recovery with explicit error handling path
   safety: Code reviewed - legitimate pattern
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=fa4b085fe4c0cf82
   owner: architecture
   reason: Silent recovery with explicit error handling path
   safety: Code reviewed - legitimate pattern
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=30098fd13284c047
   owner: architecture
   reason: Queue overflow handling at telemetry backpressure boundary
-  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps newest event path explicit
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps
+    newest event path explicit
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=eeff63a9135513fd
   owner: architecture
   reason: Queue overflow handling at telemetry backpressure boundary
-  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps newest event path explicit
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps
+    newest event path explicit
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=540532928ce6fbfe
   owner: architecture
   reason: Queue overflow handling at telemetry backpressure boundary
-  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps newest event path explicit
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps
+    newest event path explicit
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=45deae25e428a8e9
   owner: architecture
   reason: Sentinel reinsertion loop handles bounded queue contention
   safety: Full queue retries with bounded drain then explicit RuntimeError fail-fast
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=64a767e1a6835af2
   owner: architecture
   reason: Sentinel reinsertion loop handles bounded queue contention
-  safety: Empty queue during contention is a race retry path only; loop continues and fails loudly if unresolved
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  safety: Empty queue during contention is a race retry path only; loop continues
+    and fails loudly if unresolved
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:close:fp=aec2c28bc46bcb13
   owner: architecture
   reason: Silent recovery with explicit error handling path
   safety: Code reviewed - legitimate pattern
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:close:fp=bd4e524c30614a5a
   owner: architecture
   reason: Silent recovery with explicit error handling path
   safety: Code reviewed - legitimate pattern
-  expires: '2026-08-15'  # Renewed 2026-05-16: telemetry/manager.py last touched 2026-04-13; fingerprints all still match (no orphans); safety justifications unchanged.
+  expires: '2026-08-15'
+- key: telemetry/manager.py:R1:TelemetryManager:_dispatch_to_exporters:fp=c18c60271cae680a
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: telemetry/manager.py:R1:TelemetryManager:flush:fp=d4ca02206f5dd057
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null

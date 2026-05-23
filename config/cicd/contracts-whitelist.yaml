@@ -786,7 +786,7 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._compose_loop:messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_messages:chat_history (list)"
   - "src/elspeth/web/composer/service.py:_make_cache_key:arguments"
-  - "src/elspeth/web/composer/service.py:_build_llm_call_record:messages (list)"
+  - "src/elspeth/web/composer/llm_response_parsing.py:_build_llm_call_record:messages (list)"
   # Late-binding capture of the per-tool-call arguments inside the
   # dispatch_with_audit closure. The loop-local `arguments` is a Tier-3
   # parsed dict (LLM-supplied tool call arguments — no schema available
@@ -815,7 +815,7 @@ allowed_dict_patterns:
   # operates on the same provider-call payload shape as the call sites above.
   # The `tools` parameter is typed `list | None`, so the contracts check
   # treats it as a separate shape; only `messages (list)` is whitelisted here.
-  - "src/elspeth/web/composer/service.py:_apply_anthropic_cache_markers:messages (list)"
+  - "src/elspeth/web/composer/llm_response_parsing.py:_apply_anthropic_cache_markers:messages (list)"
   - "src/elspeth/web/composer/prompts.py:build_messages:chat_history (list)"
   - "src/elspeth/web/composer/prompts.py:build_messages:return (list)"
 

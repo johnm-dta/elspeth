@@ -753,18 +753,6 @@ allow_hits:
   safety: Exception is stored on RuntimePreflightFailure.original_exc and re-raised
     at the caller site with full chain preservation; no silent swallowing
   expires: null
-- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=ed314e0fdc5c4326
-  owner: web-execution
-  reason: Pydantic before-validator — .get() on pre-validated Tier 3 input from JSON
-    round-trip
-  safety: Missing keys fall through to Pydantic field validation downstream
-  expires: null
-- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=8d879a0dc99d8c5b
-  owner: web-execution
-  reason: Pydantic before-validator — .get() on pre-validated Tier 3 input from JSON
-    round-trip
-  safety: Missing keys fall through to Pydantic field validation downstream
-  expires: null
 - key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=a1f5bb8ebb43976b
   owner: web-execution
   reason: Session may never have called execute(), so no lock exists in _session_locks.
@@ -778,43 +766,6 @@ allow_hits:
   reason: Session lock map creates per-session lock lazily on first execution. Fingerprint
     shifted from ea064c190d972e82 by the F-17/F-21 pre-execute placeholder gate ImportFroms.
   safety: Mutation is thread-safe; setdefault is atomic for dict
-  expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=68b344bdf02449d6
-  owner: web-execution
-  reason: Optional keys in user-authored config — source options key may be absent.
-    Fingerprint shifted from 1814e5926bbae2eb by the F-17/F-21 pre-execute placeholder
-    gate ImportFroms.
-  safety: Returns None; validation handles absence
-  expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=70cf420b819bbc72
-  owner: web-execution
-  reason: Optional keys in user-authored config — source options key may be absent.
-    Fingerprint shifted from 0fae5de7cc15744d by the F-17/F-21 pre-execute placeholder
-    gate ImportFroms.
-  safety: Returns None; validation handles absence
-  expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=ed7ecdc38bee892b
-  owner: web-execution
-  reason: Optional keys in user-authored config — source options key may be absent.
-    Fingerprint shifted from 05fc7c19c92be15e by the F-17/F-21 pre-execute placeholder
-    gate ImportFroms.
-  safety: Returns None; validation handles absence
-  expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=428c9718322d53ea
-  owner: web-execution
-  reason: Idempotent shutdown-event cleanup on failure path. Fingerprint shifted from
-    80a37adc15cccfe9 by the F-17/F-21 pre-execute placeholder gate ImportFroms.
-  safety: Pop is idempotent; except BaseException handler cleans up before re-raise
-  expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=e006dd2d27d3d449
-  owner: web-execution
-  reason: Best-effort run status cleanup on setup failure — must not mask original
-    exception. Narrowed from `except Exception` to `(SQLAlchemyError, OSError)` per
-    canonical pattern b8ba2214/127417cb so programmer bugs in update_run_status propagate.
-    Logs exc_class only (no str(exc)) to avoid SQLAlchemy `__cause__` chains exposing
-    DB URLs/credentials. Fingerprint shifted from b031613c4c5e30c1 by the F-17/F-21
-    pre-execute placeholder gate ImportFroms.
-  safety: Logged with slog.error; original exception always re-raised
   expires: null
 - key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=888bf9a58b0bd233
   owner: web-execution
@@ -987,258 +938,6 @@ allow_hits:
   safety: Default path value matches the registered SlotSpec default in _RECIPE2_SLOTS["below_output_path"];
     operator confirms or overrides via recipe_offer turn.
   expires: null
-- key: web/composer/service.py:R2:_provider_details_payload:fp=640087d117718ba3
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=ac808107f741299f
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=f244ee6f7388384a
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=d74ccc684210a815
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=179cf6761aea5263
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=7c8401956fc39531
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=ceaed16bb8644ae0
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=51b91d37dd7d184e
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=d7d5ecc804d91486
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=e1e027f636a12386
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_token_usage_from_response:fp=b4b9079aee89aadf
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=1360a885db69774f
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=cb999288241c88a3
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=5119c54fa0f5901b
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=b46dd56341a6d4d5
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=b19b67d4714ef99f
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=4573ce0a8a87f596
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=4ad3e0852db92fca
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=034f9fa997d868cd
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_token_usage_from_response:fp=8a44c2761bfb3731
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_provider_cost_from_response:fp=6cd8c820cc791795
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_provider_cost_from_response:fp=30f7fd2a7b4947de
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_safe_response_model:fp=6004fca85098ac02
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_safe_provider_request_id:fp=31fef3217298fde4
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_response_field:fp=9d5b00f6f7b8ac3a
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_response_field:fp=b4ce018d3ebd7fda
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_json_safe_provider_artifact:fp=1199cb6b16d7d5f0
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_json_safe_provider_artifact:fp=352cdf025a620128
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R2:_json_safe_provider_artifact:fp=c77f208cc9502b7a
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_apply_anthropic_cache_markers:fp=402b4ad333b01d39
-  owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider payloads may be mapping-shaped,
-    object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: null
-- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=c4813e2e29c02105
-  owner: web-composer
-  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
-    shapes are inspected without fabricating missing values.
-  safety: Absent or malformed optional data fails closed or returns the conservative
-    branch; no state mutation is hidden.
-  expires: null
-- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=ed553a6084ecfcd5
-  owner: web-composer
-  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
-    shapes are inspected without fabricating missing values.
-  safety: Absent or malformed optional data fails closed or returns the conservative
-    branch; no state mutation is hidden.
-  expires: null
-- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=94d8ef6a21bb5dde
-  owner: web-composer
-  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
-    shapes are inspected without fabricating missing values.
-  safety: Absent or malformed optional data fails closed or returns the conservative
-    branch; no state mutation is hidden.
-  expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=d4471b25106a8098
-  owner: web-composer
-  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
-    shapes are inspected without fabricating missing values.
-  safety: Absent or malformed optional data fails closed or returns the conservative
-    branch; no state mutation is hidden.
-  expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=54eb834c4e95210f
-  owner: web-composer
-  reason: Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses
-    must be shape-checked before mutation or audit persistence.
-  safety: Malformed arguments route through ARG_ERROR or plugin-crash audit paths;
-    unexpected programmer bugs still surface outside the reviewed catch branches.
-  expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=889c6332e5a732e8
-  owner: web-composer
-  reason: Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses
-    must be shape-checked before mutation or audit persistence.
-  safety: Malformed arguments route through ARG_ERROR or plugin-crash audit paths;
-    unexpected programmer bugs still surface outside the reviewed catch branches.
-  expires: null
 - key: web/blobs/service.py:R6:BlobServiceImpl:finalize_run_output_blobs:_sync:fp=0f0584634973a5ac
   owner: web-blobs
   reason: Blob finalization/fork recovery boundary; narrow filesystem/database failures
@@ -1331,27 +1030,6 @@ allow_hits:
     recovery catches are narrow and record class-name-only diagnostics.
   expires: null
 - key: web/sessions/routes/composer.py:R6:register_composer_routes:accept_composition_proposal:fp=63d76591ae081d3c
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=3f8d5ddf6536da5a
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=c97a9563975ee710
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/messages.py:R6:register_message_routes:send_message:fp=13cbecc303d03758
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads,
     and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
@@ -1470,135 +1148,12 @@ allow_hits:
   safety: Malformed data returns structured HTTP errors or preserves the primary exception;
     recovery catches are narrow and record class-name-only diagnostics.
   expires: null
-- key: web/sessions/service.py:R1:_patch_llm_transform_prompt:fp=1ec37730adecfaaa
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=0e1944654eb249d2
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_session_write_lock:fp=8b9a7faf40d56535
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=2e3fa7c34e58ec3f
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=29f8ee83276b87db
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=0455bf167593a2c1
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=89cbdc0a5fca54c6
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=ef3701971b270390
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=209190a9043ace94
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=adbb67a26169ddee
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
 - key: web/sessions/_auto_title.py:R6:maybe_auto_title_session:fp=6eeb90e8c33babf8
   owner: web-sessions
   reason: Best-effort auto-title provider boundary; external/provider exceptions and
     optional title output are classified without blocking message persistence.
   safety: Title absence is honest optional UI metadata; non-title failures do not
     mutate persisted chat content.
-  expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=5e2ab5c61fe96705
-  owner: web-execution
-  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
-    placeholder tokens at the Tier 3 config boundary.
-  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
-    prompt or secret value is fabricated.
-  expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=9113c24c4c31f7df
-  owner: web-execution
-  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
-    placeholder tokens at the Tier 3 config boundary.
-  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
-    prompt or secret value is fabricated.
-  expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=3da70901199f9592
-  owner: web-execution
-  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
-    placeholder tokens at the Tier 3 config boundary.
-  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
-    prompt or secret value is fabricated.
-  expires: null
-- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=12a1379fe085f87c
-  owner: web-execution
-  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
-    placeholder tokens at the Tier 3 config boundary.
-  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
-    prompt or secret value is fabricated.
-  expires: null
-- key: web/execution/validation.py:R1:_mask_pending_interpretation_placeholders_for_authoring_preflight:fp=1cae14e3dcac957f
-  owner: web-execution
-  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
-    placeholder tokens at the Tier 3 config boundary.
-  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
-    prompt or secret value is fabricated.
-  expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=c93632f0adce9f79
-  owner: web-execution
-  reason: Tier 3 path-allowlist boundary check — source options are user-authored
-    pipeline YAML; path and file keys are mutually exclusive (neither required); .get()
-    returns None for the absent key and the loop continues to the other
-  safety: Absent path/file means no source-side path-allowlist check needed for that
-    key; the other key is still checked in the same iteration. If both are absent,
-    path_checked stays False and no Tier-3 boundary error is generated. No data loss
-    or fabrication.
-  expires: null
-- key: web/execution/validation.py:R1:validate_pipeline:fp=07d974974c542300
-  owner: web-execution
-  reason: Tier 3 path-allowlist boundary check — sink options are user-authored pipeline
-    YAML; path and file keys are mutually exclusive (neither required); .get() returns
-    None for the absent key and the loop continues to the other
-  safety: Absent path/file means no sink-side path-allowlist check needed for that
-    key; the other key is still checked in the same iteration. No data loss or fabrication.
   expires: null
 - key: web/composer/implicit_decisions.py:R5:_flatten_options:fp=24bbd76d54ccfe33
   owner: composer-disclosures
@@ -1736,34 +1291,6 @@ allow_hits:
   safety: Malformed data returns structured HTTP errors or preserves the primary exception;
     recovery catches are narrow and record class-name-only diagnostics.
   expires: '2026-08-20'
-- key: web/composer/tools/blobs.py:R6:_execute_update_blob:fp=346027a1e2a489dc
-  owner: web-composer
-  reason: Tier 3 composer tool boundary; blob/catalog/config helper failures are converted
-    to structured tool results only at reviewed recovery points.
-  safety: The handler returns explicit failure payloads or ToolArgumentError; unexpected
-    programmer bugs continue to propagate.
-  expires: null
-- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=302de45b445253d6
-  owner: web-composer
-  reason: Tier 3 composer tool boundary; blob/catalog/config helper failures are converted
-    to structured tool results only at reviewed recovery points.
-  safety: The handler returns explicit failure payloads or ToolArgumentError; unexpected
-    programmer bugs continue to propagate.
-  expires: null
-- key: web/composer/tools/sources.py:R6:_execute_inspect_source:fp=948d1b6adfb8742d
-  owner: web-composer
-  reason: Tier 3 composer tool boundary; blob/catalog/config helper failures are converted
-    to structured tool results only at reviewed recovery points.
-  safety: The handler returns explicit failure payloads or ToolArgumentError; unexpected
-    programmer bugs continue to propagate.
-  expires: null
-- key: web/composer/tools/generation.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=a195de2ec58be4ab
-  owner: web-composer
-  reason: Tier 3 composer tool boundary; blob/catalog/config helper failures are converted
-    to structured tool results only at reviewed recovery points.
-  safety: The handler returns explicit failure payloads or ToolArgumentError; unexpected
-    programmer bugs continue to propagate.
-  expires: null
 - key: web/catalog/service.py:R1:CatalogServiceImpl:_extract_config_fields:fp=b8d3d99b772457b8
   owner: web-catalog
   reason: Tier 3 boundary — Pydantic JSON schema 'required' key may be absent
@@ -1849,39 +1376,38 @@ allow_hits:
   expires: null
 - key: web/composer/state.py:R1:_validate_web_scrape_http_identity_not_placeholder:fp=bea652fff29d7051
   owner: web-composer
-  reason: Tier 3 boundary — the composer state stores raw user/LLM-authored
-    node options. The helper uses options.get('http') because a web_scrape node
-    under construction may legitimately omit the optional HTTP block; plugin
-    schema validation remains the authoritative missing-field reporter.
+  reason: Tier 3 boundary — the composer state stores raw user/LLM-authored node options.
+    The helper uses options.get('http') because a web_scrape node under construction
+    may legitimately omit the optional HTTP block; plugin schema validation remains
+    the authoritative missing-field reporter.
   safety: Missing-key paths return no identity-placeholder error; the helper only
     rejects explicit wire-visible placeholder values before they can ship as HTTP
     headers to scraped hosts.
   expires: '2026-08-20'
 - key: web/composer/state.py:R5:_validate_web_scrape_http_identity_not_placeholder:fp=d7b50b5c57e5c231
   owner: web-composer
-  reason: Tier 3 boundary — the HTTP options value is raw Mapping content from
-    composer state. The isinstance guard narrows the 'http' subobject before
-    reading wire-visible identity fields.
+  reason: Tier 3 boundary — the HTTP options value is raw Mapping content from composer
+    state. The isinstance guard narrows the 'http' subobject before reading wire-visible
+    identity fields.
   safety: Non-mapping HTTP options are ignored by this placeholder guard and remain
     subject to the plugin schema validator; no identity value is fabricated.
   expires: '2026-08-20'
 - key: web/composer/state.py:R1:_validate_web_scrape_http_identity_not_placeholder:fp=976e77012c7cb2f6
   owner: web-composer
-  reason: Tier 3 boundary — abuse_contact and scraping_reason are optional keys
-    inside raw operator/LLM-authored HTTP options while the node is being composed.
-    The placeholder guard must tolerate absence and let schema validation report
-    required-field defects.
+  reason: Tier 3 boundary — abuse_contact and scraping_reason are optional keys inside
+    raw operator/LLM-authored HTTP options while the node is being composed. The placeholder
+    guard must tolerate absence and let schema validation report required-field defects.
   safety: Missing-key paths continue without producing an error; explicit placeholder
     strings are rejected with a high-severity ValidationEntry before execution.
   expires: '2026-08-20'
 - key: web/composer/state.py:R5:_validate_web_scrape_http_identity_not_placeholder:fp=8e9f7b0aaa21d365
   owner: web-composer
-  reason: Tier 3 boundary — field values in the raw HTTP options mapping are
-    untyped until plugin schema validation runs. The guard narrows each candidate
-    value before checking for placeholder identity text.
+  reason: Tier 3 boundary — field values in the raw HTTP options mapping are untyped
+    until plugin schema validation runs. The guard narrows each candidate value before
+    checking for placeholder identity text.
   safety: Non-string values are ignored by this placeholder-specific check and are
-    still rejected by schema validation where required; no replacement identity
-    is invented.
+    still rejected by schema validation where required; no replacement identity is
+    invented.
   expires: '2026-08-20'
 - key: web/composer/state.py:R1:_check_schema_contracts:_producer_emit_set:fp=553d63b88e277081
   owner: web-composer
@@ -1890,10 +1416,9 @@ allow_hits:
     miss. Direct dict access would crash on every source-as-producer call. The None
     branch falls back to _effective_producer_guarantees, which is the established
     source-aware path.
-  safety: Missing-key triggers the established declared-set fallback used by all
-    source/non-transform producers — Rule A/B membership check then operates on
-    the source's raw guarantee set rather than crashing. No data fabrication; no
-    audit divergence
+  safety: Missing-key triggers the established declared-set fallback used by all source/non-transform
+    producers — Rule A/B membership check then operates on the source's raw guarantee
+    set rather than crashing. No data fabrication; no audit divergence
   expires: null
 - key: web/composer/state.py:R6:_check_schema_contracts:fp=93e6d0f366d473f2
   owner: web-composer
@@ -1981,6 +1506,1207 @@ allow_hits:
   safety: The pipeline remains invalid; no trigger config is fabricated and unexpected
     exception types propagate
   expires: null
+- key: web/interpretation_state.py:R1:interpretation_sites:fp=976876634c13da21
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:interpretation_sites:fp=4b539b3c9fb51aee
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R1:_materialize_node_for_authoring:fp=b372d1d932279ec6
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_materialize_node_for_authoring:fp=e0199f5c0c8a79cd
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R1:_replace_prompt_if_changed:fp=6630263a6a3ef59c
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R1:_replace_prompt_if_changed:fp=de1806c489da01fc
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_requirements:fp=a70c15fa64b94659
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_requirements:fp=63f52a06ad5feef6
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_coerce_requirement:fp=0ffa9e0289a39a2f
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_coerce_requirement:fp=f19fa1c749d0d1ce
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_coerce_requirement:fp=5d18c4b559c476c1
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_prompt_parts:fp=840682c6329e8637
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_prompt_parts:fp=a316960357ab995a
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_prompt_parts:fp=c33669edd20677a4
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_prompt_parts:fp=7153f333c79f05f9
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/interpretation_state.py:R5:_render_prompt_parts:fp=4b90f4c5bdb219cf
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=309c3308cc944546
+  owner: web-composer
+  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
+    shapes are inspected without fabricating missing values.
+  safety: Absent or malformed optional data fails closed or returns the conservative
+    branch; no state mutation is hidden.
+  expires: null
+- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=f87b3df6b259415a
+  owner: web-composer
+  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
+    shapes are inspected without fabricating missing values.
+  safety: Absent or malformed optional data fails closed or returns the conservative
+    branch; no state mutation is hidden.
+  expires: null
+- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=df9fae1f2e4f7e21
+  owner: web-composer
+  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
+    shapes are inspected without fabricating missing values.
+  safety: Absent or malformed optional data fails closed or returns the conservative
+    branch; no state mutation is hidden.
+  expires: null
+- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=fa16d4153827d0df
+  owner: web-composer
+  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
+    shapes are inspected without fabricating missing values.
+  safety: Absent or malformed optional data fails closed or returns the conservative
+    branch; no state mutation is hidden.
+  expires: '2026-08-23'
+- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=607e7d7054f18f96
+  owner: web-composer
+  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
+    shapes are inspected without fabricating missing values.
+  safety: Absent or malformed optional data fails closed or returns the conservative
+    branch; no state mutation is hidden.
+  expires: '2026-08-23'
+- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=e4fb8072ca400987
+  owner: web-composer
+  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
+    shapes are inspected without fabricating missing values.
+  safety: Absent or malformed optional data fails closed or returns the conservative
+    branch; no state mutation is hidden.
+  expires: '2026-08-23'
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=4f9ac73529ece8c2
+  owner: web-composer
+  reason: Composer service dynamic state boundary; optional cached/proposal/placeholder
+    shapes are inspected without fabricating missing values.
+  safety: Absent or malformed optional data fails closed or returns the conservative
+    branch; no state mutation is hidden.
+  expires: null
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=8e44609ef687ca2b
+  owner: web-composer
+  reason: Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses
+    must be shape-checked before mutation or audit persistence.
+  safety: Malformed arguments route through ARG_ERROR or plugin-crash audit paths;
+    unexpected programmer bugs still surface outside the reviewed catch branches.
+  expires: null
+- key: web/composer/service.py:R4:ComposerServiceImpl:_compose_loop:fp=e85fc07e752192b9
+  owner: web-composer
+  reason: Tier 3 composer LLM tool-call boundary; argument JSON and advisor/tool responses
+    must be shape-checked before mutation or audit persistence.
+  safety: Malformed arguments route through ARG_ERROR or plugin-crash audit paths;
+    unexpected programmer bugs still surface outside the reviewed catch branches.
+  expires: null
+- key: web/composer/service.py:R2:ComposerServiceImpl:_call_llm:fp=0620deeb6f467f9d
+  owner: composer-service
+  reason: Tier 3 boundary — preserves provider-supplied status_code attribute on the
+    wrapped LiteLLM BadRequestError so the route layer can surface it under expose_provider_error=True.
+    Pinned LiteLLM version sets .status_code on BadRequestError; the getattr is defensive
+    only against unpinned versions.
+  safety: Returns None on absent attribute; the route layer treats None as 'no provider
+    status' and falls back to a generic 400.
+  expires: '2026-08-23'
+- key: web/composer/service.py:R2:ComposerServiceImpl:_call_text_llm:fp=ad474b9eb381f935
+  owner: composer-service
+  reason: Tier 3 boundary — preserves provider-supplied status_code attribute on the
+    wrapped LiteLLM BadRequestError so the route layer can surface it under expose_provider_error=True.
+    Pinned LiteLLM version sets .status_code on BadRequestError; the getattr is defensive
+    only against unpinned versions.
+  safety: Returns None on absent attribute; the route layer treats None as 'no provider
+    status' and falls back to a generic 400.
+  expires: '2026-08-23'
+- key: web/composer/_required_paths_validator.py:R5:_optional_ancestor_present:fp=b07f5f9d3d7a04bf
+  owner: composer-tools
+  reason: Tier 3 JSON-Schema required-path walker; values come from the LLM and the
+    walker inspects shape (presence/absence) only without coercion.
+  safety: Missing-field diagnostics surface concrete dotted/indexed paths; the walker
+    emits no fabricated values and a malformed tool definition crashes at import.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_provider_details_payload:fp=9c29bd1bc7679a01
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_provider_details_payload:fp=2a1833c0a52a5e5a
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=129470a225d57f27
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_token_usage_from_response:fp=b0ed98f2855c32ae
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=019b920aea416acb
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=8a4d5742fc096a4c
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=7a51927419dde97b
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=23654a5020554ff2
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=40e4830b7986f089
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=14c33dfbf868059d
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_token_usage_from_response:fp=1288463a66cb0d29
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_token_usage_from_response:fp=73da358cb50f7ea8
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_token_usage_from_response:fp=66f75ad04196354c
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=01435ad22c7f7946
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=fa9224835d150b3f
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_token_usage_from_response:fp=5cd0d50b12dd73ad
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=b05d403d618526a2
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=c745f85451112e20
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=9abdc8a826386eea
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=633b8b555a08a0d5
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=cb1c4be269a3e9f0
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=2bfecea3bd9c907b
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=320755415534b8b2
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=0d833fdefa90f98f
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_token_usage_from_response:fp=b62e64bc2d61e617
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_provider_cost_from_response:fp=00217f7aa707a30d
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_provider_cost_from_response:fp=1a8502d16367269c
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_provider_cost_from_response:fp=e68305badf66bd65
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_safe_response_model:fp=0c7de3a07a40310f
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_safe_response_model:fp=3b92b7574fe8ca70
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_safe_provider_request_id:fp=25a663b069e6a21e
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_safe_provider_request_id:fp=0602b3a6b651c9ed
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_response_field:fp=7b98204cb11f11e6
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_response_field:fp=216e94b72103f074
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_response_field:fp=66a71df341185085
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_first_response_message:fp=0da90638df6a03f0
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=104e3cf0f025c001
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=ce5525f8747099d7
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=bacffcd9f9423b74
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_json_safe_provider_artifact:fp=f77f22d448487ccf
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_json_safe_provider_artifact:fp=d613ce74e27d37d1
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_json_safe_provider_artifact:fp=a50249b4c425b80e
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R2:_json_safe_provider_artifact:fp=c958b58e1cfbd5e2
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_reasoning_metadata_from_response:fp=46a43691f7c6b835
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_reasoning_metadata_from_response:fp=f0ada16480e94218
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R5:_supports_anthropic_prompt_cache_markers:fp=a4ba939051d5a39d
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/composer/llm_response_parsing.py:R1:_apply_anthropic_cache_markers:fp=37f7de34a9e33a02
+  owner: composer-audit
+  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
+    be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
+    optional fields remain None and no token counts or costs are fabricated.
+  expires: '2026-08-23'
+- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=cbc93e20036437ee
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=c83bca8819367925
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=3846d2c68bfd2033
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=b25701a5d377da07
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=97ffa45270f1ba18
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=4522399378639674
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=404513d29c87c02f
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=2585bcc92642a790
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=25c02d3834ca4f69
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=8fa9fc3c82f4ce76
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=2504d50b5fc751f8
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=d548d74ca0432882
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R1:_patch_llm_transform_prompt:fp=67caf872be96a1d2
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=2cdcfad84677e867
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:_session_write_lock:fp=0365942373299bba
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=af36d56ae83e80a7
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=ddb4a3f1d4305b9d
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=020df37cc90810ad
+  owner: web-execution
+  reason: Pydantic before-validator — .get() on pre-validated Tier 3 input from JSON
+    round-trip
+  safety: Missing keys fall through to Pydantic field validation downstream
+  expires: null
+- key: web/execution/schemas.py:R1:RunEvent:_resolve_data_from_event_type:fp=946fe25115431a7a
+  owner: web-execution
+  reason: Pydantic before-validator — .get() on pre-validated Tier 3 input from JSON
+    round-trip
+  safety: Missing keys fall through to Pydantic field validation downstream
+  expires: null
+- key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=039bf42792d84027
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=220a2688db0c6698
+  owner: web-execution
+  reason: Optional keys in user-authored config — source options key may be absent.
+    Fingerprint shifted from 1814e5926bbae2eb by the F-17/F-21 pre-execute placeholder
+    gate ImportFroms.
+  safety: Returns None; validation handles absence
+  expires: null
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=905b10736e8cac00
+  owner: web-execution
+  reason: Optional keys in user-authored config — source options key may be absent.
+    Fingerprint shifted from 0fae5de7cc15744d by the F-17/F-21 pre-execute placeholder
+    gate ImportFroms.
+  safety: Returns None; validation handles absence
+  expires: null
+- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=8fc6d6724b0f3bc0
+  owner: web-execution
+  reason: Optional keys in user-authored config — source options key may be absent.
+    Fingerprint shifted from 05fc7c19c92be15e by the F-17/F-21 pre-execute placeholder
+    gate ImportFroms.
+  safety: Returns None; validation handles absence
+  expires: null
+- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=e8dc86fcc244dda2
+  owner: web-execution
+  reason: Best-effort run status cleanup on setup failure — must not mask original
+    exception. Narrowed from `except Exception` to `(SQLAlchemyError, OSError)` per
+    canonical pattern b8ba2214/127417cb so programmer bugs in update_run_status propagate.
+    Logs exc_class only (no str(exc)) to avoid SQLAlchemy `__cause__` chains exposing
+    DB URLs/credentials. Fingerprint shifted from b031613c4c5e30c1 by the F-17/F-21
+    pre-execute placeholder gate ImportFroms.
+  safety: Logged with slog.error; original exception always re-raised
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=64fe896b831935d0
+  owner: web-execution
+  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
+    placeholder tokens at the Tier 3 config boundary.
+  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
+    prompt or secret value is fabricated.
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=5c9e09d799b713ab
+  owner: web-execution
+  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
+    placeholder tokens at the Tier 3 config boundary.
+  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
+    prompt or secret value is fabricated.
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=bcb0f4762e3e2d45
+  owner: web-execution
+  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
+    placeholder tokens at the Tier 3 config boundary.
+  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
+    prompt or secret value is fabricated.
+  expires: null
+- key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=3c216bd7a1ba36c4
+  owner: web-execution
+  reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
+    placeholder tokens at the Tier 3 config boundary.
+  safety: Malformed or unresolved data produces validation errors/advisories; no runtime
+    prompt or secret value is fabricated.
+  expires: null
+- key: web/execution/validation.py:R1:validate_pipeline:fp=8d39e9d6116914dc
+  owner: web-execution
+  reason: Tier 3 path-allowlist boundary check — source options are user-authored
+    pipeline YAML; path and file keys are mutually exclusive (neither required); .get()
+    returns None for the absent key and the loop continues to the other
+  safety: Absent path/file means no source-side path-allowlist check needed for that
+    key; the other key is still checked in the same iteration. If both are absent,
+    path_checked stays False and no Tier-3 boundary error is generated. No data loss
+    or fabrication.
+  expires: null
+- key: web/execution/validation.py:R1:validate_pipeline:fp=bb82c56d759ffd51
+  owner: web-execution
+  reason: Tier 3 path-allowlist boundary check — sink options are user-authored pipeline
+    YAML; path and file keys are mutually exclusive (neither required); .get() returns
+    None for the absent key and the loop continues to the other
+  safety: Absent path/file means no sink-side path-allowlist check needed for that
+    key; the other key is still checked in the same iteration. No data loss or fabrication.
+  expires: null
+- key: web/sessions/service.py:R6:SessionServiceImpl:_sync:fp=f65ffe2b6eacead7
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R6:SessionServiceImpl:_sync:fp=5d64d769907cac14
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:_sync:fp=807f122d01342885
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:_sync:fp=71b7e715f93ea4d1
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/sessions/routes/messages.py:R6:send_message:fp=6ffa502bacb1e244
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=474724286b6fc63a
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=1daeec53b4aa6f66
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=802e95754f05458c
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=1c17d4cb4392323d
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=d17d24f1f658545c
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_dispatch.py:R1:execute_tool:fp=6b3ff8aad2eb5cb2
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/secrets.py:R1:_execute_wire_secret_ref:fp=6e9e2beb8d5c3d8a
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/recipes.py:R5:_execute_apply_pipeline_recipe:fp=38345076cf12cf03
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sources.py:R1:_resolve_source_blob:fp=981fb7ee6e925c26
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sources.py:R5:_execute_set_source_from_blob:fp=a43f37ec55a33975
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sources.py:R6:_execute_inspect_source:fp=948d1b6adfb8742d
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/blobs.py:R1:_prepare_blob_create:fp=d4374e536c80d8d4
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=395e5be3ad09deeb
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/blobs.py:R1:_session_blob_lock:fp=6b8220b09146a904
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/blobs.py:R6:_execute_update_blob:fp=346027a1e2a489dc
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/blobs.py:R6:_execute_delete_blob:fp=302de45b445253d6
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=ce8c53eb04fd5d3b
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=3adad1de5bfe4b96
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=f141a4caec5e37f8
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=2e855da3d753ac56
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=766329a9f8aa05ad
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=a2826811d73510f1
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=c4f809710602eb15
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_is_full_state_component_alias:fp=905e0c9218835c34
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_execute_get_pipeline_state:fp=439e0132d268e2ad
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_assert_affected_llm_node:fp=11c936f94655c012
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_assert_affected_llm_node:fp=9f64fc1a037061e3
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_assert_affected_llm_node:fp=251ceae6d210c3e8
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=ab1cf4b10a88bdba
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=4ece4587ae937b03
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=447b3adb44e3f029
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=b9e5fbee9f339072
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=77916045544e9616
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=e47ca1f12b03986e
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders_typed:fp=d519cd112efe378b
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=c05969c59ea12b1c
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=2e820372d01b81fb
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=ab2c18c19c051908
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_common.py:R1:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=54a7ff3de6a5481d
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_common.py:R5:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=ac9610f465774b09
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/_common.py:R1:validate_composer_file_sink_collision_policy:fp=18250521a8f8f9db
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_get_plugin_assistance:fp=c22a21d252b8c2c5
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=a1c784eead38371e
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=a70926372357c264
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=ac2824b17af57239
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=485694a51385973d
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=b0512b4ba6599035
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=f122869738cb3060
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=5012dd4edbe70f0e
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=1287b9bcc0b4fddd
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=6404b93bc7e87752
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_sample_csv_rows:fp=7511eed75216631e
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=6f9a482b131046b4
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=8e7bcc3c428079c1
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=e2659eeb9f49bcb2
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=8ee48859ff64703a
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=8755d95e16eba833
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=76aea13dbddbd402
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=4034c2b8d6a79378
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=0507ae62245208b1
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=d45ca689453b6c59
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=a195de2ec58be4ab
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=2f0f72f4ed07da2e
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=5feab788ca85f48d
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=ef963351171229bf
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=ffd711cb1ba8752c
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=1443a7b892ef99f3
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=b1adbe6654c2e17b
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=68d752ef9078c2cd
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=42299a0cf96100ac
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=6e3b33a65e1eb5bd
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=9851276013b10380
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=3dd1188dad796392
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=68e168d4bf3691cb
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/transforms.py:R5:_execute_upsert_node:fp=a6cb126be5c76f54
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
+- key: web/composer/tools/transforms.py:R1:_execute_upsert_edge:fp=2719d07e0b36fa9d
+  owner: TODO
+  reason: TODO — fingerprint rotation without matching stale entry; review whether
+    this is a new violation that needs an explicit allowlist entry or a fix
+  safety: TODO
+  expires: null
 per_file_rules:
 - pattern: web/composer/guided/chat_solver.py
   rules:
@@ -1991,15 +2717,6 @@ per_file_rules:
     writes blobs or mutates guided state.
   expires: null
   max_hits: 12
-- pattern: web/composer/tools/*.py
-  rules:
-  - R1
-  - R5
-  - R9
-  reason: Tier 3 boundary — LLM tool call arguments are external data with optional
-    fields per JSON schema; pop-with-default implements RFC 7386 merge patch null
-    semantics
-  expires: null
 - pattern: web/composer/service.py
   rules:
   - R6

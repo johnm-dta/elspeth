@@ -56,7 +56,36 @@ defaults:
     # config coercion so placeholder values cannot ship as outbound headers.
     # Entries are bounded to 2026-08-20; if web_scrape HTTP options become
     # a typed composer-side model, this block should retire.
-    max_allow_hits: 416
+    #
+    # Bumped from 416 → 470 on 2026-05-23 (net +54) for the composer/service.py
+    # decomposition refactor (`refactor/composer-service-rc5.2`). The refactor
+    # extracts three modules from the 5,262-line service.py:
+    # - llm_response_parsing.py (Tier-3 LiteLLM response parsers; ~37 entries
+    #   for the same R1/R2/R5 patterns previously allowlisted in service.py).
+    # - _required_paths_validator.py (Tier-3 JSON-Schema walker; 1 R5 entry).
+    # - progress.py (no new Tier-3 entries; UI-status factories only).
+    # The 36 remaining TODO entries in pre-existing files
+    # (`web/sessions/service.py:_patch_structured_interpretation_prompt`,
+    # `web/interpretation_state.py:*`, `web/execution/service.py:_execute_locked`,
+    # `web/sessions/routes/messages.py:send_message`) are pre-existing AST-shift
+    # rotation drift unrelated to this refactor and should be triaged
+    # separately by the file owners. All 54 new entries are bounded to
+    # 2026-08-23 (90 days) to force re-evaluation.
+    #
+    # Bumped from 470 → 537 on 2026-05-23 (net +67) when rebasing
+    # refactor/composer-service-rc5.2 atop the parallel refactor/composer-tools-split
+    # merge that landed on RC5.2 (commits 0b7c87dc1..9432346f2). The tools-split
+    # decomposed the 7,389-line web/composer/tools.py into a `tools/` subpackage
+    # with 12 plane modules (_dispatch, _common, blobs, generation, outputs,
+    # recipes, secrets, sessions, sinks, sources, transforms, __init__). Each
+    # plane module re-acquired AST-shifted fingerprints for the same R1/R5/R9
+    # Tier-3 LLM-tool-argument-handling boundaries previously allowlisted under
+    # the single tools.py path. Net +67 entries reflect the per-plane
+    # redistribution; the underlying boundary semantics are unchanged. All new
+    # entries bounded 2026-08-23 (same review window as the composer/service.py
+    # bump above) so the upstream tools/ owners and this branch's review can
+    # converge in a single quarterly pass.
+    max_allow_hits: 537
     # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
     # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
     # — W5 load-bearing telemetry-only exemption per
@@ -83,10 +112,27 @@ defaults:
     # Bumped from 508 → 509 on 2026-05-20 for the same wire-visible
     # web_scrape identity placeholder validation bump as ``max_allow_hits``
     # above (net +1).
-    max_total_entries: 509
+    #
+    # Bumped from 509 → 563 on 2026-05-23 for the same composer/service.py
+    # decomposition refactor as ``max_allow_hits`` above (net +54).
+    #
+    # Bumped from 563 → 629 on 2026-05-23 (net +66) for the same rebase-atop-
+    # tools-split as ``max_allow_hits`` above. One per_file_rules entry removed
+    # (the now-stale ``web/composer/tools.py`` pattern; the file was deleted
+    # and replaced with the ``tools/`` subpackage whose plane modules carry
+    # their own per-file rules and fingerprinted entries).
+    max_total_entries: 629
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.
-    max_permanent_allow_hits: 324
+    #
+    # Bumped 2026-05-23: max_permanent_allow_hits 324 → 387 (net +63),
+    # max_permanent_total_entries 417 → 479 (net +62). Same rebase-atop-
+    # tools-split rationale as ``max_allow_hits`` / ``max_total_entries``
+    # above. Permanent counts represent the subset of expires:null entries —
+    # the upstream tools-split's plane modules brought their own permanent
+    # allowlist coverage which now lands in this composer-service refactor's
+    # commit since both refactors share the same web.yaml.
+    max_permanent_allow_hits: 387
     max_permanent_per_file_rules: 93
-    max_permanent_total_entries: 417
+    max_permanent_total_entries: 479

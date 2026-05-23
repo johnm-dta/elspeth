@@ -583,12 +583,14 @@ class ResumeState:
         # iteration (`for s in incomplete_by_row[row_id]`), both fine on the frozen shape.
         # recovery_manager is a live service object (not a container) — NOT frozen here.
         freeze_fields(self, "restored_aggregation_state", "incomplete_by_row", "schema_contracts_by_source")
-        # unprocessed_rows contains ResumedRow instances whose ``row_data``
-        # field is a plain dict that PipelineRow expects as plain dict —
-        # deep_freeze would convert it to MappingProxyType, breaking
-        # downstream mutation semantics. Coerce the outer sequence to a
-        # tuple but leave the row_data dict alone (the dataclass is already
-        # frozen, so the dict reference cannot be reassigned).
+        # unprocessed_rows is a Sequence of ResumedRow instances. Each
+        # ResumedRow is fully deep-frozen in its own __post_init__ (row_data
+        # is MappingProxyType via freeze_fields, not a plain dict). Tuple-
+        # ifying the outer Sequence is sufficient — further deep_freeze
+        # traversal is not needed because every leaf is already immutable.
+        # Consumers that need row_data as a plain dict (e.g. PipelineRow) call
+        # dict(row.row_data) explicitly at the construction boundary (see
+        # engine/orchestrator/core.py _reconstruct_resume_state loop).
         if not isinstance(self.unprocessed_rows, tuple):
             object.__setattr__(self, "unprocessed_rows", tuple(self.unprocessed_rows))
         # ADR-025 §3: schema_contracts_by_source is non-empty by invariant.

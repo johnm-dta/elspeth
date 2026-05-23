@@ -114,6 +114,7 @@ def _drive_guided_flow_to_step_3_transform_schema(client: TestClient, session_id
                 "options": {
                     "path": output_path,
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "observed_columns": [],

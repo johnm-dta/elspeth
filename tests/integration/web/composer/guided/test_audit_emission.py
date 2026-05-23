@@ -206,6 +206,7 @@ def _drive_to_recipe_offer(client: TestClient, session_id: str) -> tuple[dict, s
             "options": {
                 "path": output_path,
                 "schema": {"mode": "observed"},
+                "mode": "write",
                 "collision_policy": "auto_increment",
             },
             "observed_columns": [],
@@ -253,6 +254,7 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
             "options": {
                 "path": output_path,
                 "schema": {"mode": "observed"},
+                "mode": "write",
                 "collision_policy": "auto_increment",
             },
             "observed_columns": [],

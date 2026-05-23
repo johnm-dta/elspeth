@@ -170,6 +170,7 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
             "options": {
                 "path": output_path,
                 "schema": {"mode": "observed"},
+                "mode": "write",
                 "collision_policy": "auto_increment",
             },
             "observed_columns": [],
@@ -403,6 +404,7 @@ def _drive_to_step_2_sink_initial_solve_pre_call(client: TestClient, session_id:
             "options": {
                 "path": output_path,
                 "schema": {"mode": "observed"},
+                "mode": "write",
                 "collision_policy": "auto_increment",
             },
             "observed_columns": [],
@@ -534,6 +536,7 @@ class TestI2ChainSolverTransientFailure:
                 "options": {
                     "path": output_path,
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "observed_columns": [],

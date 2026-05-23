@@ -286,6 +286,7 @@ class TestStep2IntraStep:
                 "options": {
                     "path": output_path,
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "observed_columns": [],
@@ -317,6 +318,7 @@ class TestStep2IntraStep:
                 "options": {
                     "path": output_path,
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "observed_columns": [],
@@ -374,6 +376,7 @@ class TestStep2IntraStep:
                 "options": {
                     "path": output_path,
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "observed_columns": [],
@@ -445,6 +448,7 @@ class TestStep25RecipeAccept:
                 "options": {
                     "path": output_path,
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "observed_columns": [],
@@ -1295,6 +1299,7 @@ class TestValueErrorMappedTo400:
                 "options": {
                     "path": output_path,
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "observed_columns": [],
@@ -1659,6 +1664,7 @@ def _drive_to_step_3_propose_chain_for_step_idx(
             "options": {
                 "path": output_path,
                 "schema": {"mode": "observed"},
+                "mode": "write",
                 "collision_policy": "auto_increment",
             },
             "observed_columns": [],

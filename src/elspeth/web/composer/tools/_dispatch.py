@@ -59,7 +59,6 @@ from elspeth.web.composer.tools.outputs import (
     _handle_set_output,
 )
 from elspeth.web.composer.tools.recipes import (
-    _execute_apply_pipeline_recipe,
     _execute_list_recipes,
 )
 from elspeth.web.composer.tools.secrets import (
@@ -70,6 +69,7 @@ from elspeth.web.composer.tools.secrets import (
 from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_VALUES,
+    _execute_apply_pipeline_recipe,
     _execute_get_pipeline_state,
     _handle_set_pipeline,
 )

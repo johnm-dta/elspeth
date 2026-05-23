@@ -278,6 +278,7 @@ class TestPromoteSetPipelineArgErrorRouting:
                     "options": {
                         "path": str(output_path),
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     "on_write_failure": "discard",
@@ -334,6 +335,7 @@ class TestPromoteSetPipelineArgErrorRouting:
                     "options": {
                         "path": str(output_path),
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     "on_write_failure": "discard",

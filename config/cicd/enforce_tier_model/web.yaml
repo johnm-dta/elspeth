@@ -2075,14 +2075,14 @@ allow_hits:
     are exhaustive; pending arm raises and never returns; happy arm rebinds composition_state.
     No fabrication.
   expires: '2026-08-23'
-- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=fe7cec6d9242ae0e
+- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=b8c97a159c375db2
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: data = payload.get("data")'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=0c6c2745c6a6fff1
+- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=2a6ac3e449ff4daa
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: return type(data)
@@ -2090,14 +2090,14 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=fa9c0beb9cc18422
+- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=b23463e624595cf9
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: requirements = node.options.get(INTERPRETATION_REQUIREMENTS_KEY)'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=6d8d0ff0bb6a49df
+- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=0929fda370d8fc9b
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: if isinstance(requirement,
@@ -2105,7 +2105,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=598c3e8d1e2fc104
+- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=f8d176bf770cbeb3
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: if isinstance(requirement,
@@ -2113,7 +2113,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=fe9ed1c245fbb903
+- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=f4c156fcb6bbdbab
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: prompt_template =
@@ -2207,15 +2207,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_common.py:R1:validate_composer_file_sink_collision_policy:fp=0397162fbaa53482
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: mode = options.get("mode",
-    "write")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=4ba60774ae10f0f5
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=9da18040115d6b3a
   owner: composer-tools-rearchitect
   reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
     (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
@@ -2223,7 +2215,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
     infrastructure; semantics unchanged from RC5.2
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_dispatch_tool_batch:fp=0bcef85457e0af57
+- key: web/composer/service.py:R4:ComposerServiceImpl:_dispatch_tool_batch:fp=45721e090bfa2c30
   owner: composer-tools-rearchitect
   reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
     (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
@@ -2232,7 +2224,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
     infrastructure; semantics unchanged from RC5.2
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_dispatch_tool_batch:fp=ff82fadac5c6b0b0
+- key: web/composer/service.py:R4:ComposerServiceImpl:_dispatch_tool_batch:fp=e106791a84f69d0d
   owner: composer-tools-rearchitect
   reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
     (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
@@ -2241,7 +2233,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
     infrastructure; semantics unchanged from RC5.2
   expires: null
-- key: web/composer/service.py:R2:ComposerServiceImpl:_call_llm:fp=d6a5623c6b049c50
+- key: web/composer/service.py:R2:ComposerServiceImpl:_call_llm:fp=f0e26c532e5ff6db
   owner: composer-tools-rearchitect
   reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
     (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
@@ -2250,7 +2242,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
     infrastructure; semantics unchanged from RC5.2
   expires: null
-- key: web/composer/service.py:R2:ComposerServiceImpl:_call_text_llm:fp=9475aed316c9be0b
+- key: web/composer/service.py:R2:ComposerServiceImpl:_call_text_llm:fp=42d209bc64fd39a7
   owner: composer-tools-rearchitect
   reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
     (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4

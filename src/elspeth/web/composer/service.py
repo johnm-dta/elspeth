@@ -70,6 +70,7 @@ from elspeth.web.composer.audit import (
     finish_plugin_crash,
     finish_success,
 )
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.llm_response_parsing import (
     apply_anthropic_cache_markers,
     attach_llm_calls,
@@ -3865,7 +3866,20 @@ class ComposerServiceImpl:
                     persisted_tool_call_turn=persisted_tool_call_turn,
                 )
                 if terminate.action == "return":
-                    assert terminate.result is not None
+                    # Offensive guard (explicit raise, not assert): ``python -O``
+                    # strips assert statements. The contract between
+                    # ``_dispatch_terminate_phase`` and this caller is that
+                    # ``result`` is non-None whenever ``action == "return"``;
+                    # a None here would be a compose-loop bug, not a recoverable
+                    # state. Routed to the HTTP-500 static-detail handler at
+                    # ``routes/composer.py:905`` via :class:`InvariantError`
+                    # (B1-sanitised response body).
+                    if terminate.result is None:
+                        raise InvariantError(
+                            "_dispatch_terminate_phase returned action='return' with result=None — "
+                            "the terminate-phase contract requires result to be set whenever the "
+                            "phase signals a return."
+                        )
                     return terminate.result
                 repair_turns_used += terminate.repair_turns_delta
                 continue
@@ -3961,7 +3975,20 @@ class ComposerServiceImpl:
             composition_turns_used += classify.composition_turns_delta
             discovery_turns_used += classify.discovery_turns_delta
             if classify.action == "return":
-                assert classify.result is not None
+                # Offensive guard (explicit raise, not assert): ``python -O``
+                # strips assert statements. The contract between
+                # ``_dispatch_classify_phase`` and this caller is that
+                # ``result`` is non-None whenever ``action == "return"``
+                # (the B-4D-3 last-chance branch sets it). A None here would
+                # be a compose-loop bug. Routed to the HTTP-500 static-detail
+                # handler at ``routes/composer.py:905`` via
+                # :class:`InvariantError` (B1-sanitised response body).
+                if classify.result is None:
+                    raise InvariantError(
+                        "_dispatch_classify_phase returned action='return' with result=None — "
+                        "the classify-phase contract requires result to be set whenever the "
+                        "phase signals a return."
+                    )
                 return classify.result
             continue
 

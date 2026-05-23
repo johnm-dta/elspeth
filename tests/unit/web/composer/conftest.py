@@ -673,6 +673,7 @@ def fake_llm_one_set_pipeline_tool_call(tmp_path: Path) -> _FakeComposeLLM:
                                     "options": {
                                         "path": str(tmp_path / "outputs" / "output.csv"),
                                         "schema": {"mode": "observed"},
+                                        "mode": "write",
                                         "collision_policy": "auto_increment",
                                     },
                                     "on_write_failure": "discard",
@@ -763,6 +764,7 @@ def fake_llm_create_blob_then_set_pipeline(tmp_path: Path) -> _FakeComposeLLM:
                                     "options": {
                                         "path": str(output_path),
                                         "schema": {"mode": "observed"},
+                                        "mode": "write",
                                         "collision_policy": "auto_increment",
                                     },
                                     "on_write_failure": "discard",
@@ -842,6 +844,7 @@ def fake_llm_set_pipeline_with_misplaced_schema(tmp_path: Path) -> _FakeComposeL
                                     "options": {
                                         "path": str(tmp_path / "outputs" / "output.csv"),
                                         "schema": {"mode": "observed"},
+                                        "mode": "write",
                                         "collision_policy": "auto_increment",
                                     },
                                     "on_write_failure": "discard",

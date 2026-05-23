@@ -64,7 +64,7 @@ def _invalid_contract_state() -> CompositionState:
             OutputSpec(
                 name="main",
                 plugin="csv",
-                options={"path": "outputs/out.csv", "schema": {"mode": "observed"}, "collision_policy": "auto_increment"},
+                options={"path": "outputs/out.csv", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
                 on_write_failure="discard",
             ),
         ),
@@ -87,7 +87,7 @@ def _valid_state_with_no_edge_contracts() -> CompositionState:
             OutputSpec(
                 name="main",
                 plugin="csv",
-                options={"path": "outputs/out.csv", "schema": {"mode": "observed"}, "collision_policy": "auto_increment"},
+                options={"path": "outputs/out.csv", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
                 on_write_failure="discard",
             ),
         ),
@@ -132,6 +132,7 @@ def _connection_valid_field_mapper_state_without_edges() -> CompositionState:
                 options={
                     "path": "outputs/out.csv",
                     "schema": {"mode": "observed", "required_fields": ["body"]},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 on_write_failure="discard",
@@ -271,6 +272,7 @@ class TestDispatchTool:
                 "options": {
                     "path": "outputs/out.csv",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -295,6 +297,7 @@ class TestDispatchTool:
                     options={
                         "path": "outputs/out.csv",
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     on_write_failure="discard",

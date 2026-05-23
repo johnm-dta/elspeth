@@ -1235,7 +1235,24 @@ def validate_composer_file_sink_collision_policy(
             "'append_or_create' with mode='append'."
         )
 
-    mode = options.get("mode", "write")
+    # mode is a safety-critical operator decision (truncate vs. append) — same
+    # rationale as the collision_policy presence check above.  Mirroring
+    # ``csv_sink.py:57`` / ``json_sink.py:63``'s ``Field(default="write")``
+    # via ``options.get("mode", "write")`` here would silently paper over
+    # every upstream null source — LLM omission, operator omission,
+    # merge-patch strip, incomplete fixture — none of which is a correct
+    # state for a runnable file sink at this validator's call sites.  The
+    # operator-supplied options must name ``mode`` explicitly so the
+    # write-vs-append branch selection below is authoritative rather than
+    # inferred.  Closes I3 review finding (2026-05-24).
+    if "mode" not in options:
+        return (
+            f"File sink '{plugin_name}' must set mode explicitly. "
+            "Use 'write' to create or replace the file, or 'append' to "
+            "add rows to an existing file."
+        )
+
+    mode = options["mode"]
     policy = options["collision_policy"]
     if mode == "append":
         if policy not in _APPEND_COLLISION_POLICIES:

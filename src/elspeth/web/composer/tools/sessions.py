@@ -872,6 +872,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                             "options": {
                                 "path": "outputs/results.json",
                                 "schema": {"mode": "observed"},
+                                "mode": "write",
                                 "collision_policy": "auto_increment",
                             },
                             "on_write_failure": "discard",
@@ -881,7 +882,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                 "description": (
                     "Array of output specs: [{sink_name, plugin, options, on_write_failure?}]. "
                     "For csv/json file sinks in runnable web pipelines, options must include "
-                    "path, schema, and explicit collision_policy."
+                    "path, schema, explicit mode ('write' or 'append'), and explicit collision_policy."
                 ),
             },
             "metadata": {

@@ -730,6 +730,7 @@ class TestComposerSingleToolCall:
                     "options": {
                         "path": str(output_path),
                         "schema": {"mode": "observed", "required_fields": ["text"]},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     "on_write_failure": "discard",
@@ -5633,6 +5634,7 @@ class TestAttemptProofRepair:
                 "options": {
                     "path": "outputs/out.json",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -5881,6 +5883,7 @@ class TestComposeLoopForcedRepair:
                     "options": {
                         "path": "outputs/out.json",
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     "on_write_failure": "discard",
@@ -5926,6 +5929,7 @@ class TestComposeLoopForcedRepair:
                     "options": {
                         "path": "outputs/out.json",
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     "on_write_failure": "discard",
@@ -6236,6 +6240,7 @@ class TestComposeLoopForcedRepair:
                     options={
                         "path": "outputs/out.json",
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     on_write_failure="discard",
@@ -6315,6 +6320,7 @@ class TestComposeLoopForcedRepair:
                     options={
                         "path": "outputs/out.json",
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     on_write_failure="discard",

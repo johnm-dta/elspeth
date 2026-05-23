@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from elspeth.contracts.errors import FailedTurnMetadata
 from elspeth.contracts.freeze import freeze_fields
@@ -91,7 +91,7 @@ class _TerminateOutcome:
       / ``repair_turns_used``).
     """
 
-    action: str  # Literal["continue", "return"]
+    action: Literal["continue", "return"]
     result: ComposerResult | None = None
     repair_turns_delta: int = 0  # 0 or 1; nonzero only for continue path
 
@@ -191,7 +191,7 @@ class _ClassifyOutcome:
     carrier.
     """
 
-    action: str  # Literal["continue", "return"]
+    action: Literal["continue", "return"]
     result: ComposerResult | None = None
     composition_turns_delta: int = 0  # 0 or 1
     discovery_turns_delta: int = 0  # 0 or 1

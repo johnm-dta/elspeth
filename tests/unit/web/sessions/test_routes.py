@@ -673,6 +673,7 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
                         "options": {
                             "path": str(tmp_path / "outputs" / "output.csv"),
                             "schema": {"mode": "observed"},
+                            "mode": "write",
                             "collision_policy": "auto_increment",
                         },
                         "on_write_failure": "discard",

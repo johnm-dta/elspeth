@@ -978,6 +978,7 @@ class TestUpsertEdge:
                 "options": {
                     "path": "/data/outputs/magic_comp_rules_layers_failures.json",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -1462,6 +1463,7 @@ class TestSetOutput:
                 "options": {
                     "path": "/data/outputs/out.csv",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -5525,6 +5527,7 @@ class TestPatchOutputPathSecurity:
                 "sink_name": "main",
                 "patch": {
                     "path": "outputs/result.csv",
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
             },
@@ -5543,6 +5546,7 @@ class TestPatchOutputPathSecurity:
                 "sink_name": "main",
                 "patch": {
                     "path": "/data/outputs/subdir/out.csv",
+                    "mode": "write",
                     "collision_policy": "fail_if_exists",
                 },
             },
@@ -5807,6 +5811,7 @@ class TestSetPipelineSchemaShape:
             "options": {
                 "path": "outputs/results.json",
                 "schema": {"mode": "observed"},
+                "mode": "write",
                 "collision_policy": "auto_increment",
             },
             "on_write_failure": "discard",
@@ -5917,6 +5922,7 @@ class TestSetPipeline:
                 "options": {
                     "path": str(tmp_path / "outputs" / "main.json"),
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -5927,6 +5933,7 @@ class TestSetPipeline:
                 "options": {
                     "path": str(tmp_path / "outputs" / "failures.json"),
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -6195,6 +6202,7 @@ class TestSetPipeline:
             "on_validation_failure": "quarantine",
         }
         args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
         args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
 
         result = execute_tool(
@@ -6258,6 +6266,7 @@ class TestSetPipeline:
             "on_validation_failure": "quarantine",
         }
         args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
         args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
 
         result = execute_tool(
@@ -6581,6 +6590,7 @@ class TestSetPipeline:
                     "options": {
                         "path": str(output_path),
                         "schema": {"mode": "observed", "required_fields": ["text"]},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     "on_write_failure": "discard",
@@ -9523,6 +9533,7 @@ class TestPreviewProofStep:
                 "options": {
                     "path": "outputs/out.json",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -9595,6 +9606,7 @@ class TestPreviewProofStep:
                 "options": {
                     "path": "outputs/out.json",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",

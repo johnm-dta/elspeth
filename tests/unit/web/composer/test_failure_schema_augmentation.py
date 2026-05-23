@@ -257,6 +257,7 @@ class TestFailureSchemaAugmentationSetPipeline:
                     "options": {
                         "path": str(tmp_path / "outputs" / "out.csv"),
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     "on_write_failure": "discard",
@@ -395,7 +396,7 @@ class TestFailureSchemaAugmentationPerToolCoverage:
             {
                 "sink_name": "main",
                 "plugin": "json",
-                "options": {"schema": {"mode": "observed"}, "collision_policy": "auto_increment"},
+                "options": {"schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
                 "on_write_failure": "discard",
             },
             _empty_state(),

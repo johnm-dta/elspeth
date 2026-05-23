@@ -434,6 +434,11 @@ class TokenSchedulerRepository:
                         token_work_items_table.c.ingest_sequence,
                         token_work_items_table.c.step_index,
                         token_work_items_table.c.created_at,
+                        # Stable last-resort tiebreaker for cross-source same-tick
+                        # collisions where ingest_sequence/step_index/created_at
+                        # are not jointly disambiguating (filigree elspeth-6cb89db535,
+                        # G3 determinism-reviewer M1).
+                        token_work_items_table.c.work_item_id,
                     )
                     .limit(1)
                 )
@@ -502,6 +507,9 @@ class TokenSchedulerRepository:
                         token_work_items_table.c.ingest_sequence,
                         token_work_items_table.c.step_index,
                         token_work_items_table.c.created_at,
+                        # Stable last-resort tiebreaker for cross-source same-tick
+                        # collisions (filigree elspeth-6cb89db535, G3 M1).
+                        token_work_items_table.c.work_item_id,
                     )
                     .limit(1)
                 )
@@ -605,7 +613,13 @@ class TokenSchedulerRepository:
                 .where(token_work_items_table.c.status == TokenWorkStatus.LEASED.value)
                 .where(token_work_items_table.c.lease_expires_at < now)
                 .where(lease_owner_not_caller)
-                .order_by(token_work_items_table.c.ingest_sequence, token_work_items_table.c.step_index)
+                .order_by(
+                    token_work_items_table.c.ingest_sequence,
+                    token_work_items_table.c.step_index,
+                    # Stable last-resort tiebreaker for cross-source same-tick
+                    # collisions (filigree elspeth-6cb89db535, G3 M1).
+                    token_work_items_table.c.work_item_id,
+                )
             ).mappings()
             recovered = 0
             for row in expired:

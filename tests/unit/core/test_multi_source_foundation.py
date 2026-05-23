@@ -1869,6 +1869,83 @@ def test_scheduler_claim_ready_two_workers_claim_distinct_items() -> None:
     assert {claimed_a.lease_owner, claimed_b.lease_owner} == {"worker-a", "worker-b"}
 
 
+def test_scheduler_claim_ready_tiebreaks_by_work_item_id_on_same_tick() -> None:
+    """Regression: cross-source same-tick collisions must order by ``work_item_id``.
+
+    When two rows share ``(ingest_sequence, step_index, created_at)``
+    (cross-source ingests in the same monotonic tick), the ORDER BY appended
+    ``work_item_id`` as the final tiebreaker (elspeth-6cb89db535). Without it,
+    SQLite ordering is implementation-defined for the tied prefix, and a
+    downstream observer that hashes the order of emitted RowResults would see
+    a non-deterministic sequence across re-runs.
+
+    The test forces the tie by writing two ``token_work_items`` rows directly
+    with identical ordering columns and asserts ``claim_ready`` returns the
+    lex-min ``work_item_id`` first.
+    """
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = repo.serialize_row_payload(PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True)))
+    _insert_scheduler_owner_records(
+        engine,
+        token_specs=(("token-1", "row-1", 0), ("token-2", "row-2", 1)),
+        node_ids=("normalize",),
+    )
+    # Force identical ordering columns on the work items themselves. Rows from
+    # different sources can produce work items sharing
+    # ``(ingest_sequence, step_index, created_at)`` after upstream
+    # coalescing/forking even though the underlying ``rows`` records carry
+    # distinct ``ingest_sequence`` values (one per source). ``work_item_id`` is
+    # the only discriminator left.
+    with engine.begin() as conn:
+        conn.execute(
+            token_work_items_table.insert().values(
+                work_item_id="wi-zzz",
+                run_id="run-1",
+                token_id="token-2",
+                row_id="row-2",
+                node_id="normalize",
+                step_index=1,
+                ingest_sequence=0,
+                row_payload_json=payload,
+                status=TokenWorkStatus.READY.value,
+                attempt=0,
+                available_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        conn.execute(
+            token_work_items_table.insert().values(
+                work_item_id="wi-aaa",
+                run_id="run-1",
+                token_id="token-1",
+                row_id="row-1",
+                node_id="normalize",
+                step_index=1,
+                ingest_sequence=0,
+                row_payload_json=payload,
+                status=TokenWorkStatus.READY.value,
+                attempt=0,
+                available_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    first = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
+    second = repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now)
+    assert first is not None and second is not None
+    # Lex-min wins the tie.
+    assert first.work_item_id == "wi-aaa"
+    assert second.work_item_id == "wi-zzz"
+
+
 def _apply_scheduler_transition(
     repo,
     transition: _SchedulerTransition,

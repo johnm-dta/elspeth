@@ -23,7 +23,7 @@ from __future__ import annotations
 # Slice 4 — additional imports for shared validation/repair helpers.
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Final, TypedDict
 
@@ -1175,3 +1175,15 @@ def _prevalidate_transform(plugin_name: str, options: dict[str, Any]) -> str | N
 def _prevalidate_sink(plugin_name: str, options: dict[str, Any]) -> str | None:
     """Pre-validate sink options."""
     return _prevalidate_plugin_options("sink", plugin_name, options)
+
+
+# Type aliases shared by ``_dispatch`` and ``generation`` (and any plane that
+# needs to talk about runtime-preflight callables or generic tool handlers).
+
+ToolHandler = Callable[
+    [dict[str, Any], CompositionState, CatalogService, str | None],
+    ToolResult,
+]
+
+
+RuntimePreflight = Callable[[CompositionState], ValidationResult]

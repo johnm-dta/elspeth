@@ -1,0 +1,994 @@
+"""Composer sessions plane — pipeline-state and interpretation-review handlers."""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import UTC, datetime
+from types import MappingProxyType
+from typing import Any, Final, cast
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy import Engine
+
+from elspeth.contracts.composer_interpretation import InterpretationEventRecord, InterpretationSource
+from elspeth.contracts.enums import CreationModality
+from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.protocol import ToolArgumentError
+from elspeth.web.composer.redaction import (
+    SetPipelineArgumentsModel,
+    redact_source_storage_path,
+)
+from elspeth.web.composer.state import (
+    CompositionState,
+    EdgeSpec,
+    EdgeType,
+    NodeSpec,
+    NodeType,
+    OutputSpec,
+    PipelineMetadata,
+    SourceSpec,
+    ValidationSummary,
+    _batch_aware_placement_error,
+    _batch_aware_required_input_fields_error,
+    _validate_gate_expression,
+)
+
+# Slice 2 — moved to ._common; re-imported so the helpers/classes still in this
+# file resolve them via the in-module namespace as before.
+# Slice 4 — moved to ._common; re-imported so helpers still in this file
+# resolve them via the in-module namespace as before.
+from elspeth.web.composer.tools._common import (
+    _DEFAULT_SOURCE_VALIDATION_FAILURE,
+    ToolResult,
+    _credential_wiring_contract_failure,
+    _discovery_result,
+    _failure_result,
+    _FullPipelineStatePayload,
+    _graph_repair_suggestions,
+    _missing_output_options_repair_error,
+    _mutation_result,
+    _prevalidate_sink,
+    _prevalidate_source,
+    _prevalidate_transform,
+    _semantic_contracts_payload,
+    _serialize_edge,
+    _serialize_node,
+    _serialize_output,
+    _serialize_source,
+    _validate_mutation_arguments,
+    _validate_plugin_name,
+    _validate_sink_path,
+    _validate_source_path,
+    _vf_destination_note,
+    validate_composer_file_sink_collision_policy,
+)
+
+# Slice 3 — moved to .blobs; re-imported so helpers/handlers still in this
+# file resolve them via the in-module namespace as before.
+from elspeth.web.composer.tools.blobs import (
+    _blob_create_payload,
+    _persist_prepared_blob_create,
+    _prepare_blob_create,
+    _PreparedBlobCreate,
+)
+from elspeth.web.composer.tools.sources import (
+    _MIME_TO_SOURCE,
+    _header_only_inline_csv_conflict,
+    _reject_manual_source_blob_ref,
+    _resolve_source_blob,
+    _ResolvedSourceBlob,
+)
+from elspeth.web.interpretation_state import interpretation_sites
+from elspeth.web.validation import (
+    INTERPRETATION_PLACEHOLDER_RE,
+    _reject_credential_shaped_content,
+    _validate_accepted_value_content,
+)
+
+_FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pipeline")
+
+_FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
+
+
+ADVISOR_TRIGGER_REACTIVE: Final[str] = "reactive_validation_loop"
+
+ADVISOR_TRIGGER_PROACTIVE_SECURITY: Final[str] = "proactive_security_safety"
+
+ADVISOR_TRIGGER_PROACTIVE_RED_LISTED: Final[str] = "proactive_red_listed_plugin"
+
+ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
+    ADVISOR_TRIGGER_REACTIVE,
+    ADVISOR_TRIGGER_PROACTIVE_SECURITY,
+    ADVISOR_TRIGGER_PROACTIVE_RED_LISTED,
+)
+
+
+class _RequestInterpretationReviewArgumentsModel(BaseModel):
+    """Tier-3 trust-boundary model for the ``request_interpretation_review`` tool.
+
+    All three fields are LLM-supplied and constrained mechanically:
+
+    * ``affected_node_id`` — short identifier; 256-char cap matches the wire
+      cap used by ``upsert_node.id``.
+    * ``user_term`` and ``llm_draft`` — capped at 8192 chars to defend against
+      pathological inputs that would distend the audit row beyond the
+      schema's 8192-byte expectation (see ``interpretation_events_table``
+      column definitions; the schema-level body limit also bounds these
+      at the ASGI boundary).
+
+    ``extra="forbid"`` rejects unknown keys structurally so a misrouted
+    argument shape (e.g., the LLM passing ``id`` instead of
+    ``affected_node_id``) fails fast with a clear ARG_ERROR rather than
+    silently dropping the typo and validating a partial payload.
+    """
+
+    affected_node_id: str = Field(min_length=1, max_length=256)
+    user_term: str = Field(min_length=1, max_length=8192)
+    llm_draft: str = Field(min_length=1, max_length=8192)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+def _execute_set_pipeline(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+    *,
+    session_engine: Engine | None = None,
+    session_id: str | None = None,
+    user_message_id: str | None = None,
+    max_blob_storage_per_session_bytes: int | None = None,
+) -> ToolResult:
+    """Atomically replace the entire pipeline composition state.
+
+    Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
+    Pydantic redaction-bearing model :class:`SetPipelineArgumentsModel` (the
+    single source of truth for the argument schema — supersedes the deleted
+    ``_TOOL_REQUIRED_PATHS["set_pipeline"]`` entry in ``service.py``,
+    rev-3 N7 / rev-4 M1).
+
+    On :class:`pydantic.ValidationError` the handler re-raises as
+    :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
+    ``service.py:2480`` receives the right exception class.
+
+    Dispatcher-wired kwargs
+    -----------------------
+    The dispatcher at :func:`execute_tool` (``tools.py:5530-5540``) supplies
+    ``session_engine`` and ``session_id`` as kwargs.  These are NOT part of
+    the LLM-supplied ``arguments`` dict — they are wired from the composer
+    service request context — so they are NOT modelled in
+    :class:`SetPipelineArgumentsModel`.  The Pydantic model validates only
+    the LLM-supplied dict; the kwargs enter through the function signature.
+
+    Semantic vs argument-shape failures
+    ------------------------------------
+    Pydantic enforces argument shape (type, required-fields, extra=forbid).
+    Per-component semantic checks (plugin existence in catalog, path
+    allowlist, manual blob_ref injection rejection, source.blob_id +
+    source.inline_blob exclusivity, gate-condition expression validity)
+    remain in this handler and produce recoverable ``_failure_result``
+    responses with repair hints.  Two channels for two failure shapes
+    (type vs semantic) — same pattern as
+    :class:`SetSourceArgumentsModel` plugin-not-in-catalog handling.
+    """
+    try:
+        validated = SetPipelineArgumentsModel.model_validate(args)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="set_pipeline arguments",
+            expected="object conforming to SetPipelineArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    # 1. Validate source plugin
+    src_plugin = validated.source.plugin
+    plugin_error = _validate_plugin_name(catalog, "source", src_plugin)
+    if plugin_error is not None:
+        return _failure_result(state, plugin_error)
+
+    # Inline user-provided source data can be materialised as a blob inside
+    # this same atomic pipeline mutation. The generated path/blob_ref are
+    # authoritative exactly as if create_blob + set_source_from_blob had been
+    # called, but the LLM gets one audited tool decision instead of a serial
+    # blob-then-source-then-pipeline conversation.
+    #
+    # ``src_options`` starts as a mutable copy of the Pydantic-validated
+    # dict so the inline-blob branch below can extend it with the
+    # authoritative ``path`` / ``blob_ref`` without mutating
+    # ``validated.source.options`` (Pydantic returns the inner dict
+    # directly, so mutating it would leak across re-validations in tests).
+    src_options: Mapping[str, Any] = dict(validated.source.options)
+    manual_blob_ref_error = _reject_manual_source_blob_ref(
+        src_options,
+        tool_name="set_pipeline",
+        inline_blob_supported=True,
+    )
+    if manual_blob_ref_error is not None:
+        return _failure_result(state, manual_blob_ref_error)
+    credential_error = _credential_wiring_contract_failure(
+        state,
+        component_id="source",
+        component_type="source",
+        options=src_options,
+    )
+    if credential_error is not None:
+        return credential_error
+    prepared_inline_blob: _PreparedBlobCreate | None = None
+    resolved_source_blob: _ResolvedSourceBlob | None = None
+    source_blob_id = validated.source.blob_id
+    inline_blob = validated.source.inline_blob
+    src_on_vf = (
+        validated.source.on_validation_failure if validated.source.on_validation_failure is not None else _DEFAULT_SOURCE_VALIDATION_FAILURE
+    )
+    if source_blob_id is not None and inline_blob is not None:
+        return _failure_result(state, "set_pipeline source must use either an existing blob_id or inline_blob, not both.")
+    if source_blob_id is not None:
+        resolved = _resolve_source_blob(
+            blob_id=source_blob_id,
+            explicit_plugin=src_plugin,
+            caller_options=src_options,
+            on_validation_failure=src_on_vf,
+            state=state,
+            catalog=catalog,
+            session_engine=session_engine,
+            session_id=session_id,
+        )
+        if isinstance(resolved, ToolResult):
+            return resolved
+        resolved_source_blob = resolved
+        src_plugin = resolved.plugin
+        src_options = resolved.options
+    if inline_blob is not None:
+        if session_engine is None or session_id is None:
+            return _failure_result(state, "set_pipeline source.inline_blob requires session context.")
+        if data_dir is None:
+            return _failure_result(state, "set_pipeline source.inline_blob requires data_dir for storage.")
+        # _prepare_blob_create raises ToolArgumentError on invalid LLM
+        # arguments (CEC1 channel discipline) — propagate to the
+        # compose loop's ARG_ERROR branch rather than masking as
+        # SUCCESS-with-success=False. The inline_blob contents are already
+        # type-validated by ``_InlineBlobModel``
+        # (str/str/str + extra=forbid), so the isinstance guards inside
+        # _prepare_blob_create are unreachable from this caller — see
+        # the cleanup that removes them.
+        # Provenance classification. We always tag inline-blob
+        # set_pipeline payloads as VERBATIM with
+        # all five creating_* fields = None.  The discriminant that
+        # distinguishes LLM-authored vs verbatim content (substring match
+        # against the triggering chat message body, or a tool-call-loop
+        # tag the LLM emits explicitly) is handled at the call-loop layer:
+        # that layer owns the context (model identifier, version, provider,
+        # prompt hash) required to populate
+        # the LLM-authored variant without violating the
+        # ck_blobs_creating_llm_provenance_nullability CHECK.  Until the
+        # discriminant exists, defaulting VERBATIM keeps the CHECK
+        # satisfied trivially (no creating_* fields) AND preserves the
+        # audit guarantee that ``created_from_message_id`` always names
+        # the user message that triggered the tool call.
+        prepared_inline_blob = _prepare_blob_create(
+            inline_blob.model_dump(),
+            data_dir=data_dir,
+            session_id=session_id,
+            creation_modality=CreationModality.VERBATIM,
+            created_from_message_id=user_message_id,
+        )
+        header_conflict = _header_only_inline_csv_conflict(
+            prepared_inline_blob,
+            session_engine=session_engine,
+            session_id=session_id,
+        )
+        if header_conflict is not None:
+            return _failure_result(state, header_conflict)
+
+        mime_entry = _MIME_TO_SOURCE.get(prepared_inline_blob.mime_type)
+        mime_options: dict[str, str] = {}
+        if mime_entry is not None:
+            inferred_plugin, inferred_options = mime_entry
+            if inferred_plugin == src_plugin:
+                mime_options = inferred_options
+        src_options = {
+            **src_options,
+            **mime_options,
+            "path": str(prepared_inline_blob.storage_path),
+            "blob_ref": prepared_inline_blob.blob_id,
+        }
+
+    # S2: Validate source path allowlist (same check as _execute_set_source)
+    path_error = _validate_source_path(src_options, data_dir)
+    if path_error is not None:
+        return _failure_result(state, path_error)
+
+    src_prevalidation = _prevalidate_source(src_plugin, src_options, src_on_vf)
+    if src_prevalidation is not None:
+        return _failure_result(state, src_prevalidation)
+
+    # 2. Validate node plugins and options
+    for node in validated.nodes:
+        node_id = node.id
+        node_type = node.node_type
+        node_plugin = node.plugin
+        node_options = node.options
+        credential_error = _credential_wiring_contract_failure(
+            state,
+            component_id=node_id,
+            component_type="node",
+            options=node_options,
+        )
+        if credential_error is not None:
+            return credential_error
+        if node_type in ("transform", "aggregation") and node_plugin is not None:
+            plugin_error = _validate_plugin_name(catalog, "transform", node_plugin)
+            if plugin_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {plugin_error}")
+            batch_placement_error = _batch_aware_placement_error(node_id, node_type, node_plugin, node.output_mode)
+            if batch_placement_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {batch_placement_error}")
+            batch_required_error = _batch_aware_required_input_fields_error(node_id, node_plugin, node_options)
+            if batch_required_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {batch_required_error}")
+
+            node_prevalidation = _prevalidate_transform(node_plugin, node_options)
+            if node_prevalidation is not None:
+                return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
+
+        # Validate gate condition expression at composition time.
+        if node_type == "gate" and node.condition is not None:
+            expr_error = _validate_gate_expression(node.condition)
+            if expr_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {expr_error}")
+
+    # 3. Validate output plugins and options
+    #
+    # ``options_missing`` distinguishes "operator omitted the options key
+    # entirely" from "operator supplied options: {}".  Post-Pydantic the
+    # default-factory replaces an absent key with ``{}`` on the model side,
+    # so we look at the raw ``args`` dict to recover the operator's
+    # original intent for the repair-hint branch.  The semantic-validation
+    # branch (file-sink collision policy, path allowlist) still runs on
+    # the validated dict.
+    raw_outputs = args.get("outputs") if isinstance(args, Mapping) else None
+    for index, output in enumerate(validated.outputs):
+        out_name = output.sink_name
+        out_plugin = output.plugin
+        plugin_error = _validate_plugin_name(catalog, "sink", out_plugin)
+        if plugin_error is not None:
+            return _failure_result(state, f"Output '{out_name}': {plugin_error}")
+        out_options = output.options
+        raw_out_args: Mapping[str, Any] = {}
+        if isinstance(raw_outputs, list) and 0 <= index < len(raw_outputs):
+            raw_entry = raw_outputs[index]
+            if isinstance(raw_entry, Mapping):
+                raw_out_args = raw_entry
+        options_missing = "options" not in raw_out_args
+        if options_missing:
+            out_prevalidation = _prevalidate_sink(out_plugin, out_options)
+            out_collision_error = validate_composer_file_sink_collision_policy(
+                out_plugin,
+                out_options,
+                require_explicit=data_dir is not None,
+            )
+            validation_error = out_prevalidation if out_prevalidation is not None else out_collision_error
+            if validation_error is not None:
+                return _failure_result(
+                    state,
+                    _missing_output_options_repair_error(
+                        sink_name=out_name,
+                        plugin_name=out_plugin,
+                        on_write_failure=output.on_write_failure if output.on_write_failure is not None else "discard",
+                        validation_error=validation_error,
+                    ),
+                )
+        credential_error = _credential_wiring_contract_failure(
+            state,
+            component_id=out_name,
+            component_type="output",
+            options=out_options,
+        )
+        if credential_error is not None:
+            return credential_error
+        out_path_error = _validate_sink_path(out_options, data_dir)
+        if out_path_error is not None:
+            return _failure_result(state, f"Output '{out_name}': {out_path_error}")
+        out_prevalidation = _prevalidate_sink(out_plugin, out_options)
+        if out_prevalidation is not None:
+            return _failure_result(state, f"Output '{out_name}': {out_prevalidation}")
+        out_collision_error = validate_composer_file_sink_collision_policy(
+            out_plugin,
+            out_options,
+            require_explicit=data_dir is not None,
+        )
+        if out_collision_error is not None:
+            return _failure_result(state, f"Output '{out_name}': {out_collision_error}")
+
+    # 4. Construct specs (same field extraction as individual handlers)
+    source_spec = SourceSpec(
+        plugin=src_plugin,
+        on_success=validated.source.on_success,
+        options=src_options,
+        on_validation_failure=src_on_vf,
+    )
+
+    # ``node_type`` / ``edge_type`` are typed as ``str`` on
+    # ``_PipelineNodeModel`` / ``_PipelineEdgeModel`` to preserve Tier-3
+    # LLM-recoverable feedback (the handler reports unknown enum values
+    # via semantic _failure_result; a Pydantic Literal rejection would
+    # surface as ARG_ERROR with no repair guidance).  At the point we
+    # construct :class:`NodeSpec` / :class:`EdgeSpec`, the downstream
+    # validation (``_validate_plugin_name``, graph topology) and the
+    # ``_batch_aware_placement_error`` checks above have not yet
+    # rejected non-canonical enum values explicitly — that responsibility
+    # remains on the state-level dataclass invariants.  The ``cast`` here
+    # narrows the static type without re-validating; semantically wrong
+    # enum values flow through to be rejected at runtime by NodeSpec /
+    # EdgeSpec / CompositionState invariants.
+    node_specs = []
+    for n in validated.nodes:
+        fork_to = tuple(n.fork_to) if n.fork_to is not None else None
+        branches = dict(n.branches) if isinstance(n.branches, Mapping) else tuple(n.branches) if n.branches is not None else None
+        nt = n.node_type
+        node_specs.append(
+            NodeSpec(
+                id=n.id,
+                node_type=cast(NodeType, nt),
+                plugin=n.plugin,
+                input=n.input,
+                on_success=n.on_success,
+                on_error=n.on_error or ("discard" if nt in ("transform", "aggregation") else None),
+                options=n.options,
+                condition=n.condition,
+                routes=n.routes,
+                fork_to=fork_to,
+                branches=branches,
+                policy=n.policy,
+                merge=n.merge,
+                # ``n.trigger`` is a typed :class:`_NodeTriggerModel` (or None) per F3 —
+                # convert to a plain dict at the NodeSpec boundary because
+                # :class:`NodeSpec.trigger` is typed ``Mapping[str, Any] | None`` and
+                # is deep-frozen by ``freeze_fields("trigger")``; the freeze contract
+                # requires a Mapping, not a Pydantic model instance.
+                trigger=n.trigger.model_dump() if n.trigger is not None else None,
+                output_mode=n.output_mode,
+                expected_output_count=n.expected_output_count,
+            )
+        )
+
+    edge_specs = []
+    for e in validated.edges:
+        edge_specs.append(
+            EdgeSpec(
+                id=e.id,
+                from_node=e.from_node,
+                to_node=e.to_node,
+                edge_type=cast(EdgeType, e.edge_type),
+                label=e.label,
+            )
+        )
+
+    output_specs = []
+    for o in validated.outputs:
+        output_specs.append(
+            OutputSpec(
+                name=o.sink_name,
+                plugin=o.plugin,
+                options=o.options,
+                on_write_failure=o.on_write_failure if o.on_write_failure is not None else "discard",
+            )
+        )
+
+    # PipelineMetadata's __init__ supplies its own defaults for ``name`` and
+    # ``description``; honour those by passing through only explicitly
+    # supplied fields.  ``validated.metadata`` is None when the LLM omitted
+    # the ``metadata`` key entirely.
+    meta_kwargs: dict[str, str] = {}
+    if validated.metadata is not None:
+        if validated.metadata.name is not None:
+            meta_kwargs["name"] = validated.metadata.name
+        if validated.metadata.description is not None:
+            meta_kwargs["description"] = validated.metadata.description
+    metadata_spec = PipelineMetadata(**meta_kwargs)
+
+    # 5. Build new state
+    new_state = CompositionState(
+        source=source_spec,
+        nodes=tuple(node_specs),
+        edges=tuple(edge_specs),
+        outputs=tuple(output_specs),
+        metadata=metadata_spec,
+        version=state.version + 1,
+    )
+
+    if prepared_inline_blob is not None:
+        if session_engine is None or session_id is None:
+            return _failure_result(state, "set_pipeline source.inline_blob requires session context.")
+        quota_error = _persist_prepared_blob_create(
+            prepared_inline_blob,
+            session_engine=session_engine,
+            session_id=session_id,
+            max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
+        )
+        if quota_error is not None:
+            return _failure_result(state, quota_error)
+
+    # 6. Report all nodes + source + outputs as affected
+    affected = ("source", *(n.id for n in node_specs), *(o.name for o in output_specs))
+    data: dict[str, Any] | None = _vf_destination_note(new_state, src_on_vf)
+    if resolved_source_blob is not None:
+        source_blob_payload = {"source_blob": resolved_source_blob.payload}
+        data = source_blob_payload if data is None else {**data, **source_blob_payload}
+    if prepared_inline_blob is not None:
+        inline_payload = {"inline_blob": _blob_create_payload(prepared_inline_blob)}
+        data = inline_payload if data is None else {**data, **inline_payload}
+    return _mutation_result(
+        new_state,
+        affected,
+        data=data,
+    )
+
+
+def _handle_set_pipeline(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    return _execute_set_pipeline(arguments, state, catalog, data_dir)
+
+
+def _is_full_state_component_alias(component: Any) -> bool:
+    """Return whether a component argument explicitly requests full state."""
+    return isinstance(component, str) and component.strip().lower() in _FULL_STATE_COMPONENT_ALIAS_SET
+
+
+def _serialize_full_pipeline_state(state: CompositionState, *, requested_component: Any) -> _FullPipelineStatePayload:
+    """Serialize the full state and expose accepted full-state spellings."""
+    return {
+        "source": _serialize_source(state.source) if state.source is not None else None,
+        "nodes": [_serialize_node(n) for n in state.nodes],
+        "outputs": [_serialize_output(o) for o in state.outputs],
+        "edges": [_serialize_edge(e) for e in state.edges],
+        "metadata": {"name": state.metadata.name, "description": state.metadata.description},
+        "version": state.version,
+        "inspection": {
+            "requested_component": requested_component,
+            "resolved_component": "full",
+            "accepted_full_state_aliases": list(_FULL_STATE_COMPONENT_ALIASES),
+        },
+    }
+
+
+def _execute_get_pipeline_state(
+    args: dict[str, Any],
+    state: CompositionState,
+    catalog: CatalogService,
+    data_dir: str | None = None,
+) -> ToolResult:
+    """Return full pipeline state including all options.
+
+    If ``component`` is specified, returns only that component's details.
+    Otherwise returns the full state: source, all nodes with options, all
+    outputs with options, edges, and metadata.
+    """
+    component = args.get("component")
+
+    if component == "source":
+        data: Any = {"source": _serialize_source(state.source) if state.source is not None else None}
+    elif component is not None:
+        # Try node, then output
+        node = next((n for n in state.nodes if n.id == component), None)
+        if node is not None:
+            data = {"node": _serialize_node(node)}
+        else:
+            output = next((o for o in state.outputs if o.name == component), None)
+            if output is not None:
+                data = {"output": _serialize_output(output)}
+            elif _is_full_state_component_alias(component):
+                data = _serialize_full_pipeline_state(state, requested_component=component)
+            else:
+                return _failure_result(
+                    state,
+                    f"Component '{component}' not found. Specify 'source', a node ID, an output name, "
+                    "or a full-state alias ('full', 'all', 'pipeline', or empty string).",
+                )
+    else:
+        data = _serialize_full_pipeline_state(state, requested_component=None)
+
+    data = redact_source_storage_path(data)
+    return _discovery_result(state, data)
+
+
+def _authoring_validation_payload(state: CompositionState, validation: ValidationSummary) -> dict[str, Any]:
+    return {
+        "is_valid": validation.is_valid,
+        "errors": [e.to_dict() for e in validation.errors],
+        "warnings": [e.to_dict() for e in validation.warnings],
+        "suggestions": [e.to_dict() for e in validation.suggestions],
+        "edge_contracts": [ec.to_dict() for ec in validation.edge_contracts],
+        "semantic_contracts": _semantic_contracts_payload(validation.semantic_contracts),
+        "graph_repair_suggestions": _graph_repair_suggestions(state, validation),
+    }
+
+
+def _assert_affected_llm_node(
+    state: CompositionState,
+    affected_node_id: str,
+    user_term: str,
+) -> None:
+    """Tier-3 boundary check on the LLM-supplied ``affected_node_id``.
+
+    Raises :class:`ToolArgumentError` with an actionable message when:
+
+    * the node does not exist in ``state.nodes``;
+    * the node's plugin kind is not ``llm``;
+    * the node has neither a structured pending interpretation requirement
+      nor a legacy ``{{interpretation:<user_term>}}`` placeholder for
+      ``user_term``.
+
+    Each branch raises ARG_ERROR (not a Tier-1 crash) because the LLM is
+    expected to recover by calling ``upsert_node`` to add the placeholder
+    and re-staging the tool call. A crash here would conflate "LLM made
+    a recoverable mistake" with "we have a bug in our own code".
+
+    During the migration window this accepts structured
+    ``interpretation_requirements`` first and falls back to legacy placeholder
+    syntax. Term matching remains strict after stripping surrounding
+    whitespace.
+    """
+    node = next((n for n in state.nodes if n.id == affected_node_id), None)
+    if node is None:
+        known = sorted(n.id for n in state.nodes)
+        raise ToolArgumentError(
+            argument="affected_node_id",
+            expected=f"id of an existing LLM transform (known ids: {known!r})",
+            actual_type=f"unknown id {affected_node_id!r}",
+        )
+    plugin = node.plugin
+    if plugin != "llm":
+        raise ToolArgumentError(
+            argument="affected_node_id",
+            expected="id of a node whose plugin is 'llm'",
+            actual_type=f"node {affected_node_id!r} has plugin={plugin!r}",
+        )
+    options = node.options if node.options else {}
+    prompt_template = options.get("prompt_template") if isinstance(options, Mapping) else None
+    if not isinstance(prompt_template, str) or not prompt_template:
+        raise ToolArgumentError(
+            argument="affected_node_id",
+            expected=f"node {affected_node_id!r} to declare options.prompt_template (str) containing {{{{interpretation:{user_term}}}}}",
+            actual_type=f"options.prompt_template is {type(prompt_template).__name__}",
+        )
+    matched_terms = [term for node_id, term in interpretation_sites((node,)) if node_id == affected_node_id]
+    if user_term.strip() not in matched_terms:
+        raise ToolArgumentError(
+            argument="affected_node_id",
+            expected=(
+                f"node {affected_node_id!r} to contain a pending interpretation requirement or placeholder "
+                f"for {user_term!r} (found pending terms: {matched_terms!r})"
+            ),
+            actual_type="missing interpretation requirement or placeholder",
+        )
+
+
+def _detect_unresolved_interpretation_placeholders(nodes: Mapping[str, Any]) -> list[str]:
+    """Return the list of terms with unresolved ``{{interpretation:…}}`` placeholders.
+
+    F-17 runtime detector — invoked at the boundary between composition and
+    execution. ``nodes`` is a mapping of node-id to a node dict whose
+    ``options.prompt_template`` field is inspected. Non-LLM nodes are
+    skipped. The return value is a list of placeholder terms (deduplicated
+    by insertion order); an empty list means the pipeline is safe to
+    execute.
+
+    Standalone (no compose-loop state) so the helper is testable in
+    isolation. Production callers (the executor / preview path) raise
+    ``RuntimeError`` and emit the
+    ``interpretation_placeholder_unresolved_at_runtime`` operational
+    telemetry signal with each ``node_id`` and ``term`` (NOT the prompt
+    template value — that may carry user content).
+    """
+    unresolved: dict[str, None] = {}  # ordered set
+    for node in nodes.values():
+        if not isinstance(node, Mapping):
+            continue
+        if node.get("kind") != "llm":
+            continue
+        options = node.get("options")
+        prompt_template = options.get("prompt_template") if isinstance(options, Mapping) else None
+        if not isinstance(prompt_template, str):
+            continue
+        for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template):
+            unresolved[match.group(1).strip()] = None
+    return list(unresolved.keys())
+
+
+def _detect_unresolved_interpretation_placeholders_typed(
+    nodes: Sequence[NodeSpec],
+) -> list[tuple[str, str]]:
+    """Return (node_id, term) tuples for every unresolved interpretation site.
+
+    F-17 runtime detector — typed sibling of
+    :func:`_detect_unresolved_interpretation_placeholders` that operates
+    directly on ``CompositionState.nodes`` (a ``Sequence[NodeSpec]``). It
+    accepts both structured pending interpretation requirements and legacy
+    ``{{interpretation:…}}`` placeholders during the migration window.
+
+    Each unresolved site produces exactly one tuple per
+    ``(node_id, term)`` pair, deduplicated within a node by insertion
+    order so a repeated placeholder or requirement in one node does not
+    inflate telemetry / error surface area.  Cross-node duplicates ARE
+    preserved (the same ``term`` on two different nodes is two distinct
+    unresolved sites).
+
+    The return type is a ``list`` (not a ``tuple``) to match the
+    dict-shaped sibling and the spec at
+    ``docs/composer/ux-redesign-2026-05/18a-phase-5b-backend.md`` §F-17
+    (``list[str]`` of terms, lifted to ``list[tuple[str, str]]`` here
+    because the typed call site needs the ``node_id`` for both the
+    telemetry attribute and the user-actionable error message).
+    """
+    for node in nodes:
+        if node.plugin != "llm":
+            continue
+        if "prompt_template" not in node.options:
+            continue
+        prompt_template = node.options["prompt_template"]
+        if not isinstance(prompt_template, str):
+            raise ToolArgumentError(
+                argument="nodes[].options.prompt_template",
+                expected="a string",
+                actual_type=type(prompt_template).__name__,
+            )
+    return list(interpretation_sites(tuple(nodes)))
+
+
+RATE_CAP_PER_TERM_CODE: Final[str] = "RATE_CAP_PER_TERM"
+
+RATE_CAP_PER_SESSION_DAY_CODE: Final[str] = "RATE_CAP_PER_SESSION_DAY"
+
+RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        RATE_CAP_PER_TERM_CODE: "per_term",
+        RATE_CAP_PER_SESSION_DAY_CODE: "per_session_day",
+    }
+)
+
+
+def _utc_day_start(now: datetime) -> datetime:
+    """Return the UTC-midnight start of the calendar day containing ``now``.
+
+    F-30 fixed-window helper. The rate-limit window is the *calendar day in
+    UTC*, not a sliding 24-hour window — simpler for operators to reason
+    about and produces predictable reset behaviour ("the counter resets at
+    UTC midnight"). The caller compares ``event.created_at >= utc_day_start(now)``.
+    """
+    aware_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    aware_now_utc = aware_now.astimezone(UTC)
+    return aware_now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+async def _check_interpretation_rate_limits(
+    *,
+    session_id: UUID,
+    user_term: str,
+    composition_state_id: UUID,
+    list_events_fn: Callable[..., Awaitable[list[InterpretationEventRecord]]],
+    per_term_cap: int,
+    per_session_day_cap: int,
+    now: datetime,
+) -> None:
+    """Enforce the two per-session interpretation-review rate limits (F-30/F-31).
+
+    Two structural limits apply, in order:
+
+    1. **Per-term cap (default 3):** the same ``(session_id, user_term)`` pair,
+       scoped to the active ``composition_state_id`` branch, may be surfaced
+       at most ``per_term_cap`` times before the LLM must fall back to
+       AUTO_INTERPRETED_NO_SURFACES. Counted against rows that are NOT
+       AUTO_INTERPRETED_OPT_OUT shape (those have NULL ``user_term``) and
+       whose ``composition_state_id`` matches.
+
+    2. **Per-session-day cap (default 10):** the session may make at most
+       ``per_session_day_cap`` ``request_interpretation_review`` invocations
+       per UTC calendar day. The window starts at UTC midnight (NOT a
+       sliding 24-hour window) so the reset behaviour is predictable.
+
+    On cap exceeded: raises :class:`ToolArgumentError`. The compose loop
+    catches this and is expected (per the composer skill) to fall back to
+    a non-LLM interpretation with ``interpretation_source =
+    'auto_interpreted_no_surfaces'``.
+
+    Async because ``list_events_fn`` (the injected
+    ``list_interpretation_events`` service method) is async — it reads the
+    session DB. A sync helper would force a blocking ``asyncio.run(...)``
+    inside an already-async caller, which deadlocks.
+
+    The cap values are injected as kwargs (not read from settings inside
+    the helper) so this function is testable without a live settings
+    object. Production callers thread ``WebSettings.composer_interpretation_*``
+    in.
+    """
+    events = await list_events_fn(session_id, status="all")
+    # Per-term cap — count rows for this composition branch with matching user_term.
+    per_term_count = sum(
+        1
+        for event in events
+        if event.composition_state_id == composition_state_id and event.user_term is not None and event.user_term == user_term
+    )
+    if per_term_count >= per_term_cap:
+        raise ToolArgumentError(
+            argument="user_term",
+            expected=f"at most {per_term_cap} interpretation requests per term in this composition",
+            actual_type=(
+                f"term {user_term!r} would be surfaced {per_term_count + 1} times — use a direct "
+                f"interpretation in the prompt template instead"
+            ),
+            # Compose-loop discriminant (F-6): the rate-cap branch is the
+            # trigger for the
+            # AUTO_INTERPRETED_NO_SURFACES writer + F-15 telemetry. The
+            # ``code`` field lets the loop distinguish this exception from a
+            # generic ARG_ERROR without grepping the message string.
+            code=RATE_CAP_PER_TERM_CODE,
+        )
+    # Per-session-day cap — UTC-midnight fixed window. Only rows with
+    # populated ``user_term`` (i.e. not opt-out skeletons) count toward the
+    # invocation budget; opt-out is a different action with its own row.
+    day_start = _utc_day_start(now)
+    per_day_count = sum(1 for event in events if event.user_term is not None and event.created_at >= day_start)
+    if per_day_count >= per_session_day_cap:
+        raise ToolArgumentError(
+            argument="user_term",
+            expected=f"at most {per_session_day_cap} interpretation requests per session per UTC day",
+            actual_type=(
+                f"session would record {per_day_count + 1} requests today — the compose loop should "
+                f"fall back to auto-interpretation (AUTO_INTERPRETED_NO_SURFACES)"
+            ),
+            # See per-term cap above for the ``code`` field rationale.
+            code=RATE_CAP_PER_SESSION_DAY_CODE,
+        )
+
+
+async def _handle_request_interpretation_review(
+    arguments: object,
+    state: CompositionState,
+    *,
+    session_id: UUID,
+    composition_state_id: UUID,
+    tool_call_id: str,
+    now: datetime,
+    per_term_cap: int,
+    per_session_day_cap: int,
+    model_identifier: str,
+    model_version: str,
+    provider: str,
+    composer_skill_hash: str,
+    create_pending_interpretation_event: Callable[..., Awaitable[InterpretationEventRecord]],
+    list_interpretation_events: Callable[..., Awaitable[list[InterpretationEventRecord]]],
+) -> ToolResult:
+    """Stage a pending interpretation event for user review.
+
+    Returns a SUCCESS :class:`ToolResult` whose ``data`` payload signals
+    the frontend to surface the review affordance. Does NOT advance
+    composition state version — state mutation happens at /resolve time
+    when the user accepts or amends the draft.
+
+    Async because it awaits the injected service methods. Registered in
+    :data:`_SESSION_AWARE_TOOL_HANDLERS` (NOT the synchronous
+    :data:`_MUTATION_TOOLS` registry — see the dual-registry invariant
+    documented at the registry block above).
+    """
+    parsed = cast(
+        _RequestInterpretationReviewArgumentsModel,
+        _validate_mutation_arguments(
+            _RequestInterpretationReviewArgumentsModel,
+            arguments,
+            "request_interpretation_review arguments",
+        ),
+    )
+    # F-34 credential prefilter: Tier-3 boundary check before any DB write.
+    # ``_reject_credential_shaped_content`` raises ``ValueError``; we wrap
+    # as ToolArgumentError so the compose loop's ARG_ERROR routing catches
+    # it (a bare ValueError would land in the plugin-crash catch-all and
+    # mis-classify the failure as a Tier-1 plugin bug).
+    for field_name, field_value in (("user_term", parsed.user_term), ("llm_draft", parsed.llm_draft)):
+        try:
+            _reject_credential_shaped_content(field_value)
+        except ValueError as exc:
+            raise ToolArgumentError(
+                argument=field_name,
+                expected="content that does not match a known credential shape",
+                actual_type="credential-shaped content rejected at the tool boundary",
+            ) from exc
+    # F-2 prompt-injection guard on llm_draft. Applied BEFORE the DB write
+    # so a poisoned draft (e.g. ``{{system:override}}``) cannot enter the
+    # audit row and reach the accepted_as_drafted resolution path where it
+    # would be embedded directly into the prompt template.
+    try:
+        _validate_accepted_value_content(parsed.llm_draft)
+    except ValueError as exc:
+        raise ToolArgumentError(
+            argument="llm_draft",
+            expected="content without template metacharacters, control characters, or credential patterns",
+            actual_type="rejected by accepted-value content validator",
+        ) from exc
+    # Rate-limit gate. Cap-exceeded raises ToolArgumentError; the compose
+    # loop is expected to react by writing an AUTO_INTERPRETED_NO_SURFACES
+    # event (handled in service.py — see ``record_auto_interpreted_no_surfaces_event``).
+    await _check_interpretation_rate_limits(
+        session_id=session_id,
+        user_term=parsed.user_term,
+        composition_state_id=composition_state_id,
+        list_events_fn=list_interpretation_events,
+        per_term_cap=per_term_cap,
+        per_session_day_cap=per_session_day_cap,
+        now=now,
+    )
+    # Tier-3 boundary check on the LLM-supplied affected_node_id. Three
+    # branches (missing node / wrong kind / missing placeholder) all raise
+    # ARG_ERROR so the LLM can retry after fixing the prompt template.
+    _assert_affected_llm_node(state, parsed.affected_node_id, parsed.user_term)
+    # Persist the pending row. The service method re-validates affected_node_id
+    # under the session write lock (defence in depth — the compose-state could
+    # in principle race with another writer; the service is the authoritative
+    # consistency gate).
+    event = await create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=composition_state_id,
+        affected_node_id=parsed.affected_node_id,
+        tool_call_id=tool_call_id,
+        user_term=parsed.user_term,
+        llm_draft=parsed.llm_draft,
+        model_identifier=model_identifier,
+        model_version=model_version,
+        provider=provider,
+        composer_skill_hash=composer_skill_hash,
+    )
+    if event.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT:
+        return ToolResult(
+            success=True,
+            updated_state=state,
+            validation=state.validate(),
+            affected_nodes=(),
+            data={
+                "_kind": "interpretation_review_suppressed_by_opt_out",
+                "event_id": str(event.id),
+                "interpretation_review_disabled": True,
+                "message": "Interpretation review suppressed because this session has opted out.",
+            },
+        )
+    return ToolResult(
+        success=True,
+        updated_state=state,  # no state change yet — /resolve advances version
+        validation=state.validate(),
+        affected_nodes=(parsed.affected_node_id,),
+        data={
+            "_kind": "interpretation_review_pending",
+            "event_id": str(event.id),
+            "affected_node_id": parsed.affected_node_id,
+            "user_term": parsed.user_term,
+            "llm_draft": parsed.llm_draft,
+            "message": (
+                f"Interpretation review staged for '{parsed.user_term}'. "
+                f"Waiting for user acceptance/amendment before the pipeline can finalise."
+            ),
+        },
+    )
+
+
+SessionAwareToolHandler = Callable[..., Awaitable[ToolResult]]
+
+
+_SESSION_AWARE_TOOL_HANDLERS: dict[str, SessionAwareToolHandler] = {
+    "request_interpretation_review": _handle_request_interpretation_review,
+}
+
+
+def is_session_aware_tool(name: str) -> bool:
+    """Return True if the tool requires async dispatch with session context.
+
+    Session-aware tools are intercepted in the compose loop BEFORE
+    ``execute_tool`` is called — they cannot be dispatched through the
+    synchronous worker because they await session-service methods.
+    """
+    return name in _SESSION_AWARE_TOOL_HANDLERS

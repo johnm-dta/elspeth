@@ -13,7 +13,7 @@ ADR-001's original decision spans **two distinct concurrency axes**, and
 subsequent ADRs amend them independently:
 
 1. **Source-iteration axis** — within a run, how many sources does the
-   orchestrator pull from in parallel? Original ADR-001 answer:
+   orchestrator pull from in parallel? Original ADR-001 answer (implicit):
    one-at-a-time, sequential. Preserved by ADR-025 (multi-source
    ingestion); the plural source surface does not commit to concurrent
    iteration. Concurrent multi-source iteration would require a separate

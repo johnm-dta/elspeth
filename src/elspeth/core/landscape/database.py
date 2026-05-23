@@ -14,8 +14,44 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.journal import LandscapeJournal
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+
+# Canonical SQLite PRAGMA invariants for the Landscape audit DB.
+#
+# Tier-1 doctrine: the audit DB is the legal record. If SQLite doesn't accept
+# any of these PRAGMAs, the crash-safety / concurrency guarantees the audit
+# subsystem depends on are unmet and we MUST refuse to open the database.
+#
+# - journal_mode=WAL — file-backed DBs MUST run in WAL mode (better
+#   concurrency, fsync-on-checkpoint instead of fsync-per-write).  SQLite
+#   silently downgrades to 'memory' for ``:memory:`` databases (WAL has no
+#   meaning without an on-disk journal file); the probe accepts that.
+# - synchronous=NORMAL — paired with WAL, this is the canonical
+#   write-heavy crash-safe shape: durable across application crashes and
+#   sufficiently durable across OS crashes when fsync semantics are honoured
+#   by the filesystem.  FULL is slower without meaningful added durability
+#   under WAL.  See https://www.sqlite.org/pragma.html#pragma_synchronous
+# - foreign_keys=ON — referential integrity is mandatory for the audit
+#   schema (run_id / token_id / node_id FKs must enforce).
+# - busy_timeout=5000 ms — tolerate brief contention between recorders
+#   without surfacing SQLITE_BUSY to the caller.
+_SQLITE_PRAGMA_INVARIANTS_FILE: tuple[tuple[str, str], ...] = (
+    ("journal_mode", "wal"),
+    ("synchronous", "1"),
+    ("foreign_keys", "1"),
+    ("busy_timeout", "5000"),
+)
+_SQLITE_PRAGMA_INVARIANTS_MEMORY: tuple[tuple[str, str], ...] = (
+    # ``:memory:`` databases have no on-disk journal file; SQLite reports
+    # ``journal_mode=memory`` regardless of what we requested.  That is
+    # the only sanctioned deviation from the file-backed contract.
+    ("journal_mode", "memory"),
+    ("synchronous", "1"),
+    ("foreign_keys", "1"),
+    ("busy_timeout", "5000"),
+)
 
 
 class SchemaCompatibilityError(Exception):
@@ -312,6 +348,12 @@ class LandscapeDB:
                 LandscapeDB._configure_sqlite(self._engine)
         if self._journal is not None:
             self._journal.attach(self._engine)
+        # Tier-1: probe the SQLite PRAGMAs we just configured — if any
+        # didn't take effect, the audit DB does not meet the durability /
+        # concurrency contract and we MUST refuse to open it.  Skipped for
+        # non-SQLite backends (PostgreSQL has no equivalent surface here).
+        if self._engine is not None and self.connection_string.startswith("sqlite"):
+            LandscapeDB._verify_sqlite_pragmas(self._engine, self.connection_string)
 
     @staticmethod
     def _configure_sqlite(engine: Engine) -> None:
@@ -319,11 +361,16 @@ class LandscapeDB:
 
         Registers a connection event hook that sets:
         - PRAGMA journal_mode=WAL (better concurrency)
+        - PRAGMA synchronous=NORMAL (canonical WAL crash-safety shape)
         - PRAGMA foreign_keys=ON (referential integrity)
         - PRAGMA busy_timeout=5000 (contention tolerance)
 
         For SQLCipher engines, these PRAGMAs execute AFTER the creator callback
         returns (where PRAGMA key is issued), preserving the required ordering.
+
+        The values set here MUST stay aligned with the invariants enforced by
+        :meth:`_verify_sqlite_pragmas`; the probe is the audit-integrity gate
+        that fails the database open if SQLite ever refuses to honour them.
 
         Args:
             engine: SQLAlchemy Engine to configure
@@ -334,11 +381,70 @@ class LandscapeDB:
             cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]  # SQLAlchemy event passes DBAPI connection (has .cursor()) typed as object
             # Enable WAL mode for better concurrency
             cursor.execute("PRAGMA journal_mode=WAL")
+            # synchronous=NORMAL is the canonical pairing with WAL: durable
+            # across app crashes, sufficiently durable across OS crashes,
+            # without the per-write fsync overhead of FULL.
+            cursor.execute("PRAGMA synchronous=NORMAL")
             # Enable foreign key enforcement
             cursor.execute("PRAGMA foreign_keys=ON")
             # Set busy timeout to avoid immediate SQLITE_BUSY errors under contention
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
+
+    @staticmethod
+    def _verify_sqlite_pragmas(engine: Engine, connection_string: str) -> None:
+        """Probe SQLite to confirm the configured PRAGMAs actually took effect.
+
+        Opens a connection (which triggers the ``connect`` event hook that
+        applies the PRAGMAs), then reads each PRAGMA back and asserts the
+        value matches the invariant.  Any mismatch raises
+        :class:`AuditIntegrityError` — Tier-1 doctrine: the audit DB cannot
+        proceed with weaker durability/concurrency guarantees than the audit
+        subsystem was designed against.
+
+        SQLite silently downgrades ``journal_mode`` to ``memory`` for
+        ``:memory:`` databases (WAL requires an on-disk journal file); the
+        probe selects the file-backed or memory-backed invariant set from
+        the connection string.
+
+        Args:
+            engine: SQLAlchemy Engine configured by :meth:`_configure_sqlite`.
+            connection_string: Original connection string, used to decide
+                whether ``journal_mode=memory`` is acceptable.
+
+        Raises:
+            AuditIntegrityError: If any PRAGMA reports a value other than
+                what :meth:`_configure_sqlite` requested.  The message names
+                the PRAGMA, the expected value, and the observed value so
+                operators can diagnose without needing to re-instrument.
+        """
+        # Resolve invariants once — :memory: is a single sanctioned deviation.
+        url = make_url(connection_string)
+        is_memory = url.database is None or url.database == ":memory:"
+        invariants = _SQLITE_PRAGMA_INVARIANTS_MEMORY if is_memory else _SQLITE_PRAGMA_INVARIANTS_FILE
+
+        with engine.connect() as conn:
+            observed: dict[str, str] = {}
+            for pragma, _expected in invariants:
+                # PRAGMA names are static (literal table above), not user
+                # input — f-string interpolation is safe here.
+                result = conn.exec_driver_sql(f"PRAGMA {pragma}").scalar_one_or_none()
+                observed[pragma] = "" if result is None else str(result).lower()
+
+        mismatches: list[str] = []
+        for pragma, expected in invariants:
+            actual = observed[pragma]
+            if actual != expected.lower():
+                mismatches.append(f"PRAGMA {pragma}: expected {expected!r}, observed {actual!r}")
+
+        if mismatches:
+            # Audit DB cannot proceed with degraded guarantees.  Tier-1:
+            # raise immediately, do not attempt remediation.  The message
+            # avoids the connection string (path may be sensitive) but
+            # names every offending PRAGMA so the operator can act.
+            raise AuditIntegrityError(
+                "Landscape SQLite PRAGMA invariants violated at engine startup; audit-integrity guarantees unmet. " + "; ".join(mismatches)
+            )
 
     @staticmethod
     def _create_sqlcipher_engine(url: str, passphrase: str) -> Engine:
@@ -749,6 +855,7 @@ class LandscapeDB:
         """
         engine = create_engine("sqlite:///:memory:", echo=False)
         cls._configure_sqlite(engine)
+        cls._verify_sqlite_pragmas(engine, "sqlite:///:memory:")
         metadata.create_all(engine)
         instance = cls._from_parts("sqlite:///:memory:", engine)
         instance._sync_sqlite_schema_epoch()
@@ -787,11 +894,14 @@ class LandscapeDB:
         if passphrase is not None:
             engine = cls._create_sqlcipher_engine(url, passphrase)
             cls._configure_sqlite(engine)
+            # Tier-1 PRAGMA probe — see _verify_sqlite_pragmas docstring.
+            cls._verify_sqlite_pragmas(engine, url)
         else:
             engine = create_engine(url, echo=False)
             # SQLite-specific configuration
             if url.startswith("sqlite"):
                 cls._configure_sqlite(engine)
+                cls._verify_sqlite_pragmas(engine, url)
 
         journal: LandscapeJournal | None = None
         if dump_to_jsonl:

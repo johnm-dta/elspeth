@@ -42,6 +42,48 @@ interleave at line boundaries (Python writes are atomic for buffered
 text under POSIX) but a non-trailer-marked sidecar with two interleaved
 sequences of outcomes is not reconstructable in any meaningful way —
 the lock is the simpler, correct answer.
+
+Resume TOCTOU (T6c): ``--resume`` validation (load + trailer check +
+header drift check) MUST happen inside the flock window — splitting
+validate-then-acquire-lock allows two concurrent ``--resume`` processes
+to both pass validation, then serialise on the flock, then both append
+outcomes (the second past the first's trailer). The writer therefore
+accepts an optional ``resume_validate`` callback that runs after the
+exclusive lock is held; the CLI no longer touches the sidecar file
+before entering the writer context.
+
+Tail-truncation recovery (T6c, CRITICAL): a SIGKILL between the writer's
+``write()`` and the next ``flush()``+``fsync()`` can leave the sidecar
+with N complete lines + 1 partial final line (no trailing newline). The
+loader distinguishes:
+
+* **Tail truncation** — last line fails JSON parse AND the file does
+  not end with ``\\n``. Treat as "process killed mid-write", log a
+  structured warning to stderr naming the byte offset, return the prior
+  complete outcomes. ``--render-incomplete`` then surfaces the recovered
+  view; ``--resume`` continues from the next entry. The dead in-flight
+  entry will be re-classified on resume.
+* **Mid-file corruption** — a non-last line fails to parse, or the
+  trailing-newline-test indicates the partial line is followed by more
+  bytes. Tier-1 corruption: crash with ``SidecarCorruptError`` carrying
+  line number + byte offset. Hand-editing, kernel page-cache
+  inconsistency, or filesystem damage — operator-actionable, not
+  recoverable.
+
+This is the deliberate exception to "crash on Tier-1 corruption" carved
+out by the sidecar's whole purpose. It is bounded to ``JSONDecodeError``
+on the LAST line of a no-trailing-newline file; lines that parse JSON
+but fail structured validation (``_outcome_from_dict`` raising) stay
+sweep-fatal even on the last line — evidence corruption looking like a
+valid prefix is still corruption.
+
+Retention (T6c): sidecars with a trailer (completed sweeps) are deleted
+lazily by ``SidecarWriter.__enter__`` when older than
+:data:`COMPLETED_SIDECAR_RETENTION_DAYS`. Sidecars WITHOUT a trailer are
+recoverable Tier-1 data and stay forever — they survive until the
+operator either ``--resume``\\ s them to completion or starts a fresh
+sweep. The cleanup acquires LOCK_NB before touching each candidate so an
+in-progress resume on a stale-mtime sidecar is never raced.
 """
 
 from __future__ import annotations
@@ -50,8 +92,10 @@ import fcntl
 import hashlib
 import json
 import os
+import sys
+import time
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -74,6 +118,14 @@ from elspeth_lints.core.reaudit import (
 SIDECAR_SCHEMA_VERSION = 2  # v2: outcome records carry excerpt_redactions (closes elspeth-ebb2b88753 / C2-2 on sidecar trail)
 
 SIDECAR_DIRNAME = ".reaudit-state"
+
+# Lazy-cleanup horizon for COMPLETED sweeps (trailer present). Sidecars
+# without a trailer are recoverable Tier-1 data and stay forever — only
+# the operator (via --resume → completion, or by deleting the run_id)
+# can retire them. 30 days mirrors the project's observation-expiry
+# window: long enough to outlast a post-incident audit cycle, short
+# enough that a routine reaudit cadence keeps the directory bounded.
+COMPLETED_SIDECAR_RETENTION_DAYS = 30
 
 
 # =========================================================================
@@ -108,14 +160,17 @@ def compute_allowlist_hash(allowlist_dir: Path) -> str:
     crashes — the operator must either revert the allowlist edit or
     start a fresh sweep.
 
-    Files are walked in sorted order (lexicographic on filename) so the
-    hash is deterministic across filesystems. Only top-level files
-    matching ``*.yaml`` are included; subdirectories are recursed but
-    the sidecar's own ``.reaudit-state/`` directory is excluded (its
-    contents would otherwise self-modify the hash mid-sweep).
+    Files are walked in sorted order (lexicographic on relative path)
+    so the hash is deterministic across filesystems. Both ``*.yaml`` and
+    ``*.yml`` are included — YAML's permitted suffixes per the YAML 1.2
+    media-type registration, and operator-authored allowlist files in
+    the wild do appear under both. The sidecar's own ``.reaudit-state/``
+    directory is excluded (its contents would otherwise self-modify the
+    hash mid-sweep).
     """
     hasher = hashlib.sha256()
-    for path in sorted(allowlist_dir.rglob("*.yaml")):
+    candidates = list(allowlist_dir.rglob("*.yaml")) + list(allowlist_dir.rglob("*.yml"))
+    for path in sorted(candidates, key=lambda p: p.relative_to(allowlist_dir).as_posix()):
         if SIDECAR_DIRNAME in path.parts:
             continue
         rel = path.relative_to(allowlist_dir).as_posix()
@@ -191,17 +246,42 @@ class SidecarWriter:
     The file is opened with ``flock(LOCK_EX | LOCK_NB)`` so a second
     process targeting the same ``run_id`` fails immediately with a
     clear error. The lock is released on context exit (either path).
+
+    Resume mode (T6c TOCTOU fix): when ``append=True``, the caller may
+    supply ``on_resume_locked`` — a callback that runs *inside* the
+    flock-held window, after the lock is acquired but before any append
+    occurs. The callback receives the :class:`LoadedSidecar` parsed
+    from the file under the lock. This eliminates the validate-then-
+    acquire-lock race in which two concurrent ``--resume`` processes
+    both pass validation, serialise on the lock, then both append past
+    each other's trailers. With the callback running under the lock,
+    only one resume can validate at a time.
     """
 
-    def __init__(self, sidecar_path: Path, header: SidecarHeader, *, append: bool = False) -> None:
+    def __init__(
+        self,
+        sidecar_path: Path,
+        header: SidecarHeader,
+        *,
+        append: bool = False,
+        on_resume_locked: Callable[[LoadedSidecar], None] | None = None,
+    ) -> None:
+        if on_resume_locked is not None and not append:
+            raise ValueError("on_resume_locked is only meaningful with append=True; a fresh sweep has no prior sidecar to validate.")
         self._sidecar_path = sidecar_path
         self._header = header
         self._append = append
+        self._on_resume_locked = on_resume_locked
         self._file: Any = None  # set in __enter__
         self._outcomes_written = 0
 
     def __enter__(self) -> Self:
         self._sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        # Retention runs OUTSIDE the per-run flock — it acquires its own
+        # LOCK_NB on each candidate so an in-progress resume on a stale-
+        # mtime sidecar is never raced. Best-effort: failures don't
+        # block the sweep.
+        _prune_expired_completed_sidecars(self._sidecar_path.parent)
         mode = "a" if self._append else "x"
         try:
             self._file = self._sidecar_path.open(mode, encoding="utf-8")
@@ -222,6 +302,20 @@ class SidecarWriter:
                 "supported because their outcome lines would interleave into "
                 "an unreconstructable JSONL stream."
             ) from exc
+        if self._on_resume_locked is not None:
+            try:
+                loaded = load_sidecar(self._sidecar_path)
+                self._on_resume_locked(loaded)
+            except BaseException:
+                # Validation rejected the resume (or load found
+                # corruption). Release the lock + fd before re-raising so
+                # the operator's retry sees a clean state.
+                try:
+                    fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+                finally:
+                    self._file.close()
+                    self._file = None
+                raise
         if not self._append:
             self._write_line(_header_to_dict(self._header))
         return self
@@ -310,17 +404,50 @@ def load_sidecar(sidecar_path: Path) -> LoadedSidecar:
     Crashes on:
     * file missing
     * empty file (missing header)
-    * malformed JSON on any line
+    * malformed JSON on any non-final line, OR a final line followed by
+      bytes (impossible in append-only design but defended against)
     * line missing ``type`` discriminant
+    * structured validation failure on any outcome / header / trailer
+      payload (even if the JSON parses)
     * header schema_version != SIDECAR_SCHEMA_VERSION
     * trailer ``run_id`` mismatch with header
     * more than one header or trailer
+
+    RECOVERS from (T6c CRITICAL): the LAST line failing JSON parse when
+    the file does NOT end with a newline. Treats this as "process killed
+    between write() and the next flush()+fsync()" and:
+
+    * Logs a structured warning to stderr naming the byte offset of the
+      truncated line and the recovered-outcome count
+    * Returns ``LoadedSidecar`` with the prior complete outcomes; no
+      trailer, no in-flight outcome
+    * The in-flight entry whose write was killed is dropped — resume
+      will re-classify it (its key was never added to
+      ``classified_keys``); ``--render-incomplete`` will report it via
+      ``entries_dispatched < total_entries``
+
+    The recovery path is bounded to ``JSONDecodeError`` on the final line
+    of a file missing its terminating newline. Lines that JSON-parse but
+    fail structured validation stay sweep-fatal even on the last line —
+    evidence corruption that looks like a valid prefix is still
+    corruption.
     """
     if not sidecar_path.exists():
         raise SidecarCorruptError(f"sidecar {sidecar_path} does not exist")
-    text = sidecar_path.read_text(encoding="utf-8")
-    raw_lines = [line for line in text.splitlines() if line.strip()]
-    if not raw_lines:
+    raw_bytes = sidecar_path.read_bytes()
+    if not raw_bytes:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} is empty (no header line)")
+    text = raw_bytes.decode("utf-8")
+    # The writer's discipline (line + "\n" → flush → fsync, all in
+    # _write_line) guarantees every COMPLETE line ends in "\n". Absence
+    # of a trailing newline therefore implies the final line was being
+    # written when the process died.
+    ends_with_newline = text.endswith("\n")
+    # keepends=True so we can compute per-line byte offsets for the
+    # truncation warning. Empty / whitespace-only entries are skipped at
+    # the consumption site below.
+    raw_lines_with_eol = text.splitlines(keepends=True)
+    if not raw_lines_with_eol:
         raise SidecarCorruptError(f"sidecar {sidecar_path} is empty (no header line)")
 
     header: SidecarHeader | None = None
@@ -328,11 +455,37 @@ def load_sidecar(sidecar_path: Path) -> LoadedSidecar:
     outcomes: list[ReauditOutcome] = []
     classified_keys: set[str] = set()
 
-    for line_no, raw in enumerate(raw_lines, start=1):
+    last_index = len(raw_lines_with_eol) - 1
+    running_offset = 0
+    for line_index, raw_with_eol in enumerate(raw_lines_with_eol):
+        line_no = line_index + 1
+        line_offset = running_offset
+        running_offset += len(raw_with_eol.encode("utf-8"))
+        raw = raw_with_eol.rstrip("\n")
+        if not raw.strip():
+            continue
+        is_last_line = line_index == last_index
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: malformed JSON: {exc}") from exc
+            if is_last_line and not ends_with_newline:
+                # T6c recovery — partial last line from SIGKILL between
+                # write() and flush()+fsync(). The in-flight outcome is
+                # lost; everything written before it is durable. Log to
+                # stderr (operational visibility for the operator-driven
+                # --resume / --render-incomplete decision) and return the
+                # prior complete state.
+                sys.stderr.write(
+                    f"reaudit sidecar {sidecar_path}: partial final line "
+                    f"detected at byte offset {line_offset} "
+                    f"(no trailing newline; JSON parse failed: {exc}). "
+                    "Treating as 'process killed mid-write'; the in-flight "
+                    "outcome is dropped and will be re-classified on "
+                    f"--resume. {len(outcomes)} prior complete outcome(s) "
+                    "recovered.\n"
+                )
+                break
+            raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no} (byte offset {line_offset}): malformed JSON: {exc}") from exc
         if not isinstance(payload, dict):
             raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: expected JSON object, got {type(payload).__name__}")
         line_type = payload.get("type")
@@ -371,6 +524,52 @@ def load_sidecar(sidecar_path: Path) -> LoadedSidecar:
         trailer=trailer,
         classified_keys=frozenset(classified_keys),
     )
+
+
+def _prune_expired_completed_sidecars(sidecar_dir: Path) -> None:
+    """Delete completed sidecars older than ``COMPLETED_SIDECAR_RETENTION_DAYS``.
+
+    Called by :class:`SidecarWriter.__enter__` for lazy cleanup. Only
+    sidecars with a trailer (completed sweeps) are eligible — incomplete
+    sidecars are recoverable Tier-1 data and stay until the operator
+    finishes or abandons them.
+
+    Each candidate is gated by ``LOCK_NB`` on its own fd so an
+    in-progress resume on a stale-mtime sidecar is never raced. Best-
+    effort: any error on a single candidate is silently skipped (the
+    sweep itself must not be blocked by cleanup of an unrelated file).
+    """
+    if not sidecar_dir.exists():
+        return
+    horizon_seconds = COMPLETED_SIDECAR_RETENTION_DAYS * 86400
+    now = time.time()
+    for candidate in sidecar_dir.glob("*.jsonl"):
+        try:
+            mtime = candidate.stat().st_mtime
+        except OSError:
+            continue
+        if now - mtime <= horizon_seconds:
+            continue
+        try:
+            with candidate.open("r", encoding="utf-8") as fp:
+                try:
+                    fcntl.flock(fp.fileno(), fcntl.LOCK_NB | fcntl.LOCK_EX)
+                except BlockingIOError:
+                    continue
+                try:
+                    loaded = load_sidecar(candidate)
+                finally:
+                    fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        except (OSError, SidecarCorruptError):
+            # A corrupt sidecar past the retention horizon is also
+            # operator-actionable, but cleanup is the wrong surface to
+            # crash on. Skip; the next direct load will surface it.
+            continue
+        if loaded.trailer is not None:
+            try:
+                candidate.unlink()
+            except OSError:
+                continue
 
 
 def report_from_loaded_sidecar(loaded: LoadedSidecar) -> ReauditReport:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -1633,30 +1634,336 @@ def test_t6b_runtime_error_outside_judge_call_still_propagates(tmp_path: Path) -
         )
 
 
-def test_t6b_concurrent_reaudit_on_same_run_id_rejected(
+def test_t6c_concurrent_resume_rejected_across_processes(
     tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """flock prevents two writers from corrupting the same sidecar.
+    """Two separate processes attempting --resume on the same run_id: only one wins.
 
-    The first writer holds LOCK_EX; a second SidecarWriter on the same
-    path fails fast with SidecarConflictError. This is the file-level
-    counterpart to "do not run two reaudits with the same run_id"; the
-    operator gets a clear error rather than an interleaved JSONL.
+    This is the cross-process counterpart to T6b's flock test (which
+    was single-process and only exercised per-OFD flock semantics
+    indirectly). The TOCTOU concern T6c closes is: two ``--resume``
+    invocations both pass validation (no flock yet), then serialise on
+    flock acquisition, then both append outcomes past each other's
+    trailers. With validation pulled inside the flock window, only one
+    --resume can acquire the lock; the other fails fast.
+
+    Mechanism: subprocess.Popen (NOT multiprocessing) — pytest-xdist
+    workers and spawn-context multiprocessing have well-known pickling
+    pain around mocks and module-level state. A tiny inline Python
+    script that opens the sidecar + flocks it + waits on a sentinel
+    file is deterministic and free of those concerns.
+    """
+    import subprocess
+    import sys as _sys
+    import textwrap
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    # Pre-create an incomplete sidecar by running a sweep that aborts
+    # mid-loop. This gives us a real run_id for --resume to target.
+    ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = [ok_completion, KeyboardInterrupt()]
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+
+    from elspeth_lints.core.reaudit_sidecar import sidecar_path_for
+
+    sidecar_path = sidecar_path_for(allowlist_dir, run_id)
+    sentinel_ready = tmp_path / "child_holding_lock.sentinel"
+    sentinel_release = tmp_path / "child_may_release.sentinel"
+
+    # Process A: open sidecar, flock LOCK_EX | LOCK_NB, touch ready
+    # sentinel, then block on release sentinel. This faithfully
+    # represents the in-lock window the real SidecarWriter holds.
+    holder_script = textwrap.dedent(
+        f"""\
+        import fcntl
+        import pathlib
+        import time
+        path = pathlib.Path({str(sidecar_path)!r})
+        ready = pathlib.Path({str(sentinel_ready)!r})
+        release = pathlib.Path({str(sentinel_release)!r})
+        with path.open("a", encoding="utf-8") as fp:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            ready.touch()
+            deadline = time.time() + 30
+            while not release.exists() and time.time() < deadline:
+                time.sleep(0.05)
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        """
+    )
+    holder = subprocess.Popen([_sys.executable, "-c", holder_script])
+    try:
+        # Barrier: wait for child to confirm it holds the lock.
+        deadline = time.time() + 10.0
+        while not sentinel_ready.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        assert sentinel_ready.exists(), "subprocess A failed to acquire the sidecar lock"
+
+        # Process B (this process): attempt --resume. The TOCTOU fix
+        # means SidecarWriter.__enter__'s flock acquisition is the
+        # rejection point — IMMEDIATE, not delayed. The CLI surfaces
+        # SidecarConflictError (subclass of ReauditError) via exit 2 +
+        # the "locked by another process" stderr message.
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False):
+            rejection_start = time.time()
+            resume_exit = _run_cli_reaudit(
+                root=root,
+                allowlist_dir=allowlist_dir,
+                extra_args=["--resume", run_id],
+            )
+            rejection_elapsed = time.time() - rejection_start
+        rejection_err = capsys.readouterr().err
+        assert resume_exit == 2, f"expected exit 2 (ReauditError), got {resume_exit}"
+        # The CLI surfaces the conflict as a ReauditError ("reaudit
+        # error: ..."); the underlying class is SidecarConflictError.
+        assert "locked by another process" in rejection_err, f"expected lock-conflict message, got: {rejection_err!r}"
+        # Lock rejection is fail-fast — must NOT wait for holder.
+        assert rejection_elapsed < 5.0, f"rejection took {rejection_elapsed:.2f}s; LOCK_NB should reject immediately, not block"
+    finally:
+        sentinel_release.touch()
+        holder.wait(timeout=10)
+    assert holder.returncode == 0, f"holder process failed: returncode={holder.returncode}"
+
+    # Process C: holder is gone; --resume now succeeds (the
+    # sidecar is unlocked and validation passes).
+    ok_completion_c = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
+    fake_client_c = MagicMock()
+    fake_client_c.chat.completions.create.return_value = ok_completion_c
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client_c),
+    ):
+        success_exit = _run_cli_reaudit(
+            root=root,
+            allowlist_dir=allowlist_dir,
+            extra_args=["--resume", run_id],
+        )
+    assert success_exit == 0
+    final_lines = _read_sidecar_lines(allowlist_dir, run_id)
+    assert any(line["type"] == "trailer" for line in final_lines)
+
+
+def test_t6c_load_sidecar_recovers_truncated_final_outcome(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """SIGKILL between write() and flush() leaves a partial last line — recover prior outcomes.
+
+    Hand-constructs the exact byte-pattern that a SIGKILL between the
+    writer's ``write()`` and the next ``flush()+fsync()`` would leave:
+    header line + 3 complete outcome lines (each terminated with ``\\n``)
+    + a partial 4th outcome (first 30 bytes of the JSON payload, NO
+    trailing newline).
+
+    The loader must:
+    * NOT raise (this is the recovery surface's whole purpose)
+    * Return the 3 prior complete outcomes
+    * Write a structured warning to stderr naming the byte offset of
+      the partial line and the recovered-outcome count
+
+    --render-incomplete on the recovered sidecar must then surface the
+    INCOMPLETE SWEEP banner naming "1 entry in-flight when sweep ended"
+    (entries_dispatched=3, total_entries=4).
+    """
+    from elspeth_lints.core.reaudit_sidecar import load_sidecar, sidecar_path_for
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=4)
+
+    # First, run a normal sweep of 3 entries' worth (using --limit) so
+    # we have a real well-formed sidecar (header + 3 outcomes + trailer)
+    # built by production code. Then surgically replace the trailer with
+    # a partial 4th outcome and update the header's total_entries to 4.
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        exit_code = _run_cli_reaudit(
+            root=root,
+            allowlist_dir=allowlist_dir,
+            extra_args=["--limit", "3"],
+        )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+    sidecar = sidecar_path_for(allowlist_dir, run_id)
+
+    raw = sidecar.read_text(encoding="utf-8")
+    lines_in_order = raw.splitlines(keepends=True)
+    # Surgical edit: rewrite the header to advertise 4 total entries
+    # (so --render-incomplete will report 3-of-4 dispatched), drop the
+    # trailer, and append a partial 4th outcome with NO trailing
+    # newline.
+    header_payload = json.loads(lines_in_order[0])
+    header_payload["total_entries"] = 4
+    new_header = json.dumps(header_payload, sort_keys=True, ensure_ascii=False) + "\n"
+    outcome_lines = [line for line in lines_in_order if json.loads(line).get("type") == "outcome"]
+    assert len(outcome_lines) == 3
+    partial_outcome = '{"type": "outcome", "appended_at": "2026-05-24'  # 47 bytes, no newline, deliberately truncated
+    new_content = new_header + "".join(outcome_lines) + partial_outcome
+    sidecar.write_bytes(new_content.encode("utf-8"))
+    assert not new_content.endswith("\n")
+
+    # Recovery: load must return 3 outcomes, no trailer, warning on
+    # stderr with byte offset.
+    loaded = load_sidecar(sidecar)
+    err_capture = capsys.readouterr().err
+    assert len(loaded.outcomes) == 3
+    assert loaded.trailer is None
+    assert "partial final line" in err_capture
+    expected_offset = len(new_header.encode("utf-8")) + len("".join(outcome_lines).encode("utf-8"))
+    assert f"byte offset {expected_offset}" in err_capture
+    assert "3 prior complete outcome(s) recovered" in err_capture
+
+    # --render-incomplete surfaces the partial state — banner fires
+    # because entries_dispatched=3 < total_entries=4.
+    render_exit = _run_cli_reaudit(
+        root=root,
+        allowlist_dir=allowlist_dir,
+        extra_args=["--render-incomplete", run_id],
+    )
+    assert render_exit == 1
+    rendered = capsys.readouterr().out
+    assert "INCOMPLETE SWEEP" in rendered
+    assert "3" in rendered and "4" in rendered
+
+
+def test_t6c_load_sidecar_crashes_on_mid_file_corruption(tmp_path: Path) -> None:
+    """A non-final corrupt line is unrecoverable — Tier-1 crash.
+
+    The truncation recovery is bounded to the LAST line of a no-trailing-
+    newline file. A corrupt line in the middle (well-formed-looking
+    surroundings, broken JSON in the middle) means the file was edited
+    by hand or bytes were dropped — there is no recovery path; the
+    sidecar must crash with ``SidecarCorruptError`` naming the offending
+    line and byte offset.
+    """
+    from elspeth_lints.core.reaudit_sidecar import SidecarCorruptError, load_sidecar, sidecar_path_for
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        exit_code = _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    assert exit_code == 0
+    import re
+
+    err_text = ""
+    # capsys not requested; pull from sidecar directly.
+    # Recover run_id by listing the sidecar dir.
+    sidecar_dir = allowlist_dir / ".reaudit-state"
+    sidecars = list(sidecar_dir.glob("*.jsonl"))
+    assert len(sidecars) == 1
+    run_id = sidecars[0].stem
+    assert re.match(r"^[0-9a-f]{32}$", run_id), err_text
+    sidecar = sidecar_path_for(allowlist_dir, run_id)
+
+    raw = sidecar.read_text(encoding="utf-8")
+    lines_in_order = raw.splitlines(keepends=True)
+    # Replace the MIDDLE outcome line with broken JSON. File still ends
+    # in newline (no truncation signal), so the loader must crash.
+    assert len(lines_in_order) >= 4  # header + 3 outcomes + trailer
+    lines_in_order[2] = "{this is not valid JSON\n"
+    sidecar.write_text("".join(lines_in_order), encoding="utf-8")
+    assert raw.endswith("\n") and "".join(lines_in_order).endswith("\n")
+
+    with pytest.raises(SidecarCorruptError) as exc_info:
+        load_sidecar(sidecar)
+    assert "line 3" in str(exc_info.value)
+    assert "byte offset" in str(exc_info.value)
+    assert "malformed JSON" in str(exc_info.value)
+
+
+def test_t6c_compute_allowlist_hash_includes_yml_extension(tmp_path: Path) -> None:
+    """A .yml allowlist file is hashed (not just .yaml).
+
+    Operators in the wild author allowlist files under both .yaml and
+    .yml suffixes (both are YAML 1.2-permitted). The original glob
+    silently excluded .yml, so an operator editing a .yml file would
+    have their --resume succeed against a header hash that didn't
+    cover the edit — silent corruption of the resumed sweep.
+    """
+    from elspeth_lints.core.reaudit_sidecar import compute_allowlist_hash
+
+    allowlist_dir = tmp_path / "allowlist"
+    allowlist_dir.mkdir()
+    yaml_file = allowlist_dir / "a.yaml"
+    yaml_file.write_text("version: 1\n", encoding="utf-8")
+    yml_file = allowlist_dir / "b.yml"
+    yml_file.write_text("entries: []\n", encoding="utf-8")
+
+    hash_before = compute_allowlist_hash(allowlist_dir)
+    yml_file.write_text("entries: [{key: foo}]\n", encoding="utf-8")
+    hash_after_yml_edit = compute_allowlist_hash(allowlist_dir)
+    assert hash_before != hash_after_yml_edit, (
+        "compute_allowlist_hash must hash .yml files — editing a .yml allowlist "
+        "file must change the hash, otherwise --resume drift detection silently misses .yml edits"
+    )
+
+    yml_file.write_text("entries: []\n", encoding="utf-8")
+    yaml_file.write_text("version: 2\n", encoding="utf-8")
+    hash_after_yaml_edit = compute_allowlist_hash(allowlist_dir)
+    assert hash_before != hash_after_yaml_edit
+
+
+def test_t6c_completed_sidecar_pruned_after_retention_horizon(tmp_path: Path) -> None:
+    """Lazy cleanup: completed sweeps older than retention are deleted at next writer open.
+
+    Incomplete sweeps (no trailer) are recoverable Tier-1 data and MUST
+    NOT be deleted regardless of age — only the operator can retire
+    them via --resume or by removing the run_id manually.
     """
     from datetime import UTC as _UTC
     from datetime import datetime as _datetime
 
     from elspeth_lints.core.reaudit_sidecar import (
-        SidecarConflictError,
+        COMPLETED_SIDECAR_RETENTION_DAYS,
         SidecarHeader,
         SidecarWriter,
+        sidecar_path_for,
     )
 
-    allowlist_dir = tmp_path / "allowlist"
-    allowlist_dir.mkdir()
-    sidecar_path = allowlist_dir / ".reaudit-state" / "abc123.jsonl"
-    header = SidecarHeader(
-        run_id="abc123",
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=1)
+
+    # Build one completed sidecar (with trailer) and one incomplete
+    # sidecar (no trailer), both via real production code paths.
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        assert _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir) == 0
+    completed_run_id = next(p.stem for p in (allowlist_dir / ".reaudit-state").glob("*.jsonl"))
+    completed_sidecar = sidecar_path_for(allowlist_dir, completed_run_id)
+
+    # Force an incomplete sweep alongside.
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = KeyboardInterrupt()
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    incomplete_run_id = next(p.stem for p in (allowlist_dir / ".reaudit-state").glob("*.jsonl") if p.stem != completed_run_id)
+    incomplete_sidecar = sidecar_path_for(allowlist_dir, incomplete_run_id)
+
+    # Age both sidecars past the retention horizon.
+    ancient = time.time() - (COMPLETED_SIDECAR_RETENTION_DAYS + 5) * 86400
+    os.utime(completed_sidecar, (ancient, ancient))
+    os.utime(incomplete_sidecar, (ancient, ancient))
+
+    # Trigger lazy cleanup by entering a fresh SidecarWriter (a new
+    # run, distinct run_id). The completed-ancient sidecar must be
+    # deleted; the incomplete-ancient one must persist.
+    trigger_path = allowlist_dir / ".reaudit-state" / "trigger.jsonl"
+    trigger_header = SidecarHeader(
+        run_id="trigger",
         started_at=_datetime.now(_UTC),
         total_entries=0,
         allowlist_path=str(allowlist_dir.resolve()),
@@ -1666,15 +1973,42 @@ def test_t6b_concurrent_reaudit_on_same_run_id_rejected(
         limit=None,
         include_pre_judge=False,
     )
-
-    # First writer holds the file open + flocked. A second writer
-    # on the same path must fail fast.
-    with (
-        SidecarWriter(sidecar_path, header) as _writer,
-        pytest.raises(SidecarConflictError),
-        SidecarWriter(sidecar_path, header, append=True),
-    ):
+    with SidecarWriter(trigger_path, trigger_header):
         pass
+    trigger_path.unlink()
+
+    assert not completed_sidecar.exists(), "completed sidecar older than COMPLETED_SIDECAR_RETENTION_DAYS must be deleted"
+    assert incomplete_sidecar.exists(), "incomplete sidecar must NOT be deleted regardless of age (recoverable Tier-1 data)"
+
+
+def test_t6c_gitignore_excludes_reaudit_state_directories() -> None:
+    """The project .gitignore catches sidecars in tracked config/cicd/ dirs.
+
+    Without a gitignore rule, an operator running `git status` after a
+    reaudit sweep would see the sidecar as a new untracked file, and a
+    careless `git add -A` would commit operator-local run state into
+    the audit trail's git history. Verify the rule actually fires for
+    the exact path shape the sidecar uses.
+    """
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[3]
+    assert (repo_root / ".gitignore").exists()
+    # Use a path inside a tracked config/cicd/ directory so the test
+    # exercises the real risk surface.
+    candidate = repo_root / "config" / "cicd" / "enforce_tier_model" / ".reaudit-state" / "abc.jsonl"
+    result = subprocess.run(
+        ["git", "check-ignore", "--verbose", str(candidate.relative_to(repo_root))],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # git check-ignore exits 0 if the path IS ignored, 1 if not.
+    assert result.returncode == 0, (
+        f"sidecar path {candidate.relative_to(repo_root)} is NOT covered by .gitignore. stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert ".reaudit-state" in result.stdout
 
 
 def test_t6b_render_incomplete_on_completed_sweep_still_renders(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

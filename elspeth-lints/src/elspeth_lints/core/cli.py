@@ -7,7 +7,7 @@ import ast
 import hashlib
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1489,7 +1489,10 @@ def _run_reaudit(args: argparse.Namespace) -> int:
     * ``--resume <run_id>`` — read the prior sidecar, skip already-
       classified entries, continue from the first un-classified entry.
       Appends to the SAME sidecar; writes the trailer on clean
-      completion.
+      completion. Load + trailer-check + header drift validation all
+      run inside the writer's flock-held window (T6c TOCTOU fix) — two
+      concurrent ``--resume`` invocations can no longer both pass
+      validation and then race on the lock.
     * (no flag) — fresh sweep. Generates a new run_id, prints it to
       stderr, creates a fresh sidecar, classifies every filtered entry.
     """
@@ -1545,22 +1548,47 @@ def _run_reaudit(args: argparse.Namespace) -> int:
     is_resume = args.resume_run_id is not None
     pre_classified_keys: frozenset[str] | None = None
     pre_classified_outcomes: tuple[ReauditOutcome, ...] = ()
+    # T6c TOCTOU fix: the resume path no longer touches the sidecar
+    # outside the flock window. The writer's ``on_resume_locked``
+    # callback runs load + trailer-check + header-drift-check AFTER the
+    # exclusive lock is held, so two concurrent --resume processes can no
+    # longer both pass validation, serialise on the lock, then both
+    # append past each other's trailers. The state captured here is
+    # populated by the callback when validation succeeds; if validation
+    # raises, the writer releases the lock and the CLI surfaces the
+    # error via the existing ReauditError branch.
+    resume_state: dict[str, Any] = {}
+    on_resume_locked: Callable[[Any], None] | None = None
     if is_resume:
+        from datetime import UTC as _UTC
+        from datetime import datetime as _datetime
+
         sidecar_path = sidecar_path_for(allowlist_dir, args.resume_run_id)
-        try:
-            loaded = load_sidecar(sidecar_path)
-        except ReauditError as exc:
-            sys.stderr.write(f"reaudit error: {exc}\n")
-            return 2
-        if loaded.trailer is not None:
-            sys.stderr.write(
-                f"--resume {args.resume_run_id}: this run already completed "
-                f"(trailer present, {loaded.trailer.outcomes_written} outcomes "
-                "written). Render the existing report via --render-incomplete, "
-                "or start a fresh sweep with a new run_id.\n"
-            )
-            return 2
-        try:
+        run_id = args.resume_run_id
+        # Placeholder header — never written. Resume mode (append=True)
+        # never writes a header line; the constructor needs a non-None
+        # value but only the lock-held callback's loaded.header is
+        # authoritative.
+        header = SidecarHeader(
+            run_id=run_id,
+            started_at=_datetime.now(_UTC),
+            total_entries=0,
+            allowlist_path=str(allowlist_dir.resolve()),
+            allowlist_hash="",
+            rule_filter=args.rule,
+            since_iso=since_iso_for_header,
+            limit=args.limit,
+            include_pre_judge=args.include_pre_judge,
+        )
+
+        def on_resume_locked(loaded: Any) -> None:
+            if loaded.trailer is not None:
+                raise ReauditError(
+                    f"--resume {args.resume_run_id}: this run already completed "
+                    f"(trailer present, {loaded.trailer.outcomes_written} outcomes "
+                    "written). Render the existing report via --render-incomplete, "
+                    "or start a fresh sweep with a new run_id."
+                )
             validate_header_for_resume(
                 header=loaded.header,
                 allowlist_dir=allowlist_dir,
@@ -1569,13 +1597,10 @@ def _run_reaudit(args: argparse.Namespace) -> int:
                 limit=args.limit,
                 include_pre_judge=args.include_pre_judge,
             )
-        except ReauditError as exc:
-            sys.stderr.write(f"reaudit error: {exc}\n")
-            return 2
-        run_id = loaded.header.run_id
-        header = loaded.header
-        pre_classified_keys = loaded.classified_keys
-        pre_classified_outcomes = loaded.outcomes
+            resume_state["header"] = loaded.header
+            resume_state["classified_keys"] = loaded.classified_keys
+            resume_state["outcomes"] = loaded.outcomes
+
     else:
         run_id = generate_run_id()
         # The header is constructed before we know ``total_entries`` —
@@ -1634,7 +1659,19 @@ def _run_reaudit(args: argparse.Namespace) -> int:
         sidecar_path = sidecar_path_for(allowlist_dir, run_id)
 
     try:
-        with SidecarWriter(sidecar_path, header, append=is_resume) as writer:
+        with SidecarWriter(
+            sidecar_path,
+            header,
+            append=is_resume,
+            on_resume_locked=on_resume_locked,
+        ) as writer:
+            if is_resume:
+                # Populated by the in-lock callback. If it had raised,
+                # SidecarWriter.__enter__ would have re-raised before
+                # this point and the outer except branch would handle
+                # it. Reaching here implies validation succeeded.
+                pre_classified_keys = resume_state["classified_keys"]
+                pre_classified_outcomes = resume_state["outcomes"]
             report = reaudit_entries(
                 root=args.root.resolve(),
                 allowlist_dir=allowlist_dir,

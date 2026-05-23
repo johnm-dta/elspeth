@@ -257,6 +257,16 @@ docs/assets/*.pdf
 *.db-shm
 *.db-wal
 
+# Reaudit sweep sidecars — ephemeral per-run JSONL state written by
+# `elspeth-lints reaudit` for crash recovery. Lives at
+# `<allowlist_dir>/.reaudit-state/` (i.e. inside `config/cicd/*/`
+# directories that ARE tracked). The sidecars themselves must never be
+# committed — they are operator-local run state and contain per-entry
+# divergence outcomes that have no audit-trail value outside the
+# operator's machine. See `elspeth_lints/core/reaudit_sidecar.py` for
+# the full data-model rationale.
+**/.reaudit-state/
+
 # Release PDF pipeline source is intentionally tracked; generated
 # outputs and bulky font source trees are not.
 docs/release/*

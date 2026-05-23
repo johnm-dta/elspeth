@@ -94,6 +94,7 @@ _SET_OUTPUT_DECLARATION = ToolDeclaration(
         },
         "required": ["sink_name", "plugin", "options"],
     },
+    augments_on_failure=True,
 )
 
 
@@ -300,6 +301,7 @@ _PATCH_OUTPUT_OPTIONS_DECLARATION = ToolDeclaration(
         },
         "required": ["sink_name", "patch"],
     },
+    augments_on_failure=True,
 )
 
 

@@ -508,11 +508,18 @@ def _state_response(
     transient warnings and suggestions are included in the response.
     Historical loads pass None, producing null for these fields.
     """
-    # B4: Redact internal storage paths from blob-backed sources
+    # B4: Redact internal storage paths from blob-backed sources.
+    # ``redact_source_storage_path`` guarantees the ``"source"`` key is
+    # preserved in the returned mapping (either by returning the input dict
+    # unchanged when no blob_ref is present, or by building a shallow copy
+    # with ``redacted["source"] = redacted_source``). Index directly so any
+    # future contract violation surfaces as ``KeyError`` rather than being
+    # masked by a silent fallback — silent-failure-hunter I6 review finding,
+    # 2026-05-24.
     source_data = deep_thaw(state.source)
     if source_data is not None:
         redacted = redact_source_storage_path({"source": source_data})
-        source_data = redacted.get("source", source_data)
+        source_data = redacted["source"]
 
     return CompositionStateResponse(
         id=str(state.id),

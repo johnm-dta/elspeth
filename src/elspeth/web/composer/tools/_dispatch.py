@@ -39,7 +39,6 @@ from elspeth.web.composer.tools._common import (
     ToolResult,
     _failure_result,
     build_plugin_schemas_for_failure,
-    should_augment_with_plugin_schemas,
 )
 from elspeth.web.composer.tools._registry import (
     _BLOB_DISCOVERY_TOOLS,
@@ -53,6 +52,7 @@ from elspeth.web.composer.tools._registry import (
     _SECRET_MUTATION_TOOL_NAMES,
     _SECRET_MUTATION_TOOLS,
     _TOOL_DEFS_BY_NAME,
+    should_augment_with_plugin_schemas,
 )
 from elspeth.web.composer.tools.discovery import _SESSION_AWARE_TOOL_NAMES
 from elspeth.web.composer.tools.sessions import (
@@ -319,8 +319,10 @@ def _augment_with_plugin_schemas(
 ) -> ToolResult:
     """Attach inline ``plugin_schemas`` to a failed option-shape rejection.
 
-    For the mutation tools listed in
-    ``_PLUGIN_SCHEMA_AUGMENTATION_TOOLS``, scan ``result.validation.errors``
+    For the mutation tools whose declarations set
+    ``augments_on_failure=True`` (derived into
+    ``_registry._AUGMENTS_ON_FAILURE_TOOL_NAMES``), scan
+    ``result.validation.errors``
     for ``Invalid options for <kind> '<plugin>'`` messages and embed the
     full ``get_plugin_schema`` payload for every named plugin. Eliminates
     the second round-trip the LLM would otherwise burn calling

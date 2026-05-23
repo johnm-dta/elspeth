@@ -57,6 +57,7 @@ from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
     assert_unique_names,
+    derive_augments_on_failure_names,
     derive_blob_store_only_names,
     derive_cacheable_names,
     derive_handler_map_for,
@@ -151,6 +152,26 @@ _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES: Final[frozenset[str]] = _DISCOVERY_TOOL_N
 # gate because they have no state delta to approve — the audit trail still
 # records the blob write but the composition itself is unchanged.
 _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES: Final[frozenset[str]] = derive_blob_store_only_names(_REGISTERED_TOOLS)
+
+# Mutation tools whose failure results carry inline plugin schemas. Derived
+# from ``ToolDeclaration.augments_on_failure`` (closing the SSOT loop on what
+# used to be a shadow ``Final[frozenset[str]]`` in ``_common.py``). The
+# declaration-side ``__post_init__`` invariant restricts membership to
+# MUTATION / BLOB_MUTATION kinds. Core-reviewer I5 review finding, 2026-05-24.
+_AUGMENTS_ON_FAILURE_TOOL_NAMES: Final[frozenset[str]] = derive_augments_on_failure_names(_REGISTERED_TOOLS)
+
+
+def should_augment_with_plugin_schemas(tool_name: str) -> bool:
+    """Return True when failures from ``tool_name`` should carry inline plugin schemas.
+
+    Backs ``_dispatch.py``'s decision to call
+    ``build_plugin_schemas_for_failure``. Replaces the prior ``_common.py``
+    function that gated on the now-deleted ``_PLUGIN_SCHEMA_AUGMENTATION_TOOLS``
+    shadow frozenset; the set lives here as
+    ``_AUGMENTS_ON_FAILURE_TOOL_NAMES``, derived from
+    ``ToolDeclaration.augments_on_failure``.
+    """
+    return tool_name in _AUGMENTS_ON_FAILURE_TOOL_NAMES
 
 
 # ---------------------------------------------------------------------------

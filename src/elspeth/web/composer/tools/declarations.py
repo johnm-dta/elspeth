@@ -132,6 +132,17 @@ class ToolDeclaration:
             never advances ``CompositionState`` (excluded from the
             ``trust_mode == "explicit_approve"`` proposal-interception gate).
             Only meaningful for ``BLOB_MUTATION``.
+        augments_on_failure: True if a failure result from this tool should be
+            decorated with inline plugin schemas via
+            ``build_plugin_schemas_for_failure``. Set on mutation tools that
+            route through ``_prevalidate_plugin_options`` and therefore emit
+            ``Invalid options for <kind> '<plugin>'`` rejection messages the
+            augmentation walker can parse. Closing the SSOT loop — previously
+            this was a shadow ``Final[frozenset[str]]`` in ``_common.py`` that
+            would have drifted on rename. Only meaningful for ``MUTATION`` /
+            ``BLOB_MUTATION`` (DISCOVERY tools never write plugin config to
+            state and so cannot surface plugin-option validation failures).
+            Core-reviewer I5 review finding, 2026-05-24.
     """
 
     name: str
@@ -141,6 +152,7 @@ class ToolDeclaration:
     json_schema: Mapping[str, Any]
     cacheable: bool = False
     blob_store_only: bool = False
+    augments_on_failure: bool = False
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -190,6 +202,23 @@ class ToolDeclaration:
         # blob_store_only invariant — only BLOB_MUTATION may set this.
         if self.blob_store_only and self.kind is not ToolKind.BLOB_MUTATION:
             raise ValueError(f"ToolDeclaration({self.name!r}).blob_store_only=True is only valid for BLOB_MUTATION.")
+
+        # augments_on_failure invariant — only mutation-family kinds may set
+        # this. DISCOVERY tools never call ``_prevalidate_plugin_options`` and
+        # cannot emit the option-shape rejection messages the augmentation
+        # walker matches against; advertising augments_on_failure on a
+        # non-mutation tool would be a dead forward-pretend that this
+        # invariant rejects at the declaration site. Mirrors the cacheable /
+        # blob_store_only invariants above (Core-reviewer I5 review finding,
+        # 2026-05-24).
+        if self.augments_on_failure and self.kind not in {ToolKind.MUTATION, ToolKind.BLOB_MUTATION}:
+            raise ValueError(
+                f"ToolDeclaration({self.name!r}).augments_on_failure=True is "
+                f"forbidden for kind {self.kind.value!r}. Only MUTATION / "
+                "BLOB_MUTATION tools route through _prevalidate_plugin_options "
+                "and therefore emit the option-shape rejection messages the "
+                "augmentation walker matches against."
+            )
 
         freeze_fields(self, "json_schema")
 
@@ -269,6 +298,23 @@ def derive_cacheable_names(tools: Iterable[ToolDeclaration]) -> frozenset[str]:
     those assertions during the migration.
     """
     return frozenset(decl.name for decl in tools if decl.cacheable)
+
+
+def derive_augments_on_failure_names(tools: Iterable[ToolDeclaration]) -> frozenset[str]:
+    """Return the names of declarations that decorate failures with plugin schemas.
+
+    Only ``MUTATION`` / ``BLOB_MUTATION`` tools may set
+    ``augments_on_failure=True``; the ``ToolDeclaration`` constructor enforces
+    this. ``_registry.py`` derives the set the dispatcher consumes via
+    ``should_augment_with_plugin_schemas`` to decide whether to call
+    ``build_plugin_schemas_for_failure`` on a failed result.
+
+    Closing the SSOT loop: this used to be a hand-maintained
+    ``Final[frozenset[str]]`` in ``_common.py`` that would have drifted on
+    rename of any of the nine tools it named. Core-reviewer I5 review finding,
+    2026-05-24.
+    """
+    return frozenset(decl.name for decl in tools if decl.augments_on_failure)
 
 
 def assert_unique_names(tools: Iterable[ToolDeclaration]) -> None:

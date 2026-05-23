@@ -628,34 +628,6 @@ _INVALID_OPTIONS_PLUGIN_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 
-# Tools that emit ``Invalid options for <kind> '<plugin>'`` rejection
-# messages and therefore benefit from inline schema augmentation when
-# they fail. CLOSED LIST — extend only when adding a new mutation tool
-# that surfaces the same option-validation message shape from
-# ``_prevalidate_plugin_options``. ``apply_pipeline_recipe`` and
-# ``set_source_from_blob`` are included because they internally route
-# through the same option-validation paths as the plain ``set_*`` /
-# ``patch_*`` tools.
-_PLUGIN_SCHEMA_AUGMENTATION_TOOLS: Final[frozenset[str]] = frozenset(
-    {
-        "set_pipeline",
-        "upsert_node",
-        "set_source",
-        "set_source_from_blob",
-        "set_output",
-        "apply_pipeline_recipe",
-        "patch_node_options",
-        "patch_source_options",
-        "patch_output_options",
-    }
-)
-
-
-def should_augment_with_plugin_schemas(tool_name: str) -> bool:
-    """Return True when failures from ``tool_name`` should carry inline schemas."""
-    return tool_name in _PLUGIN_SCHEMA_AUGMENTATION_TOOLS
-
-
 def build_plugin_schemas_for_failure(
     result: ToolResult,
     catalog: CatalogService,
@@ -673,8 +645,9 @@ def build_plugin_schemas_for_failure(
 
     Returns ``None`` when the result is successful or when no error
     message matches the option-shape pattern. The caller is responsible
-    for restricting the call to the tool names in
-    ``_PLUGIN_SCHEMA_AUGMENTATION_TOOLS``.
+    for restricting the call to declarations that set
+    ``augments_on_failure=True`` (gated by
+    ``_registry.should_augment_with_plugin_schemas``).
 
     Trust tier: server-controlled response shaping. A regex match implies
     the validator already resolved the plugin in the catalog (the unknown

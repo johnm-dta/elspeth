@@ -272,6 +272,7 @@ _UPSERT_NODE_DECLARATION = ToolDeclaration(
         "Omit fields that don't apply to your node_type."
     ),
     json_schema=_UPSERT_NODE_DECLARATION_JSON_SCHEMA,
+    augments_on_failure=True,
 )
 
 
@@ -765,6 +766,7 @@ _PATCH_NODE_OPTIONS_DECLARATION = ToolDeclaration(
         },
         "required": ["node_id", "patch"],
     },
+    augments_on_failure=True,
 )
 
 

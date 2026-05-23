@@ -124,6 +124,7 @@ _SET_SOURCE_DECLARATION = ToolDeclaration(
         },
         "required": ["plugin", "on_success", "options", "on_validation_failure"],
     },
+    augments_on_failure=True,
 )
 
 
@@ -439,6 +440,7 @@ _SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
         "required": ["blob_id", "on_success"],
     },
     blob_store_only=False,
+    augments_on_failure=True,
 )
 
 
@@ -706,6 +708,7 @@ _PATCH_SOURCE_OPTIONS_DECLARATION = ToolDeclaration(
         },
         "required": ["patch"],
     },
+    augments_on_failure=True,
 )
 
 

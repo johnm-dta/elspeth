@@ -2158,7 +2158,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_common.py:R9:_apply_merge_patch:fp=a03324d4e869b70d
+- key: web/composer/tools/_common.py:R9:_apply_merge_patch:fp=d70fc3cd8961b533
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: dict.pop() with default hides missing keys: result.pop(key,
@@ -2166,7 +2166,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=04240ffc872d6f3b
+- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=7f0a32574fab6a34
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if isinstance(value, Mapping)
@@ -2175,7 +2175,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=ec6f9c5650fbb481
+- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=f3ff9c85eb214e74
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if isinstance(value, Mapping)
@@ -2184,14 +2184,14 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=b513e307c2f85f86
+- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=374639ae5d2b5155
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(cause, PydanticValidationError):'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_common.py:R1:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=833b3739496dd4ab
+- key: web/composer/tools/_common.py:R1:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=ce9127e244246bde
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: prompt_template =
@@ -2199,7 +2199,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_common.py:R5:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=809cda92a150c17c
+- key: web/composer/tools/_common.py:R5:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=cd480398045e8ae4
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
@@ -2280,13 +2280,6 @@ allow_hits:
     recovery catches are narrow and record class-name-only diagnostics.
   expires: null
 - key: web/sessions/routes/_helpers.py:R2:_litellm_error_detail:fp=d5d1731a3ca7a65c
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/_helpers.py:R1:_state_response:fp=038a07306a065c8a
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads,
     and audit-drain fallbacks require explicit shape checks and narrow recovery catches.

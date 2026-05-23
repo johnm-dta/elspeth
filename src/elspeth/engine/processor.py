@@ -2713,7 +2713,11 @@ class RowProcessor:
 
             now = self._clock.now_utc()
             self._scheduler.release_waiting(run_id=self._run_id, now=now)
-            self._scheduler.recover_expired_leases(run_id=self._run_id, now=now)
+            self._scheduler.recover_expired_leases(
+                run_id=self._run_id,
+                now=now,
+                caller_owner=self._scheduler_lease_owner,
+            )
             claimed = self._scheduler.claim_ready(
                 run_id=self._run_id,
                 lease_owner=self._scheduler_lease_owner,

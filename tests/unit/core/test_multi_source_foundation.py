@@ -1368,7 +1368,11 @@ def test_scheduler_claims_ready_work_and_recovers_expired_leases() -> None:
 
     assert repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now) is None
 
-    recovered = repo.recover_expired_leases(run_id="run-1", now=now + timedelta(seconds=31))
+    recovered = repo.recover_expired_leases(
+        run_id="run-1",
+        now=now + timedelta(seconds=31),
+        caller_owner="worker-b",
+    )
     assert recovered == 1
 
     reclaimed = repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now + timedelta(seconds=32))
@@ -1378,6 +1382,120 @@ def test_scheduler_claims_ready_work_and_recovers_expired_leases() -> None:
     assert reclaimed.on_success_sink == "default"
     assert reclaimed.attempt == item.attempt + 1
     assert reclaimed.work_item_id != item.work_item_id
+
+
+def test_scheduler_recover_expired_leases_skips_caller_owned_leases() -> None:
+    """Regression: a worker must not reap its own still-running lease.
+
+    ``recover_expired_leases`` is for crash-recovery — it returns work held by
+    *other* workers (a previous crashed RowProcessor with a different uuid, or
+    in future a peer worker) back to READY. When a token's processing exceeds
+    the lease window (LLM/HTTP pipelines easily exceed the 300s default), the
+    next scheduler iteration must NOT silently reap the in-flight worker's
+    lease — doing so leaves the worker holding a stale ``expected_lease_owner``
+    that fails CAS in ``mark_terminal`` / ``mark_pending_sink`` / ``mark_blocked``
+    and kills the run with ``AuditIntegrityError``.
+
+    Filigree elspeth-941f1508f5.
+    """
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+
+    engine = create_engine("sqlite:///:memory:")
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    contract = SchemaContract(mode="OBSERVED", fields=(), locked=True)
+    payload = repo.serialize_row_payload(PipelineRow({"id": 1}, contract))
+    _insert_scheduler_owner_records(
+        engine,
+        token_specs=(("token-caller", "row-caller", 0), ("token-prior", "row-prior", 1)),
+        node_ids=("normalize",),
+    )
+
+    caller_owner = "row-processor:run-1:caller-uuid"
+    prior_owner = "row-processor:run-1:prior-crashed-uuid"
+
+    caller_item = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-caller",
+        row_id="row-caller",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+    prior_item = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-prior",
+        row_id="row-prior",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=1,
+        available_at=now,
+        row_payload_json=payload,
+    )
+
+    caller_claim = repo.claim_ready(
+        run_id="run-1",
+        lease_owner=caller_owner,
+        lease_seconds=30,
+        now=now,
+    )
+    prior_claim = repo.claim_ready(
+        run_id="run-1",
+        lease_owner=prior_owner,
+        lease_seconds=30,
+        now=now,
+    )
+    assert caller_claim is not None
+    assert prior_claim is not None
+    assert caller_claim.lease_owner == caller_owner
+    assert prior_claim.lease_owner == prior_owner
+    assert {caller_claim.work_item_id, prior_claim.work_item_id} == {
+        caller_item.work_item_id,
+        prior_item.work_item_id,
+    }
+
+    # Both leases are now expired from the clock's perspective. The caller is
+    # still mid-iteration — its lease must NOT be recovered.
+    recovered = repo.recover_expired_leases(
+        run_id="run-1",
+        now=now + timedelta(seconds=31),
+        caller_owner=caller_owner,
+    )
+    assert recovered == 1, "Only the prior worker's lease should have been recovered"
+
+    with engine.connect() as conn:
+        rows = {
+            row.work_item_id: (row.status, row.lease_owner, row.attempt)
+            for row in conn.execute(
+                select(
+                    token_work_items_table.c.work_item_id,
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.lease_owner,
+                    token_work_items_table.c.attempt,
+                )
+            ).all()
+        }
+
+    caller_row = rows[caller_claim.work_item_id]
+    assert caller_row == (TokenWorkStatus.LEASED.value, caller_owner, caller_claim.attempt), f"Caller's lease was clobbered: {caller_row!r}"
+
+    # The prior worker's row was rewritten with a bumped attempt + new work_item_id
+    # under READY status; the original work_item_id no longer exists.
+    assert prior_claim.work_item_id not in rows
+    surviving_prior = [
+        (work_item_id, status, lease_owner, attempt)
+        for work_item_id, (status, lease_owner, attempt) in rows.items()
+        if work_item_id != caller_claim.work_item_id
+    ]
+    assert len(surviving_prior) == 1
+    _, prior_status, prior_lease_owner, prior_attempt = surviving_prior[0]
+    assert prior_status == TokenWorkStatus.READY.value
+    assert prior_lease_owner is None
+    assert prior_attempt == prior_claim.attempt + 1
 
 
 @pytest.mark.parametrize("transition", ["waiting", "blocked", "terminal", "failed"])
@@ -1406,7 +1524,11 @@ def test_scheduler_claimed_transition_rejects_stale_lease_owner_after_reclaim(tr
     assert first_claim is not None
     assert first_claim.work_item_id == item.work_item_id
 
-    recovered = repo.recover_expired_leases(run_id="run-1", now=now + timedelta(seconds=31))
+    recovered = repo.recover_expired_leases(
+        run_id="run-1",
+        now=now + timedelta(seconds=31),
+        caller_owner="worker-b",
+    )
     assert recovered == 1
     second_claim = repo.claim_ready(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now + timedelta(seconds=32))
     assert second_claim is not None

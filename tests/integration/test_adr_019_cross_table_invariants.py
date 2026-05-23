@@ -448,7 +448,7 @@ def test_valid_fork_coalesce_run_does_not_false_positive_after_sink_writes(
 
     gate = GateSettings(
         name="fork_gate",
-        input="list_source_out",
+        input="primary_out",
         condition="True",
         routes={"true": "fork", "false": "fork"},
         fork_to=["path_a", "path_b"],
@@ -474,7 +474,7 @@ def test_valid_fork_coalesce_run_does_not_false_positive_after_sink_writes(
         gates=[gate],
     )
     settings = ElspethSettings(
-        sources={"primary": {"plugin": "list_source", "on_success": "list_source_out", "options": {}}},
+        sources={"primary": {"plugin": "list_source", "on_success": "primary_out", "options": {}}},
         sinks={name: {"plugin": "collect", "on_write_failure": "discard", "options": {}} for name in sinks},
         gates=[gate],
         coalesce=[coalesce],

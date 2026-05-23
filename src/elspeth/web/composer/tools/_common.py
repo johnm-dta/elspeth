@@ -20,6 +20,8 @@ surfaces only — no sibling-plane imports.
 
 from __future__ import annotations
 
+# Slice 4 — additional imports for shared validation/repair helpers.
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -29,6 +31,18 @@ from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.core.config import TriggerConfig
+from elspeth.core.secrets import (
+    collect_credential_field_violations,
+    collect_disallowed_secret_ref_markers,
+)
+from elspeth.plugins.infrastructure.config_base import PluginConfigError
+from elspeth.plugins.infrastructure.validation import (
+    UnknownPluginTypeError,
+    get_sink_config_model,
+    get_source_config_model,
+    get_transform_config_model,
+)
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
@@ -44,6 +58,18 @@ from elspeth.web.composer.state import (
     _serialize_branches,
 )
 from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.paths import (
+    allowed_sink_directories,
+    allowed_source_directories,
+    resolve_data_path,
+)
+from elspeth.web.secrets.ref_policy import (
+    allowed_secret_ref_fields,
+    allowed_secret_ref_fields_text,
+)
+from elspeth.web.validation import (
+    INTERPRETATION_PLACEHOLDER_RE,
+)
 
 _DATA_ERROR_KEY: Final[str] = "error"
 
@@ -723,3 +749,429 @@ def _serialize_edge(edge: EdgeSpec) -> dict[str, Any]:
         "edge_type": edge.edge_type,
         "label": edge.label,
     }
+
+
+# Slice 4 additions — shared validation/repair helpers, file-sink collision-policy
+# cluster, and source-validation policy strings. Pulled to ``_common`` so the
+# per-plane files (sources/transforms/sinks/outputs/sessions) can avoid importing
+# each other.
+
+_DEFAULT_SOURCE_VALIDATION_FAILURE: Final[str] = "discard"
+
+_SOURCE_VALIDATION_FAILURE_DESCRIPTION: Final[str] = (
+    "How to handle source validation failures. Use 'discard' to drop invalid rows without routing. "
+    "Any other value, including 'quarantine', must match a configured output/sink name."
+)
+
+
+def _credential_wiring_contract_failure(
+    state: CompositionState,
+    *,
+    component_id: str,
+    component_type: str,
+    options: Any,
+) -> ToolResult | None:
+    """Reject literal credentials before a mutation writes them into state.
+
+    The returned message advertises the *inline* secret_ref form first
+    because that is the only path that works for new nodes:
+
+    - ``set_pipeline`` is atomic, so a node whose options omit a required
+      credential field fails pydantic validation and the whole mutation
+      rolls back — meaning ``wire_secret_ref`` cannot be used to attach
+      the secret post-hoc (the node never lands in state).
+    - ``collect_credential_field_violations`` short-circuits on
+      ``{secret_ref: NAME}`` markers and ``set_pipeline`` strips those
+      markers before pydantic validation, so passing the marker inline
+      in the node's options is the supported new-node path.
+
+    The post-hoc ``wire_secret_ref`` sequence is still documented as
+    the secondary path for nodes that already exist in state.
+    """
+    fields = tuple(dict.fromkeys(collect_credential_field_violations(options)))
+    if not fields:
+        return None
+
+    credential_fields = tuple(f"{component_id}:{field}" for field in fields)
+    field_list = ", ".join(credential_fields)
+    repair_sequence = ("list_secret_refs", "validate_secret_ref", "wire_secret_ref")
+    repair_text = "list_secret_refs -> validate_secret_ref -> wire_secret_ref"
+    inline_instruction = (
+        "Set `<field>: {secret_ref: NAME}` directly in the node's options "
+        "when calling set_pipeline / upsert_node. (The marker is stripped "
+        "before option validation and resolved at execution time.)"
+    )
+    post_hoc_instruction = f"Alternatively, after the node already exists in state, call {repair_text} to attach the marker post-hoc."
+    error_msg = (
+        f"Credential field(s) contain literal value(s): {field_list}. "
+        f"Literal credential values were not stored. {inline_instruction} "
+        f"{post_hoc_instruction}"
+    )
+    # Symmetric with _failure_result: lead validation.errors with the
+    # rejection reason so LLMs reading the array in order see the
+    # actionable message before any stale-state errors.
+    validation = _prepend_rejection_entry(state.validate(), error_msg)
+    return ToolResult(
+        success=False,
+        updated_state=state,
+        validation=validation,
+        affected_nodes=(),
+        data={
+            _DATA_ERROR_KEY: error_msg,
+            "credential_fields": credential_fields,
+            "components": (
+                {
+                    "component_id": component_id,
+                    "component_type": component_type,
+                    "fields": fields,
+                },
+            ),
+            "repair": {
+                "inline_form": {
+                    "instruction": inline_instruction,
+                    "example_options": {field: {"secret_ref": "<NAME>"} for field in fields},
+                },
+                "post_hoc_form": {
+                    "instruction": post_hoc_instruction,
+                    "tool_sequence": repair_sequence,
+                },
+            },
+        },
+    )
+
+
+def _validate_plugin_name(
+    catalog: CatalogService,
+    plugin_type: PluginKind,
+    name: str,
+) -> str | None:
+    """Return an error message if the plugin name is not in the catalog, or None if valid."""
+    try:
+        catalog.get_schema(plugin_type, name)
+    except (ValueError, KeyError) as exc:
+        return f"Unknown {plugin_type} plugin '{name}': {exc}"
+    return None
+
+
+def _validate_aggregation_trigger(trigger: Any) -> str | None:
+    """Return an error message if an aggregation trigger does not match runtime settings."""
+    if trigger is None:
+        return None
+    try:
+        TriggerConfig.model_validate(trigger)
+    except PydanticValidationError as exc:
+        detail = "; ".join(str(error["msg"]) for error in exc.errors())
+        return f"Invalid aggregation trigger: {detail}"
+    return None
+
+
+def _validate_source_path(
+    options: Mapping[str, Any],
+    data_dir: str | None,
+) -> str | None:
+    """S2: Validate that path/file options are under allowed source directories.
+
+    Returns an error message if validation fails, None if OK.
+    Uses Path.resolve() + is_relative_to() to defeat ../ traversal.
+    """
+    if data_dir is None:
+        return None
+
+    allowed = allowed_source_directories(data_dir)
+
+    for key in ("path", "file"):
+        if key in options:
+            resolved = resolve_data_path(options[key], data_dir)
+            if not any(resolved.is_relative_to(d) for d in allowed):
+                return (
+                    f"Path violation (S2): '{options[key]}' is outside the "
+                    f"allowed directories. Source file paths "
+                    f"must be under {data_dir}/blobs/."
+                )
+    return None
+
+
+def _validate_sink_path(
+    options: dict[str, Any],
+    data_dir: str | None,
+) -> str | None:
+    """Validate that sink path options are under allowed output directories.
+
+    Returns an error message if validation fails, None if OK.
+    Mirrors _validate_source_path but uses _allowed_sink_directories.
+    """
+    if data_dir is None:
+        return None
+
+    allowed = allowed_sink_directories(data_dir)
+
+    for key in ("path", "file"):
+        if key in options:
+            resolved = resolve_data_path(options[key], data_dir)
+            if not any(resolved.is_relative_to(d) for d in allowed):
+                return (
+                    f"Path violation (S2): '{options[key]}' is outside the "
+                    f"allowed directories. Sink output paths "
+                    f"must be under {data_dir}/outputs/ or {data_dir}/blobs/."
+                )
+    return None
+
+
+def _prevalidate_plugin_options(
+    plugin_type: PluginKind,
+    plugin_name: str,
+    options: dict[str, Any],
+    *,
+    injected_fields: dict[str, Any] | None = None,
+) -> str | None:
+    """Pre-validate plugin options against the plugin's config model.
+
+    Catches missing required options (e.g., schema, operations) and
+    malformed values (e.g., invalid field specs) BEFORE storing them in
+    CompositionState. Returns None if valid, or a descriptive error
+    message suitable for returning to the LLM agent.
+
+    The plugin's own Pydantic config model is the authority — this
+    function asks the plugin what it needs rather than hardcoding
+    knowledge about individual plugins.
+
+    Secret-ref markers (``{"secret_ref": "NAME"}``) are stripped before
+    validation. The underlying Pydantic errors are filtered to exclude
+    errors on secret-ref'd fields — those fields ARE provisioned, just
+    deferred to execution time when ``resolve_secret_refs`` replaces them
+    with actual values.
+
+    Args:
+        plugin_type: "source", "transform", or "sink".
+        plugin_name: Plugin name (e.g., "csv", "value_transform").
+        options: Options dict as provided by the LLM agent.
+        injected_fields: Synthetic values for fields that come from
+            other parts of the pipeline spec (e.g., on_validation_failure
+            for sources). Merged into options for validation only —
+            not stored.
+    """
+    from pydantic import ValidationError
+
+    secret_ref_placement_error = _secret_ref_placement_error(plugin_type, plugin_name, options)
+    if secret_ref_placement_error is not None:
+        return secret_ref_placement_error
+
+    try:
+        if plugin_type == "source":
+            config_cls = get_source_config_model(plugin_name)
+        elif plugin_type == "transform":
+            config_cls = get_transform_config_model(plugin_name, options)
+        elif plugin_type == "sink":
+            config_cls = get_sink_config_model(plugin_name)
+        else:
+            # PluginKind is Literal["source", "transform", "sink"] — unreachable.
+            raise AssertionError(f"_prevalidate_plugin_options: unexpected plugin_type={plugin_type!r}")
+    except UnknownPluginTypeError:
+        return f"Unknown {plugin_type} plugin '{plugin_name}'. Call list_{plugin_type}s to see available {plugin_type} plugins."
+    except ValueError as exc:
+        # Config model selection raised (e.g. unknown LLM provider) — surface it.
+        return f"Invalid options for {plugin_type} '{plugin_name}': {exc}"
+
+    if config_cls is None:
+        return None
+
+    # Options may contain frozen containers (MappingProxyType, tuple) from
+    # CompositionState.  Thaw them so Pydantic receives plain dicts/lists.
+    merged = deep_thaw(options)
+    if injected_fields:
+        for k, v in injected_fields.items():
+            if k not in merged:
+                merged[k] = v
+    if plugin_type == "transform" and plugin_name == "llm":
+        _mask_pending_interpretation_placeholders_for_authoring_validation(merged)
+
+    # Strip secret_ref markers before validation.  A secret-ref'd field
+    # IS provisioned (the user called wire_secret_ref), just deferred to
+    # execution time.  Stripping it may cause Pydantic to report
+    # "field required" — we filter those errors out below.
+    secret_ref_keys: set[str] = set()
+    for key, value in list(merged.items()):
+        if isinstance(value, Mapping) and len(value) == 1 and "secret_ref" in value and isinstance(value["secret_ref"], str):
+            secret_ref_keys.add(key)
+            del merged[key]
+
+    try:
+        config_cls.from_dict(merged, plugin_name=plugin_name)
+        return None
+    except PluginConfigError as exc:
+        if not secret_ref_keys:
+            # No secret refs were stripped — report the error as-is.
+            msg = exc.cause if exc.cause is not None else str(exc)
+            return f"Invalid options for {plugin_type} '{plugin_name}': {msg}"
+
+        # Secret refs were stripped.  Filter out errors on those fields.
+        cause = exc.__cause__
+        if not isinstance(cause, ValidationError):
+            # ValueError path (model validators) — can't filter per-field.
+            msg = exc.cause if exc.cause is not None else str(exc)
+            return f"Invalid options for {plugin_type} '{plugin_name}': {msg}"
+
+        remaining = [e for e in cause.errors() if not (e["loc"] and e["loc"][0] in secret_ref_keys)]
+        if not remaining:
+            return None
+
+        # Re-format only the non-secret errors.
+        lines = "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in remaining)
+        return f"Invalid options for {plugin_type} '{plugin_name}': {lines}"
+
+
+def _mask_pending_interpretation_placeholders_for_authoring_validation(
+    options: dict[str, Any],
+) -> None:
+    """Allow unresolved interpretation placeholders during composer authoring.
+
+    ``{{interpretation:<term>}}`` is a Phase 5b composer-review token, not a
+    runtime Jinja variable. The LLM must be able to stage a pending LLM node
+    carrying that token so ``request_interpretation_review`` can create the
+    audit row and the user can resolve it. Runtime remains strict: execution
+    rejects unresolved placeholders before YAML generation, and resolved
+    prompts validate through the normal LLM config path.
+    """
+
+    if "resolved_prompt_template_hash" in options:
+        return
+    prompt_template = options.get("prompt_template")
+    if not isinstance(prompt_template, str):
+        return
+    options["prompt_template"] = INTERPRETATION_PLACEHOLDER_RE.sub(
+        "pending interpretation",
+        prompt_template,
+    )
+
+
+def _secret_ref_placement_error(
+    plugin_type: PluginKind,
+    plugin_name: str,
+    options: dict[str, Any],
+) -> str | None:
+    """Return a policy error for secret_ref markers in non-credential fields."""
+    secret_ref_placement_violations = collect_disallowed_secret_ref_markers(
+        options,
+        additional_allowed_fields=allowed_secret_ref_fields(plugin_type, plugin_name),
+    )
+    if not secret_ref_placement_violations:
+        return None
+
+    violation_text = ", ".join(f"{v.field_path} -> {v.secret_name}" for v in secret_ref_placement_violations)
+    allowed_text = allowed_secret_ref_fields_text(plugin_type, plugin_name)
+    return (
+        f"Invalid secret_ref placement for {plugin_type} '{plugin_name}': {violation_text}; "
+        "only credential-bearing fields may carry secret_ref markers. "
+        f"Allowed credential-bearing fields: {allowed_text}."
+    )
+
+
+_WEB_ONLY_SOURCE_KEYS = frozenset({"blob_ref"})
+
+_FILE_SINKS_REQUIRING_COLLISION_POLICY = frozenset({"csv", "json"})
+
+_FILE_SINK_REPAIR_EXTENSIONS: Final[dict[str, str]] = {"csv": "csv", "json": "json"}
+
+_WRITE_COLLISION_POLICIES = frozenset({"fail_if_exists", "auto_increment"})
+
+_APPEND_COLLISION_POLICIES = frozenset({"append_or_create"})
+
+
+def _missing_output_options_repair_error(
+    *,
+    sink_name: str,
+    plugin_name: str,
+    on_write_failure: str,
+    validation_error: str | None,
+) -> str:
+    """Return an exact output-object repair hint for omitted sink options."""
+    if plugin_name in _FILE_SINK_REPAIR_EXTENSIONS:
+        path_fragment = _repair_identifier_fragment(sink_name, fallback="output")
+        extension = _FILE_SINK_REPAIR_EXTENSIONS[plugin_name]
+        repair_output = {
+            "sink_name": sink_name,
+            "plugin": plugin_name,
+            "options": {
+                "path": f"outputs/{path_fragment}.{extension}",
+                "schema": {"mode": "observed"},
+                "collision_policy": "auto_increment",
+            },
+            "on_write_failure": on_write_failure,
+        }
+        detail = f" Empty options were rejected: {validation_error}" if validation_error is not None else ""
+        return (
+            f"Output '{sink_name}' is missing options. For {plugin_name} file sinks, include "
+            f"an options object with path, schema, and collision_policy. Use this output object "
+            f"shape and adjust the path/schema if needed: {json.dumps(repair_output)}.{detail}"
+        )
+
+    repair_output = {
+        "sink_name": sink_name,
+        "plugin": plugin_name,
+        "options": {},
+        "on_write_failure": on_write_failure,
+    }
+    detail = f" Empty options were rejected: {validation_error}" if validation_error is not None else ""
+    return (
+        f"Output '{sink_name}' is missing options. Include the sink plugin's options object. "
+        f"If this sink accepts empty configuration, use: {json.dumps(repair_output)}; otherwise "
+        f"call get_plugin_schema for sink '{plugin_name}' and fill the required options.{detail}"
+    )
+
+
+def validate_composer_file_sink_collision_policy(
+    plugin_name: str,
+    options: Mapping[str, Any],
+    *,
+    require_explicit: bool,
+) -> str | None:
+    """Require generated runnable file sinks to choose collision behavior."""
+    if not require_explicit or plugin_name not in _FILE_SINKS_REQUIRING_COLLISION_POLICY:
+        return None
+
+    if "collision_policy" not in options:
+        return (
+            f"File sink '{plugin_name}' must set collision_policy explicitly. "
+            "Use 'fail_if_exists' to refuse a taken output path, "
+            "'auto_increment' to choose a free sibling path, or "
+            "'append_or_create' with mode='append'."
+        )
+
+    mode = options.get("mode", "write")
+    policy = options["collision_policy"]
+    if mode == "append":
+        if policy not in _APPEND_COLLISION_POLICIES:
+            return f"File sink '{plugin_name}' with mode='append' must use collision_policy='append_or_create'."
+    else:
+        if policy not in _WRITE_COLLISION_POLICIES:
+            return (
+                f"File sink '{plugin_name}' with mode='write' must use "
+                "collision_policy='fail_if_exists' or collision_policy='auto_increment'."
+            )
+
+    return None
+
+
+def _prevalidate_source(
+    plugin_name: str,
+    options: Mapping[str, Any],
+    on_validation_failure: str = _DEFAULT_SOURCE_VALIDATION_FAILURE,
+) -> str | None:
+    """Pre-validate source options, injecting on_validation_failure and filtering web-only keys."""
+    filtered = {k: v for k, v in options.items() if k not in _WEB_ONLY_SOURCE_KEYS}
+    return _prevalidate_plugin_options(
+        "source",
+        plugin_name,
+        filtered,
+        injected_fields={"on_validation_failure": on_validation_failure},
+    )
+
+
+def _prevalidate_transform(plugin_name: str, options: dict[str, Any]) -> str | None:
+    """Pre-validate transform options."""
+    return _prevalidate_plugin_options("transform", plugin_name, options)
+
+
+def _prevalidate_sink(plugin_name: str, options: dict[str, Any]) -> str | None:
+    """Pre-validate sink options."""
+    return _prevalidate_plugin_options("sink", plugin_name, options)

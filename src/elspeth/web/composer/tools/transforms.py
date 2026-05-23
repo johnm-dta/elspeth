@@ -100,6 +100,14 @@ def _handle_list_transforms(
     return _discovery_result(state, context.catalog.list_transforms())
 
 
+def _handle_list_sinks(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    context: ToolContext,
+) -> ToolResult:
+    return _discovery_result(state, context.catalog.list_sinks())
+
+
 def _handle_upsert_node(
     arguments: dict[str, Any],
     state: CompositionState,

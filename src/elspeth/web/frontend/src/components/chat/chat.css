@@ -16,7 +16,13 @@
    Chat Bubble Base Styles
    --------------------------------------------------------------------------- */
 .bubble {
-  max-width: 85%;
+  /* Fallback measure cap for any bubble that does NOT compose
+     .message-bubble-content (currently only .bubble-system, which then
+     overrides to 100%). The runtime cap for user and assistant bubbles
+     lives on .message-bubble-content below — placed there because that
+     selector has equal specificity to .bubble but appears later in
+     source order and would otherwise silently win. */
+  max-width: min(85%, 68ch);
   padding: var(--space-md) var(--space-lg);
   border-radius: var(--radius-lg);
   word-break: break-word;
@@ -47,6 +53,18 @@
   margin-bottom: var(--space-md);
 }
 
+/* Re-assert the loose-list mitigation from common.css at bubble-context
+   specificity. Commit 5dc0e7c89 raised .bubble .markdown-body p margins to
+   var(--space-md) for paragraph-break legibility; that rule wins the cascade
+   over common.css's `.markdown-body li > p { margin: 0 }` (equal specificity,
+   later source order), which silently restored loose-list compounding inside
+   bubbles. By scoping the mitigation to .bubble and placing it AFTER the
+   paragraph-margin rule, we keep both fixes: prose paragraphs get a 12px
+   break, but loose-list <li><p>...</p></li> items render tight. */
+.bubble .markdown-body li > p {
+  margin: 0;
+}
+
 .bubble-user {
   align-self: flex-end;
   background-color: var(--color-bubble-user);
@@ -57,11 +75,17 @@
   align-self: flex-start;
   background-color: var(--color-bubble-assistant);
   border: 1px solid var(--color-bubble-assistant-border);
+  /* Left-edge accent: lifts the assistant bubble's visual containment without
+     touching its background saturation or the user-bubble visual weight. The
+     2px accent reads as "system attestation" against the workspace canvas
+     where the 18%-alpha border alone fell to ~2:1 and was barely visible. */
+  border-left: 2px solid var(--color-border-strong);
 }
 
 .bubble-system {
   align-self: center;
   width: 100%;
+  max-width: 100%;   /* belt-and-braces: keep system notices full-width regardless of any future change to the .bubble fallback cap */
   text-align: center;
   background-color: var(--color-bubble-system);
   color: var(--color-text-muted);
@@ -637,7 +661,14 @@
 }
 
 .message-bubble-content {
-  max-width: 80%;
+  /* Cap measure at ~68ch (Bringhurst's upper range) so wide windows do
+     not stretch the bubble to a 120-char measure that hurts eye-return
+     on long assistant summaries. Small windows keep the 80% behaviour
+     via min(). This is the LIVE cap — .bubble has the same cap as a
+     defense-in-depth fallback, but .message-bubble-content has equal
+     specificity to .bubble and appears later in source order, so this
+     rule wins for every user and assistant bubble. */
+  max-width: min(80%, 68ch);
   font-size: var(--font-size-base);
   /* Was --line-height-normal (1.5). .message-bubble-content has the same
      specificity as .bubble but appears later in source, so it overrides

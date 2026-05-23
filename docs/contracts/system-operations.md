@@ -551,12 +551,37 @@ Merged Token (T5)
 
 ### Coalesce Invariants
 
-1. **Correlation by row_id** — Tokens from the same source row (same `row_id`) are matched across branches. Different source rows never merge.
+1. **Correlation by row_id** — Tokens from the same source row (same `row_id`) are matched across branches. Different source rows never merge. `row_id` is globally unique within a run (PK on the `rows` table); it carries one source's identity via the `source_node_id` it points to. **Cross-source coalesce is not supported by `row_id` correlation** — two rows emitted by two different sources have different `row_id` values even if their `source_row_index` happens to coincide, so the coalesce barrier never matches them. To combine rows from multiple sources into a shared coalesce-able shape, fan in through a `queue` node first (ADR-025 §Decision 9); the `queue` itself does not produce shared `row_id`s — a downstream fork/aggregation/transform is what creates the joinable token set the coalesce then matches by `row_id`.
 2. **Branch uniqueness** — A branch can only contribute one token per row_id. Duplicate arrivals for the same branch raise an error.
 3. **Consumed tokens are terminal** — All tokens consumed in a merge reach `COALESCED` terminal state.
 4. **Merged token is new** — The merged token gets a fresh `token_id` with `join_group_id` linking back to consumed tokens.
 5. **Schema merge follows mode precedence** — When merging contracts: `FIXED > FLEXIBLE > OBSERVED`. The strictest mode wins.
-6. **End-of-source flush** — When the source exhausts, all pending coalesces are flushed per their policy. `best_effort` merges what arrived; `require_all` fails remaining.
+6. **End-of-source flush** — When *all* sources in the run have exhausted, all pending coalesces are flushed per their policy. `best_effort` merges what arrived; `require_all` fails remaining. End-of-source on a single source does not flush — multi-source runs wait for the last source to drain before applying the flush rule.
+
+### Multi-source coalesce
+
+Coalesce is a same-row token-merging primitive: it joins tokens that share
+a `row_id`. In a multi-source pipeline (ADR-025) every row carries a
+durable `source_node_id`, but `row_id` remains globally unique within the
+run — two sources never share a `row_id`. Three operational consequences:
+
+- **Coalesce does not merge across sources.** A `coalesce` node whose
+  upstream fork was rooted at a single source will only receive tokens
+  whose `row_id` came from that source. Authoring a coalesce that
+  expects to combine "the same logical record from source A and source
+  B" is not the supported pattern — that is a join, not a coalesce, and
+  it requires a transform that explicitly correlates by an
+  operator-declared join key.
+- **`source_node_id` is preserved through coalesce.** The merged token's
+  upstream `row_id` retains its original `source_node_id` attribution
+  via the `rows` table; an auditor running `elspeth explain` on the
+  merged token can trace it back to the single source that produced its
+  underlying row.
+- **End-of-source semantics are per-run, not per-source.** The
+  `best_effort` / `require_all` flush at end-of-source fires when the
+  last source in the run finishes ingesting, not when each individual
+  source finishes. A run with three sources will hold pending coalesce
+  state until all three are drained.
 
 ### Coalesce Audit Trail
 

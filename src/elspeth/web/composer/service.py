@@ -48,6 +48,7 @@ from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import yaml_generator
 from elspeth.web.composer._compose_loop_carriers import (
     _CallModelOutcome,
+    _ClassifyOutcome,
     _DispatchOutcome,
     _PersistOutcome,
     _TerminateOutcome,
@@ -3390,6 +3391,175 @@ class ComposerServiceImpl:
         )
         return dispatch, advisor_calls_used
 
+    async def _classify_and_budget_turn(
+        self,
+        *,
+        dispatch: _DispatchOutcome,
+        persist: _PersistOutcome,
+        llm_messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        recorder: BufferingRecorder,
+        anti_anchor: AntiAnchorTracker,
+        progress: ComposerProgressSink | None,
+        message: str,
+        initial_version: int,
+        deadline: float,
+        runtime_preflight_cache: _RuntimePreflightCache,
+        session_scope: str,
+        user_id: str | None,
+        mutation_success_seen: bool,
+        composition_turns_used: int,
+        discovery_turns_used: int,
+    ) -> _ClassifyOutcome:
+        """Phase P5 of the compose loop — anti-anchor + budget classify.
+
+        Three concerns share this phase because their decision flow is
+        sequential:
+
+        1. **Anti-anchor hint (§7.7).** When the last three failed tool
+           calls share the same (tool_name, arguments_hash), inject a
+           role="user" hint into ``llm_messages`` so the model breaks
+           the anchored retry. The hint is persisted via the normal
+           ``chat_messages`` path.
+        2. **Cache-hit short-circuit.** When every tool call this turn
+           was a discovery cache hit, no budget charge: continue.
+        3. **Budget classify.** Charge the composition counter (with
+           the B-4D-3 last-chance LLM call on exhaustion) or the
+           discovery counter (no bonus call). Advisor-only turns are
+           neither — return to the driver without charging.
+
+        Returns:
+            ``_ClassifyOutcome(action="continue", composition_turns_delta=...,
+            discovery_turns_delta=...)`` on the normal path, or
+            ``_ClassifyOutcome(action="return", result=...)`` when the
+            B-4D-3 bonus call terminated the loop. Convergence raises
+            (composition / discovery budget exhausted without bonus
+            success) leave through the exception channel.
+        """
+        state = dispatch.state
+        last_runtime_preflight = dispatch.last_runtime_preflight
+        turn_has_mutation = dispatch.turn_has_mutation
+        turn_has_discovery = dispatch.turn_has_discovery
+        all_cache_hits = dispatch.all_cache_hits
+        persisted_tool_call_turn = persist.persisted_tool_call_turn
+        persisted_assistant_message_id = persist.persisted_assistant_message_id
+        failed_turn = persist.failed_turn
+
+        # §7.7 anti-anchor hint: if the last 3 failed tool calls share the
+        # same (tool_name, arguments_hash), the model has stopped reading
+        # validator feedback. Inject a synthetic role="user" hint before
+        # the next LLM turn so the model breaks the anchor. consume_fire()
+        # clears the deque so the hint cannot re-fire on the same anchor.
+        # Persisted via the normal llm_messages → chat_messages path; the
+        # operator-visible audit row carries the [ELSPETH-SYSTEM-HINT]
+        # marker so its system origin is unambiguous.
+        if anti_anchor.should_fire():
+            hint_text = anti_anchor.build_hint()
+            anti_anchor.consume_fire()
+            llm_messages.append({"role": "user", "content": hint_text})
+            await _emit_progress(
+                progress,
+                ComposerProgressEvent(
+                    phase="using_tools",
+                    headline="ELSPETH detected an anchored retry pattern.",
+                    evidence=(
+                        "The last 3 tool calls used identical arguments and produced the same error.",
+                        "A structural hint was injected to help the model converge.",
+                    ),
+                    likely_next="The model will see the hint and try a different argument shape.",
+                ),
+            )
+
+        # If ALL tool calls in this turn were cache hits, no budget
+        # charge — continue to next turn without incrementing.
+        if all_cache_hits:
+            return _ClassifyOutcome(action="continue")
+
+        # Classify turn and charge the appropriate budget.
+        # The current turn has already been executed (tool results
+        # are in the message history). We increment first, then
+        # check whether the budget is now exhausted. If so, we give
+        # the LLM one last chance (B-4D-3) for composition, or
+        # raise immediately for discovery (discovery exhaustion
+        # doesn't benefit from a bonus call — no state was mutated).
+        if turn_has_mutation:
+            new_composition_turns_used = composition_turns_used + 1
+            if new_composition_turns_used >= self._max_composition_turns:
+                # B-4D-3 fix: give the LLM one last chance to see the
+                # tool results and produce a text response.
+                await _emit_progress(progress, _model_call_progress_event(message))
+                response = await self._call_llm_before_deadline(
+                    llm_messages,
+                    tools,
+                    state,
+                    initial_version,
+                    deadline,
+                    recorder=recorder,
+                )
+                assistant_message = response.choices[0].message
+                if not assistant_message.tool_calls:
+                    await _emit_progress(
+                        progress,
+                        ComposerProgressEvent(
+                            phase="complete",
+                            headline="The composer response is ready.",
+                            evidence=("The model stopped requesting pipeline tools.",),
+                            likely_next="ELSPETH will save any accepted pipeline update.",
+                            reason="composer_complete",
+                        ),
+                    )
+                    result = await self._finalize_no_tool_response(
+                        content=assistant_message.content or "",
+                        state=state,
+                        initial_version=initial_version,
+                        user_id=user_id,
+                        last_runtime_preflight=last_runtime_preflight,
+                        runtime_preflight_cache=runtime_preflight_cache,
+                        session_scope=session_scope,
+                        user_message=message,
+                        mutation_success_seen=mutation_success_seen,
+                        tool_invocations=recorder.invocations,
+                        llm_calls=recorder.llm_calls,
+                    )
+                    threaded = replace(
+                        result,
+                        persisted_assistant_message_id=persisted_assistant_message_id,
+                        persisted_tool_call_turn=persisted_tool_call_turn,
+                    )
+                    return _ClassifyOutcome(
+                        action="return",
+                        result=threaded,
+                        composition_turns_delta=1,
+                    )
+                raise ComposerConvergenceError.capture(
+                    max_turns=new_composition_turns_used + discovery_turns_used,
+                    budget_exhausted="composition",
+                    state=state,
+                    initial_version=initial_version,
+                    tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
+                    llm_calls=recorder.llm_calls,
+                    failed_turn=failed_turn,
+                )
+            return _ClassifyOutcome(action="continue", composition_turns_delta=1)
+        if turn_has_discovery:
+            new_discovery_turns_used = discovery_turns_used + 1
+            if new_discovery_turns_used >= self._max_discovery_turns:
+                raise ComposerConvergenceError.capture(
+                    max_turns=composition_turns_used + new_discovery_turns_used,
+                    budget_exhausted="discovery",
+                    state=state,
+                    initial_version=initial_version,
+                    tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
+                    llm_calls=recorder.llm_calls,
+                    failed_turn=failed_turn,
+                )
+            return _ClassifyOutcome(action="continue", discovery_turns_delta=1)
+        # The only non-cache tool currently handled outside the
+        # discovery/mutation registries is request_advisor_hint. It
+        # has its own per-compose budget above, so give the primary
+        # model the returned guidance instead of charging discovery.
+        return _ClassifyOutcome(action="continue")
+
     async def _try_terminate_no_tools(
         self,
         *,
@@ -3542,6 +3712,21 @@ class ComposerServiceImpl:
     ) -> ComposerResult:
         """Inner composition loop with dual-counter budget tracking.
 
+        The loop body is decomposed into five phases (see the carrier
+        module ``_compose_loop_carriers`` for the dataclasses that
+        thread state between them):
+
+        * P1 :meth:`_call_model_turn`        — one LLM call, cap check
+        * P2 :meth:`_try_terminate_no_tools` — handle the no-tool-calls
+          branch (repair injections or finalize-and-return)
+        * P3 :meth:`_dispatch_tool_batch`    — execute every tool call,
+          accumulate ``_ToolOutcome`` records, rebind ``state``
+        * P4 :meth:`_persist_turn_audit`     — redact, persist the turn
+          audit row, raise plugin-crash propagation if applicable
+        * P5 :meth:`_classify_and_budget_turn` — anti-anchor hint,
+          cache-hit short-circuit, dual-counter budget classify,
+          B-4D-3 last-chance LLM call
+
         Uses cooperative timeout: the deadline is checked at safe
         checkpoints (before LLM calls, after tool batches) rather
         than using asyncio.wait_for() cancellation.  This ensures
@@ -3658,15 +3843,10 @@ class ComposerServiceImpl:
                 composition_turns_used=composition_turns_used,
                 discovery_turns_used=discovery_turns_used,
             )
-            response = call_model.response
-            assistant_message = call_model.assistant_message
-            raw_assistant_content = call_model.raw_assistant_content
-            assistant_tool_calls = call_model.assistant_tool_calls
-
             # If no tool calls, the LLM is done — apply the final gate and return
             if not call_model.has_tool_calls:
                 terminate = await self._try_terminate_no_tools(
-                    assistant_message=assistant_message,
+                    assistant_message=call_model.assistant_message,
                     message=message,
                     llm_messages=llm_messages,
                     state=state,
@@ -3710,32 +3890,22 @@ class ComposerServiceImpl:
                 session_scope=session_scope,
                 advisor_calls_used=advisor_calls_used,
             )
-            # Lift dispatch results back into the driver's per-iteration
-            # locals so the existing persist + classify call sites continue
-            # to read names that match the prior inline body.
+            # State the driver still owns across iterations updates from
+            # the dispatch carrier; persist + classify consume the rest
+            # of the dispatch fields directly.
             state = dispatch.state
             last_validation = dispatch.last_validation
             last_runtime_preflight = dispatch.last_runtime_preflight
-            tool_outcomes = list(dispatch.tool_outcomes)
-            decoded_args_by_call_id = dict(dispatch.decoded_args_by_call_id)
-            turn_has_mutation = dispatch.turn_has_mutation
-            turn_has_discovery = dispatch.turn_has_discovery
-            all_cache_hits = dispatch.all_cache_hits
-            plugin_crash = dispatch.plugin_crash
-            plugin_crash_cause = dispatch.plugin_crash_cause
-            assistant_message = dispatch.assistant_message
-            raw_assistant_content = dispatch.raw_assistant_content
-            assistant_tool_calls = dispatch.assistant_tool_calls
             if dispatch.mutation_success_observed:
                 mutation_success_seen = True
-            self._phase3_last_tool_outcomes = tuple(tool_outcomes)
+            self._phase3_last_tool_outcomes = dispatch.tool_outcomes
             persist = await self._persist_turn_audit(
-                tool_outcomes=tuple(tool_outcomes),
-                decoded_args_by_call_id=decoded_args_by_call_id,
-                assistant_message=assistant_message,
-                raw_assistant_content=raw_assistant_content,
-                assistant_tool_calls=assistant_tool_calls,
-                plugin_crash=plugin_crash,
+                tool_outcomes=dispatch.tool_outcomes,
+                decoded_args_by_call_id=dispatch.decoded_args_by_call_id,
+                assistant_message=dispatch.assistant_message,
+                raw_assistant_content=dispatch.raw_assistant_content,
+                assistant_tool_calls=dispatch.assistant_tool_calls,
+                plugin_crash=dispatch.plugin_crash,
                 session_id=session_id,
                 current_state_id=current_state_id,
                 persisted_tool_call_turn=persisted_tool_call_turn,
@@ -3745,131 +3915,54 @@ class ComposerServiceImpl:
             persisted_assistant_message_id = persist.persisted_assistant_message_id
             persisted_tool_call_turn = persist.persisted_tool_call_turn
             failed_turn = persist.failed_turn
-            if plugin_crash is not None:
+            if dispatch.plugin_crash is not None:
+                # Plugin-crash propagation discipline (plan §5.7): the
+                # capture in P3 already snapshotted `state` after every
+                # prior successful tool-call mutation. If persistence
+                # succeeded, re-capture with the post-persist failed_turn
+                # so the route layer's _handle_plugin_crash sees the
+                # complete partial-state story; otherwise raise the
+                # original capture as-is.
                 if persisted_tool_call_turn:
                     persisted_plugin_crash = ComposerPluginCrashError.capture(
-                        plugin_crash.original_exc,
+                        dispatch.plugin_crash.original_exc,
                         state=state,
                         initial_version=initial_version,
                         tool_invocations=(),
                         llm_calls=recorder.llm_calls,
                         failed_turn=failed_turn,
                     )
-                    if plugin_crash_cause is None:
+                    if dispatch.plugin_crash_cause is None:
                         raise persisted_plugin_crash
-                    raise persisted_plugin_crash from plugin_crash_cause
-                if plugin_crash_cause is None:
-                    raise plugin_crash
-                raise plugin_crash from plugin_crash_cause
+                    raise persisted_plugin_crash from dispatch.plugin_crash_cause
+                if dispatch.plugin_crash_cause is None:
+                    raise dispatch.plugin_crash
+                raise dispatch.plugin_crash from dispatch.plugin_crash_cause
 
-            # §7.7 anti-anchor hint: if the last 3 failed tool calls share the
-            # same (tool_name, arguments_hash), the model has stopped reading
-            # validator feedback. Inject a synthetic role="user" hint before
-            # the next LLM turn so the model breaks the anchor. consume_fire()
-            # clears the deque so the hint cannot re-fire on the same anchor.
-            # Persisted via the normal llm_messages → chat_messages path; the
-            # operator-visible audit row carries the [ELSPETH-SYSTEM-HINT]
-            # marker so its system origin is unambiguous.
-            if anti_anchor.should_fire():
-                hint_text = anti_anchor.build_hint()
-                anti_anchor.consume_fire()
-                llm_messages.append({"role": "user", "content": hint_text})
-                await _emit_progress(
-                    progress,
-                    ComposerProgressEvent(
-                        phase="using_tools",
-                        headline="ELSPETH detected an anchored retry pattern.",
-                        evidence=(
-                            "The last 3 tool calls used identical arguments and produced the same error.",
-                            "A structural hint was injected to help the model converge.",
-                        ),
-                        likely_next="The model will see the hint and try a different argument shape.",
-                    ),
-                )
-
-            # If ALL tool calls in this turn were cache hits, no budget
-            # charge — continue to next turn without incrementing.
-            if all_cache_hits:
-                continue
-
-            # Classify turn and charge the appropriate budget.
-            # The current turn has already been executed (tool results
-            # are in the message history). We increment first, then
-            # check whether the budget is now exhausted. If so, we give
-            # the LLM one last chance (B-4D-3) for composition, or
-            # raise immediately for discovery (discovery exhaustion
-            # doesn't benefit from a bonus call — no state was mutated).
-            if turn_has_mutation:
-                composition_turns_used += 1
-                if composition_turns_used >= self._max_composition_turns:
-                    # B-4D-3 fix: give the LLM one last chance to see the
-                    # tool results and produce a text response.
-                    await _emit_progress(progress, _model_call_progress_event(message))
-                    response = await self._call_llm_before_deadline(
-                        llm_messages,
-                        tools,
-                        state,
-                        initial_version,
-                        deadline,
-                        recorder=recorder,
-                    )
-                    assistant_message = response.choices[0].message
-                    if not assistant_message.tool_calls:
-                        await _emit_progress(
-                            progress,
-                            ComposerProgressEvent(
-                                phase="complete",
-                                headline="The composer response is ready.",
-                                evidence=("The model stopped requesting pipeline tools.",),
-                                likely_next="ELSPETH will save any accepted pipeline update.",
-                                reason="composer_complete",
-                            ),
-                        )
-                        result = await self._finalize_no_tool_response(
-                            content=assistant_message.content or "",
-                            state=state,
-                            initial_version=initial_version,
-                            user_id=user_id,
-                            last_runtime_preflight=last_runtime_preflight,
-                            runtime_preflight_cache=runtime_preflight_cache,
-                            session_scope=session_scope,
-                            user_message=message,
-                            mutation_success_seen=mutation_success_seen,
-                            tool_invocations=recorder.invocations,
-                            llm_calls=recorder.llm_calls,
-                        )
-                        return replace(
-                            result,
-                            persisted_assistant_message_id=persisted_assistant_message_id,
-                            persisted_tool_call_turn=persisted_tool_call_turn,
-                        )
-                    raise ComposerConvergenceError.capture(
-                        max_turns=composition_turns_used + discovery_turns_used,
-                        budget_exhausted="composition",
-                        state=state,
-                        initial_version=initial_version,
-                        tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
-                        llm_calls=recorder.llm_calls,
-                        failed_turn=failed_turn,
-                    )
-            elif turn_has_discovery:
-                discovery_turns_used += 1
-                if discovery_turns_used >= self._max_discovery_turns:
-                    raise ComposerConvergenceError.capture(
-                        max_turns=composition_turns_used + discovery_turns_used,
-                        budget_exhausted="discovery",
-                        state=state,
-                        initial_version=initial_version,
-                        tool_invocations=() if persisted_tool_call_turn else recorder.invocations,
-                        llm_calls=recorder.llm_calls,
-                        failed_turn=failed_turn,
-                    )
-            else:
-                # The only non-cache tool currently handled outside the
-                # discovery/mutation registries is request_advisor_hint. It
-                # has its own per-compose budget above, so give the primary
-                # model the returned guidance instead of charging discovery.
-                continue
+            classify = await self._classify_and_budget_turn(
+                dispatch=dispatch,
+                persist=persist,
+                llm_messages=llm_messages,
+                tools=tools,
+                recorder=recorder,
+                anti_anchor=anti_anchor,
+                progress=progress,
+                message=message,
+                initial_version=initial_version,
+                deadline=deadline,
+                runtime_preflight_cache=runtime_preflight_cache,
+                session_scope=session_scope,
+                user_id=user_id,
+                mutation_success_seen=mutation_success_seen,
+                composition_turns_used=composition_turns_used,
+                discovery_turns_used=discovery_turns_used,
+            )
+            composition_turns_used += classify.composition_turns_delta
+            discovery_turns_used += classify.discovery_turns_delta
+            if classify.action == "return":
+                assert classify.result is not None
+                return classify.result
+            continue
 
     def _persist_crashed_session(self, session_id: str) -> None:
         """Best-effort timestamp bump to mark that a compose session crashed.

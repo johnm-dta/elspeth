@@ -32,6 +32,7 @@ import pytest
 
 from elspeth_lints.core.atomic_io import (
     AtomicWriteConflictError,
+    AtomicWriteShortWriteError,
     _lock_path_for,
     _temp_path_for,
     atomic_write_text,
@@ -269,3 +270,98 @@ def test_oserror_after_temp_create_cleans_up_temp(tmp_path: Path, monkeypatch: p
     # Temp scrubbed in the except handler.
     orphans = list(tmp_path.glob(".allowlist.yaml.tmp-*"))
     assert orphans == []
+
+
+def test_short_write_raises_typed_exception(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """POSIX-legal short write surfaces as ``AtomicWriteShortWriteError``.
+
+    Pre-T9-cleanup ``os.write`` was called without checking the
+    returned byte count, so a partial write (POSIX-legal under signal
+    interruption or certain FS conditions) would silently fsync+rename
+    a truncated YAML over the live allowlist. The Tier-1 audit-trail
+    consequence is the same as the disk-full case ``OSError`` already
+    catches: corruption.
+
+    This test monkeypatches ``os.write`` to return a short count and
+    verifies the typed exception fires. The temp file is cleaned up
+    by the existing ``except BaseException`` branch, so no
+    ``.tmp-*`` orphan survives.
+    """
+    target = tmp_path / "allowlist.yaml"
+    target.write_text("ORIGINAL\n")
+
+    real_write = os.write
+    call_count = {"n": 0}
+
+    def short_write_on_first_call(fd: int, payload: bytes) -> int:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Pretend we only managed to flush half of the payload.
+            # Real ``os.write`` actually wrote some bytes to the fd
+            # (we use ``real_write`` for the partial flush) so the
+            # tmp file on disk is genuinely truncated — mirrors the
+            # POSIX failure shape we're guarding against.
+            half = max(1, len(payload) // 2)
+            real_write(fd, payload[:half])
+            return half
+        return real_write(fd, payload)
+
+    monkeypatch.setattr(os, "write", short_write_on_first_call)
+
+    with pytest.raises(AtomicWriteShortWriteError, match=r"short write to"):
+        atomic_write_text(target, "NEW_CONTENT_THAT_IS_LONG_ENOUGH_TO_HALF\n")
+
+    # Original preserved — the rename never happened.
+    assert target.read_text() == "ORIGINAL\n"
+    # Temp scrubbed.
+    orphans = list(tmp_path.glob(".allowlist.yaml.tmp-*"))
+    assert orphans == []
+
+
+def test_lockfile_path_is_gitignored() -> None:
+    """T9 MINOR: ``.<name>.lock`` siblings inside ``config/cicd/**`` are gitignored.
+
+    ``atomic_write_text`` creates persistent ``.<name>.lock`` files
+    next to managed allowlist YAMLs (flock idiom — unlinking inside
+    the lock races on re-acquire). After the first ``justify`` /
+    ``rotate`` invocation operators see them as untracked in
+    ``git status``; without an ignore rule they may commit them by
+    accident. Pin the rule so a future ``.gitignore`` refactor
+    cannot regress.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    target = repo_root / "config" / "cicd" / "enforce_tier_model" / ".web.yaml.lock"
+    result = subprocess.run(
+        ["git", "check-ignore", "-v", str(target)],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # ``git check-ignore`` exits 0 when the path IS ignored, 1 when
+    # not. Tier-1: assert the exact exit code rather than a softer
+    # "stdout contains the rule" check.
+    assert result.returncode == 0, (
+        f"expected {target} to be gitignored by .gitignore but "
+        f"git check-ignore returned {result.returncode}. stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}. The atomic_write_text lock file is "
+        f"operator-local state and must never be committed."
+    )
+    # The matching rule should be the config/cicd/**/.*.lock pattern
+    # so a regression that drops the pattern fires here.
+    assert "config/cicd/**/.*.lock" in result.stdout, (
+        f"unexpected ignore rule matched {target}: {result.stdout!r}. The intended rule is ``config/cicd/**/.*.lock``."
+    )
+
+
+def test_short_write_typed_exception_subclasses_runtime_error() -> None:
+    """``AtomicWriteShortWriteError`` mirrors the existing exception taxonomy.
+
+    Callers that broadly catch ``RuntimeError`` (the rotate/justify
+    error-handling convention in ``apply_plan``) MUST still catch a
+    short-write failure — it's an atomic-write failure, same class as
+    ``AtomicWriteConflictError``. Pinning the inheritance prevents a
+    future refactor from accidentally narrowing the taxonomy.
+    """
+    assert issubclass(AtomicWriteShortWriteError, RuntimeError)
+    assert issubclass(AtomicWriteConflictError, RuntimeError)

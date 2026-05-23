@@ -389,24 +389,50 @@ def _empty_plan_with(
 # =============================================================================
 
 
-def test_rotate_refuses_judge_gated_entry_one_to_one() -> None:
-    """A 1:1 rotation candidate carrying judge_verdict raises before producing a Rotation."""
+@pytest.mark.parametrize(
+    "verdict_name",
+    ["ACCEPTED", "OVERRIDDEN_BY_OPERATOR"],
+    ids=["judge_accepted", "operator_overridden"],
+)
+def test_rotate_refuses_judge_gated_entry_one_to_one(verdict_name: str) -> None:
+    """A 1:1 rotation candidate carrying ANY judge_verdict raises before producing a Rotation.
+
+    Parametrised over both terminal verdict shapes that gate the
+    refusal: ``ACCEPTED`` (the judge agreed the entry can stand) and
+    ``OVERRIDDEN_BY_OPERATOR`` (the operator chose to bypass the
+    judge's verdict). The refusal is gated on
+    ``entry.judge_verdict is not None`` so both arms must trigger; T9
+    review verified ``OVERRIDDEN_BY_OPERATOR`` empirically but a
+    future ``JudgeVerdict`` enum addition could silently break the
+    guard without this parametrisation pinning both shapes.
+    """
     from datetime import UTC, datetime
 
     from elspeth_lints.core.allowlist import JudgeVerdict
 
+    verdict = JudgeVerdict[verdict_name]
+
     finding = _make_finding(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="bbbb")
     entry = _make_entry(file_path="a.py", rule_id="R1", symbol=("foo",), fingerprint="aaaa", source_file="web.yaml")
     # Convert to judge-gated.
-    entry.judge_verdict = JudgeVerdict.ACCEPTED
+    entry.judge_verdict = verdict
     entry.judge_recorded_at = datetime(2026, 5, 1, tzinfo=UTC)
     entry.judge_model = "anthropic/claude-opus-4"
-    entry.judge_rationale = "judge accepted"
+    entry.judge_rationale = f"verdict={verdict_name}"
     entry.file_fingerprint = "0" * 64
     entry.ast_path = "body[0]"
 
-    with pytest.raises(RuntimeError, match=r"refusing to rotate judge-gated.*web\.yaml"):
+    with pytest.raises(RuntimeError, match=r"refusing to rotate judge-gated.*web\.yaml") as excinfo:
         plan_rotations(findings=[finding], allowlist_entries=[entry])
+    # Message must name the actual verdict so the operator can
+    # distinguish a judge refusal from an operator-override refusal
+    # in CI logs.
+    assert verdict_name in str(excinfo.value), (
+        f"refusal message must name the gating verdict so the operator "
+        f"knows whether to delete the entry and re-justify (ACCEPTED) "
+        f"or re-evaluate the override (OVERRIDDEN_BY_OPERATOR). Got: "
+        f"{excinfo.value!s}"
+    )
 
 
 def test_rotate_allows_pre_judge_entry_to_rotate_normally() -> None:

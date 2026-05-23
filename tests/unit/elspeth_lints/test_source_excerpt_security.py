@@ -1103,3 +1103,423 @@ def test_dotenv_secret_assignment_false_positives_on_prose_value() -> None:
         "firing on prose values (verify the security implications "
         "before celebrating)."
     )
+
+
+# =====================================================================
+# 3. T8c — production-path contract tests
+# =====================================================================
+#
+# These tests exercise the FULL ``extract_safe_excerpt`` pipeline
+# (path containment + raw-window read + scrubber + line-number-prefix
+# renderer). The earlier T8b coverage tested ``scrub_secrets`` in
+# isolation — that's where the SSH-body MAJOR slipped past: the
+# render-then-scrub ordering meant the production text never reached
+# the patterns in the shape the patterns expected. The unit test
+# passed; the integration was broken.
+#
+# Every pattern in ``_SECRET_PATTERNS`` MUST survive the production
+# pipeline. The parametrized contract below plants each pattern's
+# literal into a freshly-written file under tmp_path, runs the file
+# through ``extract_safe_excerpt`` with a path hint that activates
+# any ``path_hint_required`` gating, and asserts the literal is absent
+# from the rendered output AND that a redaction with the expected
+# pattern_name is recorded.
+#
+# Add a new pattern to ``_SECRET_PATTERNS``? Add a corresponding row
+# to ``_PATTERN_CONTRACT_CASES`` below. If you forget, the
+# ``test_pattern_contract_coverage_is_exhaustive`` test fires and
+# names the missing pattern.
+
+
+def test_extract_safe_excerpt_redacts_ssh_private_key_body(tmp_path: Path) -> None:
+    """T8c MAJOR: SSH body redaction works in the FULL production path.
+
+    Pre-T8c this test failed silently: the render-then-scrub ordering
+    put a line-number prefix in front of every body line, the
+    ``ssh_private_key_body`` pattern's ``^...$`` anchor matched the
+    prefix instead of the base64 body, and the literal slipped through
+    unredacted. The unit test
+    (``test_scrub_secrets_ssh_body_requires_path_hint``) continued to
+    pass because it called ``scrub_secrets`` on un-prefixed text.
+
+    Scrub-before-render closes the gap. This test pins the behaviour
+    end-to-end so the regression cannot return without firing.
+    """
+    root = tmp_path / "src_root"
+    root.mkdir()
+    # PEM-shaped file with realistic 64-char base64 body lines (the
+    # length the ``openssl`` writer produces).
+    body_line_one = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDXAAAAAAAAAAAA"
+    body_line_two = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    pem_path = root / "id_rsa"
+    pem_path.write_text(
+        f"-----BEGIN OPENSSH PRIVATE KEY-----\n{body_line_one}\n{body_line_two}\n-----END OPENSSH PRIVATE KEY-----\n",
+        encoding="utf-8",
+    )
+    excerpt = extract_safe_excerpt(root=root, target_file=pem_path, line=2, context_lines=5)
+    # Both body lines MUST be absent from the rendered prompt.
+    assert body_line_one not in excerpt.text, (
+        "ssh_private_key_body redaction regressed in the production path. "
+        "If the unit test still passes, the cause is render/scrub ordering."
+    )
+    assert body_line_two not in excerpt.text
+    # Header and footer also redacted (different patterns).
+    body_pattern_names = {r.pattern_name for r in excerpt.redactions}
+    assert "ssh_private_key_body" in body_pattern_names
+    assert "pem_private_key_header" in body_pattern_names
+    assert "pem_private_key_footer" in body_pattern_names
+    # Line-number prefix preserved on the rendered output (the body
+    # was scrubbed; the structural prefix remains).
+    assert ">>" in excerpt.text or "  " in excerpt.text
+
+
+# Pattern contract cases: one row per entry in ``_SECRET_PATTERNS``.
+# ``surrounding_text`` is a small file body that embeds the literal in
+# a no-label position; ``filename`` activates any ``path_hint_required``
+# gating. The renderer adds a line-number prefix, so the literal must
+# survive the prefix-then-scrub previously and now the scrub-then-prefix
+# pipeline.
+_PATTERN_CONTRACT_CASES: tuple[tuple[str, str, str], ...] = (
+    (
+        "pem_private_key_header",
+        "mod.py",
+        "x = 1\n-----BEGIN RSA PRIVATE KEY-----\ny = 2\n",
+    ),
+    (
+        "pem_private_key_footer",
+        "mod.py",
+        "x = 1\n-----END RSA PRIVATE KEY-----\ny = 2\n",
+    ),
+    (
+        "aws_access_key",
+        "mod.py",
+        'x = 1\nvar = "AKIAIOSFODNN7EXAMPLE"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "github_pat_classic",
+        "mod.py",
+        'x = 1\nvar = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "github_pat_fine_grained",
+        "mod.py",
+        'x = 1\nvar = "github_pat_' + "A" * 82 + '"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "gitlab_pat",
+        "mod.py",
+        'x = 1\nvar = "glpat-xyzABC123_-456DEFghIjKlMnOpQ"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "gitlab_oauth_secret",
+        "mod.py",
+        'x = 1\nvar = "gloas-applicationSecret_1234567890abcdef"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "slack_token",
+        "mod.py",
+        'x = 1\nvar = "' + "xox" + "b-" + '1234567890-AbCdEfGhIjKlMnOp"\ny = 2\n',
+    ),
+    (
+        "stripe_secret_key",
+        "mod.py",
+        'x = 1\nvar = "' + "sk" + "_live_" + '4eC39HqLyjWDarjtT1zdp7dc"\ny = 2\n',
+    ),
+    (
+        "stripe_test_secret_key",
+        "mod.py",
+        'x = 1\nvar = "' + "sk" + "_test_" + '4eC39HqLyjWDarjtT1zdp7dc"\ny = 2\n',
+    ),
+    (
+        "stripe_publishable_key",
+        "mod.py",
+        'x = 1\nvar = "' + "pk" + "_live_" + 'TYooMQauvdEDq54NiTphI7jx"\ny = 2\n',
+    ),
+    (
+        "stripe_test_publishable_key",
+        "mod.py",
+        'x = 1\nvar = "' + "pk" + "_test_" + 'TYooMQauvdEDq54NiTphI7jx"\ny = 2\n',
+    ),
+    (
+        "stripe_restricted_key",
+        "mod.py",
+        'x = 1\nvar = "' + "rk" + "_live_" + '51HG8z0KvU9rT2bWqXm1nP4dF"\ny = 2\n',
+    ),
+    (
+        "stripe_webhook_secret",
+        "mod.py",
+        'x = 1\nvar = "' + "whsec" + "_" + '5WbX9NheWmkP3FvY1k2nC8oRtZ4vUxJqLmA0pYsBgEdJ"\ny = 2\n',
+    ),
+    (
+        "anthropic_api_key",
+        "mod.py",
+        'x = 1\nvar = "sk-ant-api01-' + "B" * 80 + '"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "openai_project_key",
+        "mod.py",
+        'x = 1\nvar = "sk-proj-Wx7AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-AbCd"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "openai_session_key",
+        "mod.py",
+        'x = 1\nvar = "sess-' + "Q" * 45 + '"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "openai_api_key",
+        "mod.py",
+        'x = 1\nvar = "sk-' + "A" * 48 + '"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "huggingface_token",
+        "mod.py",
+        'x = 1\nvar = "hf_' + "C" * 36 + '"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "google_api_key",
+        "mod.py",
+        'x = 1\nvar = "AIza' + "D" * 35 + '"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "jwt",
+        "mod.py",
+        'x = 1\nvar = "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0NTY3.SflKxwRJSMeKKF2QT4"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "gcp_service_account_marker",
+        "mod.py",
+        'x = 1\ncfg = {"type": "service_account"}\ny = 2\n',
+    ),
+    (
+        "ssh_public_key",
+        "mod.py",
+        "x = 1\nkey = 'ssh-rsa " + "A" * 80 + "'\ny = 2\n",  # secret-scan: allow-this-line
+    ),
+    (
+        "discord_webhook_url",
+        "mod.py",
+        'x = 1\nurl = "https://discord.com/api/webhooks/123456789012345678/' + "E" * 60 + '"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "slack_webhook_url",
+        "mod.py",
+        'x = 1\nurl = "https://hooks.slack.com/services/'
+        + "T01ABCDEFGH/B02ZYXWVUTSR/"
+        + "F" * 24
+        + '"\ny = 2\n',
+    ),
+    (
+        "authorization_bearer",
+        "mod.py",
+        "x = 1\nheaders = 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH'\ny = 2\n",  # secret-scan: allow-this-line
+    ),
+    (
+        "azure_storage_account_key",
+        "mod.py",
+        'x = 1\nconn = "AccountKey=' + "A" * 64 + "B" * 24 + '=="\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "dotenv_secret_assignment",
+        "mod.py",
+        'x = 1\nAPI_KEY = "sk-abcdef1234567890"\ny = 2\n',  # secret-scan: allow-this-line
+    ),
+    (
+        "labelled_high_entropy_value",
+        "mod.py",
+        # Use a base64-shaped value paired with the ``token`` label.
+        # Length 40 puts it above the 32-char floor; the alphabet is
+        # the gated set [A-Za-z0-9+/=_-].
+        "x = 1\nconfig_token: 'aGVsbG8td29ybGQtdGVzdC1iYXNlNjQtdmFsdWVoaXg='\ny = 2\n",  # secret-scan: allow-this-line
+    ),
+    (
+        "ssh_private_key_body",
+        # File NAME activates ``path_hint_required`` gating.
+        "id_rsa",
+        # 64-char base64-shaped body line per the openssl writer
+        # convention. The pattern requires 60+ chars and re.MULTILINE
+        # ``^...$`` matching against the raw body.
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDXAAAAAAAAAAAA\n",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("expected_pattern_name", "filename", "file_body"),
+    _PATTERN_CONTRACT_CASES,
+    ids=[case[0] for case in _PATTERN_CONTRACT_CASES],
+)
+def test_extract_safe_excerpt_contract_per_pattern(
+    expected_pattern_name: str,
+    filename: str,
+    file_body: str,
+    tmp_path: Path,
+) -> None:
+    """Contract: every pattern in _SECRET_PATTERNS MUST redact in the production path.
+
+    This is the meta-test that prevents the T8c recurrence: a future
+    pattern added with an anchor or shape that doesn't survive the
+    ``extract_safe_excerpt`` pipeline (path resolve + raw read +
+    scrubber + line-number prefix renderer) will fail HERE rather than
+    silently shipping unredacted secrets to the LLM.
+
+    The literal that the parametrised body embeds MUST be absent from
+    the rendered ``SafeExcerpt.text`` AND a ``RedactionRecord`` with
+    the expected pattern_name MUST appear in
+    ``SafeExcerpt.redactions``.
+    """
+    root = tmp_path / "src_root"
+    root.mkdir()
+    target = root / filename
+    target.write_text(file_body, encoding="utf-8")
+
+    # Identify the planted literal: it's the body content that the
+    # pattern is supposed to match. We can derive it generically by
+    # finding the longest pattern-specific substring in the body. To
+    # keep the test honest (and avoid re-running the regex to find
+    # what we planted) we embed a known sentinel: for each case the
+    # secret literal is the longest run of consecutive non-quote /
+    # non-space chars in the body. The test below scans the body to
+    # locate that segment, then asserts it's absent from the output.
+    #
+    # That's robust to the body shapes above (most embed the literal
+    # in quotes) but for the PEM header/footer / ssh_private_key_body
+    # / gcp_service_account_marker cases the literal IS the whole
+    # body content of interest — we assert pattern_name presence
+    # instead.
+
+    excerpt = extract_safe_excerpt(
+        root=root,
+        target_file=target,
+        line=2,
+        context_lines=10,
+    )
+
+    pattern_names = {r.pattern_name for r in excerpt.redactions}
+    assert expected_pattern_name in pattern_names, (
+        f"pattern {expected_pattern_name!r} did NOT fire in the production "
+        f"path. This is the T8c failure shape: scrub_secrets may pass in "
+        f"isolation but extract_safe_excerpt's pipeline mutated the text "
+        f"so the pattern no longer matches. Recorded redactions: "
+        f"{sorted(pattern_names)}."
+    )
+
+    # Locate the literal in the body and assert it doesn't appear in
+    # the rendered prompt. Different pattern shapes plant their
+    # literal differently — we extract the substring that the
+    # pattern is meant to scrub by re-running the regex against the
+    # RAW body (the same shape ``extract_safe_excerpt`` sees before
+    # rendering).
+    from elspeth_lints.core.source_excerpt import _SECRET_PATTERNS
+
+    pattern = next(p for p in _SECRET_PATTERNS if p.name == expected_pattern_name)
+    match = pattern.regex.search(file_body)
+    assert match is not None, (
+        f"test setup error: pattern {expected_pattern_name!r} does not match its own contract body — fix the body for this row."
+    )
+    planted_literal = match.group(pattern.redact_group)
+    assert planted_literal not in excerpt.text, (
+        f"pattern {expected_pattern_name!r} fired (recorded as redaction) "
+        f"but the literal {planted_literal!r} is still present in the "
+        f"rendered prompt. The redaction record is honest about WHAT was "
+        f"redacted but the replacement didn't actually substitute. This "
+        f"is a Tier-1 audit-trail integrity failure."
+    )
+
+
+def test_pattern_contract_coverage_is_exhaustive() -> None:
+    """Every pattern in _SECRET_PATTERNS MUST have a contract-test case.
+
+    Adding a new pattern to ``_SECRET_PATTERNS`` without adding the
+    corresponding row to ``_PATTERN_CONTRACT_CASES`` would silently
+    leave that pattern uncovered by the production-path contract.
+    This guard names the missing pattern so the contributor knows
+    exactly which test row to add.
+    """
+    from elspeth_lints.core.source_excerpt import _SECRET_PATTERNS
+
+    pattern_names_in_module = {p.name for p in _SECRET_PATTERNS}
+    pattern_names_in_contract = {case[0] for case in _PATTERN_CONTRACT_CASES}
+    missing_from_contract = pattern_names_in_module - pattern_names_in_contract
+    extras_in_contract = pattern_names_in_contract - pattern_names_in_module
+    assert not missing_from_contract, (
+        f"_SECRET_PATTERNS gained {sorted(missing_from_contract)} since "
+        f"the contract test was last updated. Add a row to "
+        f"_PATTERN_CONTRACT_CASES so the production-path redaction is "
+        f"pinned end-to-end."
+    )
+    assert not extras_in_contract, (
+        f"_PATTERN_CONTRACT_CASES references {sorted(extras_in_contract)} which no longer exist in _SECRET_PATTERNS. Remove the stale rows."
+    )
+
+
+# =====================================================================
+# 3a. T8c — exact-length pattern trailing anchor (\b -> (?!\w))
+# =====================================================================
+#
+# Pre-T8c the trailing anchor on ``openai_api_key`` and
+# ``google_api_key`` was ``\b``. ``\b`` matches a transition between
+# a word char and a non-word char (or string boundary adjacent to a
+# word char). The vulnerability shape is specific to
+# ``google_api_key`` because its body alphabet ``[A-Za-z0-9_-]{35}``
+# includes ``-`` (non-word) AND it has a fixed length so the regex
+# engine cannot extend the match. When a real key ends in ``-`` and is
+# followed by another non-word char (``,`` / ``"`` / ``)`` / EOS),
+# ``\b`` finds no transition and the literal slips through. ``(?!\w)``
+# asserts only "no word char follows" — strictly stricter than ``\b``
+# in this case AND honest at end-of-string. The change to
+# ``openai_api_key`` is consistency-only (its body alphabet has no
+# non-word chars so the empirical behaviour is unchanged).
+
+
+def test_scrub_secrets_google_key_with_non_word_terminator() -> None:
+    """T8c MINOR: google_api_key body ending in ``-`` redacts before non-word terminator.
+
+    Pre-T8c with the ``\\b`` trailing anchor: if the 35th body char
+    is ``-`` (non-word, allowed by the alphabet) and the source
+    follows it with another non-word char (``,`` / ``"`` / ``)``),
+    the boundary check requires a word/non-word transition and fails
+    (both chars are non-word). Literal slips through unredacted.
+
+    With ``(?!\\w)``: the lookahead requires only that the next char
+    not be a word char. ``,`` is not a word char, so the lookahead
+    succeeds and the match takes.
+
+    This test plants the precise failure shape so a regression to
+    ``\\b`` cannot land silently.
+    """
+    # Body of exactly 35 chars from the gated alphabet, ending in ``-``.
+    body = "D" * 34 + "-"
+    planted = "AIza" + body
+    assert len(body) == 35  # contract: exactly the regex's body length
+    # Follow the literal with another non-word char so ``\b`` fails.
+    excerpt_text = f'config["google_key"] = ({planted},)'
+    result = scrub_secrets(excerpt_text)
+    assert planted not in result.text, (
+        "google_api_key did not redact a body ending in ``-`` followed by "
+        "a non-word char. The trailing anchor must be ``(?!\\w)`` not "
+        "``\\b``: ``\\b`` requires a word/non-word transition and finds "
+        "none when both sides are non-word."
+    )
+    pattern_names = {r.pattern_name for r in result.redactions}
+    assert "google_api_key" in pattern_names
+
+
+def test_scrub_secrets_google_key_at_eof_with_dash_terminator() -> None:
+    """T8c MINOR: google_api_key body ending in ``-`` redacts at end-of-string.
+
+    The other vulnerability shape: a key whose body ends in ``-`` and
+    sits at the very end of the excerpt. ``\\b`` requires a
+    neighbouring word char on at least one side. With ``-`` (non-word)
+    on one side and string-end on the other there is no word char to
+    anchor against, so the boundary check fails. ``(?!\\w)`` is
+    trivially satisfied at end-of-string.
+    """
+    body = "X" * 34 + "-"
+    planted = "AIza" + body
+    excerpt_text = f"key at eof: {planted}"
+    result = scrub_secrets(excerpt_text)
+    assert planted not in result.text, (
+        "google_api_key did not redact a body ending in ``-`` at end-of-string. ``(?!\\w)`` must hold at EOS where ``\\b`` does not."
+    )
+    pattern_names = {r.pattern_name for r in result.redactions}
+    assert "google_api_key" in pattern_names

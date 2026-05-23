@@ -102,14 +102,10 @@ class RedactionRecord:
     the redaction was performed via ``extract_safe_excerpt``. Sufficient
     for audit replay correlation (an operator with access to the
     unredacted source can re-derive the salted hash and confirm what
-    was redacted) without persisting the secret itself. The salt scopes
-    brute-force cost per-file-fingerprint rather than across the whole
-    audit corpus: a leaked ``PASSWORD=hunter12`` would otherwise be
-    recoverable in seconds against an unsalted 64-bit SHA-256 prefix;
-    salting forces the attacker to brute-force per file, raising cost
-    by orders of magnitude per leak. Per the project's
-    hash-survives-payload-deletion principle: the hash is the durable
-    handle to a value the audit trail deliberately does NOT carry.
+    was redacted) without persisting the secret itself. Per the
+    project's hash-survives-payload-deletion principle: the hash is the
+    durable handle to a value the audit trail deliberately does NOT
+    carry.
 
     Direct callers of ``scrub_secrets`` who pass no salt produce an
     unsalted hash — preserved for the grep-equality cross-excerpt
@@ -118,6 +114,32 @@ class RedactionRecord:
     distinct: the salted regime is the production path through
     ``extract_safe_excerpt`` and the only one that reaches the audit
     YAML/JSONL; the unsalted regime supports diagnostic use only.
+
+    Threat model (operator-visible, T8c-corrected):
+        The salt scopes brute-force cost to a per-file dimension rather
+        than across the whole audit corpus: an attacker who exfiltrates
+        the YAML/JSONL audit trail and tries to recover redacted values
+        with a precomputed rainbow table over common low-entropy
+        secrets (``hunter2``, ``admin1234``, ``Password!``) is forced
+        to recompute the table per ``file_fingerprint`` rather than
+        once across all files. That is the property the salt actually
+        delivers.
+
+        It does NOT defeat per-file targeted brute force. The
+        ``file_fingerprint`` is itself stored in the audit trail
+        (intentionally — the C8-3 binding requires it). An attacker who
+        has both the ``redacted_hash`` AND the ``file_fingerprint`` can
+        try candidate strings + this file's fingerprint in seconds.
+        For low-entropy secrets recovered through this channel the salt
+        provides no resistance.
+
+        Mitigating per-file targeted brute force requires a SECRET salt
+        — an HMAC key held outside the audit trail (env var, KMS,
+        hardware token) and combined with the file fingerprint to
+        produce the per-record salt. That is a separate design
+        decision (key management, rotation, recovery semantics) and is
+        explicitly out of scope here. The current scheme is honest
+        about defeating cross-corpus rainbow tables only.
     """
 
     pattern_name: str
@@ -375,9 +397,16 @@ _SECRET_PATTERNS: tuple[_Pattern, ...] = (
         name="openai_session_key",
         regex=re.compile(r"\bsess-[A-Za-z0-9]{40,}\b"),
     ),
+    # Trailing anchor: see ``google_api_key`` below for the
+    # ``(?!\w)`` vs ``\b`` rationale. For ``openai_api_key`` the body
+    # alphabet ``[A-Za-z0-9]{48}`` contains only word chars so the
+    # change is empirically a no-op against current input; it is
+    # kept here for consistency with ``google_api_key`` and to keep
+    # the two patterns aligned should a future ``openai_api_key``
+    # format admit non-word chars in the body.
     _Pattern(
         name="openai_api_key",
-        regex=re.compile(r"\bsk-[A-Za-z0-9]{48}\b"),
+        regex=re.compile(r"\bsk-[A-Za-z0-9]{48}(?!\w)"),
     ),
     # HuggingFace user access tokens. Format per HF token docs:
     # ``hf_`` prefix + 34+ base62 chars.
@@ -389,9 +418,20 @@ _SECRET_PATTERNS: tuple[_Pattern, ...] = (
     # prefix + exactly 35 url-safe chars. The fixed length is the
     # distinguishing signal (other AI*-prefixed strings exist but
     # don't hit the 39-char total).
+    # Trailing anchor is ``(?!\w)`` rather than ``\b`` because the
+    # body alphabet ``[A-Za-z0-9_-]{35}`` includes ``-`` (non-word).
+    # If a real Google API key ends in ``-`` and is followed in source
+    # by another non-word char (``,`` / ``"`` / ``)`` / end-of-string),
+    # ``\b`` requires a word/non-word TRANSITION and finds none
+    # (``-`` is non-word, ``,`` is non-word), so the literal slips
+    # through unredacted. ``(?!\w)`` simply asserts "no word char
+    # follows" and succeeds in this case. Also honest at end-of-string
+    # (``\b`` requires a neighbouring word char on at least one side;
+    # lookahead does not). See T8c regression test
+    # ``test_scrub_secrets_google_key_with_non_word_terminator``.
     _Pattern(
         name="google_api_key",
-        regex=re.compile(r"\bAIza[A-Za-z0-9_-]{35}\b"),
+        regex=re.compile(r"\bAIza[A-Za-z0-9_-]{35}(?!\w)"),
     ),
     # JWT shape: three base64url segments joined by '.'. The middle
     # segment carries the claims; the third carries the signature.
@@ -496,10 +536,15 @@ _SECRET_PATTERNS: tuple[_Pattern, ...] = (
     # file is structurally a key file and every long base64 line in it
     # is part of the body — the over-redaction failure mode is bounded
     # to "we don't ship the contents of a key file to the LLM", which
-    # is the correct behaviour. We anchor to the line (``re.MULTILINE``
-    # with ``^...$``) so the match is a full line, preventing
-    # accidental absorption of label characters from line-number
-    # prefixes the renderer adds.
+    # is the correct behaviour. ``^...$`` with ``re.MULTILINE`` matches
+    # a full raw line; this requires ``extract_safe_excerpt`` to scrub
+    # the raw window BEFORE applying the line-number prefix renderer
+    # (T8c). The earlier render-then-scrub ordering made ``^`` match
+    # the marker prefix ``>>   123  `` rather than the body content,
+    # silently dropping every body redaction in production while the
+    # unit test (which called ``scrub_secrets`` on un-prefixed text)
+    # continued to pass — see T8c regression test
+    # ``test_extract_safe_excerpt_redacts_ssh_private_key_body``.
     _Pattern(
         name="ssh_private_key_body",
         regex=re.compile(r"^[A-Za-z0-9+/=]{60,}$", re.MULTILINE),
@@ -635,19 +680,44 @@ def extract_safe_excerpt(
        clamped to valid line indices (1-based), mirroring the original
        ``_extract_surrounding_code`` shape so the judge sees the same
        ±N-line window with the same ``>>``-prefixed marker line.
-    4. The rendered window is fed through ``scrub_secrets`` with the
-       file fingerprint as salt and the resolved target's path-string
-       as the path hint. The salt scopes brute-force cost per file;
-       the hint enables the ``ssh_private_key_body`` pattern only on
-       structurally-key files.
+    4. The RAW window text (just the body, no line-number prefix) is
+       fed through ``scrub_secrets`` with the file fingerprint as salt
+       and the resolved target's path-string as the path hint. The
+       salt scopes brute-force cost per file; the hint enables the
+       ``ssh_private_key_body`` pattern only on structurally-key files.
+    5. The scrubbed body is then prefixed line-by-line with the
+       ``>>``/``  `` + line-number marker. Splitting on ``\n`` is
+       safe because none of the patterns in ``_SECRET_PATTERNS`` span
+       a newline (every regex matches single-line bodies); the
+       newline count is conserved by ``scrub_secrets``, so line
+       numbers retain fidelity with the source file.
 
-    The two-step "render-then-scrub" order (rather than "scrub-then-
-    render") is deliberate: the scrubber operates on the line-number-
-    prefixed rendered text, which means redaction tokens are visible
-    in the judge prompt at the same line they replaced. The line-
-    number prefix itself never matches any secret pattern, so this
-    ordering preserves audit-trail line-number fidelity without
-    impeding scrubber accuracy.
+    Why scrub BEFORE render (T8c, supersedes the earlier
+    render-then-scrub ordering):
+
+    The ``ssh_private_key_body`` pattern uses ``^[A-Za-z0-9+/=]{60,}$``
+    with ``re.MULTILINE``. ``^`` matches the start of a logical line.
+    Render-then-scrub put the line-number prefix ``>>   123  `` at the
+    start of every line, so ``^`` matched the prefix's leading marker
+    character (``>``) rather than the base64 body — the pattern
+    silently dropped every body match in production. The unit test
+    (which called ``scrub_secrets`` on un-prefixed text) continued to
+    pass and hid the gap.
+
+    Scrub-before-render makes the test surface
+    (``scrub_secrets(raw_text)``) match the production surface (raw
+    text -> scrub -> render). It also leaves
+    ``RedactionRecord.byte_count`` and ``RedactionRecord.redacted_hash``
+    naturally measured against the RAW secret bytes — under the old
+    ordering the line-number prefix would have been excluded from
+    those measurements only because no pattern matched across the
+    prefix boundary, an implicit dependency we no longer rely on.
+
+    Operator-visible consequence: SSH key files (``*.pem`` /
+    ``id_rsa`` / etc.) now have their body lines redacted in the
+    judge prompt. Previously they slipped through. Audit JSONL written
+    before T8c may contain unredacted SSH bodies for entries justified
+    against such files.
     """
     resolved = resolve_safe_excerpt_path(root=root, target_file=target_file)
     raw_bytes = resolved.read_bytes()
@@ -656,9 +726,31 @@ def extract_safe_excerpt(
     lines = text.splitlines()
     start = max(1, line - context_lines)
     end = min(len(lines), line + context_lines)
+    raw_window = "\n".join(lines[start - 1 : end])
+    scrubbed = scrub_secrets(raw_window, salt=file_fingerprint, path_hint=str(resolved))
+    scrubbed_lines = scrubbed.text.split("\n")
+    # ``split("\n")`` produces ``end - start + 1`` segments when the
+    # raw window had that many lines (none of ``_SECRET_PATTERNS``
+    # span ``\n`` so the count is conserved). If a future pattern
+    # were added that DOES span newlines this assertion would
+    # surface the drift loudly, per Tier-1 doctrine.
+    expected_lines = end - start + 1
+    if len(scrubbed_lines) != expected_lines:
+        raise RuntimeError(
+            f"extract_safe_excerpt: scrubber altered newline count "
+            f"(raw window had {expected_lines} lines, scrubbed has "
+            f"{len(scrubbed_lines)}); a secret pattern must have "
+            f"matched across a newline. Refusing to render a line-number "
+            f"prefix against a mismatched body — file={resolved}."
+        )
     rendered_lines: list[str] = []
-    for line_num in range(start, end + 1):
+    for offset, body_line in enumerate(scrubbed_lines):
+        line_num = start + offset
         marker = ">>" if line_num == line else "  "
-        rendered_lines.append(f"{marker} {line_num:5d}  {lines[line_num - 1]}")
+        rendered_lines.append(f"{marker} {line_num:5d}  {body_line}")
     rendered = "\n".join(rendered_lines)
-    return scrub_secrets(rendered, salt=file_fingerprint, path_hint=str(resolved))
+    return SafeExcerpt(
+        text=rendered,
+        redactions=scrubbed.redactions,
+        file_fingerprint=file_fingerprint,
+    )

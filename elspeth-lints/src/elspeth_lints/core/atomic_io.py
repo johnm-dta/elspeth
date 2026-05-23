@@ -61,6 +61,28 @@ class AtomicWriteConflictError(RuntimeError):
     """
 
 
+class AtomicWriteShortWriteError(RuntimeError):
+    """``os.write`` returned fewer bytes than requested.
+
+    POSIX permits ``write(2)`` to write fewer bytes than the requested
+    count for a regular file. The kernel/FS combinations on which this
+    surfaces are narrow (signal interruption, certain network FSes,
+    out-of-quota near the boundary) and we do not see it in practice
+    on the ext4/xfs/btrfs hosts ELSPETH runs on. Tier-1 doctrine,
+    however, says "crash on any anomaly": silently shipping a
+    truncated YAML to ``os.replace`` would corrupt the audit trail
+    just as effectively as the disk-full case ``OSError`` already
+    catches, and we cannot detect it post-facto because ``os.fsync``
+    happily syncs the truncated state.
+
+    Raised with the byte counts so the operator can correlate the
+    underlying cause (signal? FS quota? short-write on the kernel
+    side?). Uses a typed exception rather than ``assert`` because
+    ``python -O`` strips asserts and the project's Tier-1 guarantees
+    must survive optimisation.
+    """
+
+
 def _temp_path_for(path: Path) -> Path:
     """Compute a per-invocation private temp path next to ``path``.
 
@@ -158,7 +180,19 @@ def atomic_write_text(
         )
         temp_created = True
         try:
-            os.write(fd, content.encode(encoding))
+            payload = content.encode(encoding)
+            written = os.write(fd, payload)
+            if written != len(payload):
+                # POSIX-legal short write: detect at the boundary
+                # rather than silently shipping a truncated file
+                # through to ``os.replace``. See
+                # ``AtomicWriteShortWriteError`` for the rationale.
+                raise AtomicWriteShortWriteError(
+                    f"atomic_write_text: short write to {temp_path}: "
+                    f"os.write returned {written} of {len(payload)} bytes. "
+                    "Refusing to fsync+rename a truncated allowlist YAML; "
+                    "Tier-1 doctrine treats this as an audit-trail anomaly."
+                )
             os.fsync(fd)
         finally:
             os.close(fd)

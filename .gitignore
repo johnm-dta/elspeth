@@ -267,6 +267,14 @@ docs/assets/*.pdf
 # the full data-model rationale.
 **/.reaudit-state/
 
+# atomic_write_text lock files — persistent `.<name>.lock` siblings
+# next to managed allowlist YAMLs (the flock idiom; unlinking inside
+# the lock races on re-acquire so they stay on disk between runs).
+# Operators see them as untracked after the first `justify` /
+# `rotate` invocation; they must never be committed. See
+# `elspeth_lints/core/atomic_io.py` for the locking rationale.
+config/cicd/**/.*.lock
+
 # Release PDF pipeline source is intentionally tracked; generated
 # outputs and bulky font source trees are not.
 docs/release/*

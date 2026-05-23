@@ -2786,6 +2786,50 @@ class TestComposerAvailabilityAndBadRequest:
         assert mock_llm.call_count == 2
         mock_sleep.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_bad_request_llm_error_is_not_retried(self) -> None:
+        """Provider 400-class errors are deterministic — not transient — and
+        must surface to the caller on the first attempt without consuming
+        any retry budget. Pins the no-retry policy made mechanically visible
+        in commit 361643809 (``except _BadRequestLLMError: raise`` between
+        the ``LiteLLMAuthError`` and ``LiteLLMAPIError`` clauses). Without
+        this negative-side assertion, a future refactor that either
+        (a) changes ``_BadRequestLLMError`` to inherit from
+        ``LiteLLMAPIError`` or (b) removes the explicit re-raise clause
+        could silently re-route bad-requests through the retry loop and
+        every existing positive-side test would still pass.
+        """
+        from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        catalog = _mock_catalog()
+        settings = _make_settings()
+        service = ComposerServiceImpl(catalog=catalog, settings=settings)
+        state = _empty_state()
+        bad_request = LiteLLMBadRequestError(
+            message="model gpt-foo does not exist",
+            model="gpt-foo",
+            llm_provider="openai",
+        )
+
+        with (
+            patch(
+                "elspeth.web.composer.service._litellm_acompletion",
+                new_callable=AsyncMock,
+                side_effect=bad_request,
+            ) as mock_llm,
+            patch("elspeth.web.composer.service.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            pytest.raises(_BadRequestLLMError),
+        ):
+            await service.compose("Hello", [], state)
+
+        # Pins the no-retry contract: exactly one provider call, and no
+        # backoff sleep was awaited (the retry path's only observable
+        # side-effect besides the call count).
+        assert mock_llm.call_count == 1
+        mock_sleep.assert_not_awaited()
+
 
 class TestPluginBugCrashesFromToolExecution:
     """Plugin-internal TypeError/ValueError/UnicodeError must crash.

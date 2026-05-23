@@ -736,6 +736,165 @@ class TestRunDiagnosticsEndpoint:
         assert response.working_view.headline == "Runtime records are updating"
         assert "3 tokens are visible in the runtime trace." in response.working_view.evidence
 
+    @pytest.mark.asyncio
+    async def test_evaluate_diagnostics_surfaces_bad_request_provider_detail(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Parity with the /sessions/ route: when ``explain_run_diagnostics``
+        raises ``_BadRequestLLMError`` and ``composer_expose_provider_errors``
+        is True, the 502 detail carries ``provider_detail`` /
+        ``provider_status_code`` from the carrier attributes rather than the
+        redacted ``str(exc)`` wrap message. Pins the fix for the parallel
+        silent-failure bug closed by commit 299b2b2be on the sessions side.
+        """
+        from fastapi import HTTPException
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.get_status = AsyncMock(
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="running",
+                started_at=datetime.now(UTC),
+                finished_at=None,
+                error=None,
+                landscape_run_id=str(run_id),
+            )
+        )
+        diagnostics = RunDiagnosticsResponse(
+            run_id=str(run_id),
+            landscape_run_id=str(run_id),
+            run_status="running",
+            summary=RunDiagnosticSummary(
+                token_count=0,
+                preview_limit=50,
+                preview_truncated=False,
+                state_counts={},
+                operation_counts={},
+                latest_activity_at=None,
+            ),
+            tokens=[],
+            operations=[],
+            artifacts=[],
+        )
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_diagnostics_for_settings",
+            lambda *args, **kwargs: diagnostics,
+        )
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
+
+        class FakeComposer:
+            async def explain_run_diagnostics(self, snapshot: dict[str, object]) -> str:
+                raise _BadRequestLLMError(
+                    "LLM request rejected (BadRequestError)",
+                    provider_detail="Model `gpt-foo` does not exist",
+                    provider_status_code=400,
+                )
+
+        app = _create_test_app(execution_service=svc)
+        app.state.composer_service = FakeComposer()
+        app.state.settings.composer_expose_provider_errors = True
+        endpoint = _route_endpoint(app, "evaluate_run_diagnostics")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await endpoint(
+                run_id,
+                _request_for_app(app),
+                limit=50,
+                user=UserIdentity(user_id=_TEST_USER_ID, username="testuser"),
+                service=svc,
+            )
+
+        assert exc_info.value.status_code == 502
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail["error_type"] == "run_diagnostics_explanation_failed"
+        assert detail["detail"] == "_BadRequestLLMError"
+        assert detail["provider_detail"] == "Model `gpt-foo` does not exist"
+        assert detail["provider_status_code"] == 400
+
+    @pytest.mark.asyncio
+    async def test_evaluate_diagnostics_redacts_bad_request_when_expose_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ``composer_expose_provider_errors`` is False the 502 detail
+        carries class-name only — no provider_detail / provider_status_code.
+        Pins the redaction-by-default contract that the staging-debug toggle
+        is the only path to operator-only material.
+        """
+        from fastapi import HTTPException
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.get_status = AsyncMock(
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="running",
+                started_at=datetime.now(UTC),
+                finished_at=None,
+                error=None,
+                landscape_run_id=str(run_id),
+            )
+        )
+        diagnostics = RunDiagnosticsResponse(
+            run_id=str(run_id),
+            landscape_run_id=str(run_id),
+            run_status="running",
+            summary=RunDiagnosticSummary(
+                token_count=0,
+                preview_limit=50,
+                preview_truncated=False,
+                state_counts={},
+                operation_counts={},
+                latest_activity_at=None,
+            ),
+            tokens=[],
+            operations=[],
+            artifacts=[],
+        )
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_diagnostics_for_settings",
+            lambda *args, **kwargs: diagnostics,
+        )
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
+
+        class FakeComposer:
+            async def explain_run_diagnostics(self, snapshot: dict[str, object]) -> str:
+                raise _BadRequestLLMError(
+                    "LLM request rejected (BadRequestError)",
+                    provider_detail="Model `gpt-foo` does not exist",
+                    provider_status_code=400,
+                )
+
+        app = _create_test_app(execution_service=svc)
+        app.state.composer_service = FakeComposer()
+        app.state.settings.composer_expose_provider_errors = False
+        endpoint = _route_endpoint(app, "evaluate_run_diagnostics")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await endpoint(
+                run_id,
+                _request_for_app(app),
+                limit=50,
+                user=UserIdentity(user_id=_TEST_USER_ID, username="testuser"),
+                service=svc,
+            )
+
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail["error_type"] == "run_diagnostics_explanation_failed"
+        assert detail["detail"] == "_BadRequestLLMError"
+        assert "provider_detail" not in detail
+        assert "provider_status_code" not in detail
+
 
 class TestExecuteIDORAndPathTraversal:
     """IDOR and path traversal defense-in-depth checks in execute().

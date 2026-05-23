@@ -261,3 +261,75 @@ def test_redaction_preserves_non_path_slot_keys_inside_summary() -> None:
     # No path-blob_ref pair => no REDACTED_BLOB_SOURCE_PATH substitution
     # (mirroring the Task 4 set_source pass-through pin).
     assert REDACTED_BLOB_SOURCE_PATH not in redacted["slots"]
+
+
+def test_apply_recipe_crashes_on_set_pipeline_contract_violation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offensive-programming pin: if ``_execute_set_pipeline`` ever returns
+    ``ToolResult.data`` that is neither ``None`` nor a ``Mapping``, the
+    apply-recipe merge path crashes with an ``AssertionError`` that names
+    the offending type and points at the system-code bug.
+
+    Replaces the pre-existing silent-wrap fallback flagged by the 2026-05-23
+    multi-agent review: the prior code wrapped contract-violating data into
+    ``{"replaced_pipeline_note": ..., "set_pipeline_data": <garbage>}`` and
+    returned success, which would have surfaced confidently-wrong audit data
+    to the LLM. Per CLAUDE.md "Plugin returns wrong type → CRASH"; the
+    ``data`` shape is a system-code contract (``dict | None`` per the
+    annotation at the success-path construction site), not Tier-3 LLM input.
+
+    The non-empty pre-state forces the success+annotation branch — see the
+    suppress-note guard at the head of the merge block. Both ``apply_recipe``
+    and ``_execute_set_pipeline`` are stubbed so the test isolates the merge
+    contract from the recipe catalog and pipeline-validation surfaces.
+    """
+    from dataclasses import replace as _replace
+
+    from elspeth.web.composer.state import SourceSpec
+    from elspeth.web.composer.tools import _common as tools_common
+    from elspeth.web.composer.tools import sessions as tools_sessions
+
+    # Pre-state has a source so ``pre_source_present`` is truthy and the
+    # annotation branch is reached. Use a real SourceSpec so the dataclass
+    # validation in CompositionState.__post_init__ is satisfied.
+    pre_state = CompositionState(
+        source=SourceSpec(plugin="csv", on_success="out", options={}, on_validation_failure="quarantine"),
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="pre-existing-pipeline"),
+        version=1,
+    )
+    post_state = _replace(pre_state, version=pre_state.version + 1)
+
+    # Stub apply_recipe so the test does not depend on the recipe catalog.
+    # Returns a dict the (stubbed) _execute_set_pipeline will ignore.
+    monkeypatch.setattr(
+        tools_sessions,
+        "apply_recipe",
+        lambda name, slots: {"source": {"plugin": "csv"}, "nodes": [], "outputs": []},
+    )
+
+    def fake_set_pipeline(args: Any, state: Any, context: Any) -> Any:
+        # Return a ToolResult whose ``data`` violates the dict-or-None
+        # contract — this is the "plugin returned wrong type" scenario.
+        return tools_common.ToolResult(
+            success=True,
+            updated_state=post_state,
+            validation=post_state.validate(),
+            affected_nodes=("source",),
+            data=42,  # int — neither dict nor None
+        )
+
+    monkeypatch.setattr(tools_sessions, "_execute_set_pipeline", fake_set_pipeline)
+
+    with pytest.raises(AssertionError) as exc_info:
+        _execute_apply_pipeline_recipe(
+            {"recipe_name": "anything", "slots": {}},
+            pre_state,
+            ToolContext(catalog=_mock_catalog()),
+        )
+
+    msg = str(exc_info.value)
+    assert "_execute_set_pipeline" in msg
+    assert "'int'" in msg
+    assert "dict | None" in msg

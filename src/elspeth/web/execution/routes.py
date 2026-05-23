@@ -31,6 +31,7 @@ from elspeth.web.auth.models import AuthenticationError, UserIdentity
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
+from elspeth.web.composer.service import _BadRequestLLMError
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
@@ -75,6 +76,7 @@ from elspeth.web.sessions.protocol import (
     SessionServiceProtocol,
     TerminalSessionRunStatus,
 )
+from elspeth.web.sessions.routes._helpers import _litellm_error_detail
 
 slog = structlog.get_logger()
 
@@ -679,8 +681,23 @@ def create_execution_router() -> APIRouter:
         )
 
         composer: ComposerService = request.app.state.composer_service
+        settings: WebSettings = request.app.state.settings
         try:
             explanation = await composer.explain_run_diagnostics(diagnostics.model_dump(mode="json"))
+        except _BadRequestLLMError as exc:
+            # Provider rejected the request (400-class). Carrier exposes
+            # `provider_detail` / `provider_status_code` precisely because
+            # `str(exc)` is redacted to the class-name wrap. Delegate to
+            # `_litellm_error_detail` — the same helper sessions routes use
+            # — so the staging-debug surface is symmetric across endpoints.
+            raise HTTPException(
+                status_code=502,
+                detail=_litellm_error_detail(
+                    "run_diagnostics_explanation_failed",
+                    exc,
+                    expose_provider_error=settings.composer_expose_provider_errors,
+                ),
+            ) from exc
         except ComposerServiceError as exc:
             raise HTTPException(
                 status_code=502,

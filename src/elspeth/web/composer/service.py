@@ -4883,6 +4883,16 @@ class ComposerServiceImpl:
                 # detail. The redacted str(exc) intentionally does NOT leak
                 # provider text; only ``expose_provider_error=True`` surfaces
                 # ``provider_detail``/``provider_status_code``.
+                #
+                # Reciprocal contract: the route layer reads those two
+                # attributes via ``_litellm_error_detail`` in
+                # ``web/sessions/routes/_helpers.py`` (and the parallel call
+                # site in ``web/execution/routes.py:evaluate_run_diagnostics``).
+                # Any future bad-request carrier that subclasses this or
+                # supersedes it MUST populate both ``provider_detail`` and
+                # ``provider_status_code`` for the HTTP surface to remain
+                # useful — otherwise the route falls back to the redacted
+                # class-name wrap and operators lose triage data.
                 raise
             except LiteLLMAPIError:
                 attempt += 1

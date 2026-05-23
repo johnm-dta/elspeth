@@ -136,10 +136,10 @@ def _execute_set_pipeline(
     """Atomically replace the entire pipeline composition state.
 
     Tier-3 boundary: ``args`` is an LLM-supplied dict.  Validated via the
-    Pydantic redaction-bearing model :class:`SetPipelineArgumentsModel` (the
-    single source of truth for the argument schema — supersedes the deleted
-    ``_TOOL_REQUIRED_PATHS["set_pipeline"]`` entry in ``service.py``,
-    rev-3 N7 / rev-4 M1).
+    Pydantic redaction-bearing model :class:`SetPipelineArgumentsModel` —
+    the single source of truth for the argument schema, superseding the
+    deleted ``_TOOL_REQUIRED_PATHS["set_pipeline"]`` entry in
+    ``service.py``.
 
     On :class:`pydantic.ValidationError` the handler re-raises as
     :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing at
@@ -540,10 +540,10 @@ def _execute_apply_pipeline_recipe(
     """Validate a recipe's slots, build set_pipeline args, and dispatch to set_pipeline.
 
     Tier-3 boundary: ``arguments`` is an LLM-supplied dict.  Validated
-    via :class:`ApplyPipelineRecipeArgumentsModel` (the single source of
-    truth for the argument schema — supersedes the deleted
+    via :class:`ApplyPipelineRecipeArgumentsModel` — the single source
+    of truth for the argument schema, superseding the deleted
     ``_TOOL_REQUIRED_PATHS["apply_pipeline_recipe"]`` entry in
-    ``service.py``, rev-3 N7 / rev-4 M1).  On
+    ``service.py``.  On
     :class:`pydantic.ValidationError` the handler re-raises as
     :class:`ToolArgumentError` so the compose loop's ARG_ERROR routing
     at ``service.py:2480`` receives the right exception class.
@@ -629,16 +629,27 @@ def _execute_apply_pipeline_recipe(
     # creation summary) by merging into a single dict. set_pipeline's
     # ``data`` is currently None on the recipe path because recipes don't
     # use inline_blob, but merging is forward-compatible.
+    #
+    # ``_execute_set_pipeline`` declares ``data: dict[str, Any] | None``
+    # (see the local annotation at the success-path construction site).
+    # That contract is system code, not Tier-3 LLM data, so the only two
+    # legitimate shapes here are ``None`` or a ``Mapping``. Any other type
+    # is a system-code contract violation in ``_execute_set_pipeline`` (or
+    # a future helper that returns through the same path); per CLAUDE.md
+    # plugin-error rules we crash with the actual type rather than silently
+    # wrapping garbage into a payload the LLM would treat as valid.
     existing_data = result.data
     if existing_data is None:
-        merged_data: Any = {"replaced_pipeline_note": note}
+        merged_data: dict[str, Any] = {"replaced_pipeline_note": note}
     elif isinstance(existing_data, Mapping):
         merged_data = {**dict(existing_data), "replaced_pipeline_note": note}
     else:
-        # set_pipeline contract: ``data`` is None or a Mapping. Anything
-        # else is a contract drift bug — surface the note alongside in a
-        # wrapper rather than silently dropping either.
-        merged_data = {"replaced_pipeline_note": note, "set_pipeline_data": existing_data}
+        raise AssertionError(
+            f"_execute_set_pipeline returned ToolResult.data of type "
+            f"{type(existing_data).__name__!r}; contract is dict | None. "
+            f"This is a system-code bug in _execute_set_pipeline (or a "
+            f"helper feeding it); audit the return paths there."
+        )
 
     return replace(result, data=merged_data)
 

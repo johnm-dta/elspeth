@@ -23,6 +23,17 @@ be motivated by an actual cross-package consumer — internal callers within
 ``elspeth.web.composer.tools.*`` import from their sibling submodules
 directly, not via this facade.
 
+CLOSED LIST. **Before re-adding a name here to silence an import error,
+fix the importer instead** — sibling submodules under
+``elspeth.web.composer.tools.*`` must import from each other directly
+(``from elspeth.web.composer.tools.sessions import _execute_set_pipeline``),
+NOT via this facade. Re-adding a name to chase down an import error
+re-inflates the surface the underscore-rename + prune commits (67df87181,
+4b66ad52c) deliberately collapsed. Extension of this list requires a
+design-review decision attached to a cross-package consumer; the
+regression test catches dead entries but cannot catch
+deliberately-excluded names that quietly grew a new consumer.
+
 The regression test
 ``tests/unit/web/composer/test_tools_facade_surface.py`` fails the build if
 any ``__all__`` entry becomes dead.

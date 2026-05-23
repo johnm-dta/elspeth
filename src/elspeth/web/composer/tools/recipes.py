@@ -1,10 +1,9 @@
 """Composer recipes plane — pipeline-recipe discovery handler.
 
-The recipe-application handler (``_execute_apply_pipeline_recipe``) is
-co-located with ``_execute_set_pipeline`` in ``tools/sessions.py`` because
-the application path delegates state replacement to the set_pipeline
-executor; keeping them in the same plane closes the cross-plane private-
-access edge the slice 1-5 refactor introduced.
+The recipe-application handler (``_execute_apply_pipeline_recipe``) lives
+in ``tools/sessions.py`` next to ``_execute_set_pipeline`` — see the
+``_execute_apply_pipeline_recipe`` docstring there for the delegation
+rationale.
 """
 
 from __future__ import annotations

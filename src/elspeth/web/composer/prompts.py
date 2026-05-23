@@ -171,9 +171,13 @@ _SCHEMAS_LOADED_UNSET: Final[frozenset[tuple[str, str]]] = frozenset({("__elspet
 
 # Distinct ``composer_progress`` markers emitted when the unset sentinel
 # reaches the renderer. Surfaced inside the JSON payload the LLM reads,
-# so a service-side regression is visible to every audited turn.
-_SCHEMAS_LOADED_UNSET_MARKER: Final[str] = "<schemas-loaded-tracker-not-threaded>"
-_SCHEMAS_GAP_UNSET_MARKER: Final[str] = "<schemas-loaded-tracker-not-threaded>"
+# so a service-side regression is visible to every audited turn. The
+# ``:loaded`` / ``:gap`` suffix lets an auditor reading a recorded
+# system-context dump tell which view tripped — collapsing the two to a
+# single string would mask the field-level fault locality the sentinel
+# is meant to surface.
+_SCHEMAS_LOADED_UNSET_MARKER: Final[str] = "<schemas-loaded-tracker-not-threaded:loaded>"
+_SCHEMAS_GAP_UNSET_MARKER: Final[str] = "<schemas-loaded-tracker-not-threaded:gap>"
 
 
 def _state_referenced_plugins(state: CompositionState) -> set[tuple[str, str]]:
@@ -225,8 +229,11 @@ def build_context_string(
             threading the tracker is observable: an explicit empty
             frozenset means "I tracked, and nothing has loaded", while
             the sentinel renders the
-            ``"<schemas-loaded-tracker-not-threaded>"`` marker in the
-            payload. Non-service callers exercising the prompt builder
+            ``"<schemas-loaded-tracker-not-threaded:loaded>"`` and
+            ``"<schemas-loaded-tracker-not-threaded:gap>"`` markers in
+            the payload (one per affected view, so an auditor can tell
+            field-level fault locality from the dump alone).
+            Non-service callers exercising the prompt builder
             directly should pass ``frozenset()`` to opt into the
             "tracked, empty" reading.
 

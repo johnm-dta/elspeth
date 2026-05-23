@@ -242,13 +242,15 @@ class TestSchemasLoadedUnsetSentinel:
 
     def test_sentinel_default_emits_distinct_loaded_marker(self) -> None:
         """No ``schemas_loaded`` kwarg → ``schemas_loaded_this_session``
-        renders the ``<schemas-loaded-tracker-not-threaded>`` marker,
-        distinguishable from the legitimate ``[]`` produced by
-        ``frozenset()`` (the "tracked, nothing loaded" reading).
+        renders the ``<schemas-loaded-tracker-not-threaded:loaded>``
+        marker, distinguishable both from the legitimate ``[]`` produced
+        by ``frozenset()`` (the "tracked, nothing loaded" reading) AND
+        from the ``:gap``-suffixed sibling marker (so an auditor reading
+        the dump can identify which view tripped).
         """
         progress = _composer_progress(build_context_string(_empty_state(), _stub_catalog()))
-        assert progress["schemas_loaded_this_session"] == ["<schemas-loaded-tracker-not-threaded>"]
-        assert progress["schemas_gap"] == ["<schemas-loaded-tracker-not-threaded>"]
+        assert progress["schemas_loaded_this_session"] == ["<schemas-loaded-tracker-not-threaded:loaded>"]
+        assert progress["schemas_gap"] == ["<schemas-loaded-tracker-not-threaded:gap>"]
 
     def test_sentinel_default_emits_distinct_gap_marker_even_with_referenced_plugins(self) -> None:
         """The sentinel branch overrides the normal ``referenced - loaded``
@@ -257,8 +259,8 @@ class TestSchemasLoadedUnsetSentinel:
         regression cannot masquerade as "the model has discovered
         nothing yet"."""
         progress = _composer_progress(build_context_string(_three_plugin_state(), _stub_catalog()))
-        assert progress["schemas_loaded_this_session"] == ["<schemas-loaded-tracker-not-threaded>"]
-        assert progress["schemas_gap"] == ["<schemas-loaded-tracker-not-threaded>"]
+        assert progress["schemas_loaded_this_session"] == ["<schemas-loaded-tracker-not-threaded:loaded>"]
+        assert progress["schemas_gap"] == ["<schemas-loaded-tracker-not-threaded:gap>"]
         # ``schemas_referenced_by_state`` is computed independently from
         # ``state`` and must NOT carry the sentinel marker — the referenced
         # view is a fact about state, not about the tracker.
@@ -276,6 +278,22 @@ class TestSchemasLoadedUnsetSentinel:
         progress = _composer_progress(build_context_string(_empty_state(), _stub_catalog(), schemas_loaded=frozenset()))
         assert progress["schemas_loaded_this_session"] == []
         assert progress["schemas_gap"] == []
+
+    def test_loaded_and_gap_unset_markers_are_distinct(self) -> None:
+        """The two sentinel markers must be byte-distinct so an auditor
+        reading a recorded ``composer_progress`` dump can tell which
+        view tripped (loaded-vs-gap field-level fault locality).
+        Collapsing the two to a single string would let a tracker
+        regression on one view masquerade as a regression on the other.
+        """
+        from elspeth.web.composer.prompts import (
+            _SCHEMAS_GAP_UNSET_MARKER,
+            _SCHEMAS_LOADED_UNSET_MARKER,
+        )
+
+        assert _SCHEMAS_LOADED_UNSET_MARKER != _SCHEMAS_GAP_UNSET_MARKER
+        assert _SCHEMAS_LOADED_UNSET_MARKER.endswith(":loaded>")
+        assert _SCHEMAS_GAP_UNSET_MARKER.endswith(":gap>")
 
     def test_sentinel_constant_identity_is_stable_across_calls(self) -> None:
         """The default-value expression evaluates once at function-def

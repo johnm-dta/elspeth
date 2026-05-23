@@ -2336,22 +2336,61 @@ class TestToolRegistry:
         overlap = set(_DISCOVERY_TOOLS.keys()) & set(_MUTATION_TOOLS.keys())
         assert overlap == set(), f"Registry overlap: {overlap}"
 
-    def test_cacheable_discovery_excludes_stateful_tools(self) -> None:
-        """diff_pipeline, get_pipeline_state, and preview_pipeline are not cacheable.
+    def test_cacheable_discovery_is_opt_in_with_named_mutable_complement(self) -> None:
+        """Pin the *property* of the opt-in design, not the *result* of the
+        subtraction the production code abandoned.
 
-        - diff_pipeline and get_pipeline_state depend on mutable state.
-        - preview_pipeline incorporates runtime_preflight output that is externally
-          injected and may change between compose turns, so caching it would serve
-          stale validation results after a state mutation.
+        Three load-bearing invariants the discovery module enforces at
+        import time (``elspeth/web/composer/tools/discovery.py``):
+
+        1. ``_SESSION_MUTABLE_DISCOVERY_TOOL_NAMES`` is a named, documented
+           constant — surfacing the forbidden set as data (not a comment)
+           so a future copy-paste edit can be mechanically rejected by the
+           import-time assertion rather than silently auto-caching a new
+           stateful discovery tool.
+        2. The cacheable opt-in set and the mutable forbidden set are
+           disjoint — the assertion at ``discovery.py:168-171`` would
+           crash import time on a violation, this test additionally pins
+           the runtime contract at the test layer.
+        3. The contents of the mutable set name the three stateful
+           discovery tools (``diff_pipeline``, ``get_pipeline_state``,
+           ``preview_pipeline``) explicitly — adding a fourth requires
+           updating this test, forcing a design-review checkpoint rather
+           than letting the new tool slip in via subtraction arithmetic.
+
+        Replaces the prior subtraction-shape assertion which mirrored
+        the opt-OUT pattern the production code deliberately moved away
+        from in commit e34f53c30.
         """
         from elspeth.web.composer.tools import (
             _CACHEABLE_DISCOVERY_TOOLS,
             _DISCOVERY_TOOLS,
         )
-
-        assert (
-            frozenset(_DISCOVERY_TOOLS.keys()) - {"diff_pipeline", "get_pipeline_state", "preview_pipeline"} == _CACHEABLE_DISCOVERY_TOOLS
+        from elspeth.web.composer.tools.discovery import (
+            _CACHEABLE_DISCOVERY_TOOL_NAMES,
+            _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES,
         )
+
+        # Invariant 1: the forbidden set exists as named data.
+        assert isinstance(_SESSION_MUTABLE_DISCOVERY_TOOL_NAMES, frozenset)
+
+        # Invariant 2: disjointness — a tool cannot be both cacheable and
+        # session-mutable. Belt-and-braces with the import-time assert.
+        assert not (_CACHEABLE_DISCOVERY_TOOL_NAMES & _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES)
+
+        # Invariant 3: the forbidden set names exactly the three stateful
+        # tools. A fourth requires updating this test deliberately.
+        assert frozenset({"diff_pipeline", "get_pipeline_state", "preview_pipeline"}) == _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES
+
+        # Cross-check: every discovery tool is either cacheable or in the
+        # documented forbidden set — no tool may live in neither category
+        # by default (the opt-in regime requires an explicit classification
+        # decision per tool).
+        assert frozenset(_DISCOVERY_TOOLS.keys()) == (_CACHEABLE_DISCOVERY_TOOL_NAMES | _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES)
+
+        # The compiled export from the dispatch facade matches the
+        # discovery-module source of truth.
+        assert _CACHEABLE_DISCOVERY_TOOLS == _CACHEABLE_DISCOVERY_TOOL_NAMES
 
     def test_cacheable_is_subset_of_discovery(self) -> None:
         from elspeth.web.composer.tools import (

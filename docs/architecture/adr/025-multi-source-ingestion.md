@@ -593,3 +593,42 @@ implementation work — deletion of the legacy facade, migration of the
 rewrite, doc corpus update, tests for crash-and-resume — is downstream
 and tracked by the tickets enumerated above. The ADR commits to the
 shape; the tickets execute against it.
+
+### Pattern: Shim Amplification (R1 Reinforcing Loop) and the atomicity budget
+
+*Recorded 2026-05-24 per systems-thinker finding (elspeth-27e36f63ad):*
+the G4 deletion landed at 26+ call sites. The structural decision above
+rejects Alternative 3 ("Retain legacy facade indefinitely") — but that
+rejection is only durable while the reinforcing loop **R1 (Shim
+Amplification)** remains bounded:
+
+> **B1 (ADR-Commitment restraining loop):** ADR commits to structural
+> deletion → sessions execute → call-site count is bounded.
+>
+> **R1 (Shim Amplification reinforcing loop):** each planning cycle
+> without execution adds call sites → deletion cost rises → deferral
+> pressure increases → more cycles without execution.
+
+The transition threshold at which R1 begins to dominate B1 is
+approximately **40+ call sites**, where a structural deletion starts to
+look like a project rather than a commit and rational deferral pressure
+becomes self-reinforcing.
+
+**Atomicity invariant (governance rule — no code required):** ADR-driven
+structural deletions must land as a **single atomic commit** with no
+intermediate "partially migrated" state on the default branch. Once a
+deletion is chartered by an ADR, no merge to the default branch may
+leave the shim and any of its call sites co-existing without a matching
+deletion of the shim itself in the same commit.
+
+**Call-site budget signal:** when a "to-be-deleted" surface crosses
+approximately 40 call sites before a deletion commit has landed, escalate
+to operator decision rather than session execution. The cost of a
+multi-commit, multi-session structural deletion under R1 dynamics exceeds
+the cost of re-examining scope.
+
+**Recognising the same pattern in future:** an ADR that rejects a legacy
+surface (Alternative 3 pattern — "retain for simplicity / compatibility")
+implicitly commits to the atomicity invariant above. Future contributors
+seeing a shim with 30+ call sites on an RC branch should treat that as a
+forcing-function signal, not a routine clean-up item.

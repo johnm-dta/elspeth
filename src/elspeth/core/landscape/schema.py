@@ -408,14 +408,20 @@ token_work_items_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("run_id", "token_id", "node_id", "attempt"),
-    # ``status=LEASED`` must imply a non-empty ``lease_owner``. The
+    # ``status=leased`` must imply a non-empty ``lease_owner``. The
     # ``recover_expired_leases`` sweep's OR-NULL predicate (elspeth-28aaa36a62)
     # treats ``lease_owner=NULL`` as a recoverable wedge, so the CHECK closes
     # the structural gap by preventing the wedge from being written in the
     # first place (filigree elspeth-9990c81e14, embedded-database-reviewer).
+    # The literal MUST match ``TokenWorkStatus.LEASED.value`` exactly — the
+    # enum is a ``StrEnum`` whose ``.value`` is lowercase ``"leased"`` and
+    # every write site persists ``.value`` (e.g. ``scheduler_repository.py``
+    # ``status=TokenWorkStatus.LEASED.value``). A mismatched literal here
+    # would make both arms of the CHECK trivially satisfied for every row
+    # and silently nullify the Tier-1 invariant (elspeth-36d5635402).
     # The constraint runs independently of ``PRAGMA foreign_keys`` in SQLite.
     CheckConstraint(
-        "(status = 'LEASED' AND lease_owner IS NOT NULL AND length(lease_owner) > 0) OR status != 'LEASED'",
+        "(status = 'leased' AND lease_owner IS NOT NULL AND length(lease_owner) > 0) OR status != 'leased'",
         name="ck_token_work_items_lease_owner_required_when_leased",
     ),
     ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),

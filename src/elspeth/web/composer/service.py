@@ -43,6 +43,7 @@ from elspeth.contracts.composer_llm_audit import (
 )
 from elspeth.contracts.composer_progress import ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
+from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import yaml_generator
@@ -862,7 +863,7 @@ class ComposerServiceImpl:
         *,
         sessions_service: SessionServiceProtocol | None = None,
         session_engine: Engine | None = None,
-        secret_service: Any | None = None,
+        secret_service: WebSecretResolver | None = None,
         runtime_preflight_coordinator: RuntimePreflightCoordinator | None = None,
     ) -> None:
         self._catalog = catalog

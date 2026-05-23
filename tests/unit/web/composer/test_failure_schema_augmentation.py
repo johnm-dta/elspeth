@@ -190,12 +190,18 @@ class TestFailureScheamAugmentationSetPipeline:
         # set_pipeline is atomic — it stops at the first per-component
         # rejection it builds. The contract for plugin_schemas is "every
         # plugin named in a surfaced 'Invalid options for ...' error",
-        # so we assert the union of what actually appears.
+        # so we assert the exact iteration order that actually appears.
         assert "plugin_schemas" in payload
-        named_kinds = {key.split("/", 1)[0] for key in payload["plugin_schemas"]}
-        # At minimum the FIRST plugin to fail validation must carry its
-        # schema. Whichever one set_pipeline surfaces first is acceptable.
-        assert named_kinds <= {"source", "sink"} and named_kinds
+        # Build named_kinds as an ordered list (dict iteration is insertion
+        # order in CPython 3.7+) so the assertion below is order-sensitive.
+        named_kinds = [key.split("/", 1)[0] for key in payload["plugin_schemas"]]
+        # set_pipeline reports the source schema first — this ordering is
+        # the surface contract relied on by composer prompt construction
+        # (prompts.py consumes plugin_schemas in iteration order). If this
+        # flips to sink-first, or if multiple kinds appear (meaning atomic
+        # bail-at-first-failure was relaxed), the LLM context will reorder;
+        # reassess prompts.py before changing this expectation.
+        assert named_kinds == ["source"]
         for key, schema in payload["plugin_schemas"].items():
             kind, plugin = key.split("/", 1)
             assert schema["name"] == plugin

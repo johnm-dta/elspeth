@@ -116,6 +116,7 @@ from elspeth.web.composer.protocol import (
     ComposerServiceError,
 )
 from elspeth.web.composer.redaction import redact_source_storage_path
+from elspeth.web.composer.service import _BadRequestLLMError
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.telemetry_phase8 import (
@@ -461,6 +462,12 @@ def _litellm_error_detail(
     ``detail`` remains class-name-only for the stable redaction contract. When
     staging/debug mode is explicitly enabled, ``provider_detail`` carries a
     bounded, scrubbed provider message for operator triage.
+
+    For composer's ``_BadRequestLLMError`` carrier, the raw provider text and
+    HTTP status code are read from the dedicated ``provider_detail`` /
+    ``provider_status_code`` attributes — ``str(exc)`` on that class returns
+    only the redacted wrap message. For LiteLLM-native exceptions the raw
+    message and ``.status_code`` attribute are the right surface.
     """
     detail: dict[str, object] = {
         "error_type": error_type,
@@ -469,16 +476,22 @@ def _litellm_error_detail(
     if not expose_provider_error:
         return detail
 
-    raw_provider_detail = str(exc).strip()
+    if isinstance(exc, _BadRequestLLMError):
+        raw_provider_detail: str | None = exc.provider_detail
+        raw_status_code: int | None = exc.provider_status_code
+    else:
+        raw_provider_detail = str(exc).strip() or None
+        natural_status_code = getattr(exc, "status_code", None)
+        raw_status_code = natural_status_code if type(natural_status_code) is int else None
+
     if raw_provider_detail:
         scrubbed = scrub_text_for_audit(raw_provider_detail).strip()
         detail["provider_detail"] = (
             _PROVIDER_DETAIL_REDACTED if scrubbed == _REDACTED_SECRET_DETAIL else scrubbed[:_MAX_PROVIDER_DETAIL_CHARS]
         )
 
-    status_code = getattr(exc, "status_code", None)
-    if type(status_code) is int:
-        detail["provider_status_code"] = status_code
+    if raw_status_code is not None:
+        detail["provider_status_code"] = raw_status_code
     return detail
 
 

@@ -15,7 +15,17 @@ from sqlalchemy import Engine
 
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.schema import get_aggregation_contract_options
+from elspeth.core.expression_parser import ExpressionEvaluationError, ExpressionParser
+from elspeth.plugins.infrastructure.manager import (
+    PluginNotFoundError,
+    get_shared_plugin_manager,
+)
+from elspeth.plugins.transforms.llm.model_catalog import (
+    OPENROUTER_LITELLM_PREFIX,
+    read_litellm_model_list,
+)
 from elspeth.web.catalog.protocol import PluginKind
+from elspeth.web.composer._producer_resolver import ProducerResolver
 from elspeth.web.composer.source_inspection import (
     derive_extra_column_risk,
     inspect_blob_content,
@@ -342,11 +352,6 @@ def _execute_get_plugin_assistance(
     Unknown plugin name or invalid plugin_type surfaces here as a tool
     failure with the original message so the agent can correct the call.
     """
-    from elspeth.plugins.infrastructure.manager import (
-        PluginNotFoundError,
-        get_shared_plugin_manager,
-    )
-
     del context  # unused; signature uniformity with the other handlers.
     plugin_type_raw = args["plugin_type"]
     plugin_name = args["plugin_name"]
@@ -458,8 +463,6 @@ def _execute_list_models(
     value-source compliance walker share a single source of truth for
     what counts as "a known model."
     """
-    from elspeth.plugins.transforms.llm.model_catalog import read_litellm_model_list
-
     del context  # unused; signature uniformity with the other handlers.
     all_models: list[str] = list(read_litellm_model_list())
 
@@ -483,8 +486,6 @@ def _execute_list_models(
         # and what the value-source compliance validator accepts. The
         # OPENROUTER_LITELLM_PREFIX constant lives next to the catalog
         # reader so both sites strip identically.
-        from elspeth.plugins.transforms.llm.model_catalog import OPENROUTER_LITELLM_PREFIX
-
         normalised = provider.rstrip("/")
         if normalised == OPENROUTER_LITELLM_PREFIX.rstrip("/"):
             prefix_len = len(OPENROUTER_LITELLM_PREFIX)
@@ -633,8 +634,6 @@ def _gate_expression_type_diagnostics_for_observed_csv(
     if not rows:
         return []
 
-    from elspeth.core.expression_parser import ExpressionEvaluationError, ExpressionParser
-
     diagnostics: list[dict[str, Any]] = []
     direct_gate_nodes = (
         node for node in state.nodes if node.node_type == "gate" and node.input == source.on_success and node.condition is not None
@@ -715,8 +714,6 @@ def _source_field_reaches_connection_without_type_change(
     transforms may coerce, overwrite, delete, or synthesize the field, so the
     proof step abstains instead of emitting a false positive.
     """
-    from elspeth.web.composer._producer_resolver import ProducerResolver
-
     resolver = ProducerResolver.build(
         source=state.source,
         nodes=state.nodes,

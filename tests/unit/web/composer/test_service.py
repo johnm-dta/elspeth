@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,10 +19,6 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.catalog.protocol import CatalogService
-from elspeth.web.catalog.schemas import (
-    PluginSchemaInfo,
-    PluginSummary,
-)
 from elspeth.web.composer.progress import ComposerProgressEvent
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
@@ -42,7 +38,6 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools import ToolResult
 from elspeth.web.composer.tools import execute_tool as _execute_tool
-from elspeth.web.config import WebSettings
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
 from elspeth.web.execution.schemas import (
     ValidationCheck,
@@ -59,12 +54,17 @@ from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
-
-
-@dataclass
-class FakeFunction:
-    name: str
-    arguments: str
+from tests.unit.web.composer._helpers import (
+    FakeChoice,
+    FakeFunction,
+    FakeLLMResponse,
+    FakeMessage,
+    FakeToolCall,
+    _empty_state,
+    _make_llm_response,
+    _make_settings,
+    _mock_catalog,
+)
 
 
 def _execution_ready() -> ValidationReadiness:
@@ -118,127 +118,6 @@ def ValidationResult(
         readiness=readiness or (_execution_ready() if is_valid else _not_authoring_ready()),
         **kwargs,
     )
-
-
-@dataclass
-class FakeToolCall:
-    id: str
-    function: FakeFunction
-
-
-@dataclass
-class FakeMessage:
-    content: str | None
-    tool_calls: list[FakeToolCall] | None
-
-
-@dataclass
-class FakeChoice:
-    message: FakeMessage
-
-
-@dataclass
-class FakeLLMResponse:
-    choices: list[FakeChoice]
-
-
-def _empty_state() -> CompositionState:
-    return CompositionState(
-        source=None,
-        nodes=(),
-        edges=(),
-        outputs=(),
-        metadata=PipelineMetadata(),
-        version=1,
-    )
-
-
-def _mock_catalog() -> MagicMock:
-    """Mock CatalogService with real PluginSummary/PluginSchemaInfo instances.
-
-    AC #16: Tests must use real PluginSummary and PluginSchemaInfo instances,
-    not plain dicts. Mock return types must match the CatalogService protocol.
-    """
-    catalog = MagicMock(spec=CatalogService)
-    catalog.list_sources.return_value = [
-        PluginSummary(
-            name="csv",
-            description="CSV source",
-            plugin_type="source",
-            config_fields=[],
-        ),
-    ]
-    catalog.list_transforms.return_value = [
-        PluginSummary(
-            name="passthrough",
-            description="Uppercase",
-            plugin_type="transform",
-            config_fields=[],
-        ),
-    ]
-    catalog.list_sinks.return_value = [
-        PluginSummary(
-            name="csv",
-            description="CSV sink",
-            plugin_type="sink",
-            config_fields=[],
-        ),
-    ]
-    catalog.get_schema.return_value = PluginSchemaInfo(
-        name="csv",
-        plugin_type="source",
-        description="CSV source",
-        json_schema={"title": "Config", "properties": {}},
-        knob_schema={"fields": []},
-    )
-    return catalog
-
-
-def _make_llm_response(
-    content: str | None = None,
-    tool_calls: list[dict[str, Any]] | None = None,
-) -> FakeLLMResponse:
-    """Build a typed fake LiteLLM response.
-
-    Uses typed dataclasses instead of MagicMock so tests fail if production
-    code accesses an attribute that doesn't exist on the real response shape.
-    """
-    fake_tool_calls: list[FakeToolCall] | None = None
-    if tool_calls:
-        fake_tool_calls = [
-            FakeToolCall(
-                id=tc["id"],
-                function=FakeFunction(
-                    name=tc["name"],
-                    arguments=json.dumps(tc["arguments"]),
-                ),
-            )
-            for tc in tool_calls
-        ]
-
-    message = FakeMessage(content=content, tool_calls=fake_tool_calls)
-    return FakeLLMResponse(choices=[FakeChoice(message=message)])
-
-
-def _make_settings(**overrides: Any) -> WebSettings:
-    """Build WebSettings with Pydantic-enforced defaults.
-
-    Use keyword arguments to override specific fields for a test.
-    Defaults come from the Pydantic model — no drift possible.
-
-    data_dir defaults to /data (absolute) so test paths like
-    /data/blobs/file.csv pass S2 path validation.
-    """
-    defaults: dict[str, Any] = {
-        "data_dir": Path("/data"),
-        "composer_max_composition_turns": 15,
-        "composer_max_discovery_turns": 10,
-        "composer_timeout_seconds": 85.0,
-        "composer_rate_limit_per_minute": 10,
-        "shareable_link_signing_key": b"\x00" * 32,
-    }
-    defaults.update(overrides)
-    return WebSettings(**defaults)
 
 
 def _assert_no_mutation_empty_state_blocker(
@@ -1742,7 +1621,7 @@ class TestProviderCacheTokenAudit:
 
     @pytest.mark.asyncio
     async def test_openai_nested_cached_tokens_lands_on_audit_record(self) -> None:
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1752,7 +1631,7 @@ class TestProviderCacheTokenAudit:
                 "prompt_tokens_details": {"cached_tokens": 1024},
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.prompt_tokens == 1200
         assert usage.cached_prompt_tokens == 1024
         assert usage.cache_creation_input_tokens is None
@@ -1760,7 +1639,7 @@ class TestProviderCacheTokenAudit:
 
     @pytest.mark.asyncio
     async def test_anthropic_sibling_cache_fields_land_on_audit_record(self) -> None:
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1770,7 +1649,7 @@ class TestProviderCacheTokenAudit:
                 "cache_read_input_tokens": 1100,
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None
@@ -1785,7 +1664,7 @@ class TestProviderCacheTokenAudit:
         carry the SAME value because LiteLLM derives the former from the
         latter. The audit row must record only the Anthropic-shape signal.
         """
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1796,7 +1675,7 @@ class TestProviderCacheTokenAudit:
                 "cache_read_input_tokens": 1100,
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None
@@ -1812,7 +1691,7 @@ class TestProviderCacheTokenAudit:
         misleads the auditor into thinking the provider reported a zero-hit
         cache read, when in fact the provider only reported cache creation.
         """
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage(
             {
@@ -1823,7 +1702,7 @@ class TestProviderCacheTokenAudit:
                 "cache_read_input_tokens": 0,
             }
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 0
         assert usage.cached_prompt_tokens is None
@@ -1833,11 +1712,11 @@ class TestProviderCacheTokenAudit:
         """Pydantic-shaped (attribute) usage object also dedups when siblings present.
 
         Real LiteLLM responses are Pydantic ``Usage`` objects, not Mappings.
-        Verifies the elif branch in ``_token_usage_from_response`` honors the
+        Verifies the elif branch in ``token_usage_from_response`` honors the
         same dedup rule: nested ``prompt_tokens_details.cached_tokens`` is
         dropped when an Anthropic sibling is present on the attribute object.
         """
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         @dataclass
         class FakePromptTokensDetails:
@@ -1871,7 +1750,7 @@ class TestProviderCacheTokenAudit:
                 cache_read_input_tokens=1100,
             ),
         )
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cache_creation_input_tokens == 7000
         assert usage.cache_read_input_tokens == 1100
         assert usage.cached_prompt_tokens is None
@@ -1879,10 +1758,10 @@ class TestProviderCacheTokenAudit:
     @pytest.mark.asyncio
     async def test_no_cache_metadata_leaves_fields_none(self) -> None:
         """Absent cache metadata must NOT be fabricated to zero."""
-        from elspeth.web.composer.llm_response_parsing import _token_usage_from_response
+        from elspeth.web.composer.llm_response_parsing import token_usage_from_response
 
         response = self._response_with_usage({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120})
-        usage = _token_usage_from_response(response)
+        usage = token_usage_from_response(response)
         assert usage.cached_prompt_tokens is None
         assert usage.cache_creation_input_tokens is None
         assert usage.cache_read_input_tokens is None

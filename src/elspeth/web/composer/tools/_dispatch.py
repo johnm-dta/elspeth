@@ -9,6 +9,7 @@ from typing import Any, Final, cast
 
 from sqlalchemy import Engine
 
+from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.state import (
     CompositionState,
@@ -59,7 +60,6 @@ from elspeth.web.composer.tools.outputs import (
     _handle_set_output,
 )
 from elspeth.web.composer.tools.recipes import (
-    _execute_apply_pipeline_recipe,
     _execute_list_recipes,
 )
 from elspeth.web.composer.tools.secrets import (
@@ -70,11 +70,9 @@ from elspeth.web.composer.tools.secrets import (
 from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_VALUES,
+    _execute_apply_pipeline_recipe,
     _execute_get_pipeline_state,
     _handle_set_pipeline,
-)
-from elspeth.web.composer.tools.sinks import (
-    _handle_list_sinks,
 )
 from elspeth.web.composer.tools.sources import (
     _execute_inspect_source,
@@ -85,6 +83,7 @@ from elspeth.web.composer.tools.sources import (
     _handle_set_source,
 )
 from elspeth.web.composer.tools.transforms import (
+    _handle_list_sinks,
     _handle_list_transforms,
     _handle_patch_node_options,
     _handle_remove_edge,
@@ -1311,7 +1310,7 @@ def execute_tool(
     data_dir: str | None = None,
     session_engine: Engine | None = None,
     session_id: str | None = None,
-    secret_service: Any | None = None,
+    secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
     baseline: CompositionState | None = None,
     prior_validation: ValidationSummary | None = None,
@@ -1344,7 +1343,9 @@ def execute_tool(
         session_engine: SQLAlchemy engine for the session database.
             Required for blob tools to perform synchronous blob lookups.
         session_id: Current session ID. Required for blob tools.
-        secret_service: WebSecretService instance. Required for secret tools.
+        secret_service: ``WebSecretResolver`` — auth-scoped secret-reference
+            resolver. Required for secret tools. Production wiring passes a
+            ``ScopedSecretResolver`` (``elspeth.web.secrets.service``).
         user_id: Current user ID. Required for secret tools.
         baseline: Baseline state for diff_pipeline comparisons.
         prior_validation: Pre-computed validation for the current state.

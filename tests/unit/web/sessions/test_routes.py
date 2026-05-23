@@ -2895,6 +2895,72 @@ class TestLiteLLMErrorRedaction:
         assert secret not in body_text
         assert detail["provider_detail"] == ("Provider detail redacted because it may contain secrets.")
 
+    def test_bad_request_llm_error_dedicated_attributes_consumed(self) -> None:
+        """_BadRequestLLMError carries the raw provider text on a dedicated attribute.
+
+        ``str(exc)`` on this class returns only the redacted wrap message
+        ("LLM request rejected (BadRequestError)"), so the route helper must
+        prefer ``exc.provider_detail`` / ``exc.provider_status_code``. Without
+        this branch the attributes were dead infrastructure.
+        """
+        from elspeth.web.composer.service import _BadRequestLLMError
+        from elspeth.web.sessions.routes import _litellm_error_detail
+
+        exc = _BadRequestLLMError(
+            "LLM request rejected (BadRequestError)",
+            provider_detail="Anthropic API: prompt too long (200K token limit)",
+            provider_status_code=400,
+        )
+
+        detail = _litellm_error_detail(
+            "llm_unavailable",
+            exc,
+            expose_provider_error=True,
+        )
+
+        assert detail["error_type"] == "llm_unavailable"
+        assert detail["detail"] == "_BadRequestLLMError"
+        assert detail["provider_status_code"] == 400
+        assert detail["provider_detail"] == "Anthropic API: prompt too long (200K token limit)"
+
+    def test_bad_request_llm_error_attributes_scrubbed_for_secrets(self) -> None:
+        """Provider text from _BadRequestLLMError must pass through the scrubber too."""
+        from elspeth.web.composer.service import _BadRequestLLMError
+        from elspeth.web.sessions.routes import _litellm_error_detail
+
+        secret = "sk-or-v1-abcdefghijklmnopqrstuvwxyz123456"  # secret-scan: allow-this-line
+        exc = _BadRequestLLMError(
+            "LLM request rejected (BadRequestError)",
+            provider_detail=f"Provider echoed Authorization Bearer {secret}",
+            provider_status_code=400,
+        )
+
+        detail = _litellm_error_detail(
+            "llm_unavailable",
+            exc,
+            expose_provider_error=True,
+        )
+
+        assert secret not in str(detail)
+        assert detail["provider_detail"] == "Provider detail redacted because it may contain secrets."
+
+    def test_bad_request_llm_error_without_detail_yields_no_provider_fields(self) -> None:
+        """When the carrier has no provider text, omit the optional fields rather than fabricating."""
+        from elspeth.web.composer.service import _BadRequestLLMError
+        from elspeth.web.sessions.routes import _litellm_error_detail
+
+        exc = _BadRequestLLMError("LLM request rejected (BadRequestError)")
+
+        detail = _litellm_error_detail(
+            "llm_unavailable",
+            exc,
+            expose_provider_error=True,
+        )
+
+        assert detail["detail"] == "_BadRequestLLMError"
+        assert "provider_detail" not in detail
+        assert "provider_status_code" not in detail
+
     def test_recompose_auth_error_body_carries_class_name_only(self, tmp_path) -> None:
         """recompose path must mirror send_message's redaction."""
         import asyncio

@@ -43,6 +43,7 @@ from elspeth.contracts.composer_llm_audit import (
 )
 from elspeth.contracts.composer_progress import ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
+from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import yaml_generator
@@ -70,21 +71,21 @@ from elspeth.web.composer.audit import (
     finish_success,
 )
 from elspeth.web.composer.llm_response_parsing import (
-    _apply_anthropic_cache_markers,
-    _attach_llm_calls,
-    _build_llm_call_record,
-    _safe_response_model,
-    _supports_anthropic_prompt_cache_markers,
-    _token_usage_from_response,
+    apply_anthropic_cache_markers,
+    attach_llm_calls,
+    build_llm_call_record,
+    safe_response_model,
+    supports_anthropic_prompt_cache_markers,
+    token_usage_from_response,
 )
 from elspeth.web.composer.progress import (
     ComposerProgressEvent,
-    _emit_progress,
-    _model_call_progress_event,
-    _tool_batch_progress_event,
-    _tool_completed_progress_event,
-    _tool_started_progress_event,
     convergence_progress_event,
+    emit_progress,
+    model_call_progress_event,
+    tool_batch_progress_event,
+    tool_completed_progress_event,
+    tool_started_progress_event,
 )
 from elspeth.web.composer.prompts import build_messages, build_run_diagnostics_messages, build_system_prompt
 from elspeth.web.composer.proposals import build_tool_proposal_summary
@@ -862,7 +863,7 @@ class ComposerServiceImpl:
         *,
         sessions_service: SessionServiceProtocol | None = None,
         session_engine: Engine | None = None,
-        secret_service: Any | None = None,
+        secret_service: WebSecretResolver | None = None,
         runtime_preflight_coordinator: RuntimePreflightCoordinator | None = None,
     ) -> None:
         self._catalog = catalog
@@ -1729,7 +1730,7 @@ class ComposerServiceImpl:
                 user_message_id,
             )
         except ComposerConvergenceError as exc:
-            await _emit_progress(
+            await emit_progress(
                 progress,
                 convergence_progress_event(budget_exhausted=exc.budget_exhausted),
             )
@@ -1789,7 +1790,7 @@ class ComposerServiceImpl:
                         original_exc_class=crash.exc_class,
                         audit_exc_class=type(audit_failure).__name__,
                     )
-            await _emit_progress(
+            await emit_progress(
                 progress,
                 ComposerProgressEvent(
                     phase="failed",
@@ -1806,7 +1807,7 @@ class ComposerServiceImpl:
             # route handlers further narrow LiteLLMAPIError into the
             # provider_unavailable progress code; here the service emits the
             # safe catch-all because we may not know which class fired.
-            await _emit_progress(
+            await emit_progress(
                 progress,
                 ComposerProgressEvent(
                     phase="failed",
@@ -1850,7 +1851,7 @@ class ComposerServiceImpl:
             if preferences.trust_mode == "explicit_approve":
                 return None
 
-        await _emit_progress(
+        await emit_progress(
             progress,
             ComposerProgressEvent(
                 phase="using_tools",
@@ -1969,7 +1970,7 @@ class ComposerServiceImpl:
         ``tool_call_cap_exceeded`` reason directly; no carrier is returned
         in that case.
         """
-        await _emit_progress(progress, _model_call_progress_event(message))
+        await emit_progress(progress, model_call_progress_event(message))
         response = await self._call_llm_before_deadline(
             llm_messages,
             tools,
@@ -2223,9 +2224,9 @@ class ComposerServiceImpl:
         assistant_tool_calls = call_model.assistant_tool_calls
         response = call_model.response
 
-        await _emit_progress(
+        await emit_progress(
             progress,
-            _tool_batch_progress_event(
+            tool_batch_progress_event(
                 tuple(tool_call.function.name for tool_call in assistant_message.tool_calls),
             ),
         )
@@ -2455,7 +2456,7 @@ class ComposerServiceImpl:
                     # Audit-recorded with cache_hit=True so the trail
                     # captures every LLM decision-point, even those
                     # served from cache without re-running the handler.
-                    await _emit_progress(
+                    await emit_progress(
                         progress,
                         ComposerProgressEvent(
                             phase="using_tools",
@@ -2665,7 +2666,7 @@ class ComposerServiceImpl:
                 # fall through to normal dispatch, which will emit a
                 # ToolArgumentError through the standard arg-error path.
 
-            await _emit_progress(progress, _tool_started_progress_event(tool_name))
+            await emit_progress(progress, tool_started_progress_event(tool_name))
 
             # Advisor escape-hatch interception. The request_advisor_hint
             # tool is intercepted here BEFORE execute_tool() because the
@@ -3158,7 +3159,7 @@ class ComposerServiceImpl:
                 # ``raise ToolArgumentError(...) from exc`` get the
                 # cause preserved on ``__cause__`` for debug/audit but
                 # NOT echoed to the LLM.
-                await _emit_progress(
+                await emit_progress(
                     progress,
                     ComposerProgressEvent(
                         phase="using_tools",
@@ -3346,7 +3347,7 @@ class ComposerServiceImpl:
             else:
                 anti_anchor.record_failure(tool_name, audit.arguments_hash)
             result_json = _serialize_tool_result(result)
-            await _emit_progress(progress, _tool_completed_progress_event(tool_name, result.success))
+            await emit_progress(progress, tool_completed_progress_event(tool_name, result.success))
             _append_tool_outcome(
                 response=result,
                 error_class=None,
@@ -3457,7 +3458,7 @@ class ComposerServiceImpl:
             hint_text = anti_anchor.build_hint()
             anti_anchor.consume_fire()
             llm_messages.append({"role": "user", "content": hint_text})
-            await _emit_progress(
+            await emit_progress(
                 progress,
                 ComposerProgressEvent(
                     phase="using_tools",
@@ -3487,7 +3488,7 @@ class ComposerServiceImpl:
             if new_composition_turns_used >= self._max_composition_turns:
                 # B-4D-3 fix: give the LLM one last chance to see the
                 # tool results and produce a text response.
-                await _emit_progress(progress, _model_call_progress_event(message))
+                await emit_progress(progress, model_call_progress_event(message))
                 response = await self._call_llm_before_deadline(
                     llm_messages,
                     tools,
@@ -3498,7 +3499,7 @@ class ComposerServiceImpl:
                 )
                 assistant_message = response.choices[0].message
                 if not assistant_message.tool_calls:
-                    await _emit_progress(
+                    await emit_progress(
                         progress,
                         ComposerProgressEvent(
                             phase="complete",
@@ -3660,7 +3661,7 @@ class ComposerServiceImpl:
         ):
             return _TerminateOutcome(action="continue", repair_turns_delta=1)
 
-        await _emit_progress(
+        await emit_progress(
             progress,
             ComposerProgressEvent(
                 phase="complete",
@@ -3762,7 +3763,7 @@ class ComposerServiceImpl:
         # Falls back to "anonymous" when user_id is None (CLI/test paths);
         # the real web composer always has user_id from auth dependency.
         actor = f"composer-web:user-{user_id}" if user_id is not None else "composer-web:anonymous"
-        await _emit_progress(
+        await emit_progress(
             progress,
             ComposerProgressEvent(
                 phase="starting",
@@ -4424,7 +4425,7 @@ class ComposerServiceImpl:
                     # and matches the audit envelope's ``actor`` field.
                     actor=audit.actor,
                     model_identifier=self._model,
-                    model_version=_safe_response_model(response) or self._model,
+                    model_version=safe_response_model(response) or self._model,
                     provider=self._availability.provider or "unknown",
                     composer_skill_hash=self._composer_skill_hash,
                 )
@@ -4522,7 +4523,7 @@ class ComposerServiceImpl:
                 # provider does not return one we fall back to the
                 # requested identifier — keeps the column NOT NULL
                 # without fabricating a value.
-                "model_version": _safe_response_model(response) or self._model,
+                "model_version": safe_response_model(response) or self._model,
                 "provider": self._availability.provider or "unknown",
                 "composer_skill_hash": self._composer_skill_hash,
                 "create_pending_interpretation_event": sessions_service.create_pending_interpretation_event,
@@ -4633,9 +4634,9 @@ class ComposerServiceImpl:
                 )
             guidance = raw_content
             status = ComposerLLMCallStatus.SUCCESS
-            usage = _token_usage_from_response(response)
+            usage = token_usage_from_response(response)
             metadata = {
-                "model": _safe_response_model(response) or advisor_model,
+                "model": safe_response_model(response) or advisor_model,
                 "prompt_tokens": usage.prompt_tokens,
                 "completion_tokens": usage.completion_tokens,
                 "cached_prompt_tokens": usage.cached_prompt_tokens,
@@ -4691,7 +4692,7 @@ class ComposerServiceImpl:
         finally:
             if recorder is not None and status is not None:
                 recorder.record_llm_call(
-                    _build_llm_call_record(
+                    build_llm_call_record(
                         model_requested=advisor_model,
                         messages=messages,
                         tools=None,
@@ -4707,7 +4708,7 @@ class ComposerServiceImpl:
                 )
                 current_exc = sys.exc_info()[1]
                 if current_exc is not None:
-                    _attach_llm_calls(current_exc, recorder)
+                    attach_llm_calls(current_exc, recorder)
 
     async def _call_llm_with_audit(
         self,
@@ -4731,8 +4732,8 @@ class ComposerServiceImpl:
         from litellm.exceptions import APIError as LiteLLMAPIError
         from litellm.exceptions import AuthenticationError as LiteLLMAuthError
 
-        if _supports_anthropic_prompt_cache_markers(self._model):
-            messages, tools_or_none = _apply_anthropic_cache_markers(messages, tools)
+        if supports_anthropic_prompt_cache_markers(self._model):
+            messages, tools_or_none = apply_anthropic_cache_markers(messages, tools)
             tools = tools_or_none if tools_or_none is not None else tools
 
         started_at = datetime.now(UTC)
@@ -4757,44 +4758,44 @@ class ComposerServiceImpl:
             status = ComposerLLMCallStatus.CANCELLED
             error_class = type(exc).__name__
             error_message = type(exc).__name__
-            _attach_llm_calls(exc, recorder)
+            attach_llm_calls(exc, recorder)
             raise
         except LiteLLMAuthError as exc:
             status = ComposerLLMCallStatus.AUTH_ERROR
             error_class = type(exc).__name__
             error_message = type(exc).__name__
-            _attach_llm_calls(exc, recorder)
+            attach_llm_calls(exc, recorder)
             raise
         except LiteLLMAPIError as exc:
             status = ComposerLLMCallStatus.API_ERROR
             error_class = type(exc).__name__
             error_message = type(exc).__name__
-            _attach_llm_calls(exc, recorder)
+            attach_llm_calls(exc, recorder)
             raise
         except _MalformedLLMResponseError as exc:
             status = ComposerLLMCallStatus.MALFORMED_RESPONSE
             response = exc.response
             error_class = type(exc).__name__
             error_message = "malformed_response"
-            _attach_llm_calls(exc, recorder)
+            attach_llm_calls(exc, recorder)
             raise
         except _BadRequestLLMError as exc:
             cause = exc.__cause__
             status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
             error_class = type(cause).__name__ if cause is not None else type(exc).__name__
             error_message = error_class
-            _attach_llm_calls(exc, recorder)
+            attach_llm_calls(exc, recorder)
             raise
         except Exception as exc:
             status = ComposerLLMCallStatus.API_ERROR
             error_class = type(exc).__name__
             error_message = type(exc).__name__
-            _attach_llm_calls(exc, recorder)
+            attach_llm_calls(exc, recorder)
             raise
         finally:
             if recorder is not None and status is not None:
                 recorder.record_llm_call(
-                    _build_llm_call_record(
+                    build_llm_call_record(
                         model_requested=self._model,
                         messages=messages,
                         tools=tools,
@@ -4810,7 +4811,7 @@ class ComposerServiceImpl:
                 )
                 current_exc = sys.exc_info()[1]
                 if current_exc is not None:
-                    _attach_llm_calls(current_exc, recorder)
+                    attach_llm_calls(current_exc, recorder)
 
     async def _call_llm_before_deadline(
         self,
@@ -4875,7 +4876,14 @@ class ComposerServiceImpl:
                 ) from None
             except LiteLLMAuthError:
                 raise
-            # _BadRequestLLMError intentionally not retried — 400s are not transient.
+            except _BadRequestLLMError:
+                # Bad-request from provider: never retry. 400s are not transient,
+                # and the carrier holds the provider's status code + detail on
+                # dedicated attributes for the outer handler to build the HTTP
+                # detail. The redacted str(exc) intentionally does NOT leak
+                # provider text; only ``expose_provider_error=True`` surfaces
+                # ``provider_detail``/``provider_status_code``.
+                raise
             except LiteLLMAPIError:
                 attempt += 1
                 if attempt >= _LLM_API_MAX_ATTEMPTS:

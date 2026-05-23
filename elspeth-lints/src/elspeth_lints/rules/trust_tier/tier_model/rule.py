@@ -290,6 +290,30 @@ class TierModelVisitor(ast.NodeVisitor):
             }
         ),
         "web/composer/guided/protocol.py": frozenset({"validate_payload"}),
+        # The Tier-3 LiteLLM/provider response parsers were extracted from
+        # service.py into a dedicated module (llm_response_parsing.py) and
+        # the cross-module public names had their underscore prefix removed
+        # on 2026-05-23 (elspeth-da023db7e7 rename refactor). Same semantics,
+        # same boundary, new file + new names: this is a 1:1 successor
+        # inclusion, not a list extension. Internal helpers retain their
+        # underscore prefix because they are not cross-module-imported.
+        "web/composer/llm_response_parsing.py": frozenset(
+            {
+                "_first_response_message",
+                "_json_safe_provider_artifact",
+                "_provider_cost_from_response",
+                "_provider_details_payload",
+                "_reasoning_metadata_from_response",
+                "_response_field",
+                "_safe_provider_request_id",
+                "apply_anthropic_cache_markers",
+                "attach_llm_calls",
+                "build_llm_call_record",
+                "safe_response_model",
+                "supports_anthropic_prompt_cache_markers",
+                "token_usage_from_response",
+            }
+        ),
         "web/composer/recipes.py": frozenset({"_coerce_slot"}),
         "web/composer/redaction.py": frozenset(
             {
@@ -316,19 +340,9 @@ class TierModelVisitor(ast.NodeVisitor):
                 # semantics, same boundary, new method name: this is a
                 # 1:1 successor inclusion, not a list extension.
                 "_dispatch_tool_batch",
-                "_first_response_message",
-                "_json_safe_provider_artifact",
                 "_litellm_completion_supports_param",
                 "_matching_interpretation_placeholder_count",
                 "_optional_ancestor_present",
-                "_provider_cost_from_response",
-                "_provider_details_payload",
-                "_reasoning_metadata_from_response",
-                "_response_field",
-                "_safe_provider_request_id",
-                "_safe_response_model",
-                "_supports_anthropic_prompt_cache_markers",
-                "_token_usage_from_response",
                 "_try_apply_freeform_recipe_intent",
                 "_validate_advisor_arguments",
             }

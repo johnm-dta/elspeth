@@ -191,13 +191,15 @@ class TestOptionalAncestorPresentRefusesArraySegment:
     array as "present" would produce wrong validation results.
 
     Per CLAUDE.md ("Defensive Programming: Forbidden. Offensive Programming:
-    Encouraged"), the walker raises ``AssertionError`` with a diagnostic
+    Encouraged"), the walker raises ``NotImplementedError`` with a diagnostic
     pointing the next maintainer at the exact extension needed, rather than
     falling through and emitting incorrect missing-required-paths results.
+    ``NotImplementedError`` (not ``AssertionError``) communicates that the
+    code path is unimplemented, not that an internal invariant was violated.
     """
 
     def test_array_segment_in_optional_ancestor_raises_with_diagnostic(self) -> None:
-        with pytest.raises(AssertionError, match="optional_ancestor"):
+        with pytest.raises(NotImplementedError, match="optional_ancestor"):
             _optional_ancestor_present({"x": []}, ("x", _ARRAY_ITEM_SEGMENT))
 
     def test_diagnostic_message_names_the_extension_point(self) -> None:
@@ -206,7 +208,7 @@ class TestOptionalAncestorPresentRefusesArraySegment:
         at a generic 'unsupported' string — the next maintainer should be
         able to find the extension site without grepping.
         """
-        with pytest.raises(AssertionError) as exc_info:
+        with pytest.raises(NotImplementedError) as exc_info:
             _optional_ancestor_present({"y": [{"z": 1}]}, ("y", _ARRAY_ITEM_SEGMENT, "z"))
         message = str(exc_info.value)
         assert "_find_missing_required_paths" in message or "per-array-item" in message, (

@@ -24,16 +24,13 @@ __all__ = [
     "ComposerProgressPhase",
     "ComposerProgressRegistry",
     "ComposerProgressSnapshot",
-    "_emit_progress",
-    "_is_schema_or_catalog_tool",
-    "_is_secret_tool",
-    "_model_call_progress_event",
-    "_safe_tool_evidence",
-    "_tool_batch_progress_event",
-    "_tool_completed_progress_event",
-    "_tool_started_progress_event",
     "client_cancelled_progress_event",
     "convergence_progress_event",
+    "emit_progress",
+    "model_call_progress_event",
+    "tool_batch_progress_event",
+    "tool_completed_progress_event",
+    "tool_started_progress_event",
 ]
 
 COMPOSER_PROGRESS_MAX_EVIDENCE = 4
@@ -356,7 +353,7 @@ def _clean_required_text(value: str, *, field_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _emit_progress(
+async def emit_progress(
     progress: ComposerProgressSink | None,
     event: ComposerProgressEvent,
 ) -> None:
@@ -366,7 +363,7 @@ async def _emit_progress(
     await progress(event)
 
 
-def _model_call_progress_event(message: str) -> ComposerProgressEvent:
+def model_call_progress_event(message: str) -> ComposerProgressEvent:
     headline = "I'm asking the model to choose the next safe pipeline update."
     normalized = message.lower()
     if "html" in normalized and "json" in normalized:
@@ -379,7 +376,7 @@ def _model_call_progress_event(message: str) -> ComposerProgressEvent:
     )
 
 
-def _tool_batch_progress_event(tool_names: tuple[str, ...]) -> ComposerProgressEvent:
+def tool_batch_progress_event(tool_names: tuple[str, ...]) -> ComposerProgressEvent:
     if any(_is_schema_or_catalog_tool(name) for name in tool_names):
         return ComposerProgressEvent(
             phase="using_tools",
@@ -416,7 +413,7 @@ def _tool_batch_progress_event(tool_names: tuple[str, ...]) -> ComposerProgressE
     )
 
 
-def _tool_started_progress_event(tool_name: str) -> ComposerProgressEvent:
+def tool_started_progress_event(tool_name: str) -> ComposerProgressEvent:
     if _is_schema_or_catalog_tool(tool_name):
         return ComposerProgressEvent(
             phase="using_tools",
@@ -446,7 +443,7 @@ def _tool_started_progress_event(tool_name: str) -> ComposerProgressEvent:
     )
 
 
-def _tool_completed_progress_event(tool_name: str, success: bool) -> ComposerProgressEvent:
+def tool_completed_progress_event(tool_name: str, success: bool) -> ComposerProgressEvent:
     if not success:
         return ComposerProgressEvent(
             phase="using_tools",

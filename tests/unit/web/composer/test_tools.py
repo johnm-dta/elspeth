@@ -3861,12 +3861,11 @@ class TestUpdateBlobQuota:
 
         from sqlalchemy import update as sa_update
 
-        from elspeth.web.sessions.models import blobs_table
-
         # Simulate concurrent writer: bump DB size_bytes to 50 *after*
         # _sync_get_blob() has already read 5.  We hook _sync_get_blob to
         # perform the concurrent write immediately after returning.
-        original_get = __import__("elspeth.web.composer.tools", fromlist=["_sync_get_blob"])._sync_get_blob
+        from elspeth.web.composer.tools.blobs import _sync_get_blob as original_get
+        from elspeth.web.sessions.models import blobs_table
 
         def _get_then_concurrent_write(*args, **kwargs):
             result = original_get(*args, **kwargs)
@@ -10059,3 +10058,66 @@ class TestBlockingDiagnosticRegistry:
             assert d["message"] == "msg"
             assert d["suggested_repair"] == "repair"
             assert d["evidence_locator"] == {"source": "blob", "blob_id": "abc"}
+
+
+class TestToolContextSecretServiceTyping:
+    """Type-contract tests for ``ToolContext.secret_service``.
+
+    Prior to elspeth-d017c958e9 the field was ``Any | None``, which
+    silently accepted any object — including the wrong production
+    surface (``WebSecretService``, which requires ``auth_provider_type``)
+    or a misnamed kwarg. The field now annotates ``WebSecretResolver``
+    (L0 protocol from ``elspeth.contracts.secrets``), and production
+    wiring passes ``ScopedSecretResolver``.
+
+    These tests pin the structural contract so the dispatch boundary
+    stays typed.
+    """
+
+    def test_scoped_secret_resolver_satisfies_protocol(self) -> None:
+        """Production ``ScopedSecretResolver`` must satisfy the protocol."""
+        from elspeth.contracts.secrets import WebSecretResolver
+        from elspeth.web.secrets.service import ScopedSecretResolver
+
+        # ScopedSecretResolver only depends on its inner service for
+        # delegation; structural-typing checks need only the methods,
+        # not a live DB.
+        class _ServiceStub:
+            def list_refs(self, user_id: str, *, auth_provider_type: str) -> list[Any]:
+                return []
+
+            def has_ref(self, user_id: str, name: str, *, auth_provider_type: str) -> bool:
+                return False
+
+            def resolve(self, user_id: str, name: str, *, auth_provider_type: str) -> None:
+                return None
+
+        resolver = ScopedSecretResolver(_ServiceStub(), auth_provider_type="local")  # type: ignore[arg-type]
+        assert isinstance(resolver, WebSecretResolver)
+
+    def test_tool_context_accepts_protocol_implementor(self) -> None:
+        """ToolContext.secret_service must accept any WebSecretResolver."""
+        from elspeth.web.composer.tools._common import ToolContext
+
+        class _ResolverStub:
+            def list_refs(self, user_id: str) -> list[Any]:
+                return []
+
+            def has_ref(self, user_id: str, name: str) -> bool:
+                return False
+
+            def resolve(self, user_id: str, name: str) -> None:
+                return None
+
+        ctx = ToolContext(catalog=MagicMock(), secret_service=_ResolverStub())  # type: ignore[arg-type]
+        # Field is reachable, typed, and forwards the structural surface.
+        assert ctx.secret_service is not None
+        assert ctx.secret_service.has_ref("u1", "missing") is False
+        assert ctx.secret_service.list_refs("u1") == []
+
+    def test_tool_context_secret_service_defaults_to_none(self) -> None:
+        """Non-secret-aware callers (legacy direct tests) construct with None."""
+        from elspeth.web.composer.tools._common import ToolContext
+
+        ctx = ToolContext(catalog=MagicMock())
+        assert ctx.secret_service is None

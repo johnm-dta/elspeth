@@ -142,7 +142,7 @@ def _passthrough_transform_schema() -> PluginSchemaInfo:
     )
 
 
-class TestFailureScheamAugmentationSetPipeline:
+class TestFailureSchemaAugmentationSetPipeline:
     def test_failed_set_pipeline_includes_plugin_schemas_for_named_plugins(self) -> None:
         """set_pipeline rejection naming a plugin → that plugin's schema inline.
 
@@ -190,12 +190,18 @@ class TestFailureScheamAugmentationSetPipeline:
         # set_pipeline is atomic — it stops at the first per-component
         # rejection it builds. The contract for plugin_schemas is "every
         # plugin named in a surfaced 'Invalid options for ...' error",
-        # so we assert the union of what actually appears.
+        # so we assert the exact iteration order that actually appears.
         assert "plugin_schemas" in payload
-        named_kinds = {key.split("/", 1)[0] for key in payload["plugin_schemas"]}
-        # At minimum the FIRST plugin to fail validation must carry its
-        # schema. Whichever one set_pipeline surfaces first is acceptable.
-        assert named_kinds <= {"source", "sink"} and named_kinds
+        # Build named_kinds as an ordered list (dict iteration is insertion
+        # order in CPython 3.7+) so the assertion below is order-sensitive.
+        named_kinds = [key.split("/", 1)[0] for key in payload["plugin_schemas"]]
+        # set_pipeline reports the source schema first — this ordering is
+        # the surface contract relied on by composer prompt construction
+        # (prompts.py consumes plugin_schemas in iteration order). If this
+        # flips to sink-first, or if multiple kinds appear (meaning atomic
+        # bail-at-first-failure was relaxed), the LLM context will reorder;
+        # reassess prompts.py before changing this expectation.
+        assert named_kinds == ["source"]
         for key, schema in payload["plugin_schemas"].items():
             kind, plugin = key.split("/", 1)
             assert schema["name"] == plugin
@@ -265,7 +271,7 @@ class TestFailureScheamAugmentationSetPipeline:
         assert "plugin_schemas" not in payload
 
 
-class TestFailureScheamAugmentationMultiPluginErrors:
+class TestFailureSchemaAugmentationMultiPluginErrors:
     """Cover the multi-plugin iteration contract directly.
 
     ``set_pipeline`` is atomic and bails at the first per-component
@@ -320,7 +326,7 @@ class TestFailureScheamAugmentationMultiPluginErrors:
         assert schemas["sink/json"]["plugin_type"] == "sink"
 
 
-class TestFailureScheamAugmentationDeduplication:
+class TestFailureSchemaAugmentationDeduplication:
     def test_plugin_schemas_deduplicated_when_multiple_errors_name_same_plugin(self) -> None:
         """Two distinct errors naming the same (kind, plugin) → schema emitted once."""
         from elspeth.web.composer.state import ValidationEntry, ValidationSummary
@@ -359,7 +365,7 @@ class TestFailureScheamAugmentationDeduplication:
         assert list(schemas.keys()) == ["source/csv"]
 
 
-class TestFailureScheamAugmentationPerToolCoverage:
+class TestFailureSchemaAugmentationPerToolCoverage:
     """Confirm the augmentation hook fires for every option-shape tool."""
 
     def test_set_source_failure_carries_schema(self) -> None:
@@ -471,7 +477,7 @@ class TestFailureScheamAugmentationPerToolCoverage:
         assert "source/csv" in payload["plugin_schemas"]
 
 
-class TestFailureScheamAugmentationNonAugmentedTools:
+class TestFailureSchemaAugmentationNonAugmentedTools:
     def test_get_plugin_schema_does_not_carry_plugin_schemas_field(self) -> None:
         """Discovery tools — even on failure — must NOT trigger augmentation."""
         catalog = _make_catalog_with_schemas()

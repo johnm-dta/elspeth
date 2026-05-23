@@ -48,18 +48,12 @@ if TYPE_CHECKING:
     from elspeth.web.composer.audit import BufferingRecorder
 
 __all__ = [
-    "_apply_anthropic_cache_markers",
-    "_attach_llm_calls",
-    "_build_llm_call_record",
-    "_first_response_message",
-    "_json_safe_provider_artifact",
-    "_provider_cost_from_response",
-    "_reasoning_metadata_from_response",
-    "_response_field",
-    "_safe_provider_request_id",
-    "_safe_response_model",
-    "_supports_anthropic_prompt_cache_markers",
-    "_token_usage_from_response",
+    "apply_anthropic_cache_markers",
+    "attach_llm_calls",
+    "build_llm_call_record",
+    "safe_response_model",
+    "supports_anthropic_prompt_cache_markers",
+    "token_usage_from_response",
 ]
 
 
@@ -77,7 +71,7 @@ def _provider_details_payload(value: Any, *, fields: tuple[str, ...]) -> Mapping
     return {field: getattr(value, field, None) for field in fields}
 
 
-def _token_usage_from_response(response: Any | None) -> TokenUsage:
+def token_usage_from_response(response: Any | None) -> TokenUsage:
     """Normalize provider usage metadata without fabricating missing counts.
 
     Captures provider-reported prompt-cache statistics in addition to the
@@ -180,7 +174,7 @@ def _provider_cost_from_response(response: Any | None) -> tuple[float | None, Co
     return cost, PROVIDER_COST_SOURCE_RESPONSE_USAGE_COST
 
 
-def _safe_response_model(response: Any | None) -> str | None:
+def safe_response_model(response: Any | None) -> str | None:
     if response is None:
         return None
     model = getattr(response, "model", None)
@@ -264,7 +258,7 @@ def _reasoning_metadata_from_response(response: Any | None) -> _ReasoningMetadat
     }
 
 
-def _build_llm_call_record(
+def build_llm_call_record(
     *,
     model_requested: str,
     messages: list[dict[str, Any]],
@@ -278,12 +272,12 @@ def _build_llm_call_record(
     error_class: str | None = None,
     error_message: str | None = None,
 ) -> ComposerLLMCall:
-    usage = _token_usage_from_response(response)
+    usage = token_usage_from_response(response)
     provider_cost, provider_cost_source = _provider_cost_from_response(response)
     reasoning_metadata = _reasoning_metadata_from_response(response)
     return ComposerLLMCall(
         model_requested=model_requested,
-        model_returned=_safe_response_model(response),
+        model_returned=safe_response_model(response),
         status=status,
         prompt_tokens=usage.prompt_tokens,
         completion_tokens=usage.completion_tokens,
@@ -310,7 +304,7 @@ def _build_llm_call_record(
     )
 
 
-def _attach_llm_calls(exc: BaseException, recorder: BufferingRecorder | None) -> None:
+def attach_llm_calls(exc: BaseException, recorder: BufferingRecorder | None) -> None:
     """Attach buffered LLM calls to exception objects that otherwise lack carriers."""
     if recorder is None:
         return
@@ -342,7 +336,7 @@ def _attach_llm_calls(exc: BaseException, recorder: BufferingRecorder | None) ->
 # ---------------------------------------------------------------------------
 
 
-def _supports_anthropic_prompt_cache_markers(model: str | None) -> bool:
+def supports_anthropic_prompt_cache_markers(model: str | None) -> bool:
     """Return True when the configured model honors Anthropic cache_control markers.
 
     Coverage: Anthropic direct (``anthropic/...``), OpenRouter Anthropic
@@ -366,7 +360,7 @@ def _supports_anthropic_prompt_cache_markers(model: str | None) -> bool:
     )
 
 
-def _apply_anthropic_cache_markers(
+def apply_anthropic_cache_markers(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:

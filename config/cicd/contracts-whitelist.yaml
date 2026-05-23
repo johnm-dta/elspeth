@@ -685,7 +685,7 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools/sources.py:_handle_set_source:arguments"
   - "src/elspeth/web/composer/tools/sources.py:_handle_list_sources:arguments"
   - "src/elspeth/web/composer/tools/transforms.py:_handle_list_transforms:arguments"
-  - "src/elspeth/web/composer/tools/sinks.py:_handle_list_sinks:arguments"
+  - "src/elspeth/web/composer/tools/transforms.py:_handle_list_sinks:arguments"
   - "src/elspeth/web/composer/tools/generation.py:_handle_get_plugin_schema:arguments"
   - "src/elspeth/web/composer/tools/generation.py:_handle_get_expression_grammar:arguments"
   - "src/elspeth/web/composer/tools/transforms.py:_handle_upsert_node:arguments"

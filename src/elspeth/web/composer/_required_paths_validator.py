@@ -144,7 +144,7 @@ def _optional_ancestor_present(value: object, ancestor: RequiredPath) -> bool:
     cursor: object = value
     for segment in ancestor:
         if segment == _ARRAY_ITEM_SEGMENT:
-            raise AssertionError(
+            raise NotImplementedError(
                 "Array-segment in optional_ancestor is not yet supported by this walker. "
                 f"Saw ancestor={ancestor!r}. To handle optional sub-objects inside array "
                 "items, extend _find_missing_required_paths to evaluate ancestor presence "

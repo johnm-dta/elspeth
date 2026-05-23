@@ -1014,6 +1014,12 @@ def _emit_justify_output(
             "dry_run": args.dry_run,
             "operator_override": args.operator_override,
             "proposed_entry": yaml_entry,
+            # Cache accounting (OpenRouter -> Anthropic). cached may be
+            # null when the provider didn't report a cached-tokens count
+            # (caching off, or older transport without the field). 0
+            # means caching was on but produced no hit on this call.
+            "prompt_tokens_total": judge_response.prompt_tokens_total,
+            "prompt_tokens_cached": judge_response.prompt_tokens_cached,
         }
         sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
         return
@@ -1025,6 +1031,23 @@ def _emit_justify_output(
     sys.stdout.write(f"Operator override:{'  yes' if args.operator_override else '  no'}\n")
     sys.stdout.write(f"Dry run:          {'yes' if args.dry_run else 'no'}\n")
     sys.stdout.write(f"Wrote:            {'yes' if wrote else 'no'}\n")
+    # Cache accounting (one-line, text-format only). Per the project
+    # telemetry primacy order this is operator-facing CLI output, not
+    # slog — auditors don't read it; the operator does, to see whether
+    # the static policy block is cache-hitting across repeat calls.
+    # ``cached=None`` is meaningfully distinct from ``cached=0`` (the
+    # provider didn't report a count at all vs reported zero hits).
+    sys.stdout.write(
+        f"Cache:            prompt_tokens={judge_response.prompt_tokens_total} "
+        f"cached={judge_response.prompt_tokens_cached if judge_response.prompt_tokens_cached is not None else 'n/a'}"
+    )
+    if (
+        judge_response.prompt_tokens_cached is not None
+        and judge_response.prompt_tokens_total > 0
+    ):
+        ratio = judge_response.prompt_tokens_cached / judge_response.prompt_tokens_total
+        sys.stdout.write(f" ({ratio:.0%} hit)")
+    sys.stdout.write("\n")
     sys.stdout.write("\nJudge rationale:\n")
     for line in judge_response.judge_rationale.splitlines() or [""]:
         sys.stdout.write(f"  {line}\n")

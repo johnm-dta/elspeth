@@ -72,26 +72,39 @@ def _build_allowlist_dir(tmp_path: Path) -> Path:
     return allowlist_dir
 
 
-def _mock_anthropic_message(*, verdict: str, rationale: str) -> MagicMock:
-    block = MagicMock()
-    block.type = "text"
-    block.text = json.dumps(
+def _mock_openrouter_completion(*, verdict: str, rationale: str) -> MagicMock:
+    """OpenAI-shape chat-completion mock for OpenRouter routing.
+
+    The judge calls the OpenAI SDK pointed at OpenRouter; this mock
+    matches ``client.chat.completions.create(...)``'s return shape —
+    ``.choices[0].message.content`` is a JSON string the judge will
+    parse, and ``.usage`` carries prompt-token accounting (required;
+    the judge reads it offensively for cache-hit telemetry).
+    """
+    message = MagicMock()
+    message.content = json.dumps(
         {"verdict": verdict, "rationale": rationale, "should_use_decorator": None}
     )
-    message = MagicMock()
-    message.content = [block]
-    return message
+    choice = MagicMock()
+    choice.message = message
+    completion = MagicMock()
+    completion.choices = [choice]
+    completion.usage = MagicMock(
+        prompt_tokens=4000,
+        prompt_tokens_details=MagicMock(cached_tokens=0),
+    )
+    return completion
 
 
 @contextmanager
 def _mock_judge_call(*, verdict: str, rationale: str) -> Iterator[MagicMock]:
-    """Patch ``anthropic.Anthropic`` so reaudit's judge call runs offline."""
-    fake_message = _mock_anthropic_message(verdict=verdict, rationale=rationale)
+    """Patch ``openai.OpenAI`` so reaudit's judge call runs offline."""
+    fake_completion = _mock_openrouter_completion(verdict=verdict, rationale=rationale)
     fake_client = MagicMock()
-    fake_client.messages.create.return_value = fake_message
+    fake_client.chat.completions.create.return_value = fake_completion
     with (
-        patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test-key"}, clear=False),
-        patch("anthropic.Anthropic", return_value=fake_client) as client_class,
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client) as client_class,
     ):
         yield client_class
 
@@ -781,7 +794,7 @@ def test_cli_reaudit_writes_output_file(tmp_path: Path) -> None:
 
 
 def test_cli_reaudit_missing_api_key_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Without ANTHROPIC_API_KEY the run dies cleanly at the first judge call."""
+    """Without OPENROUTER_API_KEY the run dies cleanly at the first judge call."""
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
     fp = _live_fingerprint_for_widget(root)
@@ -797,13 +810,13 @@ def test_cli_reaudit_missing_api_key_exits_2(tmp_path: Path, capsys: pytest.Capt
         "--root", str(root),
         "--allowlist-dir", str(allowlist_dir),
     ]
-    env_without_key = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    env_without_key = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
     with patch.dict(os.environ, env_without_key, clear=True):
         exit_code = main(argv)
 
     assert exit_code == 2
     captured = capsys.readouterr()
-    assert "ANTHROPIC_API_KEY" in captured.err
+    assert "OPENROUTER_API_KEY" in captured.err
 
 
 def test_cli_reaudit_invalid_since_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

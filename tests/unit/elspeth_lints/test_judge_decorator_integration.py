@@ -76,30 +76,39 @@ def _build_allowlist_dir(tmp_path: Path) -> Path:
     return allowlist_dir
 
 
-def _mock_anthropic_message(
+def _mock_openrouter_completion(
     *,
     verdict: str,
     rationale: str,
     should_use_decorator: Any = None,
 ) -> MagicMock:
-    """Build a mock Anthropic ``messages.create`` return value.
+    """Build a mock OpenAI-SDK chat-completion result.
 
-    Mirrors ``test_justify._mock_anthropic_message``; duplicated here so
-    this test file is self-contained and can drive ``should_use_decorator``
-    independently.
+    Mirrors ``test_justify._mock_openrouter_completion``; duplicated
+    here so this test file is self-contained and can drive
+    ``should_use_decorator`` independently. The judge routes through
+    OpenRouter via the OpenAI-compatible SDK, so the mock matches the
+    chat-completions shape (``.choices[0].message.content`` is a JSON
+    string; ``.usage.prompt_tokens`` + optional
+    ``.prompt_tokens_details.cached_tokens`` carry token accounting).
     """
-    block = MagicMock()
-    block.type = "text"
-    block.text = json.dumps(
+    message = MagicMock()
+    message.content = json.dumps(
         {
             "verdict": verdict,
             "rationale": rationale,
             "should_use_decorator": should_use_decorator,
         }
     )
-    message = MagicMock()
-    message.content = [block]
-    return message
+    choice = MagicMock()
+    choice.message = message
+    completion = MagicMock()
+    completion.choices = [choice]
+    completion.usage = MagicMock(
+        prompt_tokens=4000,
+        prompt_tokens_details=MagicMock(cached_tokens=0),
+    )
+    return completion
 
 
 @contextmanager
@@ -109,17 +118,17 @@ def _mock_judge_call(
     rationale: str,
     should_use_decorator: Any = None,
 ) -> Iterator[MagicMock]:
-    """Patch ``anthropic.Anthropic`` to a fake client emitting one message."""
-    fake_message = _mock_anthropic_message(
+    """Patch ``openai.OpenAI`` to a fake client emitting one completion."""
+    fake_completion = _mock_openrouter_completion(
         verdict=verdict,
         rationale=rationale,
         should_use_decorator=should_use_decorator,
     )
     fake_client = MagicMock()
-    fake_client.messages.create.return_value = fake_message
+    fake_client.chat.completions.create.return_value = fake_completion
     with (
-        patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test-key"}, clear=False),
-        patch("anthropic.Anthropic", return_value=fake_client) as client_class,
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client) as client_class,
     ):
         yield client_class
 

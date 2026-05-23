@@ -200,5 +200,3 @@ def trust_boundary(
         return wrapper
 
     return decorator
-
-

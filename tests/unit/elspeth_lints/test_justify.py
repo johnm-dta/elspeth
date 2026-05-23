@@ -1,10 +1,10 @@
 """Unit tests for the ``elspeth-lints justify`` subcommand.
 
-These exercise the judge-gated allowlist-write path. The Anthropic SDK
-is mocked at the ``anthropic.Anthropic`` client level so the tests run
-offline; the model-response contract is exercised end-to-end (JSON
-shape, verdict parsing, allowlist round-trip) without making a network
-call.
+These exercise the judge-gated allowlist-write path. The OpenAI SDK
+(pointed at OpenRouter) is mocked at the ``openai.OpenAI`` client level
+so the tests run offline; the model-response contract is exercised
+end-to-end (JSON shape, verdict parsing, allowlist round-trip) without
+making a network call.
 
 The tests deliberately avoid round-tripping through ``yaml.safe_load``
 on the written entry because the production write path is text-level;
@@ -77,40 +77,81 @@ def _build_allowlist_dir(tmp_path: Path) -> Path:
     return allowlist_dir
 
 
-def _mock_anthropic_message(*, verdict: str, rationale: str, should_use_decorator: Any = None) -> MagicMock:
-    """Build a mock Anthropic ``messages.create`` return value.
+def _mock_openrouter_completion(
+    *,
+    verdict: str,
+    rationale: str,
+    should_use_decorator: Any = None,
+    prompt_tokens: int = 4000,
+    cached_tokens: int | None = 0,
+) -> MagicMock:
+    """Build a mock OpenAI-SDK ``chat.completions.create`` return value.
 
-    Mirrors the SDK shape: ``.content`` is a list of blocks, each with
-    ``.type`` and ``.text``. The judge expects exactly one ``text``
-    block whose payload is a JSON object.
+    The judge routes through OpenRouter via the OpenAI SDK, so the mock
+    mirrors the chat-completions shape: ``.choices[0].message.content``
+    is a JSON string the judge will parse, and ``.usage`` carries the
+    prompt-token totals plus the (OpenAI-shaped, OpenRouter-forwarded)
+    ``prompt_tokens_details.cached_tokens`` field.
+
+    ``cached_tokens=None`` simulates a provider that didn't report the
+    cached count (caching off, or transport omitted it). ``0`` simulates
+    caching-on with no hit; a positive int simulates a cache hit.
     """
-    block = MagicMock()
-    block.type = "text"
-    block.text = json.dumps(
+    message = MagicMock()
+    message.content = json.dumps(
         {
             "verdict": verdict,
             "rationale": rationale,
             "should_use_decorator": should_use_decorator,
         }
     )
-    message = MagicMock()
-    message.content = [block]
-    return message
+    choice = MagicMock()
+    choice.message = message
+    completion = MagicMock()
+    completion.choices = [choice]
+    # Usage shape: total + optional details. cached_tokens=None means
+    # the field on details is absent (we model this by setting details
+    # to None directly, which judge._extract_cache_accounting treats as
+    # "no count reported").
+    if cached_tokens is None:
+        completion.usage = MagicMock(
+            prompt_tokens=prompt_tokens,
+            prompt_tokens_details=None,
+        )
+    else:
+        details = MagicMock(cached_tokens=cached_tokens)
+        completion.usage = MagicMock(
+            prompt_tokens=prompt_tokens,
+            prompt_tokens_details=details,
+        )
+    return completion
 
 
 @contextmanager
-def _mock_judge_call(*, verdict: str, rationale: str) -> Iterator[MagicMock]:
-    """Patch ``anthropic.Anthropic`` so tests run offline.
+def _mock_judge_call(
+    *,
+    verdict: str,
+    rationale: str,
+    prompt_tokens: int = 4000,
+    cached_tokens: int | None = 0,
+) -> Iterator[MagicMock]:
+    """Patch ``openai.OpenAI`` so tests run offline.
 
     Yields the patched client class so callers can introspect how it was
-    invoked (e.g. assert on the prompt the judge would have received).
+    invoked (e.g. assert on the prompt the judge would have received and
+    on the cache_control marker on the system block).
     """
-    fake_message = _mock_anthropic_message(verdict=verdict, rationale=rationale)
+    fake_completion = _mock_openrouter_completion(
+        verdict=verdict,
+        rationale=rationale,
+        prompt_tokens=prompt_tokens,
+        cached_tokens=cached_tokens,
+    )
     fake_client = MagicMock()
-    fake_client.messages.create.return_value = fake_message
+    fake_client.chat.completions.create.return_value = fake_completion
     with (
-        patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test-key"}, clear=False),
-        patch("anthropic.Anthropic", return_value=fake_client) as client_class,
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client) as client_class,
     ):
         yield client_class
 
@@ -144,9 +185,10 @@ def test_call_judge_raises_configuration_error_when_api_key_absent() -> None:
         rationale="...",
         surrounding_code="...",
     )
-    # Strip the key out of the environment for this call.
-    env_without_key = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    with patch.dict(os.environ, env_without_key, clear=True), pytest.raises(JudgeConfigurationError, match="ANTHROPIC_API_KEY"):
+    # Strip the key out of the environment for this call. The judge
+    # routes through OpenRouter, so the gate is OPENROUTER_API_KEY.
+    env_without_key = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
+    with patch.dict(os.environ, env_without_key, clear=True), pytest.raises(JudgeConfigurationError, match="OPENROUTER_API_KEY"):
         call_judge(request)
 
 
@@ -160,16 +202,19 @@ def test_call_judge_crashes_on_malformed_json() -> None:
         rationale="...",
         surrounding_code="...",
     )
-    bad_block = MagicMock()
-    bad_block.type = "text"
-    bad_block.text = "not json at all { ::: }"
+    # OpenAI-shape mock with non-JSON content.
     bad_message = MagicMock()
-    bad_message.content = [bad_block]
+    bad_message.content = "not json at all { ::: }"
+    bad_choice = MagicMock()
+    bad_choice.message = bad_message
+    bad_completion = MagicMock()
+    bad_completion.choices = [bad_choice]
+    bad_completion.usage = MagicMock(prompt_tokens=100, prompt_tokens_details=None)
     fake_client = MagicMock()
-    fake_client.messages.create.return_value = bad_message
+    fake_client.chat.completions.create.return_value = bad_completion
     with (
-        patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test-key"}, clear=False),
-        patch("anthropic.Anthropic", return_value=fake_client),
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client),
         pytest.raises(RuntimeError, match="non-JSON response"),
     ):
         call_judge(request)
@@ -214,7 +259,7 @@ def test_justify_accepted_writes_entry_with_judge_metadata(tmp_path: Path) -> No
     assert target_yaml.exists()
     text = target_yaml.read_text(encoding="utf-8")
     assert "judge_verdict: ACCEPTED" in text
-    assert "judge_model: claude-opus-4-7" in text
+    assert "judge_model: anthropic/claude-opus-4" in text
     assert "genuine Tier-3 boundary" in text
     assert "plugins/widget.py:R1:Widget:lookup:fp=" in text
     # B3: owner is recorded verbatim from --owner, not fabricated from $USER.
@@ -226,7 +271,7 @@ def test_justify_accepted_writes_entry_with_judge_metadata(tmp_path: Path) -> No
     assert len(allowlist.entries) == 1
     entry = allowlist.entries[0]
     assert entry.judge_verdict is JudgeVerdict.ACCEPTED
-    assert entry.judge_model == "claude-opus-4-7"
+    assert entry.judge_model == "anthropic/claude-opus-4"
     assert entry.judge_rationale == "genuine Tier-3 boundary"
     assert entry.judge_recorded_at is not None
     assert entry.judge_recorded_at.tzinfo is not None
@@ -387,13 +432,13 @@ def test_justify_missing_api_key_emits_configuration_error(tmp_path: Path, capsy
         "--rationale", "...",
         "--owner", "test-agent",
     ]
-    env_without_key = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    env_without_key = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
     with patch.dict(os.environ, env_without_key, clear=True):
         exit_code = main(argv)
 
     assert exit_code == 2
     captured = capsys.readouterr()
-    assert "ANTHROPIC_API_KEY" in captured.err
+    assert "OPENROUTER_API_KEY" in captured.err
 
 
 # ---------- CLI: ambiguous symbol ----------
@@ -434,7 +479,7 @@ class Widget:
     # Set the API key so we definitely don't fall out via the
     # configuration check — the ambiguity error must fire first.
     judge_called = MagicMock()
-    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False), patch("anthropic.Anthropic", judge_called):
+    with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False), patch("openai.OpenAI", judge_called):
         exit_code = main(argv)
 
     assert exit_code == 2
@@ -481,7 +526,7 @@ def test_justify_round_trip_preserves_judge_metadata_across_reads(tmp_path: Path
     second = second_load.entries[0]
 
     assert first.judge_verdict == second.judge_verdict == JudgeVerdict.ACCEPTED
-    assert first.judge_model == second.judge_model == "claude-opus-4-7"
+    assert first.judge_model == second.judge_model == "anthropic/claude-opus-4"
     assert first.judge_rationale == second.judge_rationale == "judge's verbatim reasoning"
     assert first.judge_recorded_at == second.judge_recorded_at
     assert first.judge_recorded_at is not None
@@ -559,6 +604,333 @@ def test_justify_rejects_empty_owner(
     # argparse's standard frame is "argument --owner: <our message>"
     assert "--owner" in captured.err
     assert "non-empty" in captured.err or "audit identity" in captured.err
+
+
+# =============================================================================
+# Prompt-caching contract: static policy block carries cache_control;
+# dynamic per-call material does not.
+# =============================================================================
+#
+# The judge's system prompt is now structured as a cacheable static
+# policy block (CLAUDE.md excerpts, the @trust_boundary teaching, the
+# output schema, the decision heuristic) plus a per-call user message
+# (file path, rationale, surrounding code). The static block is wrapped
+# in ``cache_control: {"type": "ephemeral"}`` so the OpenRouter ->
+# Anthropic transport will cache it for the 5-minute TTL window. These
+# tests pin the structural contract: the first system block must carry
+# the cache marker; the user block must NOT carry it; and the static
+# block must contain the load-bearing policy phrases the judge needs
+# (so future edits don't accidentally drop a section without breaking a
+# test).
+# =============================================================================
+
+
+def test_call_judge_system_block_is_cached_and_user_block_is_not(tmp_path: Path) -> None:
+    request = JudgeRequest(
+        file_path="plugins/widget.py",
+        rule_id="R1",
+        symbol="Widget.lookup",
+        fingerprint="fp-cache-test",
+        rationale="payload is Tier-3 external data",
+        surrounding_code="return payload.get('name', 'anonymous')",
+    )
+    with _mock_judge_call(verdict="ACCEPTED", rationale="boundary is genuine") as client_class:
+        call_judge(request)
+
+    # Reach into the underlying mock client instance to see the call
+    # kwargs. patch("openai.OpenAI", return_value=fake_client) means
+    # client_class.return_value is the fake_client.
+    fake_client = client_class.return_value
+    create_call = fake_client.chat.completions.create.call_args
+    messages = create_call.kwargs["messages"]
+    assert isinstance(messages, list)
+    assert len(messages) == 2
+
+    # System message: list-of-blocks shape, single text block, with
+    # cache_control: ephemeral.
+    system_msg = messages[0]
+    assert system_msg["role"] == "system"
+    system_blocks = system_msg["content"]
+    assert isinstance(system_blocks, list)
+    assert len(system_blocks) == 1
+    sys_block = system_blocks[0]
+    assert sys_block["type"] == "text"
+    assert sys_block["cache_control"] == {"type": "ephemeral"}
+
+    # User message: also list-of-blocks shape, but no cache_control.
+    user_msg = messages[1]
+    assert user_msg["role"] == "user"
+    user_blocks = user_msg["content"]
+    assert isinstance(user_blocks, list)
+    assert len(user_blocks) == 1
+    user_block = user_blocks[0]
+    assert user_block["type"] == "text"
+    assert "cache_control" not in user_block
+
+
+def test_call_judge_static_policy_contains_loadbearing_phrases(tmp_path: Path) -> None:
+    """The cached block must contain the policy vocabulary the judge needs.
+
+    These phrases are excerpted verbatim from CLAUDE.md and bind back to
+    the Decision Heuristic at the end of the prompt. If a refactor
+    accidentally drops one of these sections, the heuristic loses its
+    referent and the verdict quality degrades.
+    """
+    request = JudgeRequest(
+        file_path="plugins/widget.py",
+        rule_id="R1",
+        symbol="Widget.lookup",
+        fingerprint="fp-phrases",
+        rationale="...",
+        surrounding_code="...",
+    )
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok") as client_class:
+        call_judge(request)
+
+    fake_client = client_class.return_value
+    create_call = fake_client.chat.completions.create.call_args
+    sys_text = create_call.kwargs["messages"][0]["content"][0]["text"]
+
+    # Tier-model vocabulary
+    assert "Tier 1: Our Data" in sys_text
+    assert "Tier 2: Pipeline Data" in sys_text
+    assert "Tier 3: External Data" in sys_text
+    assert "FULL TRUST" in sys_text
+    assert "ZERO TRUST" in sys_text
+
+    # Fabrication-decision test (load-bearing for §6 of the heuristic)
+    assert "fabrication-decision test" in sys_text
+
+    # Defensive vs offensive (the heading is the canonical phrase)
+    assert "Defensive Programming: Forbidden" in sys_text
+    assert "Offensive Programming: Encouraged" in sys_text
+
+    # No legacy policy and layer rules — both are heuristic referents
+    assert "No Legacy Code" in sys_text
+    assert "Layer Dependency Rules" in sys_text
+
+    # The decorator-teaching section is preserved (load-bearing for
+    # should_use_decorator output contract)
+    assert "@trust_boundary" in sys_text
+    assert "should_use_decorator" in sys_text
+
+    # Output schema and decision heuristic
+    assert "Output schema" in sys_text
+    assert "Decision Heuristic" in sys_text
+
+
+def test_call_judge_user_block_contains_per_call_material(tmp_path: Path) -> None:
+    """Dynamic material (file path, rationale, code) must be in the user message.
+
+    The per-call material must NOT be in the system block (that would
+    bust the cache key and defeat the optimisation). The user message
+    must carry the substituted template.
+    """
+    request = JudgeRequest(
+        file_path="plugins/my_specific_file.py",
+        rule_id="R1",
+        symbol="MyClass.my_method",
+        fingerprint="fp-dynamic-12345",
+        rationale="this is the rationale text the agent supplied",
+        surrounding_code="    return external_payload.get('field', 'fallback')",
+    )
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok") as client_class:
+        call_judge(request)
+
+    fake_client = client_class.return_value
+    create_call = fake_client.chat.completions.create.call_args
+    sys_text = create_call.kwargs["messages"][0]["content"][0]["text"]
+    user_text = create_call.kwargs["messages"][1]["content"][0]["text"]
+
+    # User message carries the dynamic substitutions.
+    assert "plugins/my_specific_file.py" in user_text
+    assert "MyClass.my_method" in user_text
+    assert "fp-dynamic-12345" in user_text
+    assert "this is the rationale text the agent supplied" in user_text
+    assert "external_payload.get('field', 'fallback')" in user_text
+
+    # The dynamic material must NOT be in the cached system block.
+    assert "plugins/my_specific_file.py" not in sys_text
+    assert "fp-dynamic-12345" not in sys_text
+
+
+# =============================================================================
+# Cache-hit accounting: the JudgeResponse exposes prompt-token totals.
+# =============================================================================
+
+
+def test_call_judge_returns_cache_accounting_when_provider_reports_it() -> None:
+    request = JudgeRequest(
+        file_path="plugins/widget.py",
+        rule_id="R1",
+        symbol="Widget.lookup",
+        fingerprint="fp",
+        rationale="...",
+        surrounding_code="...",
+    )
+    with _mock_judge_call(
+        verdict="ACCEPTED",
+        rationale="ok",
+        prompt_tokens=4000,
+        cached_tokens=3500,
+    ):
+        response = call_judge(request)
+    assert response.prompt_tokens_total == 4000
+    assert response.prompt_tokens_cached == 3500
+
+
+def test_call_judge_distinguishes_cached_zero_from_cached_none() -> None:
+    """Provider reported 0 hits != provider didn't report cached count at all.
+
+    Per the fabrication-decision test in CLAUDE.md: absence and zero are
+    different facts. ``cached=0`` means caching was on but produced no
+    hit (e.g. first call within a TTL window). ``cached=None`` means
+    the provider didn't surface the field at all (older transport,
+    caching off). The audit trail loses information if we coerce one to
+    the other.
+    """
+    request = JudgeRequest(
+        file_path="plugins/widget.py",
+        rule_id="R1",
+        symbol="Widget.lookup",
+        fingerprint="fp",
+        rationale="...",
+        surrounding_code="...",
+    )
+    with _mock_judge_call(
+        verdict="ACCEPTED",
+        rationale="ok",
+        prompt_tokens=4000,
+        cached_tokens=0,
+    ):
+        response_zero = call_judge(request)
+    with _mock_judge_call(
+        verdict="ACCEPTED",
+        rationale="ok",
+        prompt_tokens=4000,
+        cached_tokens=None,
+    ):
+        response_none = call_judge(request)
+    assert response_zero.prompt_tokens_cached == 0
+    assert response_none.prompt_tokens_cached is None
+
+
+def test_justify_text_output_includes_cache_line(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    argv = [
+        "justify",
+        "--root", str(root),
+        "--allowlist-dir", str(allowlist_dir),
+        "--file-path", "plugins/widget.py",
+        "--symbol", "Widget.lookup",
+        "--rationale", "Tier-3 boundary",
+        "--owner", "test-agent",
+    ]
+    with _mock_judge_call(
+        verdict="ACCEPTED",
+        rationale="ok",
+        prompt_tokens=4000,
+        cached_tokens=3200,
+    ):
+        exit_code = main(argv)
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "Cache:" in out
+    assert "prompt_tokens=4000" in out
+    assert "cached=3200" in out
+    # 3200 / 4000 = 80%
+    assert "80% hit" in out
+
+
+def test_justify_text_output_renders_cached_none_as_na(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Provider that didn't surface cached count renders as ``n/a``, not 0."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    argv = [
+        "justify",
+        "--root", str(root),
+        "--allowlist-dir", str(allowlist_dir),
+        "--file-path", "plugins/widget.py",
+        "--symbol", "Widget.lookup",
+        "--rationale", "Tier-3 boundary",
+        "--owner", "test-agent",
+    ]
+    with _mock_judge_call(
+        verdict="ACCEPTED",
+        rationale="ok",
+        prompt_tokens=4000,
+        cached_tokens=None,
+    ):
+        exit_code = main(argv)
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "cached=n/a" in out
+    # No hit ratio if cached is None.
+    assert "hit)" not in out
+
+
+def test_justify_json_output_includes_cache_fields(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    argv = [
+        "justify",
+        "--root", str(root),
+        "--allowlist-dir", str(allowlist_dir),
+        "--file-path", "plugins/widget.py",
+        "--symbol", "Widget.lookup",
+        "--rationale", "Tier-3 boundary",
+        "--owner", "test-agent",
+        "--format", "json",
+    ]
+    with _mock_judge_call(
+        verdict="ACCEPTED",
+        rationale="ok",
+        prompt_tokens=4000,
+        cached_tokens=3500,
+    ):
+        exit_code = main(argv)
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["prompt_tokens_total"] == 4000
+    assert payload["prompt_tokens_cached"] == 3500
+
+
+def test_justify_json_output_cache_fields_when_provider_omits_cached(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """JSON output preserves the absence signal as JSON null, not zero."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    argv = [
+        "justify",
+        "--root", str(root),
+        "--allowlist-dir", str(allowlist_dir),
+        "--file-path", "plugins/widget.py",
+        "--symbol", "Widget.lookup",
+        "--rationale", "Tier-3 boundary",
+        "--owner", "test-agent",
+        "--format", "json",
+    ]
+    with _mock_judge_call(
+        verdict="ACCEPTED",
+        rationale="ok",
+        prompt_tokens=4000,
+        cached_tokens=None,
+    ):
+        exit_code = main(argv)
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["prompt_tokens_total"] == 4000
+    assert payload["prompt_tokens_cached"] is None
 
 
 def test_justify_records_owner_verbatim(tmp_path: Path) -> None:

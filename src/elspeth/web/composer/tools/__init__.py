@@ -174,7 +174,6 @@ from elspeth.web.composer.tools.outputs import (
     _SetOutputArgumentsModel,
 )
 from elspeth.web.composer.tools.recipes import (
-    _execute_apply_pipeline_recipe,
     _execute_list_recipes,
 )
 from elspeth.web.composer.tools.secrets import (
@@ -199,6 +198,7 @@ from elspeth.web.composer.tools.sessions import (
     _check_interpretation_rate_limits,
     _detect_unresolved_interpretation_placeholders,
     _detect_unresolved_interpretation_placeholders_typed,
+    _execute_apply_pipeline_recipe,
     _execute_get_pipeline_state,
     _execute_set_pipeline,
     _handle_request_interpretation_review,

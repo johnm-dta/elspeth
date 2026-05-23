@@ -84,6 +84,36 @@ recoverable Tier-1 data and stay forever — they survive until the
 operator either ``--resume``\\ s them to completion or starts a fresh
 sweep. The cleanup acquires LOCK_NB before touching each candidate so an
 in-progress resume on a stale-mtime sidecar is never raced.
+
+Write-side partial-line truncation (T6d, CRITICAL): the T6c read-side
+correctly detected the partial last line on load, but ``SidecarWriter``
+opened in ``mode="a"`` re-corrupted the file on ``--resume``. POSIX
+append mode positions the write head at EOF; when EOF is mid-partial-
+line (no trailing newline), the first appended write glues the new
+JSON onto the truncated tail, producing an unparseable line that
+``load_sidecar``'s structural-validation path then raises
+:class:`SidecarCorruptError` on (the file ends with a newline again, so
+the tail-truncation heuristic no longer fires). The operator's natural
+recovery action destroys the data the read-side fix preserved.
+
+``SidecarWriter.__enter__`` therefore truncates any partial last line
+INSIDE the flock-held window, AFTER the resume-validate callback runs
+and BEFORE the first append. Detection: the on-disk bytes do not end
+with ``\\n``. Truncation point: ``rfind(b"\\n") + 1`` (keep the final
+newline; drop the partial bytes after it). Persistence: ``os.ftruncate``
+on the open fd, ``os.fsync`` of the fd, then ``os.fsync`` of the parent
+directory to make the inode-size change durable across crashes.
+
+The partial last line is unrecoverable data — that is the deliberate
+Tier-1 trade-off: losing the one in-flight outcome (which the killed
+sweep had not durably persisted anyway) beats losing the entire
+sidecar (the prior outcomes plus everything appended after the glued
+line). The dropped entry is re-classified on resume because its key
+never made it into ``classified_keys``.
+
+Cleanly-terminated sidecars (final byte is ``\\n``) are not modified.
+``--render-incomplete`` reads sidecars via :func:`load_sidecar` directly
+and never enters the writer; render is read-only and never truncates.
 """
 
 from __future__ import annotations
@@ -256,6 +286,23 @@ class SidecarWriter:
     both pass validation, serialise on the lock, then both append past
     each other's trailers. With the callback running under the lock,
     only one resume can validate at a time.
+
+    Partial-last-line truncation (T6d): if the sidecar's final byte is
+    not ``\\n``, the writer truncates the file to the last newline
+    boundary BEFORE the first append, with ``os.ftruncate`` on the
+    locked fd plus an ``os.fsync`` of the file and the parent
+    directory. The truncation is the deliberate Tier-1 trade-off
+    documented at module scope: the partial last line (a SIGKILL'd
+    in-flight write, never durably persisted) is LOST, but everything
+    written before it is preserved, and the new outcomes append cleanly
+    without gluing onto a truncated tail. Without this truncation,
+    POSIX append-mode writes start at the mid-line byte offset and
+    produce an unparseable glued line that the loader's structural
+    validation rejects with :class:`SidecarCorruptError` — destroying
+    the very data the T6c read-side recovery preserved. The
+    truncation runs AFTER ``on_resume_locked`` (so a rejected resume
+    leaves the file untouched) and INSIDE the flock window (so a
+    second process cannot append between read-and-truncate).
     """
 
     def __init__(
@@ -316,9 +363,80 @@ class SidecarWriter:
                     self._file.close()
                     self._file = None
                 raise
+        if self._append:
+            # T6d: truncate any partial last line BEFORE the first
+            # append. POSIX append mode positions writes at EOF; if EOF
+            # sits mid-partial-line (no trailing newline because a
+            # SIGKILL caught the writer between write() and the next
+            # flush()+fsync()), the first append would glue its JSON
+            # onto the truncated tail and produce an unparseable line.
+            # The next load_sidecar would then crash with
+            # SidecarCorruptError because the file once again ends with
+            # "\n", so the T6c tail-truncation heuristic no longer
+            # fires. Truncating to the last newline boundary preserves
+            # every durable prior outcome at the cost of the
+            # never-durable partial one — the Tier-1 trade-off
+            # documented in the module docstring.
+            try:
+                self._truncate_partial_tail()
+            except BaseException:
+                try:
+                    fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+                finally:
+                    self._file.close()
+                    self._file = None
+                raise
         if not self._append:
             self._write_line(_header_to_dict(self._header))
         return self
+
+    def _truncate_partial_tail(self) -> None:
+        """Drop any partial last line; no-op when the file ends with ``\\n``.
+
+        Reads the on-disk bytes (we hold the exclusive flock, so no
+        other process can have appended since the fd was opened),
+        locates the last newline, and ``ftruncate``s to one past it.
+        Then ``fsync`` the fd so the inode-size shrink is durable, and
+        ``fsync`` the parent directory so the new size survives a
+        crash before the next file-content write.
+
+        Failure modes propagate as :class:`OSError` (disk full,
+        permission, EIO from the underlying device) — those are
+        operator-actionable and the writer's caller surfaces them
+        through the same ReauditError exit path the rest of the module
+        uses; wrapping them here would obscure the cause.
+
+        Idempotent: a clean newline-terminated file is left
+        byte-identical (no ftruncate, no fsync). An empty file is also
+        a no-op (the file ends with no bytes at all; nothing to
+        truncate).
+        """
+        raw_bytes = self._sidecar_path.read_bytes()
+        if not raw_bytes:
+            return
+        if raw_bytes.endswith(b"\n"):
+            return
+        last_newline = raw_bytes.rfind(b"\n")
+        # last_newline == -1 means the file is one partial line with no
+        # newline anywhere — truncation point is 0, the file becomes
+        # empty. In practice this is unreachable on the resume path
+        # because on_resume_locked has already called load_sidecar
+        # which would have raised on "no header" or recovered the
+        # partial line at the offset and continued. Defending against
+        # it costs nothing and keeps this helper self-contained.
+        truncate_to = last_newline + 1
+        os.ftruncate(self._file.fileno(), truncate_to)
+        os.fsync(self._file.fileno())
+        # Parent-directory fsync makes the inode-size change durable
+        # across a crash — without it, the kernel may have queued the
+        # metadata update separately from the file content writes,
+        # and a crash between truncate and the next outcome write
+        # could resurrect the dropped bytes via the page cache.
+        dir_fd = os.open(str(self._sidecar_path.parent), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
     def __exit__(
         self,

@@ -1728,8 +1728,15 @@ def test_t6c_concurrent_resume_rejected_across_processes(
         # The CLI surfaces the conflict as a ReauditError ("reaudit
         # error: ..."); the underlying class is SidecarConflictError.
         assert "locked by another process" in rejection_err, f"expected lock-conflict message, got: {rejection_err!r}"
-        # Lock rejection is fail-fast — must NOT wait for holder.
-        assert rejection_elapsed < 5.0, f"rejection took {rejection_elapsed:.2f}s; LOCK_NB should reject immediately, not block"
+        # Lock rejection is fail-fast — LOCK_NB returns EWOULDBLOCK in
+        # microseconds. _run_cli_reaudit drives the CLI in-process
+        # (no subprocess interpreter cold start), so the upper bound
+        # is dominated by argparse + module imports + the actual
+        # flock syscall. 0.5s gives ~3 orders of magnitude headroom
+        # over the real per-flock cost while still proving "not
+        # waiting for the held-lock 30s sleep to release" — the
+        # property that fails if LOCK_NB regresses to LOCK_EX.
+        assert rejection_elapsed < 0.5, f"rejection took {rejection_elapsed:.2f}s; LOCK_NB should reject immediately, not block"
     finally:
         sentinel_release.touch()
         holder.wait(timeout=10)
@@ -1832,6 +1839,415 @@ def test_t6c_load_sidecar_recovers_truncated_final_outcome(tmp_path: Path, capsy
     rendered = capsys.readouterr().out
     assert "INCOMPLETE SWEEP" in rendered
     assert "3" in rendered and "4" in rendered
+
+
+def test_t6d_resume_after_sigkill_truncates_partial_line_and_appends_cleanly(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """CRITICAL — operator's natural recovery action preserves prior outcomes.
+
+    Reproduces the exact write-side failure the T6c reviewer identified:
+    SIGKILL leaves N complete outcomes + 1 partial line (no trailing
+    newline). The T6c read-side correctly recovers the prior N on
+    --render-incomplete. But --resume opens mode="a" which positions
+    POSIX writes at EOF — mid-partial-line. Without T6d, the first
+    appended outcome glues onto the truncated tail, the file ends in
+    \\n again, and the next load_sidecar crashes with
+    SidecarCorruptError because the glued line is non-final malformed
+    JSON — destroying everything the read-side fix preserved.
+
+    With T6d, SidecarWriter.__enter__ truncates the partial last line
+    inside the flock window (after on_resume_locked validates the
+    header). The resume then appends cleanly past the last newline
+    boundary, the next load succeeds, and the final sidecar contains
+    the prior complete outcomes plus the resumed ones plus a clean
+    trailer.
+
+    Setup:
+    * 3 allowlist entries
+    * First sweep: classify 1, KeyboardInterrupt aborts (real
+      abort, real sidecar state, real production code path)
+    * Simulate SIGKILL: open the (already-not-trailered) sidecar and
+      append a partial 4th-outcome-prefix WITHOUT a trailing newline.
+      This is byte-for-byte what a real SIGKILL between write() and
+      flush()+fsync() would leave.
+    * Sidecar now: header + 1 complete outcome + partial line, NO
+      trailer, NOT ending in \\n.
+
+    Assertions:
+    * --resume exits 0 (no SidecarCorruptError)
+    * Final sidecar reloads cleanly via load_sidecar (no crash)
+    * Outcomes: 1 pre-kill + 2 resumed = 3 (the partial in-flight is
+      dropped; resume re-classifies it from scratch)
+    * Trailer present
+    * NO glued line: the raw bytes contain no occurrence of the
+      truncated prefix immediately followed by a fresh outcome JSON
+    """
+    from elspeth_lints.core.reaudit_sidecar import load_sidecar, sidecar_path_for
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    # Phase 1: real sweep, classify 1, abort on 2nd judge call.
+    ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
+    aborting_client = MagicMock()
+    aborting_client.chat.completions.create.side_effect = [ok_completion, KeyboardInterrupt()]
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=aborting_client),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+    sidecar = sidecar_path_for(allowlist_dir, run_id)
+
+    # Confirm the post-abort state: header + 1 outcome, ends in \n,
+    # no trailer.
+    after_abort = sidecar.read_bytes()
+    assert after_abort.endswith(b"\n")
+    after_abort_lines = sidecar.read_text(encoding="utf-8").splitlines()
+    assert len(after_abort_lines) == 2  # header + 1 outcome
+    assert json.loads(after_abort_lines[0])["type"] == "header"
+    assert json.loads(after_abort_lines[1])["type"] == "outcome"
+
+    # Phase 2: simulate the SIGKILL — append a partial 4th-outcome-
+    # prefix to the sidecar with NO trailing newline. This is
+    # byte-for-byte what a write() of a JSON line that died before
+    # flush()+fsync() would leave on disk.
+    partial_prefix = b'{"type": "outcome", "appended_at": "2026-05-24'  # 47 bytes, no \n
+    with sidecar.open("ab") as fp:
+        fp.write(partial_prefix)
+    after_kill = sidecar.read_bytes()
+    assert not after_kill.endswith(b"\n"), "setup precondition: file must end mid-partial-line"
+    assert partial_prefix in after_kill
+
+    # Phase 3: --resume. With T6d, this truncates the partial line and
+    # appends cleanly. Without T6d, the first resumed write glues
+    # onto the partial prefix and the next reload crashes.
+    resume_client = MagicMock()
+    resume_client.chat.completions.create.side_effect = [ok_completion, ok_completion]
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=resume_client),
+    ):
+        resume_exit = _run_cli_reaudit(
+            root=root,
+            allowlist_dir=allowlist_dir,
+            extra_args=["--resume", run_id],
+        )
+    assert resume_exit == 0, f"--resume must succeed after partial-line truncation (got exit {resume_exit})"
+    assert resume_client.chat.completions.create.call_count == 2, (
+        "resume must re-classify the 2 unclassified entries (the dropped partial is one of them)"
+    )
+
+    # Phase 4: the final sidecar reloads cleanly — this is the
+    # property that fails without T6d.
+    loaded = load_sidecar(sidecar)
+    assert len(loaded.outcomes) == 3, f"expected 3 outcomes (1 pre-kill + 2 resumed); got {len(loaded.outcomes)}"
+    assert loaded.trailer is not None, "trailer must be written after successful resume"
+
+    # Phase 5: assert NO glued line in the raw bytes — the partial
+    # prefix must NOT appear immediately followed by a fresh JSON open-
+    # brace (which would be the diagnostic for the bug). Specifically,
+    # the bytes "appended_at\": \"2026-05-24{" would only exist if the
+    # truncation didn't happen.
+    final_bytes = sidecar.read_bytes()
+    glued_signature = partial_prefix + b"{"
+    assert glued_signature not in final_bytes, "partial line was glued onto a fresh outcome — T6d truncation did not fire"
+    # Also: the partial prefix should NOT appear anywhere in the
+    # truncated file (it was dropped wholesale).
+    assert partial_prefix not in final_bytes, "partial prefix bytes survived truncation — T6d truncation point was wrong"
+
+
+def test_t6d_truncate_is_idempotent_on_clean_sidecar(tmp_path: Path) -> None:
+    """A newline-terminated sidecar is byte-identical before/after writer entry.
+
+    The truncation logic is gated on "final byte is not \\n". A clean
+    sidecar (every write made it to disk before the next read) must
+    skip the truncation entirely — no ftruncate, no fsync, no
+    observable side effect on the bytes.
+    """
+    from elspeth_lints.core.reaudit_sidecar import (
+        SidecarHeader,
+        SidecarWriter,
+        compute_allowlist_hash,
+    )
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    # Build a real clean sidecar via a normal completed sweep.
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        exit_code = _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    assert exit_code == 0
+    sidecar_dir = allowlist_dir / ".reaudit-state"
+    [sidecar] = list(sidecar_dir.glob("*.jsonl"))
+    run_id = sidecar.stem
+
+    before_bytes = sidecar.read_bytes()
+    assert before_bytes.endswith(b"\n"), "clean sidecar precondition: ends in \\n"
+
+    # Drop the trailer so we can enter append-mode (a completed sweep
+    # with a trailer cannot be resumed). Re-strip after rebuild so the
+    # file still ends in \n.
+    text = sidecar.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    non_trailer = [line for line in lines if json.loads(line).get("type") != "trailer"]
+    sidecar.write_bytes("".join(non_trailer).encode("utf-8"))
+    clean_pre_enter = sidecar.read_bytes()
+    assert clean_pre_enter.endswith(b"\n")
+
+    # Enter as a writer in append mode WITHOUT a resume callback (so
+    # validation is skipped and we exercise only the truncation
+    # gating). The header argument is required by the constructor but
+    # is not re-written in append mode.
+    header = SidecarHeader(
+        run_id=run_id,
+        started_at=datetime.now(UTC),
+        total_entries=3,
+        allowlist_path=str(allowlist_dir),
+        allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        rule_filter="trust_tier.tier_model",
+        since_iso=None,
+        limit=None,
+        include_pre_judge=False,
+    )
+    with SidecarWriter(sidecar, header, append=True):
+        pass  # enter + exit; truncation gating is the test surface
+
+    after_enter = sidecar.read_bytes()
+    assert after_enter == clean_pre_enter, "clean sidecar must be byte-identical after writer entry — truncation must have been a no-op"
+
+
+def test_t6d_truncation_shrinks_file_to_last_newline_offset(tmp_path: Path) -> None:
+    """After truncation, os.path.getsize equals last_newline_offset + 1.
+
+    Verifies the durable size change: the file's inode shrinks to drop
+    the partial bytes after the last newline, not merely the
+    in-process buffer.
+    """
+    from elspeth_lints.core.reaudit_sidecar import (
+        SidecarHeader,
+        SidecarWriter,
+        compute_allowlist_hash,
+    )
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    # Real sweep → real sidecar → drop trailer → append partial line.
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        exit_code = _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    assert exit_code == 0
+    sidecar_dir = allowlist_dir / ".reaudit-state"
+    [sidecar] = list(sidecar_dir.glob("*.jsonl"))
+    run_id = sidecar.stem
+
+    text = sidecar.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    non_trailer = [line for line in lines if json.loads(line).get("type") != "trailer"]
+    sidecar.write_bytes("".join(non_trailer).encode("utf-8"))
+    expected_size_after_truncate = sidecar.stat().st_size
+    # Append partial line.
+    partial_prefix = b'{"partial line with no newline'
+    with sidecar.open("ab") as fp:
+        fp.write(partial_prefix)
+    pre_enter_size = sidecar.stat().st_size
+    assert pre_enter_size == expected_size_after_truncate + len(partial_prefix)
+    # Last newline is at index expected_size_after_truncate - 1; the
+    # truncation point is expected_size_after_truncate.
+    raw_before = sidecar.read_bytes()
+    last_nl = raw_before.rfind(b"\n")
+    assert last_nl + 1 == expected_size_after_truncate
+
+    header = SidecarHeader(
+        run_id=run_id,
+        started_at=datetime.now(UTC),
+        total_entries=3,
+        allowlist_path=str(allowlist_dir),
+        allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        rule_filter="trust_tier.tier_model",
+        since_iso=None,
+        limit=None,
+        include_pre_judge=False,
+    )
+    with SidecarWriter(sidecar, header, append=True):
+        # Inside the writer context: the truncation has fired. Don't
+        # write anything; we want to observe the post-truncate size
+        # before any new append changes it.
+        post_truncate_size = sidecar.stat().st_size
+        assert post_truncate_size == expected_size_after_truncate, (
+            f"post-truncate size {post_truncate_size} != expected last_newline_offset+1 {expected_size_after_truncate}"
+        )
+
+
+def test_t6d_truncation_runs_inside_flock_window(tmp_path: Path) -> None:
+    """A second writer attempting to enter while a holder has the lock fails fast — does NOT truncate.
+
+    Constructs a holder process that opens the sidecar and holds
+    LOCK_EX | LOCK_NB, then attempts to enter a second SidecarWriter
+    in this process. The second writer must hit BlockingIOError on
+    its own flock attempt (raising SidecarConflictError) BEFORE
+    reaching the truncation logic. Verified by asserting the sidecar
+    bytes are byte-identical after the failed attempt.
+
+    The simpler test (this one is in-process to avoid subprocess
+    machinery): pre-acquire the lock via a separate fd, then attempt
+    SidecarWriter entry. The fcntl semantics treat the two fds as
+    independent for LOCK_EX testing — and the operator-visible bug
+    we're guarding against is "another reaudit invocation grabbed
+    the lock, ours fails to acquire, the partial-line state on disk
+    is untouched until our retry."
+    """
+    from elspeth_lints.core.reaudit_sidecar import (
+        SidecarConflictError,
+        SidecarHeader,
+        SidecarWriter,
+        compute_allowlist_hash,
+    )
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        exit_code = _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    assert exit_code == 0
+    sidecar_dir = allowlist_dir / ".reaudit-state"
+    [sidecar] = list(sidecar_dir.glob("*.jsonl"))
+    run_id = sidecar.stem
+
+    # Drop trailer + append partial line (mimics post-SIGKILL state).
+    text = sidecar.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    non_trailer = [line for line in lines if json.loads(line).get("type") != "trailer"]
+    sidecar.write_bytes("".join(non_trailer).encode("utf-8"))
+    partial_prefix = b'{"partial line with no newline'
+    with sidecar.open("ab") as fp:
+        fp.write(partial_prefix)
+    pre_attempt_bytes = sidecar.read_bytes()
+
+    # Holder: acquire exclusive flock via a separate fd. Use a
+    # separate Python file object (not the SidecarWriter context) so
+    # the lock survives across our attempt. fcntl flocks are per-fd
+    # in the Linux fcntl-emulating-flock semantics used here; a
+    # second open+flock attempt from the same process WILL block.
+    # subprocess-based test for the cross-process case lives at
+    # test_t6c_concurrent_resume_rejected_across_processes; this
+    # test's narrow purpose is "truncation does not happen on the
+    # rejection path."
+    import subprocess
+    import sys as _sys
+    import textwrap
+
+    sentinel_ready = tmp_path / "t6d_holder_ready.sentinel"
+    sentinel_release = tmp_path / "t6d_holder_release.sentinel"
+    holder_script = textwrap.dedent(
+        f"""\
+        import fcntl
+        import pathlib
+        import time
+        path = pathlib.Path({str(sidecar)!r})
+        ready = pathlib.Path({str(sentinel_ready)!r})
+        release = pathlib.Path({str(sentinel_release)!r})
+        with path.open("a", encoding="utf-8") as fp:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            ready.touch()
+            deadline = time.time() + 30
+            while not release.exists() and time.time() < deadline:
+                time.sleep(0.05)
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        """
+    )
+    holder = subprocess.Popen([_sys.executable, "-c", holder_script])
+    try:
+        deadline = time.time() + 10.0
+        while not sentinel_ready.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        assert sentinel_ready.exists(), "holder process failed to acquire the sidecar lock"
+
+        header = SidecarHeader(
+            run_id=run_id,
+            started_at=datetime.now(UTC),
+            total_entries=3,
+            allowlist_path=str(allowlist_dir),
+            allowlist_hash=compute_allowlist_hash(allowlist_dir),
+            rule_filter="trust_tier.tier_model",
+            since_iso=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+        with pytest.raises(SidecarConflictError), SidecarWriter(sidecar, header, append=True):
+            raise AssertionError("writer entry must have raised before reaching the body")
+
+        # The lock-rejected attempt MUST NOT have truncated the file.
+        post_attempt_bytes = sidecar.read_bytes()
+        assert post_attempt_bytes == pre_attempt_bytes, (
+            "lock-rejected writer entry mutated the sidecar — truncation ran outside the flock window"
+        )
+    finally:
+        sentinel_release.touch()
+        holder.wait(timeout=10)
+    assert holder.returncode == 0
+
+
+def test_t6d_render_incomplete_does_not_truncate_partial_line(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """--render-incomplete is read-only — the sidecar bytes must be byte-identical after.
+
+    Only the writer truncates; the renderer must surface the partial
+    state without mutating disk. This is operator-actionable: the
+    operator inspects the killed sweep via --render-incomplete BEFORE
+    deciding whether to --resume, and the inspection must not change
+    the file under them.
+    """
+    from elspeth_lints.core.reaudit_sidecar import sidecar_path_for
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=4)
+
+    # Reuse the synthetic-partial-line pattern from the T6c truncation
+    # recovery test: real --limit 3 sweep, then surgically modify
+    # header total_entries=4, drop trailer, append partial line.
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        exit_code = _run_cli_reaudit(
+            root=root,
+            allowlist_dir=allowlist_dir,
+            extra_args=["--limit", "3"],
+        )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+    sidecar = sidecar_path_for(allowlist_dir, run_id)
+
+    raw = sidecar.read_text(encoding="utf-8")
+    lines_in_order = raw.splitlines(keepends=True)
+    header_payload = json.loads(lines_in_order[0])
+    header_payload["total_entries"] = 4
+    new_header = json.dumps(header_payload, sort_keys=True, ensure_ascii=False) + "\n"
+    outcome_lines = [line for line in lines_in_order if json.loads(line).get("type") == "outcome"]
+    partial_outcome = '{"type": "outcome", "appended_at": "2026-05-24'
+    new_content = (new_header + "".join(outcome_lines) + partial_outcome).encode("utf-8")
+    sidecar.write_bytes(new_content)
+    pre_render_bytes = sidecar.read_bytes()
+    assert not pre_render_bytes.endswith(b"\n"), "setup precondition"
+
+    # --render-incomplete must not mutate the file. (It will fire the
+    # T6c partial-line warning during load_sidecar, but that's
+    # stderr, not disk state.)
+    render_exit = _run_cli_reaudit(
+        root=root,
+        allowlist_dir=allowlist_dir,
+        extra_args=["--render-incomplete", run_id],
+    )
+    # render-incomplete exits 1 because the rendered sweep is
+    # incomplete by definition; that is the existing behaviour.
+    assert render_exit == 1
+    capsys.readouterr()  # drain stderr (partial-line warning + report)
+
+    post_render_bytes = sidecar.read_bytes()
+    assert post_render_bytes == pre_render_bytes, "render-incomplete mutated the sidecar — only writers may truncate"
 
 
 def test_t6c_load_sidecar_crashes_on_mid_file_corruption(tmp_path: Path) -> None:

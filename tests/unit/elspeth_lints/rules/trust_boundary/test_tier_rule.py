@@ -109,8 +109,17 @@ def test_missing_tier_kwarg() -> None:
     assert "missing" in findings[0].message.lower()
 
 
-def test_ignores_non_literal_kwargs() -> None:
-    """Non-literal kwargs are reported by tier_model; this rule degrades silently."""
+def test_non_literal_kwargs_fires_NONLITERAL() -> None:
+    """Non-literal kwargs are self-enforced (TBT2), NOT silently deferred.
+
+    Before the C6-4 honesty-gate hardening (epic elspeth-2ed3bb0f7d,
+    ticket elspeth-1f4634235a) this rule continued silently when any
+    kwarg wasn't a literal, deferring all reporting to
+    ``trust_tier.tier_model``. That created a cross-rule bypass —
+    suppressing tier_model on a file granted tier-honesty immunity.
+    The rule now self-enforces; the redundant finding when tier_model
+    is also active is deliberate.
+    """
     findings = _analyze(
         """
         SOME_TIER = 3
@@ -125,7 +134,25 @@ def test_ignores_non_literal_kwargs() -> None:
             return data
         """
     )
-    assert findings == []
+    assert len(findings) == 1
+    assert findings[0].rule_id == "TBT2"
+    assert "tier" in findings[0].message
+    assert "not a static literal" in findings[0].message
+
+
+def test_double_star_unpacking_fires_NONLITERAL() -> None:
+    """``@trust_boundary(**META)`` is also non-literal — covered by TBT2."""
+    findings = _analyze(
+        """
+        META = {"tier": 3}
+        @trust_boundary(**META)
+        def foo(data):
+            return data
+        """
+    )
+    assert len(findings) == 1
+    assert findings[0].rule_id == "TBT2"
+    assert "unpacking" in findings[0].message
 
 
 def test_ignores_undecorated_functions() -> None:

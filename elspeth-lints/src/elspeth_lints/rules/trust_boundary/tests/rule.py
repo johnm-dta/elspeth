@@ -1,7 +1,7 @@
 """Trust-boundary tests rule implementation.
 
 Honesty gate: every ``@trust_boundary`` must carry a ``test_ref`` that points
-to a real pytest node whose body asserts on raising behaviour. Three
+to a real pytest node whose body asserts on raising behaviour. Four
 sub-findings:
 
 * ``TBE1`` (MISSING): ``test_ref`` is absent or ``None``.
@@ -12,6 +12,11 @@ sub-findings:
   ``unittest.TestCase.assertRaises(...)`` pattern. The honesty contract is
   that the test must exercise malformed-input rejection, and the only
   mechanically detectable signal of that is a raising assertion.
+* ``TBE4`` (NONLITERAL): a kwarg on the decorator is not a static literal
+  (a name reference, a call, **-unpacking, or a positional arg). Emitted
+  by self-enforcement rather than deferring to ``trust_tier.tier_model``
+  — see ``trust_boundary.shared.KeywordExtraction`` and ticket
+  elspeth-1f4634235a (C6-4).
 
 Path resolution: ``test_ref`` is a pytest nodeid of the form
 ``tests/path/to/file.py::test_func`` or ``tests/path/to/file.py::TestCls::test_method``.
@@ -29,11 +34,16 @@ from __future__ import annotations
 
 import ast
 import hashlib
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from elspeth_lints.core.ast_walker import PythonSyntaxError, parse_python_file, walk_python_files
+from elspeth_lints.core.ast_walker import (
+    PythonFileReadError,
+    PythonSyntaxError,
+    iter_own_scope,
+    parse_python_file,
+    walk_python_files,
+)
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.trust_boundary.shared import (
     display_path,
@@ -45,9 +55,11 @@ from elspeth_lints.rules.trust_boundary.tests.metadata import (
     RULE_ID,
     RULE_METADATA,
     RULE_MISSING,
+    RULE_NONLITERAL,
     RULE_NOTFOUND,
     RULE_WEAK,
     SUGGESTION_MISSING,
+    SUGGESTION_NONLITERAL,
     SUGGESTION_NOTFOUND,
     SUGGESTION_WEAK,
 )
@@ -76,10 +88,26 @@ def analyze_tree(tree: ast.AST, file_path: str, *, repo_root: Path) -> list[Find
     """Return ``trust_boundary.tests`` findings for one parsed syntax tree."""
     findings: list[Finding] = []
     for _func_node, call in iter_trust_boundary_decorators(tree):
-        kwargs = extract_keywords(call)
-        if kwargs is None:
-            # Deferred to tier_model rule's non-literal diagnostics.
+        extraction = extract_keywords(call)
+        if extraction.kwargs is None:
+            # Non-literal kwarg (or **-unpacking / positional args). Per the
+            # C6-4 honesty-gate hardening (epic elspeth-2ed3bb0f7d, ticket
+            # elspeth-1f4634235a) we self-enforce instead of deferring to
+            # ``trust_tier.tier_model`` — suppressing tier_model on a file
+            # must NOT grant honesty-gate immunity here. The redundant
+            # finding when tier_model is also active is deliberate.
+            assert extraction.nonliteral_message is not None  # tagged union invariant
+            findings.append(
+                _make_finding(
+                    rule_id=RULE_NONLITERAL,
+                    file_path=file_path,
+                    call=call,
+                    message=extraction.nonliteral_message,
+                    suggestion=SUGGESTION_NONLITERAL,
+                )
+            )
             continue
+        kwargs = extraction.kwargs
         test_ref = kwargs.get("test_ref")
         if test_ref is None:
             findings.append(
@@ -87,10 +115,7 @@ def analyze_tree(tree: ast.AST, file_path: str, *, repo_root: Path) -> list[Find
                     rule_id=RULE_MISSING,
                     file_path=file_path,
                     call=call,
-                    message=(
-                        "@trust_boundary has no test_ref; a behavioural test is mandatory "
-                        "for trust-boundary suppressions."
-                    ),
+                    message=("@trust_boundary has no test_ref; a behavioural test is mandatory for trust-boundary suppressions."),
                     suggestion=SUGGESTION_MISSING,
                 )
             )
@@ -103,10 +128,7 @@ def analyze_tree(tree: ast.AST, file_path: str, *, repo_root: Path) -> list[Find
                     rule_id=RULE_MISSING,
                     file_path=file_path,
                     call=call,
-                    message=(
-                        f"@trust_boundary test_ref must be a non-empty string, "
-                        f"got {test_ref!r}."
-                    ),
+                    message=(f"@trust_boundary test_ref must be a non-empty string, got {test_ref!r}."),
                     suggestion=SUGGESTION_MISSING,
                 )
             )
@@ -118,10 +140,7 @@ def analyze_tree(tree: ast.AST, file_path: str, *, repo_root: Path) -> list[Find
                     rule_id=RULE_NOTFOUND,
                     file_path=file_path,
                     call=call,
-                    message=(
-                        f"@trust_boundary test_ref {test_ref!r} does not resolve "
-                        f"(file or function not found under {repo_root})."
-                    ),
+                    message=(f"@trust_boundary test_ref {test_ref!r} does not resolve (file or function not found under {repo_root})."),
                     suggestion=SUGGESTION_NOTFOUND,
                 )
             )
@@ -148,11 +167,15 @@ def scan_root(root: Path) -> list[Finding]:
     repo_root = repository_root(root)
     findings: list[Finding] = []
     for item in walk_python_files(root):
-        if isinstance(item, PythonSyntaxError):
+        # Skip non-analysable per-file results. Syntax errors and I/O
+        # failures are surfaced by the CLI driver (which converts them to
+        # ``parse-error`` / ``read-error`` findings); the per-rule scan
+        # loop has nothing rule-specific to add for an unparseable or
+        # unreadable file, so it skips them rather than attributing a
+        # rule-id-specific finding.
+        if isinstance(item, (PythonSyntaxError, PythonFileReadError)):
             continue
-        findings.extend(
-            analyze_tree(item.tree, display_path(item.path, root), repo_root=repo_root)
-        )
+        findings.extend(analyze_tree(item.tree, display_path(item.path, root), repo_root=repo_root))
     return findings
 
 
@@ -184,7 +207,13 @@ def _resolve_test_ref(test_ref: str, repo_root: Path) -> _ResolvedTestRef | None
     if not file_path.is_file():
         return None
     parsed = parse_python_file(file_path)
-    if isinstance(parsed, PythonSyntaxError):
+    # Both PythonSyntaxError (unparseable test file) and
+    # PythonFileReadError (UTF-8 / permission / OSError) are treated as
+    # "test ref doesn't resolve". The CLI driver surfaces the underlying
+    # read-error as a separate per-file diagnostic; here we just fail
+    # the resolution so the TBE2 (NOTFOUND) finding fires on the
+    # decorator. We do NOT pretend the test exists.
+    if isinstance(parsed, (PythonSyntaxError, PythonFileReadError)):
         return None
     func = _lookup_named_function(parsed.tree, name_segments)
     if func is None:
@@ -192,9 +221,7 @@ def _resolve_test_ref(test_ref: str, repo_root: Path) -> _ResolvedTestRef | None
     return _ResolvedTestRef(test_function=func, file_path=file_path)
 
 
-def _lookup_named_function(
-    tree: ast.Module, name_segments: list[str]
-) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+def _lookup_named_function(tree: ast.Module, name_segments: list[str]) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
     """Walk ``name_segments`` against a parsed module to find the target function.
 
     A single segment is a module-level function. Multiple segments are
@@ -228,11 +255,28 @@ def _has_raising_assertion(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool
     * ``self.assertRaises(...)`` / ``cls.assertRaises(...)`` /
       bare ``assertRaises(...)`` calls (covers unittest-style tests).
 
-    The walk is body-only: decorators, return annotations, and default values
-    on inner functions are out of scope.
+    The walk is scope-respecting and body-only: decorators, return
+    annotations, default values, and the bodies of nested helper
+    functions, lambdas, or classes are out of scope. The honesty
+    contract for TBE3 is that the raising assertion must be visible in
+    the test function the decorator names — buried one indirection away
+    in a helper does NOT count. This mirrors the documented behaviour
+    in this module's header docstring ("does NOT walk imports,
+    fixtures, or helpers; a test that delegates its raising-assertion
+    to a helper function would be reported as WEAK").
+
+    Before the fix, ``_walk_statements`` used :func:`ast.walk`, which
+    descends into nested ``FunctionDef`` bodies. A decorated test whose
+    only ``pytest.raises(...)`` lived in a nested helper falsely passed
+    TBE3 — the rule reported "the body contains a raising assertion"
+    when, by the contract, the body did not. The fix uses
+    :func:`iter_own_scope` (same scope-respecting walker the B1 /
+    C5-1 fixes use in the tier_model and scope rules), which
+    short-circuits at nested-scope boundaries so reads inside an inner
+    helper / lambda / class body don't satisfy the outer's contract.
     """
     for statement in func.body:
-        for child in _walk_statements(statement):
+        for child in iter_own_scope(statement):
             if isinstance(child, ast.Call) and _is_raising_call(child.func):
                 return True
             if isinstance(child, (ast.With, ast.AsyncWith)):
@@ -240,11 +284,6 @@ def _has_raising_assertion(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool
                     if isinstance(item.context_expr, ast.Call) and _is_raising_call(item.context_expr.func):
                         return True
     return False
-
-
-def _walk_statements(statement: ast.stmt) -> Iterator[ast.AST]:
-    """Yield every AST node under a statement (the statement itself first)."""
-    yield from ast.walk(statement)
 
 
 def _is_raising_call(func_expr: ast.expr) -> bool:
@@ -268,9 +307,7 @@ def _make_finding(
     message: str,
     suggestion: str,
 ) -> Finding:
-    fingerprint = hashlib.sha256(
-        f"{rule_id}|{file_path}|{call.lineno}|{call.col_offset}".encode()
-    ).hexdigest()[:16]
+    fingerprint = hashlib.sha256(f"{rule_id}|{file_path}|{call.lineno}|{call.col_offset}".encode()).hexdigest()[:16]
     return Finding(
         rule_id=rule_id,
         file_path=file_path,

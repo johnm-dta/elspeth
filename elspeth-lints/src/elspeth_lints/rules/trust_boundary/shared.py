@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 _TRUST_BOUNDARY_NAME = "trust_boundary"
@@ -84,10 +85,13 @@ def _literal_value(node: ast.expr) -> tuple[bool, object]:
 
     Anything referencing a name, a call, an attribute, an f-string, or a
     comprehension is treated as non-literal. The honesty-gate rules need
-    static metadata; an unverifiable value is a rule violation in itself, but
-    these rules degrade by treating the kwarg as absent so they don't
-    double-report the same defect (``tier_model.trust_boundary_suppress``
-    already surfaces ``R_TB_NONLITERAL`` when this happens).
+    static metadata; an unverifiable value is a rule violation in itself —
+    each honesty rule self-enforces by emitting its own
+    ``R_TB_NONLITERAL`` finding on top of any duplicate finding emitted by
+    ``trust_tier.tier_model``. The redundancy is deliberate per the
+    honesty-gate cross-rule-bypass remediation (epic elspeth-2ed3bb0f7d,
+    ticket elspeth-1f4634235a / C6-4): suppressing ``trust_tier.tier_model``
+    on a file must NOT grant honesty-gate immunity.
     """
     if isinstance(node, ast.Constant):
         return True, node.value
@@ -131,33 +135,82 @@ def _literal_value(node: ast.expr) -> tuple[bool, object]:
     return False, None
 
 
-def extract_keywords(call: ast.Call) -> dict[str, object] | None:
-    """Return the decorator's kwargs as a literal-value dict, or ``None`` if any kwarg is non-literal.
+@dataclass(frozen=True, slots=True)
+class KeywordExtraction:
+    """Outcome of parsing a ``@trust_boundary(...)`` call's kwargs.
+
+    Exactly one of ``kwargs`` and ``nonliteral_message`` is non-``None``:
+
+    * ``kwargs`` is the literal-value dict when every kwarg parsed
+      successfully — the rule walks the dict as before.
+    * ``nonliteral_message`` is a human-readable diagnostic when any kwarg
+      cannot be statically evaluated (a name reference, a call, a
+      comprehension), uses ``**kwargs``-unpacking, or the call has
+      positional arguments. The caller emits this as an
+      ``R_TB_NONLITERAL`` finding on the decorator call site.
+
+    Why a tagged result rather than ``dict | None``: the previous
+    ``None`` sentinel made every caller ``continue`` silently, deferring
+    to the ``trust_tier.tier_model`` rule. That created a cross-rule
+    bypass — suppressing ``tier_model`` on a file granted honesty-gate
+    immunity for non-literal decorators on that same file. The honesty
+    gates must self-enforce literal-only kwargs; see
+    epic elspeth-2ed3bb0f7d, ticket elspeth-1f4634235a (C6-4). The
+    redundant finding when ``tier_model`` is also active is deliberate.
+    """
+
+    kwargs: dict[str, object] | None
+    nonliteral_message: str | None
+
+
+def extract_keywords(call: ast.Call) -> KeywordExtraction:
+    """Return the decorator's kwargs as a tagged result.
 
     Positional arguments are rejected (the runtime decorator is keyword-only;
     a positional-arg call is malformed). ``**kwargs``-style unpacking is
     rejected (``keyword.arg is None``). Any kwarg whose value cannot be
-    literal-evaluated also yields ``None`` — the honesty gates treat such a
-    call as inert so the canonical malformed-decorator diagnostics
-    (``R_TB_NONLITERAL`` / ``R_TB_MALFORMED`` in the tier_model rule) own
-    that reporting surface.
+    literal-evaluated is also rejected. In all three rejection cases the
+    returned :class:`KeywordExtraction` has ``kwargs is None`` and
+    ``nonliteral_message`` populated with a human-readable diagnostic;
+    callers must emit an ``R_TB_NONLITERAL`` finding rather than silently
+    skipping (which would defer to ``trust_tier.tier_model`` and create a
+    cross-rule bypass — see :class:`KeywordExtraction`).
 
     Returns:
-        A ``dict[str, object]`` of kwarg → literal value when every kwarg is
-        a static literal; ``None`` if any kwarg is non-literal, the call has
-        positional args, or ``**kwargs`` unpacking is used.
+        :class:`KeywordExtraction` — ``kwargs`` populated on success,
+        ``nonliteral_message`` populated when any kwarg is non-literal, the
+        call has positional args, or ``**kwargs`` unpacking is used.
     """
     if call.args:
-        return None
+        return KeywordExtraction(
+            kwargs=None,
+            nonliteral_message=(
+                "@trust_boundary received positional arguments; the decorator is keyword-only and its honesty-gate metadata cannot be read."
+            ),
+        )
     parsed: dict[str, object] = {}
     for keyword in call.keywords:
         if keyword.arg is None:
-            return None
+            return KeywordExtraction(
+                kwargs=None,
+                nonliteral_message=(
+                    "@trust_boundary uses **-unpacking for its arguments; static analysis cannot read the honesty-gate metadata."
+                ),
+            )
         ok, value = _literal_value(keyword.value)
         if not ok:
-            return None
+            return KeywordExtraction(
+                kwargs=None,
+                nonliteral_message=(
+                    f"@trust_boundary kwarg {keyword.arg!r} is not a static "
+                    "literal (e.g. it references a name, a call, an attribute, "
+                    "or a comprehension); the honesty-gate metadata is "
+                    "unverifiable so the decorator cannot be trusted to mark a "
+                    "real trust boundary."
+                ),
+            )
         parsed[keyword.arg] = value
-    return parsed
+    return KeywordExtraction(kwargs=parsed, nonliteral_message=None)
 
 
 def display_path(file_path: Path, root: Path) -> str:

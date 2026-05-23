@@ -517,7 +517,7 @@ class TestOrchestrator:
             sources=config.sources,
             transforms=config.transforms,
             sinks=config.sinks,
-            source_id_map={"source": source_id},
+            source_id_map={"primary": source_id},
             transform_id_map=graph.get_transform_id_map(),
             sink_id_map=graph.get_sink_id_map(),
         )

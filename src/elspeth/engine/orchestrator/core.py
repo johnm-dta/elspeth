@@ -1423,7 +1423,17 @@ class Orchestrator:
         source_id_map: dict[str, NodeID] = {}
         for candidate_source_id in graph.get_sources():
             source_info = graph.get_node_info(candidate_source_id)
-            source_name = str(source_info.config["source_name"] if "source_name" in source_info.config else "source")
+            # Per ADR-025 §2, the DAG builder unconditionally sets
+            # ``source_name`` on every source node. A missing key would
+            # collide ``source_id_map["source"] = ...`` across multiple
+            # sources, silently overwriting earlier entries.
+            if "source_name" not in source_info.config:
+                raise OrchestrationInvariantError(
+                    f"DAG source node {candidate_source_id!r} is missing 'source_name' in its config. "
+                    f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
+                    f"This is a graph-construction bug — node config keys: {sorted(source_info.config.keys())}."
+                )
+            source_name = str(source_info.config["source_name"])
             source_id_map[source_name] = candidate_source_id
         source_id = next(iter(source_id_map.values()))
         transform_id_map: dict[int, NodeID] = graph.get_transform_id_map()

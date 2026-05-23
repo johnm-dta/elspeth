@@ -270,6 +270,27 @@ def get_tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
+# Import-time trailing-pin invariant. ``test_trailing_tool_name_is_locked``
+# also tests this, but a test only fires at CI time; this check fires at
+# module import, including at every web-service boot. An accidental
+# reordering of ``get_tool_definitions()`` (e.g., moving ``wire_secret_ref``
+# out of the trailing slot) would otherwise silently invalidate Anthropic's
+# prompt-cache marker for every follow-up turn until the new trailing-tool
+# prefix warmed up — visible only as a deploy-time cost spike and a
+# latency regression, never as a crash. LLM-safety review finding #1 +
+# solution-architect L1 + adapted from the test docstring (2026-05-23).
+_TRAILING_TOOL_NAME: Final[str] = "wire_secret_ref"
+_trailing_seen = get_tool_definitions()[-1]["name"]
+if _trailing_seen != _TRAILING_TOOL_NAME:
+    raise RuntimeError(
+        f"Trailing tool in get_tool_definitions() is {_trailing_seen!r}, expected {_TRAILING_TOOL_NAME!r}. "
+        "Anthropic cache_control markers attach to the last tool; reordering invalidates the "
+        "prompt cache for every follow-up turn. If intentional, update _TRAILING_TOOL_NAME here "
+        "and test_trailing_tool_name_is_locked, and consider the cache-miss cost on next deploy."
+    )
+del _trailing_seen
+
+
 def _inject_prior_validation(
     result: ToolResult,
     prior: ValidationSummary,

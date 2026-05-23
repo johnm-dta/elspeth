@@ -30,6 +30,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.config import WebSettings
+from elspeth.web.execution.protocol import YamlGenerator
 from elspeth.web.execution.validation import (
     _build_edge_contract_suggestion,
     _collect_secret_refs,
@@ -465,7 +466,7 @@ class TestValidatePipelinePendingInterpretationPlaceholders:
             )
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec_set=YamlGenerator)
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
 

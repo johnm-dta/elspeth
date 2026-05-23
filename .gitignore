@@ -235,9 +235,7 @@ landscape.db-wal
 # Tool-specific local config and caches
 .codex/
 
-# Filigree issue tracker
-.filigree/
-.mcp.json
+
 
 # Deployment artifacts
 deploy/
@@ -265,6 +263,12 @@ docs/release/*
 !docs/release/pdf/output/
 
 
-# No
+## Internal tooling
+# Filigree issue tracker
+.filigree/
+.mcp.json
+
+# Clarion
 clarion
 clarion.yaml
+.clarion

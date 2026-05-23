@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from tests.fixtures.landscape import RecorderSetup, make_recorder_with_run
 
 from elspeth.contracts import NodeType
 from elspeth.contracts.audit import TokenRef
@@ -11,7 +12,6 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.lineage import explain
 from elspeth.core.landscape.schema import token_parents_table, tokens_table
-from tests.fixtures.landscape import RecorderSetup, make_recorder_with_run
 
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 

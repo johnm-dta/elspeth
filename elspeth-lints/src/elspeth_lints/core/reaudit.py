@@ -298,6 +298,9 @@ def reaudit_entries(
     since: datetime | None,
     limit: int | None,
     include_pre_judge: bool,
+    sidecar_writer: Any = None,
+    pre_classified_keys: frozenset[str] | None = None,
+    pre_classified_outcomes: Sequence[ReauditOutcome] = (),
 ) -> ReauditReport:
     """Re-judge entries in ``allowlist_dir`` against current source in ``root``.
 
@@ -325,6 +328,23 @@ def reaudit_entries(
     classified ``ENTRY_OBSOLETE`` without calling the judge. Otherwise
     the judge runs and the response is classified against the entry's
     stored verdict.
+
+    ``sidecar_writer`` (T6b) is an optional
+    :class:`~elspeth_lints.core.reaudit_sidecar.SidecarWriter` already
+    entered as a context manager by the caller. When supplied, every
+    classified outcome is appended to the sidecar with fsync, so a
+    process killed mid-sweep leaves a recoverable trail. The CLI driver
+    always supplies one; tests and internal callers may omit it for
+    pure in-memory invocations.
+
+    ``pre_classified_keys`` + ``pre_classified_outcomes`` (T6b
+    ``--resume`` support) carry forward the keys + outcomes already
+    classified by an earlier killed sweep. Entries whose key appears in
+    ``pre_classified_keys`` are skipped (already classified, already
+    durable on the sidecar). The returned report's ``outcomes`` is the
+    concatenation of the prior outcomes and this run's outcomes, in
+    iteration order; ``entries_dispatched`` and ``total_entries`` are
+    summed across both halves so the report reflects the unified sweep.
     """
     supported = _supported_rules()
     if rule_filter not in supported:
@@ -360,7 +380,20 @@ def reaudit_entries(
         limit=limit,
     )
 
-    outcomes: list[ReauditOutcome] = []
+    # Resume support (T6b): the caller may have already classified some
+    # prefix of ``filtered`` in a prior sweep that was killed. We strip
+    # those entries from the iteration list and carry their outcomes
+    # forward into the returned report. Pre-classified entries are NOT
+    # rewritten to the sidecar — they're already durable on disk from
+    # the original sweep.
+    if pre_classified_keys:
+        from elspeth_lints.core.reaudit_sidecar import filter_already_classified
+
+        to_dispatch = filter_already_classified(filtered, pre_classified_keys)
+    else:
+        to_dispatch = list(filtered)
+
+    outcomes: list[ReauditOutcome] = list(pre_classified_outcomes)
     # Cache scanned-file findings keyed by file_path so we don't re-run
     # the scanner for every entry on a file that has many entries
     # (web/composer/tools/* clusters dozens of entries per file).
@@ -373,10 +406,12 @@ def reaudit_entries(
     # the deficit on the report (closes elspeth-9a4e54cc01 / C3-3).
     # Incremented *before* the per-entry work runs so an uncaught
     # exception above the per-entry try/except still leaves
-    # ``entries_dispatched`` equal to "how many we tried".
+    # ``entries_dispatched`` equal to "how many we tried". On resume,
+    # the count starts at the prior sweep's contribution so the unified
+    # report's ratio reflects both halves of the work.
     total_entries = len(filtered)
-    entries_dispatched = 0
-    for entry in filtered:
+    entries_dispatched = len(pre_classified_outcomes)
+    for entry in to_dispatch:
         entries_dispatched += 1
         outcome = _reaudit_one_entry(
             entry=entry,
@@ -385,6 +420,8 @@ def reaudit_entries(
             findings_cache=findings_cache,
         )
         outcomes.append(outcome)
+        if sidecar_writer is not None:
+            sidecar_writer.write_outcome(outcome)
 
     return ReauditReport.from_outcomes(
         outcomes,
@@ -485,19 +522,41 @@ def _reaudit_one_entry(
     # Per-entry transport-failure isolation (closes elspeth-9a4e54cc01 /
     # C3-2). The judge call is a Tier-3 external boundary: a transient
     # network failure on entry 423 of 700 must not discard the prior
-    # 422 outcomes. We catch only ``openai.APIError`` (the SDK umbrella
-    # for connection / timeout / rate-limit / 5xx) and classify as
-    # ``JUDGE_CALL_FAILED``; ``JudgeConfigurationError`` (missing API
-    # key, missing SDK) and ``RuntimeError`` from malformed-response
-    # detection are NOT caught — they're sweep-fatal misconfigurations
-    # or corruption signals and should abort loudly. Lazy import so
-    # ``elspeth-lints --help`` doesn't pay the SDK cost on every
-    # invocation (mirrors the pattern in ``call_judge`` itself).
+    # 422 outcomes. The catch covers two failure classes:
+    #
+    # 1. ``openai.APIError`` — the SDK umbrella for connection / timeout /
+    #    rate-limit / 5xx. Genuine transport tier.
+    # 2. ``RuntimeError`` raised from inside ``call_judge`` itself —
+    #    today these are emitted by ``_parse_judge_payload`` (malformed
+    #    JSON from the model) and ``_extract_text_block`` (unexpected
+    #    response shape). The model's output is itself a stochastic
+    #    Tier-3 boundary; a single malformed response is the same class
+    #    of failure as a 5xx and must not abort a 700-entry sweep. T6b
+    #    extends T6 commit 6b33ee5b3 to close this gap.
+    #
+    # The catch is scoped to the ``call_judge`` invocation only:
+    # ``_classify_divergence`` and friends emit their own ``RuntimeError``
+    # subclasses on registry corruption and those MUST propagate (bugs
+    # in our code, not transport failures). ``JudgeConfigurationError``
+    # (missing API key / SDK) is also not caught — it's an operator
+    # misconfiguration and remains sweep-fatal.
+    #
+    # Lazy import so ``elspeth-lints --help`` doesn't pay the SDK cost
+    # on every invocation (mirrors the pattern in ``call_judge`` itself).
     from openai import APIError
+
+    from elspeth_lints.core.judge import JudgeConfigurationError
 
     try:
         response = call_judge(request)
-    except APIError as exc:
+    except JudgeConfigurationError:
+        # JudgeConfigurationError subclasses RuntimeError but is NOT a
+        # transport failure — it's an operator misconfiguration (missing
+        # API key, missing SDK). Re-raise before the broader RuntimeError
+        # branch can swallow it, preserving the sweep-fatal semantics
+        # the T6 commit established.
+        raise
+    except (APIError, RuntimeError) as exc:
         return ReauditOutcome(
             entry=entry,
             original_verdict=entry.judge_verdict,

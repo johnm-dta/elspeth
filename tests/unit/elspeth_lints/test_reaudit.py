@@ -1270,3 +1270,503 @@ def test_c3_2_cli_exits_1_on_judge_call_failed(tmp_path: Path, capsys: pytest.Ca
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "JUDGE_CALL_FAILED" in captured.out
+
+
+# =====================================================================
+# T6b: sidecar JSONL crash-recovery (extends T6 commit 6b33ee5b3,
+# closes the remaining failure mode of P0 elspeth-9a4e54cc01)
+# =====================================================================
+
+
+def _write_n_duplicate_entries(allowlist_dir: Path, root: Path, count: int) -> Path:
+    """Write ``count`` allowlist entries all targeting Widget.lookup.
+
+    Each entry has a distinct ``owner`` so the loader's de-dup never
+    fires; the YAML carries ``count`` distinct rows that all dispatch
+    through the judge. Returns the YAML path.
+    """
+    import hashlib as _hashlib
+
+    finding = _live_widget_finding(root)
+    fp = finding.fingerprint
+    live_file_fp = _hashlib.sha256((root / "plugins/widget.py").read_bytes()).hexdigest()
+    live_ast_path = finding.ast_path
+    lines: list[str] = ["allow_hits:"]
+    for i in range(count):
+        lines.append(f"- key: plugins/widget.py:R1:Widget:lookup:fp={fp}")
+        lines.append(f"  owner: agent-{i}")
+        lines.append("  reason: |-")
+        lines.append("    payload is Tier-3 external data")
+        lines.append("  safety: |-")
+        lines.append("    bounded coercion")
+        lines.append("  expires: '2030-01-01'")
+        lines.append("  judge_verdict: ACCEPTED")
+        lines.append("  judge_recorded_at: '2024-01-01T00:00:00+00:00'")
+        lines.append("  judge_model: claude-opus-4-7")
+        lines.append("  judge_rationale: |-")
+        lines.append(f"    rationale entry {i}")
+        lines.append(f"  file_fingerprint: '{live_file_fp}'")
+        lines.append(f"  ast_path: '{live_ast_path}'")
+    target = allowlist_dir / "plugins.yaml"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
+def _run_cli_reaudit(*, root: Path, allowlist_dir: Path, extra_args: list[str] | None = None) -> int:
+    argv = [
+        "reaudit",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--format",
+        "text",
+    ]
+    if extra_args:
+        argv.extend(extra_args)
+    return main(argv)
+
+
+def _read_sidecar_lines(allowlist_dir: Path, run_id: str) -> list[dict[str, Any]]:
+    from elspeth_lints.core.reaudit_sidecar import sidecar_path_for
+
+    sidecar = sidecar_path_for(allowlist_dir, run_id)
+    return [json.loads(line) for line in sidecar.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _extract_run_id_from_stderr(stderr: str) -> str:
+    import re
+
+    match = re.search(r"run_id=([0-9a-f]{32})", stderr)
+    if match is None:
+        raise AssertionError(f"could not find run_id in stderr: {stderr!r}")
+    return match.group(1)
+
+
+def test_t6b_sidecar_happy_path_writes_header_outcomes_trailer(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A normal sweep writes header + N outcome lines + trailer.
+
+    Verifies the full JSONL structure end-to-end on the CLI surface
+    and confirms the in-memory report's dispatch counts match.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="boundary still genuine"):
+        exit_code = _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+    lines = _read_sidecar_lines(allowlist_dir, run_id)
+    assert lines[0]["type"] == "header"
+    assert lines[0]["run_id"] == run_id
+    assert lines[0]["total_entries"] == 3
+    assert lines[0]["schema_version"] == 1
+    assert lines[0]["rule_filter"] == "trust_tier.tier_model"
+    outcome_lines = [line for line in lines if line["type"] == "outcome"]
+    assert len(outcome_lines) == 3
+    for outcome_line in outcome_lines:
+        assert outcome_line["divergence"] == "STILL_AGREES"
+        # The entry payload round-tripped with the canonical key
+        # produced by the live scanner.
+        assert outcome_line["entry"]["key"].startswith("plugins/widget.py:R1:Widget:lookup:fp=")
+        assert outcome_line["entry"]["judge_verdict"] == "ACCEPTED"
+        assert outcome_line["entry"]["owner"].startswith("agent-")
+    assert lines[-1]["type"] == "trailer"
+    assert lines[-1]["outcomes_written"] == 3
+    assert lines[-1]["run_id"] == run_id
+
+
+def test_t6b_mid_sweep_keyboard_interrupt_leaves_no_trailer(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """KeyboardInterrupt during sweep leaves partial sidecar without trailer.
+
+    Simulates SIGINT after entry 3 of 5: the sidecar has header + 3
+    outcome lines + NO trailer. --render-incomplete then surfaces the
+    partial state via the renderer's INCOMPLETE SWEEP banner.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=5)
+
+    # Mock the judge so the 4th call raises KeyboardInterrupt — the
+    # first 3 entries classify normally, the 4th aborts the loop.
+    ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = [
+        ok_completion,
+        ok_completion,
+        ok_completion,
+        KeyboardInterrupt(),
+    ]
+
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+    lines = _read_sidecar_lines(allowlist_dir, run_id)
+    assert lines[0]["type"] == "header"
+    outcome_lines = [line for line in lines if line["type"] == "outcome"]
+    assert len(outcome_lines) == 3
+    trailer_lines = [line for line in lines if line["type"] == "trailer"]
+    assert trailer_lines == []
+
+    # --render-incomplete surfaces the partial state.
+    render_exit = _run_cli_reaudit(
+        root=root,
+        allowlist_dir=allowlist_dir,
+        extra_args=["--render-incomplete", run_id],
+    )
+    assert render_exit == 1
+    rendered = capsys.readouterr()
+    assert "INCOMPLETE SWEEP" in rendered.out
+    assert "3" in rendered.out and "5" in rendered.out
+
+
+def test_t6b_resume_completes_killed_sweep(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """--resume after KeyboardInterrupt continues from un-classified entries.
+
+    Three entries; first sweep classifies 1 then aborts; --resume
+    classifies the remaining 2 and writes the trailer. The final
+    sidecar has 3 outcome lines + trailer.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
+    aborting_client = MagicMock()
+    aborting_client.chat.completions.create.side_effect = [ok_completion, KeyboardInterrupt()]
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=aborting_client),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+    lines_after_abort = _read_sidecar_lines(allowlist_dir, run_id)
+    outcome_count_after_abort = sum(1 for line in lines_after_abort if line["type"] == "outcome")
+    assert outcome_count_after_abort == 1
+    assert not any(line["type"] == "trailer" for line in lines_after_abort)
+
+    # Resume — provide enough successful responses for the remaining 2.
+    resume_client = MagicMock()
+    resume_client.chat.completions.create.side_effect = [ok_completion, ok_completion]
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=resume_client),
+    ):
+        resume_exit = _run_cli_reaudit(
+            root=root,
+            allowlist_dir=allowlist_dir,
+            extra_args=["--resume", run_id],
+        )
+
+    assert resume_exit == 0
+    # Resume should have called the judge exactly twice (the remaining
+    # entries), confirming it did not re-classify the already-done ones.
+    assert resume_client.chat.completions.create.call_count == 2
+
+    lines_after_resume = _read_sidecar_lines(allowlist_dir, run_id)
+    outcome_count_after_resume = sum(1 for line in lines_after_resume if line["type"] == "outcome")
+    assert outcome_count_after_resume == 3
+    trailer_lines = [line for line in lines_after_resume if line["type"] == "trailer"]
+    assert len(trailer_lines) == 1
+    assert trailer_lines[0]["outcomes_written"] == 2  # this resume run wrote 2 (not the unified 3)
+
+
+def test_t6b_resume_rejects_allowlist_edit_via_header_mismatch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Editing the allowlist YAML between sweep and resume crashes the resume.
+
+    Tier-1 honesty: the resumed sweep would re-derive a different
+    filtered list, breaking the "skip already-classified" guarantee.
+    The hash mismatch fires at validation time.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
+    aborting_client = MagicMock()
+    aborting_client.chat.completions.create.side_effect = [ok_completion, KeyboardInterrupt()]
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=aborting_client),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+
+    # Mutate the allowlist YAML — change one owner string. The C8-3
+    # binding fields stay valid, so the load itself still succeeds,
+    # but the hash drifts.
+    yaml_path = allowlist_dir / "plugins.yaml"
+    text = yaml_path.read_text(encoding="utf-8")
+    yaml_path.write_text(text.replace("agent-1", "agent-1-edited"), encoding="utf-8")
+
+    resume_exit = _run_cli_reaudit(
+        root=root,
+        allowlist_dir=allowlist_dir,
+        extra_args=["--resume", run_id],
+    )
+    assert resume_exit == 2
+    err = capsys.readouterr().err
+    assert "hash drift" in err
+
+
+def test_t6b_fsync_called_per_outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each outcome write triggers a flush + os.fsync for durability.
+
+    Without fsync, a SIGKILL between write() and the kernel's writeback
+    could swallow recently-appended lines. We spy on os.fsync at the
+    sidecar module's namespace and assert it fires at header, every
+    outcome, and trailer.
+    """
+    import os as _os
+
+    from elspeth_lints.core import reaudit_sidecar
+
+    fsync_calls: list[int] = []
+    real_fsync = _os.fsync
+
+    def spy_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(reaudit_sidecar.os, "fsync", spy_fsync)
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=2)
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        exit_code = _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    assert exit_code == 0
+    # At least: 1 header + 2 outcomes + 1 trailer = 4 fsync calls.
+    assert len(fsync_calls) >= 4
+
+
+def test_t6b_malformed_judge_json_classifies_judge_call_failed(tmp_path: Path) -> None:
+    """A RuntimeError from _parse_judge_payload (malformed JSON) is now classified.
+
+    Pre-T6b this would abort the sweep (RuntimeError propagated). The
+    T6b widening makes malformed-model-response a per-entry isolation
+    point: the entry records JUDGE_CALL_FAILED and the sweep continues.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=2)
+
+    # First response is malformed (not JSON); second is normal. The
+    # loop should record JUDGE_CALL_FAILED for #1 and STILL_AGREES
+    # for #2.
+    malformed = MagicMock()
+    malformed_choice = MagicMock()
+    malformed_choice.message.content = "this is not JSON at all"
+    malformed.choices = [malformed_choice]
+    malformed.usage = MagicMock(
+        prompt_tokens=4000,
+        prompt_tokens_details=MagicMock(cached_tokens=0),
+    )
+    ok_completion = _mock_openrouter_completion(verdict="ACCEPTED", rationale="ok")
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.side_effect = [malformed, ok_completion]
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client),
+    ):
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert len(report.outcomes) == 2
+    assert report.outcomes[0].divergence is ReauditDivergence.JUDGE_CALL_FAILED
+    rationale_0 = report.outcomes[0].fresh_rationale or ""
+    assert "RuntimeError" in rationale_0
+    assert report.outcomes[1].divergence is ReauditDivergence.STILL_AGREES
+
+
+def test_t6b_runtime_error_outside_judge_call_still_propagates(tmp_path: Path) -> None:
+    """A RuntimeError raised by _classify_divergence (registry corruption) propagates.
+
+    The T6b widening of the catch is scoped to ``call_judge()`` only.
+    RuntimeErrors raised AFTER the call (during divergence
+    classification, scanner dispatch, etc.) must still abort the sweep
+    — they signal bugs in our code, not transport failures.
+
+    We simulate this by having call_judge return a verdict triple that
+    can't be classified: a BLOCKED prior verdict, which the loader is
+    supposed to reject — but if we synthesize it directly on the entry
+    via reaudit_entries' filter loop, _classify_divergence will crash
+    with ReauditError (a RuntimeError subclass). That crash must
+    propagate.
+    """
+    from elspeth_lints.core.reaudit import _classify_divergence
+
+    # Direct unit-test of the classifier-level invariant: BLOCKED on a
+    # persisted entry crashes with ReauditError. This is the runtime
+    # error path that must NOT be wrapped into JUDGE_CALL_FAILED.
+    with pytest.raises(ReauditError, match="BLOCKED"):
+        _classify_divergence(
+            entry_verdict=JudgeVerdict.BLOCKED,
+            entry_model_verdict=None,
+            fresh_verdict=JudgeVerdict.ACCEPTED,
+        )
+
+
+def test_t6b_concurrent_reaudit_on_same_run_id_rejected(
+    tmp_path: Path,
+) -> None:
+    """flock prevents two writers from corrupting the same sidecar.
+
+    The first writer holds LOCK_EX; a second SidecarWriter on the same
+    path fails fast with SidecarConflictError. This is the file-level
+    counterpart to "do not run two reaudits with the same run_id"; the
+    operator gets a clear error rather than an interleaved JSONL.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _datetime
+
+    from elspeth_lints.core.reaudit_sidecar import (
+        SidecarConflictError,
+        SidecarHeader,
+        SidecarWriter,
+    )
+
+    allowlist_dir = tmp_path / "allowlist"
+    allowlist_dir.mkdir()
+    sidecar_path = allowlist_dir / ".reaudit-state" / "abc123.jsonl"
+    header = SidecarHeader(
+        run_id="abc123",
+        started_at=_datetime.now(_UTC),
+        total_entries=0,
+        allowlist_path=str(allowlist_dir.resolve()),
+        allowlist_hash="0" * 64,
+        rule_filter="trust_tier.tier_model",
+        since_iso=None,
+        limit=None,
+        include_pre_judge=False,
+    )
+
+    # First writer holds the file open + flocked. A second writer
+    # on the same path must fail fast.
+    with (
+        SidecarWriter(sidecar_path, header) as _writer,
+        pytest.raises(SidecarConflictError),
+        SidecarWriter(sidecar_path, header, append=True),
+    ):
+        pass
+
+
+def test_t6b_render_incomplete_on_completed_sweep_still_renders(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """--render-incomplete on a cleanly-finished sweep renders the full report.
+
+    Edge case: operator passes --render-incomplete on a run_id that
+    actually completed (trailer present). The renderer should still
+    work — entries_dispatched == total_entries means no banner, but
+    the outcomes still render. Exit is non-zero per the
+    "incomplete-by-intent" exit-code policy.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=2)
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        assert _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir) == 0
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+
+    render_exit = _run_cli_reaudit(
+        root=root,
+        allowlist_dir=allowlist_dir,
+        extra_args=["--render-incomplete", run_id],
+    )
+    assert render_exit == 1
+    rendered = capsys.readouterr().out
+    assert "INCOMPLETE SWEEP" not in rendered  # complete sweep → no banner
+    assert "STILL_AGREES" in rendered  # but outcomes still render
+
+
+def test_t6b_resume_on_completed_sweep_refuses(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """--resume on a run that already finished crashes with a clear error.
+
+    Without this guard, --resume would re-open the sidecar in append
+    mode and write a second (or third) trailer on top of an existing
+    one, corrupting the audit record. Refuse instead.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=2)
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
+        assert _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir) == 0
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+
+    resume_exit = _run_cli_reaudit(
+        root=root,
+        allowlist_dir=allowlist_dir,
+        extra_args=["--resume", run_id],
+    )
+    assert resume_exit == 2
+    err = capsys.readouterr().err
+    assert "already completed" in err
+
+
+def test_t6b_sidecar_load_rejects_unknown_schema_version(tmp_path: Path) -> None:
+    """A sidecar from a future schema version crashes at load.
+
+    Tier-1: the on-disk format is bound to the running build. A
+    schema_version bump must not silently re-interpret old lines or
+    forward-compatibly read newer ones — the resume semantics are
+    schema-coupled.
+    """
+    from elspeth_lints.core.reaudit_sidecar import SidecarCorruptError, load_sidecar
+
+    sidecar = tmp_path / "fake.jsonl"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "type": "header",
+                "schema_version": 999,
+                "run_id": "abc",
+                "started_at": "2026-05-24T00:00:00+00:00",
+                "total_entries": 0,
+                "allowlist_path": str(tmp_path),
+                "allowlist_hash": "0" * 64,
+                "rule_filter": "trust_tier.tier_model",
+                "since_iso": None,
+                "limit": None,
+                "include_pre_judge": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(SidecarCorruptError, match="schema_version"):
+        load_sidecar(sidecar)
+
+
+def test_t6b_sidecar_load_rejects_malformed_jsonl(tmp_path: Path) -> None:
+    """Bad JSON in any sidecar line crashes the load."""
+    from elspeth_lints.core.reaudit_sidecar import SidecarCorruptError, load_sidecar
+
+    sidecar = tmp_path / "bad.jsonl"
+    sidecar.write_text("{not json}\n", encoding="utf-8")
+    with pytest.raises(SidecarCorruptError, match="malformed JSON"):
+        load_sidecar(sidecar)

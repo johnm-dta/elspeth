@@ -277,6 +277,37 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write report to this path instead of stdout.",
     )
+    # T6b crash-recovery surfaces — mutually exclusive with each other.
+    # Without either flag, the command starts a fresh sweep and prints
+    # the new run_id to stderr so the operator can recover from a crash.
+    reaudit_recovery = reaudit.add_mutually_exclusive_group()
+    reaudit_recovery.add_argument(
+        "--resume",
+        dest="resume_run_id",
+        type=str,
+        default=None,
+        help=(
+            "Resume a prior killed/crashed sweep by run_id. Reads the "
+            "<allowlist-dir>/.reaudit-state/<run_id>.jsonl sidecar, skips "
+            "entries already classified, continues from the first un-classified "
+            "entry. Crashes if the allowlist or filter arguments have drifted "
+            "between the original sweep and this resume."
+        ),
+    )
+    reaudit_recovery.add_argument(
+        "--render-incomplete",
+        dest="render_incomplete_run_id",
+        type=str,
+        default=None,
+        help=(
+            "Render the partial report captured by a killed/crashed sweep "
+            "without re-running the judge. Reads the sidecar at "
+            "<allowlist-dir>/.reaudit-state/<run_id>.jsonl, reconstructs the "
+            "outcomes, and renders via the same formatter as a normal run. "
+            "Exits non-zero because the rendered sweep is incomplete by "
+            "definition (a clean sweep would not need this flag)."
+        ),
+    )
 
     dump_edges = subparsers.add_parser("dump-edges", help="Dump import edges for architecture review")
     dump_edges.add_argument("--root", type=Path, default=Path.cwd())
@@ -1407,16 +1438,53 @@ def _run_reaudit(args: argparse.Namespace) -> int:
 
     Lazy-imports the reaudit module so subcommands that don't reach for
     the judge / tier_model scanner don't pay their import cost.
+
+    Three paths (mutually exclusive at argparse level):
+
+    * ``--render-incomplete <run_id>`` — read the sidecar for a prior
+      killed sweep and render its partial outcomes. No judge calls. No
+      sidecar mutation. Exits non-zero because the rendered sweep is
+      incomplete by definition.
+    * ``--resume <run_id>`` — read the prior sidecar, skip already-
+      classified entries, continue from the first un-classified entry.
+      Appends to the SAME sidecar; writes the trailer on clean
+      completion.
+    * (no flag) — fresh sweep. Generates a new run_id, prints it to
+      stderr, creates a fresh sidecar, classifies every filtered entry.
     """
     from elspeth_lints.core.judge import JudgeConfigurationError
     from elspeth_lints.core.reaudit import (
         ReauditDivergence,
         ReauditError,
         reaudit_entries,
-        render_report_json,
-        render_report_markdown,
-        render_report_text,
     )
+    from elspeth_lints.core.reaudit_sidecar import (
+        SidecarHeader,
+        SidecarWriter,
+        compute_allowlist_hash,
+        generate_run_id,
+        load_sidecar,
+        report_from_loaded_sidecar,
+        sidecar_path_for,
+        validate_header_for_resume,
+    )
+
+    allowlist_dir: Path = args.allowlist_dir
+
+    if args.render_incomplete_run_id is not None:
+        sidecar_path = sidecar_path_for(allowlist_dir, args.render_incomplete_run_id)
+        try:
+            loaded = load_sidecar(sidecar_path)
+        except ReauditError as exc:
+            sys.stderr.write(f"reaudit error: {exc}\n")
+            return 2
+        report = report_from_loaded_sidecar(loaded)
+        _write_report(report, args)
+        # --render-incomplete always exits non-zero (1 if the sweep was
+        # killed mid-process, also 1 if the sweep happened to complete
+        # but the operator asked for the partial view anyway — they're
+        # asking for a failure-mode surface, exit code matches intent).
+        return 1
 
     since: Any = None
     if args.since is not None:
@@ -1425,15 +1493,119 @@ def _run_reaudit(args: argparse.Namespace) -> int:
             sys.stderr.write(f"--since: {args.since!r} is not a valid ISO-8601 date or timestamp\n")
             return 2
 
-    try:
-        report = reaudit_entries(
-            root=args.root.resolve(),
-            allowlist_dir=args.allowlist_dir,
-            rule_filter=args.rule,
+    # Normalised since-iso for sidecar header binding. The raw
+    # ``--since`` string may carry millisecond precision the parser
+    # doesn't surface back; we record the *parsed* value's ISO form so
+    # the resume comparison sees a canonical representation.
+    since_iso_for_header = since.isoformat() if since is not None else None
+
+    from elspeth_lints.core.reaudit import ReauditOutcome
+
+    is_resume = args.resume_run_id is not None
+    pre_classified_keys: frozenset[str] | None = None
+    pre_classified_outcomes: tuple[ReauditOutcome, ...] = ()
+    if is_resume:
+        sidecar_path = sidecar_path_for(allowlist_dir, args.resume_run_id)
+        try:
+            loaded = load_sidecar(sidecar_path)
+        except ReauditError as exc:
+            sys.stderr.write(f"reaudit error: {exc}\n")
+            return 2
+        if loaded.trailer is not None:
+            sys.stderr.write(
+                f"--resume {args.resume_run_id}: this run already completed "
+                f"(trailer present, {loaded.trailer.outcomes_written} outcomes "
+                "written). Render the existing report via --render-incomplete, "
+                "or start a fresh sweep with a new run_id.\n"
+            )
+            return 2
+        try:
+            validate_header_for_resume(
+                header=loaded.header,
+                allowlist_dir=allowlist_dir,
+                rule_filter=args.rule,
+                since_iso=since_iso_for_header,
+                limit=args.limit,
+                include_pre_judge=args.include_pre_judge,
+            )
+        except ReauditError as exc:
+            sys.stderr.write(f"reaudit error: {exc}\n")
+            return 2
+        run_id = loaded.header.run_id
+        header = loaded.header
+        pre_classified_keys = loaded.classified_keys
+        pre_classified_outcomes = loaded.outcomes
+    else:
+        run_id = generate_run_id()
+        # The header is constructed before we know ``total_entries`` —
+        # which requires loading the allowlist and applying the filters.
+        # We defer constructing the SidecarHeader until inside the
+        # ``reaudit_entries`` boundary by computing the filtered count
+        # here through a peek. Simpler to centralise: do the load up
+        # front, count, then enter the writer.
+        from elspeth_lints.core.allowlist import load_allowlist
+        from elspeth_lints.core.reaudit import _apply_filters, _supported_rules, _valid_rule_ids_for
+
+        supported = _supported_rules()
+        if args.rule not in supported:
+            sys.stderr.write(f"reaudit error: --rule {args.rule!r} is not supported by reaudit. Supported: {sorted(supported)}.\n")
+            return 2
+        try:
+            valid_rule_ids = _valid_rule_ids_for(args.rule)
+        except ReauditError as exc:
+            sys.stderr.write(f"reaudit error: {exc}\n")
+            return 2
+        try:
+            preview = load_allowlist(
+                allowlist_dir,
+                valid_rule_ids=valid_rule_ids,
+                source_root=args.root.resolve(),
+            )
+        except (FileNotFoundError, NotADirectoryError, ReauditError) as exc:
+            sys.stderr.write(f"reaudit error: {exc}\n")
+            return 2
+        filtered_preview = _apply_filters(
+            entries=preview.entries,
+            include_pre_judge=args.include_pre_judge,
             since=since,
+            limit=args.limit,
+        )
+        from datetime import UTC as _UTC
+        from datetime import datetime as _datetime
+
+        header = SidecarHeader(
+            run_id=run_id,
+            started_at=_datetime.now(_UTC),
+            total_entries=len(filtered_preview),
+            allowlist_path=str(allowlist_dir.resolve()),
+            allowlist_hash=compute_allowlist_hash(allowlist_dir),
+            rule_filter=args.rule,
+            since_iso=since_iso_for_header,
             limit=args.limit,
             include_pre_judge=args.include_pre_judge,
         )
+        sys.stderr.write(
+            f"reaudit: starting sweep run_id={run_id} ({header.total_entries} entries). "
+            f"If the sweep is killed before completion, recover via "
+            f"`elspeth-lints reaudit --resume {run_id}` or "
+            f"`elspeth-lints reaudit --render-incomplete {run_id}`.\n"
+        )
+        sidecar_path = sidecar_path_for(allowlist_dir, run_id)
+
+    try:
+        with SidecarWriter(sidecar_path, header, append=is_resume) as writer:
+            report = reaudit_entries(
+                root=args.root.resolve(),
+                allowlist_dir=allowlist_dir,
+                rule_filter=args.rule,
+                since=since,
+                limit=args.limit,
+                include_pre_judge=args.include_pre_judge,
+                sidecar_writer=writer,
+                pre_classified_keys=pre_classified_keys,
+                pre_classified_outcomes=pre_classified_outcomes,
+            )
+            writer.commit_trailer()
     except ReauditError as exc:
         sys.stderr.write(f"reaudit error: {exc}\n")
         return 2
@@ -1441,18 +1613,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Judge configuration error: {exc}\n")
         return 2
 
-    if args.reaudit_format == "json":
-        rendered = render_report_json(report)
-    elif args.reaudit_format == "markdown":
-        rendered = render_report_markdown(report)
-    else:
-        rendered = render_report_text(report)
-
-    if args.output is None:
-        sys.stdout.write(rendered)
-    else:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered, encoding="utf-8")
+    _write_report(report, args)
 
     # Exit-code policy (closes elspeth-9a4e54cc01 / C3-2 + C3-3):
     #   0 — sweep complete, every entry produced a verdict-based
@@ -1468,6 +1629,28 @@ def _run_reaudit(args: argparse.Namespace) -> int:
     if judge_call_failures > 0 or incomplete:
         return 1
     return 0
+
+
+def _write_report(report: Any, args: argparse.Namespace) -> None:
+    """Render ``report`` per ``args.reaudit_format`` to stdout or ``args.output``."""
+    from elspeth_lints.core.reaudit import (
+        render_report_json,
+        render_report_markdown,
+        render_report_text,
+    )
+
+    if args.reaudit_format == "json":
+        rendered = render_report_json(report)
+    elif args.reaudit_format == "markdown":
+        rendered = render_report_markdown(report)
+    else:
+        rendered = render_report_text(report)
+
+    if args.output is None:
+        sys.stdout.write(rendered)
+    else:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding="utf-8")
 
 
 def _parse_since(value: str) -> Any:

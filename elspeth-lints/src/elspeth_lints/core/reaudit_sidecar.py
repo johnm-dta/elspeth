@@ -1,0 +1,732 @@
+"""Sidecar persistence for reaudit sweeps — crash-recovery primitive (T6b).
+
+Closes the second half of elspeth-9a4e54cc01 (P0). T6 (commit 6b33ee5b3)
+gave the renderer an "INCOMPLETE SWEEP" banner that fires when a
+partial :class:`ReauditReport` is constructed with ``entries_dispatched
+< total_entries``. That banner only renders, however, if a partial
+report exists — and the prior orchestrator built the report at the END
+of the loop, so any out-of-band kill (SIGKILL, ``KeyboardInterrupt``,
+``RuntimeError`` propagated from a per-entry component, machine reboot)
+left no report and no banner. The N silently-dropped entries vanished.
+
+T6b closes the gap with **append-only sidecar JSONL**. Every reaudit
+invocation writes a header line, one outcome line per entry, and a
+trailer line on clean exit. ``flush + fsync`` after every line means a
+SIGKILL within microseconds preserves the entries already written.
+Absence of a trailer line on disk == sweep was killed mid-process.
+
+Two recovery surfaces consume the sidecar:
+
+* ``elspeth-lints reaudit --resume <run_id>`` reads the existing
+  sidecar, skips the already-classified entries, continues from the
+  first un-classified one, appends new outcomes to the SAME sidecar,
+  and writes the trailer when the loop completes.
+* ``elspeth-lints reaudit --render-incomplete <run_id>`` reads the
+  sidecar, reconstructs a partial :class:`ReauditReport` (with
+  ``entries_dispatched < total_entries`` taken from header), and
+  hands it to the existing renderer — the T6 "INCOMPLETE SWEEP"
+  banner fires automatically.
+
+The sidecar's data model is audit data (Tier-1): malformed JSONL,
+missing required fields, type mismatches, integrity hash drift all
+crash the loader. No defensive coercion. The directory lives at
+``<allowlist_dir>/.reaudit-state/`` — siting it inside the allowlist
+config tree keeps the run-state co-located with the configuration it
+operates against (and the matching ``.gitignore`` rule is the
+operator's responsibility; surfaced in the commit message).
+
+Concurrency control: ``fcntl.flock(LOCK_EX | LOCK_NB)`` on the sidecar
+file blocks a second process from opening the same ``run_id`` for
+write. Two concurrent reauditors writing the same JSONL would
+interleave at line boundaries (Python writes are atomic for buffered
+text under POSIX) but a non-trailer-marked sidecar with two interleaved
+sequences of outcomes is not reconstructable in any meaningful way —
+the lock is the simpler, correct answer.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import uuid
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Self
+
+from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict
+from elspeth_lints.core.reaudit import (
+    ReauditDivergence,
+    ReauditError,
+    ReauditOutcome,
+    ReauditReport,
+)
+
+# Bump on any breaking change to the JSONL schema. The loader refuses
+# to read a sidecar whose header advertises a different version — the
+# operator's mid-sweep state is bound to a specific schema, and an
+# upgrade that silently changes line shapes would corrupt
+# reconstruction.
+SIDECAR_SCHEMA_VERSION = 1
+
+SIDECAR_DIRNAME = ".reaudit-state"
+
+
+# =========================================================================
+# Public surface
+# =========================================================================
+
+
+def generate_run_id() -> str:
+    """Return a fresh ``run_id`` for a new sweep.
+
+    UUID4 hex (32 chars, no hyphens) — short enough to type at the
+    ``--resume`` prompt, long enough that operator concurrent invocations
+    can't collide by accident.
+    """
+    return uuid.uuid4().hex
+
+
+def sidecar_path_for(allowlist_dir: Path, run_id: str) -> Path:
+    """Resolve the JSONL path for a given allowlist directory + run_id.
+
+    The sidecar directory is created lazily by :class:`SidecarWriter`'s
+    ``__enter__`` so callers don't need to pre-create anything.
+    """
+    return allowlist_dir / SIDECAR_DIRNAME / f"{run_id}.jsonl"
+
+
+def compute_allowlist_hash(allowlist_dir: Path) -> str:
+    """SHA-256 over (filename, content_bytes) of every YAML file in the dir.
+
+    The hash binds a sidecar to the exact allowlist state the sweep
+    observed at start. A ``--resume`` whose recomputed hash diverges
+    crashes — the operator must either revert the allowlist edit or
+    start a fresh sweep.
+
+    Files are walked in sorted order (lexicographic on filename) so the
+    hash is deterministic across filesystems. Only top-level files
+    matching ``*.yaml`` are included; subdirectories are recursed but
+    the sidecar's own ``.reaudit-state/`` directory is excluded (its
+    contents would otherwise self-modify the hash mid-sweep).
+    """
+    hasher = hashlib.sha256()
+    for path in sorted(allowlist_dir.rglob("*.yaml")):
+        if SIDECAR_DIRNAME in path.parts:
+            continue
+        rel = path.relative_to(allowlist_dir).as_posix()
+        hasher.update(rel.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(path.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
+# =========================================================================
+# Header / outcome / trailer line shapes
+# =========================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class SidecarHeader:
+    """First line of every sidecar — sweep-identifying metadata.
+
+    ``allowlist_hash`` is the integrity check that lets ``--resume``
+    detect "the allowlist was edited between the original sweep and the
+    resume" (and crash rather than silently produce a corrupt report).
+
+    Filter fields (``rule_filter``, ``since_iso``, ``limit``,
+    ``include_pre_judge``) bind the sweep to the exact filtered entry
+    list. A ``--resume`` whose filters differ from the header crashes:
+    re-deriving ``filtered`` with different filters would produce a
+    different entry order and the "skip already-classified" logic
+    becomes meaningless.
+    """
+
+    run_id: str
+    started_at: datetime
+    total_entries: int
+    allowlist_path: str
+    allowlist_hash: str
+    rule_filter: str
+    since_iso: str | None
+    limit: int | None
+    include_pre_judge: bool
+    schema_version: int = SIDECAR_SCHEMA_VERSION
+
+
+@dataclass(frozen=True, slots=True)
+class SidecarTrailer:
+    """Final line of a cleanly-completed sweep.
+
+    Presence of a trailer == sweep ran to completion (every dispatched
+    entry got an outcome). Absence == sweep was killed mid-process or
+    crashed above the per-entry boundary.
+    """
+
+    run_id: str
+    finished_at: datetime
+    outcomes_written: int
+
+
+# =========================================================================
+# Writer (append-only, fsync-per-line, flock-guarded)
+# =========================================================================
+
+
+class SidecarWriter:
+    """Context manager that owns the sidecar file for one sweep.
+
+    Use as ``with SidecarWriter(path, header) as writer:`` — the header
+    is written on enter, ``write_outcome()`` appends one line per
+    entry, and ``commit_trailer()`` writes the trailer line on clean
+    exit. If the block exits via exception, the trailer is NOT written:
+    the sidecar persists without a trailer, marking the sweep as
+    incomplete-on-disk.
+
+    The file is opened with ``flock(LOCK_EX | LOCK_NB)`` so a second
+    process targeting the same ``run_id`` fails immediately with a
+    clear error. The lock is released on context exit (either path).
+    """
+
+    def __init__(self, sidecar_path: Path, header: SidecarHeader, *, append: bool = False) -> None:
+        self._sidecar_path = sidecar_path
+        self._header = header
+        self._append = append
+        self._file: Any = None  # set in __enter__
+        self._outcomes_written = 0
+
+    def __enter__(self) -> Self:
+        self._sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "a" if self._append else "x"
+        try:
+            self._file = self._sidecar_path.open(mode, encoding="utf-8")
+        except FileExistsError as exc:
+            raise SidecarConflictError(
+                f"sidecar already exists at {self._sidecar_path} (run_id={self._header.run_id!r}); "
+                "this run_id has been used by a prior sweep. Pick a different run_id "
+                "or use --resume <run_id> to continue the prior sweep."
+            ) from exc
+        try:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            self._file.close()
+            self._file = None
+            raise SidecarConflictError(
+                f"sidecar {self._sidecar_path} is locked by another process; "
+                "concurrent reaudit invocations on the same run_id are not "
+                "supported because their outcome lines would interleave into "
+                "an unreconstructable JSONL stream."
+            ) from exc
+        if not self._append:
+            self._write_line(_header_to_dict(self._header))
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if self._file is not None:
+            try:
+                fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._file.close()
+                self._file = None
+
+    def write_outcome(self, outcome: ReauditOutcome) -> None:
+        """Append one outcome line, flushing and fsyncing immediately.
+
+        The fsync is the recovery guarantee: a SIGKILL one instruction
+        after this method returns must leave the outcome durable on
+        disk. Without fsync, the kernel's page cache could swallow the
+        line on power loss / abrupt termination.
+        """
+        if self._file is None:
+            raise RuntimeError("SidecarWriter not entered; use 'with SidecarWriter(...)'")
+        self._write_line(_outcome_to_dict(outcome))
+        self._outcomes_written += 1
+
+    def commit_trailer(self) -> None:
+        """Append the trailer line, marking the sweep complete on disk."""
+        if self._file is None:
+            raise RuntimeError("SidecarWriter not entered; use 'with SidecarWriter(...)'")
+        trailer = SidecarTrailer(
+            run_id=self._header.run_id,
+            finished_at=datetime.now(UTC),
+            outcomes_written=self._outcomes_written,
+        )
+        self._write_line(_trailer_to_dict(trailer))
+
+    def _write_line(self, payload: dict[str, Any]) -> None:
+        if self._file is None:
+            raise RuntimeError("SidecarWriter not entered; use 'with SidecarWriter(...)'")
+        line = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        self._file.write(line + "\n")
+        self._file.flush()
+        os.fsync(self._file.fileno())
+
+
+class SidecarConflictError(ReauditError):
+    """A sidecar with this ``run_id`` already exists or is locked.
+
+    Subclass of :class:`ReauditError` so the CLI's existing exit-2
+    branch surfaces it as an operator-actionable error.
+    """
+
+
+class SidecarCorruptError(ReauditError):
+    """A sidecar exists but cannot be loaded.
+
+    Used for malformed JSONL, missing required fields, schema-version
+    mismatch, header integrity drift. The sidecar is Tier-1 audit data;
+    "I can't read it" is a crash, not a recovery path.
+    """
+
+
+# =========================================================================
+# Loader (used by --resume and --render-incomplete)
+# =========================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedSidecar:
+    """In-memory reconstruction of a sidecar's contents."""
+
+    header: SidecarHeader
+    outcomes: tuple[ReauditOutcome, ...]
+    trailer: SidecarTrailer | None
+    classified_keys: frozenset[str]
+
+
+def load_sidecar(sidecar_path: Path) -> LoadedSidecar:
+    """Read a sidecar JSONL into structured form.
+
+    Crashes on:
+    * file missing
+    * empty file (missing header)
+    * malformed JSON on any line
+    * line missing ``type`` discriminant
+    * header schema_version != SIDECAR_SCHEMA_VERSION
+    * trailer ``run_id`` mismatch with header
+    * more than one header or trailer
+    """
+    if not sidecar_path.exists():
+        raise SidecarCorruptError(f"sidecar {sidecar_path} does not exist")
+    text = sidecar_path.read_text(encoding="utf-8")
+    raw_lines = [line for line in text.splitlines() if line.strip()]
+    if not raw_lines:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} is empty (no header line)")
+
+    header: SidecarHeader | None = None
+    trailer: SidecarTrailer | None = None
+    outcomes: list[ReauditOutcome] = []
+    classified_keys: set[str] = set()
+
+    for line_no, raw in enumerate(raw_lines, start=1):
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: malformed JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: expected JSON object, got {type(payload).__name__}")
+        line_type = payload.get("type")
+        if line_type == "header":
+            if header is not None:
+                raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: duplicate header (only one allowed)")
+            header = _header_from_dict(payload, sidecar_path=sidecar_path, line_no=line_no)
+        elif line_type == "outcome":
+            if header is None:
+                raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: outcome line precedes header")
+            outcome = _outcome_from_dict(payload, sidecar_path=sidecar_path, line_no=line_no)
+            outcomes.append(outcome)
+            classified_keys.add(outcome.entry.key)
+        elif line_type == "trailer":
+            if header is None:
+                raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: trailer line precedes header")
+            if trailer is not None:
+                raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: duplicate trailer (only one allowed)")
+            trailer = _trailer_from_dict(payload, sidecar_path=sidecar_path, line_no=line_no)
+            if trailer.run_id != header.run_id:
+                raise SidecarCorruptError(
+                    f"sidecar {sidecar_path} line {line_no}: trailer run_id {trailer.run_id!r} "
+                    f"does not match header run_id {header.run_id!r}"
+                )
+        else:
+            raise SidecarCorruptError(
+                f"sidecar {sidecar_path} line {line_no}: unknown line type {line_type!r}; expected one of header/outcome/trailer"
+            )
+
+    if header is None:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} has no header line")
+
+    return LoadedSidecar(
+        header=header,
+        outcomes=tuple(outcomes),
+        trailer=trailer,
+        classified_keys=frozenset(classified_keys),
+    )
+
+
+def report_from_loaded_sidecar(loaded: LoadedSidecar) -> ReauditReport:
+    """Build a :class:`ReauditReport` from a sidecar's recorded outcomes.
+
+    Used by ``--render-incomplete`` to surface a killed-sweep's partial
+    state to the operator. ``entries_dispatched`` = number of outcome
+    lines (each represents a successfully-dispatched entry). The
+    renderer's T6 banner fires when this is less than the header's
+    ``total_entries``.
+    """
+    return ReauditReport.from_outcomes(
+        loaded.outcomes,
+        entries_dispatched=len(loaded.outcomes),
+        total_entries=loaded.header.total_entries,
+    )
+
+
+# =========================================================================
+# JSON encoding / decoding for sidecar line shapes
+# =========================================================================
+
+
+def _header_to_dict(header: SidecarHeader) -> dict[str, Any]:
+    return {
+        "type": "header",
+        "schema_version": header.schema_version,
+        "run_id": header.run_id,
+        "started_at": header.started_at.isoformat(),
+        "total_entries": header.total_entries,
+        "allowlist_path": header.allowlist_path,
+        "allowlist_hash": header.allowlist_hash,
+        "rule_filter": header.rule_filter,
+        "since_iso": header.since_iso,
+        "limit": header.limit,
+        "include_pre_judge": header.include_pre_judge,
+    }
+
+
+def _header_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: int) -> SidecarHeader:
+    schema_version = _required(payload, "schema_version", int, sidecar_path, line_no)
+    if schema_version != SIDECAR_SCHEMA_VERSION:
+        raise SidecarCorruptError(
+            f"sidecar {sidecar_path} line {line_no}: schema_version={schema_version} "
+            f"is incompatible with this build (expected {SIDECAR_SCHEMA_VERSION}). "
+            "A sidecar's lifetime is bound to one schema; pick a different run_id "
+            "and start a fresh sweep."
+        )
+    started_at_str = _required(payload, "started_at", str, sidecar_path, line_no)
+    started_at = _parse_iso_datetime(started_at_str, sidecar_path=sidecar_path, line_no=line_no, field="started_at")
+    since_iso = payload.get("since_iso")
+    if since_iso is not None and not isinstance(since_iso, str):
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: since_iso must be str or null; got {type(since_iso).__name__}")
+    limit = payload.get("limit")
+    if limit is not None and not isinstance(limit, int):
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: limit must be int or null; got {type(limit).__name__}")
+    return SidecarHeader(
+        run_id=_required(payload, "run_id", str, sidecar_path, line_no),
+        started_at=started_at,
+        total_entries=_required(payload, "total_entries", int, sidecar_path, line_no),
+        allowlist_path=_required(payload, "allowlist_path", str, sidecar_path, line_no),
+        allowlist_hash=_required(payload, "allowlist_hash", str, sidecar_path, line_no),
+        rule_filter=_required(payload, "rule_filter", str, sidecar_path, line_no),
+        since_iso=since_iso,
+        limit=limit,
+        include_pre_judge=_required(payload, "include_pre_judge", bool, sidecar_path, line_no),
+        schema_version=schema_version,
+    )
+
+
+def _trailer_to_dict(trailer: SidecarTrailer) -> dict[str, Any]:
+    return {
+        "type": "trailer",
+        "run_id": trailer.run_id,
+        "finished_at": trailer.finished_at.isoformat(),
+        "outcomes_written": trailer.outcomes_written,
+    }
+
+
+def _trailer_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: int) -> SidecarTrailer:
+    finished_at_str = _required(payload, "finished_at", str, sidecar_path, line_no)
+    return SidecarTrailer(
+        run_id=_required(payload, "run_id", str, sidecar_path, line_no),
+        finished_at=_parse_iso_datetime(finished_at_str, sidecar_path=sidecar_path, line_no=line_no, field="finished_at"),
+        outcomes_written=_required(payload, "outcomes_written", int, sidecar_path, line_no),
+    )
+
+
+def _outcome_to_dict(outcome: ReauditOutcome) -> dict[str, Any]:
+    return {
+        "type": "outcome",
+        "appended_at": datetime.now(UTC).isoformat(),
+        "entry": _entry_to_dict(outcome.entry),
+        "original_verdict": _verdict_value(outcome.original_verdict),
+        "original_model_verdict": _verdict_value(outcome.original_model_verdict),
+        "fresh_verdict": _verdict_value(outcome.fresh_verdict),
+        "fresh_rationale": outcome.fresh_rationale,
+        "fresh_recorded_at": outcome.fresh_recorded_at.isoformat() if outcome.fresh_recorded_at is not None else None,
+        "divergence": outcome.divergence.value,
+        "code_snapshot": outcome.code_snapshot,
+    }
+
+
+def _outcome_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: int) -> ReauditOutcome:
+    entry_payload = payload.get("entry")
+    if not isinstance(entry_payload, dict):
+        raise SidecarCorruptError(
+            f"sidecar {sidecar_path} line {line_no}: outcome.entry must be JSON object; got {type(entry_payload).__name__}"
+        )
+    entry = _entry_from_dict(entry_payload, sidecar_path=sidecar_path, line_no=line_no)
+    divergence_str = _required(payload, "divergence", str, sidecar_path, line_no)
+    try:
+        divergence = ReauditDivergence(divergence_str)
+    except ValueError as exc:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: unknown divergence {divergence_str!r}") from exc
+    fresh_recorded_at_raw = payload.get("fresh_recorded_at")
+    if fresh_recorded_at_raw is not None:
+        if not isinstance(fresh_recorded_at_raw, str):
+            raise SidecarCorruptError(
+                f"sidecar {sidecar_path} line {line_no}: fresh_recorded_at must be str or null; got {type(fresh_recorded_at_raw).__name__}"
+            )
+        fresh_recorded_at = _parse_iso_datetime(
+            fresh_recorded_at_raw, sidecar_path=sidecar_path, line_no=line_no, field="fresh_recorded_at"
+        )
+    else:
+        fresh_recorded_at = None
+    fresh_rationale = payload.get("fresh_rationale")
+    if fresh_rationale is not None and not isinstance(fresh_rationale, str):
+        raise SidecarCorruptError(
+            f"sidecar {sidecar_path} line {line_no}: fresh_rationale must be str or null; got {type(fresh_rationale).__name__}"
+        )
+    return ReauditOutcome(
+        entry=entry,
+        original_verdict=_verdict_from_value(payload.get("original_verdict"), sidecar_path, line_no, "original_verdict"),
+        original_model_verdict=_verdict_from_value(payload.get("original_model_verdict"), sidecar_path, line_no, "original_model_verdict"),
+        fresh_verdict=_verdict_from_value(payload.get("fresh_verdict"), sidecar_path, line_no, "fresh_verdict"),
+        fresh_rationale=fresh_rationale,
+        fresh_recorded_at=fresh_recorded_at,
+        divergence=divergence,
+        code_snapshot=_required(payload, "code_snapshot", str, sidecar_path, line_no),
+    )
+
+
+def _entry_to_dict(entry: AllowlistEntry) -> dict[str, Any]:
+    return {
+        "key": entry.key,
+        "owner": entry.owner,
+        "reason": entry.reason,
+        "safety": entry.safety,
+        "expires": entry.expires.isoformat() if entry.expires is not None else None,
+        "file_fingerprint": entry.file_fingerprint,
+        "ast_path": entry.ast_path,
+        "pattern": entry.pattern,
+        "source_file": entry.source_file,
+        "judge_verdict": _verdict_value(entry.judge_verdict),
+        "judge_recorded_at": entry.judge_recorded_at.isoformat() if entry.judge_recorded_at is not None else None,
+        "judge_model": entry.judge_model,
+        "judge_rationale": entry.judge_rationale,
+        "judge_model_verdict": _verdict_value(entry.judge_model_verdict),
+    }
+
+
+def _entry_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: int) -> AllowlistEntry:
+    expires_raw = payload.get("expires")
+    if expires_raw is not None:
+        if not isinstance(expires_raw, str):
+            raise SidecarCorruptError(
+                f"sidecar {sidecar_path} line {line_no}: entry.expires must be str or null; got {type(expires_raw).__name__}"
+            )
+        try:
+            expires: date | None = date.fromisoformat(expires_raw)
+        except ValueError as exc:
+            raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: entry.expires not ISO-8601 date: {expires_raw!r}") from exc
+    else:
+        expires = None
+    judge_recorded_raw = payload.get("judge_recorded_at")
+    if judge_recorded_raw is not None:
+        if not isinstance(judge_recorded_raw, str):
+            raise SidecarCorruptError(
+                f"sidecar {sidecar_path} line {line_no}: entry.judge_recorded_at must be str or null; got {type(judge_recorded_raw).__name__}"
+            )
+        judge_recorded_at = _parse_iso_datetime(
+            judge_recorded_raw, sidecar_path=sidecar_path, line_no=line_no, field="entry.judge_recorded_at"
+        )
+    else:
+        judge_recorded_at = None
+    return AllowlistEntry(
+        key=_required(payload, "key", str, sidecar_path, line_no),
+        owner=_required(payload, "owner", str, sidecar_path, line_no),
+        reason=_required(payload, "reason", str, sidecar_path, line_no),
+        safety=_required(payload, "safety", str, sidecar_path, line_no),
+        expires=expires,
+        file_fingerprint=_optional_str(payload, "file_fingerprint", sidecar_path, line_no),
+        ast_path=_optional_str(payload, "ast_path", sidecar_path, line_no),
+        pattern=_optional_str(payload, "pattern", sidecar_path, line_no),
+        source_file=_required(payload, "source_file", str, sidecar_path, line_no),
+        judge_verdict=_verdict_from_value(payload.get("judge_verdict"), sidecar_path, line_no, "entry.judge_verdict"),
+        judge_recorded_at=judge_recorded_at,
+        judge_model=_optional_str(payload, "judge_model", sidecar_path, line_no),
+        judge_rationale=_optional_str(payload, "judge_rationale", sidecar_path, line_no),
+        judge_model_verdict=_verdict_from_value(payload.get("judge_model_verdict"), sidecar_path, line_no, "entry.judge_model_verdict"),
+    )
+
+
+def _verdict_value(verdict: JudgeVerdict | None) -> str | None:
+    return verdict.value if verdict is not None else None
+
+
+def _verdict_from_value(
+    raw: Any,
+    sidecar_path: Path,
+    line_no: int,
+    field: str,
+) -> JudgeVerdict | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: {field} must be str or null; got {type(raw).__name__}")
+    try:
+        return JudgeVerdict(raw)
+    except ValueError as exc:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: {field} has unknown verdict {raw!r}") from exc
+
+
+def _required(payload: dict[str, Any], field: str, expected_type: type, sidecar_path: Path, line_no: int) -> Any:
+    if field not in payload:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: missing required field {field!r}")
+    value = payload[field]
+    # bool is a subclass of int in Python; check bool first so a stray
+    # True doesn't satisfy an int field (or vice versa).
+    if expected_type is int and isinstance(value, bool):
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: {field} must be int; got bool")
+    if expected_type is bool and not isinstance(value, bool):
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: {field} must be bool; got {type(value).__name__}")
+    if not isinstance(value, expected_type):
+        raise SidecarCorruptError(
+            f"sidecar {sidecar_path} line {line_no}: {field} must be {expected_type.__name__}; got {type(value).__name__}"
+        )
+    return value
+
+
+def _optional_str(payload: dict[str, Any], field: str, sidecar_path: Path, line_no: int) -> str | None:
+    value = payload.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: {field} must be str or null; got {type(value).__name__}")
+    return value
+
+
+def _parse_iso_datetime(value: str, *, sidecar_path: Path, line_no: int, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: {field} not ISO-8601: {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise SidecarCorruptError(
+            f"sidecar {sidecar_path} line {line_no}: {field} is timezone-naive ({value!r}); sidecar timestamps must be timezone-aware"
+        )
+    return parsed
+
+
+# =========================================================================
+# Header-integrity validation (--resume)
+# =========================================================================
+
+
+def validate_header_for_resume(
+    *,
+    header: SidecarHeader,
+    allowlist_dir: Path,
+    rule_filter: str,
+    since_iso: str | None,
+    limit: int | None,
+    include_pre_judge: bool,
+) -> None:
+    """Crash if the on-disk header is incompatible with the current resume request.
+
+    Three classes of mismatch:
+
+    1. ``allowlist_hash`` drift — the YAML files were edited between
+       the original sweep and the resume. Re-deriving the filtered
+       entry list would produce a different order or different entries
+       and the "skip already-classified" logic becomes meaningless.
+    2. Filter argument drift — ``--rule`` / ``--since`` / ``--limit`` /
+       ``--include-pre-judge`` differ from the header. Different
+       filters produce a different filtered list; resume becomes
+       reconstruction of a sweep that never existed.
+    3. ``allowlist_path`` drift — the operator pointed ``--allowlist-dir``
+       at a different directory than the one the sweep ran against.
+    """
+    expected_hash = compute_allowlist_hash(allowlist_dir)
+    if expected_hash != header.allowlist_hash:
+        raise SidecarCorruptError(
+            f"--resume {header.run_id}: allowlist hash drift detected. "
+            f"Sidecar recorded hash={header.allowlist_hash} but current "
+            f"allowlist dir {allowlist_dir} hashes to {expected_hash}. "
+            "The allowlist was edited between the original sweep and this "
+            "resume. Either revert the allowlist edit or start a fresh "
+            "sweep (the resumed entries would no longer correspond to the "
+            "originally-judged findings)."
+        )
+    header_path = Path(header.allowlist_path)
+    if header_path.resolve() != allowlist_dir.resolve():
+        raise SidecarCorruptError(
+            f"--resume {header.run_id}: --allowlist-dir {allowlist_dir} "
+            f"does not match the directory the sweep ran against "
+            f"({header.allowlist_path})."
+        )
+    if rule_filter != header.rule_filter:
+        raise SidecarCorruptError(
+            f"--resume {header.run_id}: --rule={rule_filter!r} does not match "
+            f"the original sweep's rule={header.rule_filter!r}. Different "
+            "filters produce different entry lists; resume requires identical "
+            "filter arguments."
+        )
+    if since_iso != header.since_iso:
+        raise SidecarCorruptError(
+            f"--resume {header.run_id}: --since={since_iso!r} does not match the original sweep's --since={header.since_iso!r}."
+        )
+    if limit != header.limit:
+        raise SidecarCorruptError(
+            f"--resume {header.run_id}: --limit={limit!r} does not match the original sweep's --limit={header.limit!r}."
+        )
+    if include_pre_judge != header.include_pre_judge:
+        raise SidecarCorruptError(
+            f"--resume {header.run_id}: --include-pre-judge={include_pre_judge!r} "
+            f"does not match the original sweep's value={header.include_pre_judge!r}."
+        )
+
+
+def filter_already_classified(
+    entries: Sequence[AllowlistEntry],
+    classified_keys: Iterable[str],
+) -> list[AllowlistEntry]:
+    """Return ``entries`` with already-classified keys removed, order preserved.
+
+    Resume semantics: the original sweep classified some prefix of the
+    filtered entry list. The remaining suffix is what needs to run.
+    Filtering on key (rather than positional index) is robust to YAML
+    iteration-order quirks across reloads — though if the allowlist
+    hash matches, the order is also guaranteed identical.
+
+    If an entry key appears multiple times in ``entries`` and ``classified_keys``,
+    each occurrence in ``classified_keys`` consumes one match in
+    ``entries``. This handles the legitimate case where the YAML has
+    multiple ``allow_hits`` entries with the same canonical key (same
+    finding, different owners) and the sweep classified some of them.
+    """
+    remaining_counts: dict[str, int] = {}
+    for key in classified_keys:
+        remaining_counts[key] = remaining_counts.get(key, 0) + 1
+    result: list[AllowlistEntry] = []
+    for entry in entries:
+        if remaining_counts.get(entry.key, 0) > 0:
+            remaining_counts[entry.key] -= 1
+            continue
+        result.append(entry)
+    return result

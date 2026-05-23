@@ -718,16 +718,21 @@ rationale.
 ## Related Decisions
 
 - **ADR-001** (plugin-level concurrency) — **amended by
-  this ADR.** RC5.2 ran one worker per process; RC6 adds
+  this ADR along the worker-execution axis**; ADR-001's
+  *Amendments* section records the amendment inline as of
+  2026-05-23. RC5.2 ran one worker per process; RC6 adds
   concurrent token execution across multiple workers, sound
   via the scheduler row being authoritative for lease
   ownership and claim ordering. ADR-001's determinism
   contract carried the implicit "one worker per run"
   assumption; the multi-worker contract is "claim order is
   `ingest_sequence, step_index, created_at` regardless of
-  which worker wins the CAS." A formal ADR-001 amendment
-  may follow once the deployment shape (see *Open
-  questions*) is decided.
+  which worker wins the CAS." The orthogonal source-iteration
+  axis of ADR-001 (orchestrator pulls from one source at a
+  time within a run) is not amended here and is preserved
+  by ADR-025; concurrent multi-source iteration is deferred
+  RC6 follow-up work (G12 / elspeth-bc81207798) that would
+  require its own ADR.
 - **ADR-010** (declaration-trust framework) — preserved. The
   scheduler row carries no declaration-trust state; resume
   precondition (runtime VAL manifest match) is enforced at

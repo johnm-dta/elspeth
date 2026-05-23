@@ -219,10 +219,12 @@ by code**. The singular `source` surface is deleted, not deprecated.
 - This is not a commitment to *concurrent* multi-source execution.
   The orchestrator processes sources sequentially within a run (G12 /
   elspeth-bc81207798 — parallel ingest is downstream RC6 work). The
-  determinism property recorded in ADR-001 — orchestrator is single-
-  threaded — is preserved; ADR-026 (the durable token scheduler)
-  records the queue primitive that makes future multi-worker
-  ingestion safe to add without revisiting this ADR.
+  source-iteration axis of ADR-001 — orchestrator pulls one source
+  at a time — is preserved by this ADR. The orthogonal
+  worker-execution axis of ADR-001 is amended by ADR-026 (the durable
+  token scheduler), whose `token_work_items` row makes the multi-
+  worker contract sound; that amendment is recorded in ADR-001's
+  *Amendments* section.
 - This is not a claim that all sources in a pipeline share a
   schema contract. They explicitly may not. Mixed-contract pipelines
   are a first-class capability; each row's schema is recovered by
@@ -485,11 +487,12 @@ gate — per `project_multi_source_token_scheduler_rc6`)
 ## Open questions / future work
 
 - **Concurrent multi-source ingestion.** This ADR does not commit to
-  parallel iteration of N sources. ADR-001 (plugin-level concurrency)
-  records the orchestrator's single-threaded determinism property and
-  is not amended here. G12 / elspeth-bc81207798 (multi-source
-  pipelines run sequentially) is RC6 follow-up work and would
-  warrant its own ADR if it changes the concurrency contract.
+  parallel iteration of N sources. ADR-001's source-iteration axis is
+  not amended by this ADR (it is preserved); the orthogonal
+  worker-execution axis is amended by ADR-026 (companion). G12 /
+  elspeth-bc81207798 (multi-source pipelines run sequentially) is RC6
+  follow-up work along the source-iteration axis and would warrant
+  its own ADR if it changes that axis.
 - **Cross-source row identity coalescing.** When two sources happen
   to emit `row_id = "12345"`, the audit trail today treats them as
   distinct because `(source_node_id, row_id)` is the durable
@@ -505,10 +508,14 @@ gate — per `project_multi_source_token_scheduler_rc6`)
 
 ## Related Decisions
 
-- **ADR-001** (plugin-level concurrency) — preserved; the orchestrator
-  remains single-threaded within a run. The scheduler primitive
-  recorded in ADR-026 is designed to support future multi-worker
-  ingestion without revisiting ADR-001's determinism property.
+- **ADR-001** (plugin-level concurrency) — the source-iteration axis
+  of ADR-001 is **preserved by this ADR**: the orchestrator continues
+  to pull from one named source at a time within a run, sequentially.
+  ADR-001's separate worker-execution axis is amended by ADR-026
+  (companion); the two axes are orthogonal and ADR-001's *Amendments*
+  section records the full trail. Concurrent multi-source iteration
+  would amend the source-iteration axis and is deferred RC6 follow-up
+  (G12 / elspeth-bc81207798) requiring a separate future ADR.
 - **ADR-010** (declaration-trust framework) — preserved; the
   per-source schema contract continues to be a declaration-trust
   artifact, and the runtime VAL manifest drift check at

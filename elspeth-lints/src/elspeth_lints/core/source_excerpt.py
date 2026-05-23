@@ -726,6 +726,35 @@ def extract_safe_excerpt(
     lines = text.splitlines()
     start = max(1, line - context_lines)
     end = min(len(lines), line + context_lines)
+    # Empty-window early return (closes elspeth-9bbb9df9a5 / T8d, restores
+    # pre-T8c behaviour). Two distinct shapes reach this branch:
+    #
+    # 1. ``len(lines) == 0`` — the source file is genuinely empty
+    #    (e.g. a zero-byte ``__init__.py``). ``end = min(0, …) = 0``,
+    #    ``start = max(1, …) >= 1``, so ``start > end``.
+    # 2. ``line > len(lines)`` — the requested line is past current EOF.
+    #    A stale allowlist entry pointing at a line number that no
+    #    longer exists is the realistic trigger. ``end = len(lines)``,
+    #    ``start = max(1, line - context_lines) > len(lines) = end``.
+    #
+    # Both cases share a single semantic: there is no window to render.
+    # The honest output is an empty ``SafeExcerpt`` carrying the (still
+    # meaningful) file fingerprint and no redactions — the caller can
+    # then decide whether an empty excerpt is an ENTRY_OBSOLETE signal,
+    # a no-op justify, or an operator-actionable refusal. We deliberately
+    # do NOT route this through ``scrub_secrets("")`` and the
+    # downstream invariant: the invariant compares the rendered line
+    # count (``"".split("\n") == [""]``, length 1) to the expected
+    # window line count (0 here), would misfire, and would raise a
+    # misleading "scrubber altered newline count" RuntimeError. The
+    # invariant is intended to surface a real cross-newline pattern
+    # match — an empty window is not that condition.
+    if start > end:
+        return SafeExcerpt(
+            text="",
+            redactions=(),
+            file_fingerprint=file_fingerprint,
+        )
     raw_window = "\n".join(lines[start - 1 : end])
     scrubbed = scrub_secrets(raw_window, salt=file_fingerprint, path_hint=str(resolved))
     scrubbed_lines = scrubbed.text.split("\n")

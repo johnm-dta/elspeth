@@ -1523,3 +1523,228 @@ def test_scrub_secrets_google_key_at_eof_with_dash_terminator() -> None:
     )
     pattern_names = {r.pattern_name for r in result.redactions}
     assert "google_api_key" in pattern_names
+
+
+# =====================================================================
+# 6. Empty / out-of-bounds windows (T8d regression — closes
+#    elspeth-9bbb9df9a5 MAJOR introduced by T8c, commit d88b737f2).
+#
+# The scrub-before-render refactor in T8c added an invariant comparing
+# the post-scrub line count to ``end - start + 1``. When the requested
+# window is empty (zero-byte file, or stale line number past EOF) the
+# raw window is ``""``, ``"".split("\n") == [""]`` (length 1), but
+# ``end - start + 1`` is 0 or negative — the invariant misfires with a
+# misleading ``"scrubber altered newline count"`` ``RuntimeError``.
+#
+# The pre-refactor code at commit ``a80992528`` handled empty windows
+# cleanly by short-circuiting the rendering loop. The fix restores that
+# semantic via an early-return for ``start > end``, BEFORE the raw
+# window is materialised but AFTER the file fingerprint is hashed (the
+# fingerprint is still a meaningful audit fact for a zero-byte file).
+# =====================================================================
+
+
+_SHA256_EMPTY_BYTES = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def test_extract_safe_excerpt_empty_file_returns_empty_excerpt(tmp_path: Path) -> None:
+    """T8d regression: zero-byte file does NOT raise the scrubber invariant.
+
+    Pre-refactor (commit ``a80992528``): empty file → empty rendered
+    excerpt, no crash. Post-T8c (commit ``d88b737f2``): empty file →
+    ``RuntimeError("scrubber altered newline count")`` because
+    ``start > end`` makes ``expected_lines`` non-positive while
+    ``scrubbed_lines`` is always ``[""]``. The fix early-returns an
+    empty ``SafeExcerpt`` carrying the SHA-256 of zero bytes (a stable,
+    meaningful fingerprint that the C8-3 binding path can still record).
+    """
+    root = tmp_path / "src_root"
+    root.mkdir()
+    empty = root / "plugins"
+    empty.mkdir()
+    empty_init = empty / "__init__.py"
+    empty_init.write_bytes(b"")
+
+    excerpt = extract_safe_excerpt(
+        root=root,
+        target_file=empty_init,
+        line=1,
+        context_lines=15,
+    )
+
+    assert excerpt.text == ""
+    assert excerpt.redactions == ()
+    # Fingerprint of zero bytes is the well-known SHA-256 constant —
+    # NOT the empty string. The audit trail can still bind the entry
+    # to the file's content even though the content is empty.
+    assert excerpt.file_fingerprint == _SHA256_EMPTY_BYTES
+
+
+def test_extract_safe_excerpt_single_line_file_renders_single_marker(tmp_path: Path) -> None:
+    """T8d regression: single-line file is NOT an empty window — the invariant must hold.
+
+    A 1-line file has ``len(lines) == 1``, ``start = max(1, 1-15) = 1``,
+    ``end = min(1, 1+15) = 1`` → window of exactly one line. This is
+    the SHALLOW non-empty case the early-return must NOT swallow:
+    rendering must produce the ``>>``-marker line and the invariant
+    must hold (scrubbed body length == expected window length == 1).
+    Guards against an overly aggressive early-return that captures the
+    1-line case as if it were the empty case.
+    """
+    root = tmp_path / "src_root"
+    root.mkdir()
+    single = root / "single.py"
+    single.write_text("x = 1\n", encoding="utf-8")
+
+    excerpt = extract_safe_excerpt(
+        root=root,
+        target_file=single,
+        line=1,
+        context_lines=15,
+    )
+
+    # The line-number prefix uses ``>>`` for the marker line; the
+    # 5-digit zero-padded line number is the existing render format.
+    assert excerpt.text == ">>     1  x = 1"
+    assert excerpt.redactions == ()
+    # Fingerprint is the SHA-256 of the on-disk bytes including the
+    # trailing newline — confirms the read path was exercised, not
+    # short-circuited.
+    import hashlib
+
+    assert excerpt.file_fingerprint == hashlib.sha256(b"x = 1\n").hexdigest()
+
+
+def test_extract_safe_excerpt_out_of_bounds_line_returns_empty_excerpt(tmp_path: Path) -> None:
+    """T8d regression: line past EOF returns empty SafeExcerpt, not RuntimeError.
+
+    A 5-line file with ``line=100`` triggers ``start = max(1, 85) =
+    85``, ``end = min(5, 115) = 5`` → ``start > end``. Pre-fix this
+    raised the misleading ``"pattern must have matched across a
+    newline"`` ``RuntimeError`` even though no pattern ran — the
+    invariant arithmetic was the bug. Post-fix we return an empty
+    ``SafeExcerpt`` with the file's true fingerprint so the caller
+    can decide whether to treat this as ENTRY_OBSOLETE, a no-op
+    justify, or an operator-actionable refusal.
+    """
+    root = tmp_path / "src_root"
+    root.mkdir()
+    five_line = root / "five.py"
+    body = "a = 1\nb = 2\nc = 3\nd = 4\ne = 5\n"
+    five_line.write_text(body, encoding="utf-8")
+
+    excerpt = extract_safe_excerpt(
+        root=root,
+        target_file=five_line,
+        line=100,
+        context_lines=15,
+    )
+
+    assert excerpt.text == ""
+    assert excerpt.redactions == ()
+    import hashlib
+
+    assert excerpt.file_fingerprint == hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def test_reaudit_stale_entry_past_eof_does_not_crash(tmp_path: Path) -> None:
+    """T8d regression: a stale allowlist entry past current EOF is per-entry handled.
+
+    Constructs a reaudit fixture where the allowlist entry points at
+    a key whose finding has been deleted (or whose line is past
+    current EOF). The reaudit dispatch must NOT raise the
+    ``"scrubber altered newline count"`` ``RuntimeError`` —
+    ``_find_matching_finding`` already returns ``None`` for a deleted
+    finding so the sweep classifies the entry as
+    ``ENTRY_OBSOLETE`` before ``extract_safe_excerpt`` is reached.
+    The test asserts that classification rather than a crash, and
+    confirms zero exfil calls.
+
+    This is the realistic reaudit shape: a finding the scanner used
+    to flag is no longer present (file edited, finding fixed, line
+    moved past EOF) — the sweep must continue cleanly.
+    """
+    root, target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    # Allowlist entry binds to a symbol that doesn't exist in the
+    # current source — the post-refactor file. Mimics "the operator
+    # fixed the finding but forgot to prune the allowlist entry".
+    forged_key = "plugins/widget.py:R1:Widget.gone_method:fp=deadbeef"
+    (allowlist_dir / "_stale.yaml").write_text(
+        "allow_hits:\n"
+        f"- key: {forged_key}\n"
+        "  owner: someone\n"
+        "  reason: |-\n"
+        "    stale entry left over after the underlying finding was fixed\n"
+        "  safety: |-\n"
+        "    Suppression gated by cicd-judge; see judge_rationale below.\n"
+        "  expires: '2030-01-01'\n",
+        encoding="utf-8",
+    )
+    # Replace the synthetic source with a version that no longer has
+    # the R1 finding the entry purports to suppress. The simplest way:
+    # remove the offending method body. This also shrinks the file so
+    # any cached line number would be past EOF.
+    target.write_text('"""Trimmed module."""\n', encoding="utf-8")
+
+    with _mock_judge_call() as client_class:
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=True,
+        )
+
+    assert len(report.outcomes) == 1
+    outcome = report.outcomes[0]
+    # No RuntimeError leaked — the sweep classified the entry.
+    assert outcome.divergence is ReauditDivergence.ENTRY_OBSOLETE
+    # No exfil: judge was never called.
+    assert client_class.call_count == 0
+
+
+def test_justify_against_empty_file_refuses_cleanly(tmp_path: Path) -> None:
+    """T8d regression: ``justify`` against a zero-byte file exits 2, no crash.
+
+    Operator typo / autocomplete picks an empty ``__init__.py``.
+    Pre-fix path: ``_scan_single_file_findings`` returns no findings
+    so the CLI exits 2 BEFORE reaching ``extract_safe_excerpt`` —
+    but if a future caller bypassed that guard the invariant would
+    have fired. This test pins the operator-visible behaviour
+    (exit 2, no judge call) AND ensures no ``RuntimeError`` from the
+    excerpt pipeline can surface even when the scanner-stage guard
+    is removed (covered by the direct ``extract_safe_excerpt`` tests
+    above).
+    """
+    root = tmp_path / "src_root"
+    (root / "plugins").mkdir(parents=True)
+    empty_init = root / "plugins" / "__init__.py"
+    empty_init.write_bytes(b"")
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    with _mock_judge_call() as client_class:
+        exit_code = main(
+            [
+                "justify",
+                "--root",
+                str(root),
+                "--allowlist-dir",
+                str(allowlist_dir),
+                "--file-path",
+                "plugins/__init__.py",
+                "--symbol",
+                "_module_",
+                "--rationale",
+                "empty-file probe",
+                "--owner",
+                "operator",
+            ]
+        )
+
+    # Exit 2 because there is nothing to justify; not a crash.
+    assert exit_code == 2
+    # Judge was never reached.
+    assert client_class.call_count == 0

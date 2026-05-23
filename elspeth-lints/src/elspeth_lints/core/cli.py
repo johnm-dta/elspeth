@@ -1043,6 +1043,20 @@ def _build_yaml_entry_text(
     """
     from datetime import timedelta  # local import to keep top-of-file footprint small
 
+    # Writer-side parity with loader invariant 7 in
+    # allowlist._validate_judge_metadata_atomic: a whitespace-only rationale
+    # would be rejected at load time, but we refuse to persist it in the
+    # first place so a corrupt entry never reaches the YAML on disk. Today
+    # judge._required_str_field strips at parse-time, but the writer is the
+    # last gate before the audit record lands; offensive-programming policy
+    # says the gate should hold even if the upstream guard regresses.
+    if not judge_rationale.strip():
+        raise ValueError(
+            "_build_yaml_entry_text: judge_rationale is empty or whitespace-only; "
+            "a judge verdict without a rationale is audit-broken (the 'why' is "
+            "missing) and would be rejected by the loader's invariant 7."
+        )
+
     expiry = (recorded_at + timedelta(days=90)).date()
     lines: list[str] = []
     lines.append(f"- key: {key}")

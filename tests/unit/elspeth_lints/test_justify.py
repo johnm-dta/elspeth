@@ -1406,3 +1406,36 @@ def test_justify_override_also_writes_binding_fields(tmp_path: Path) -> None:
     assert "judge_model_verdict: BLOCKED" in text
     assert f"file_fingerprint: {expected_file_fp}" in text
     assert "ast_path:" in text
+
+
+@pytest.mark.parametrize("blank_rationale", ["", "   ", "\n\n", "\t \n"])
+def test_build_yaml_entry_text_refuses_whitespace_only_rationale(blank_rationale: str) -> None:
+    """Writer-side parity with loader invariant 7 (C8-4).
+
+    The loader's ``_validate_judge_metadata_atomic`` already rejects
+    whitespace-only rationales at read time. This test pins the symmetric
+    write-side guard inside ``_build_yaml_entry_text``: a corrupt entry
+    must never be persisted in the first place. Today
+    ``judge._required_str_field`` strips at parse-time, but the writer is
+    the last gate before the YAML lands on disk; offensive-programming
+    policy says the gate should hold even if the upstream guard regresses
+    (e.g. a future contributor adds a code-path that constructs a
+    ``JudgeResponse`` without going through the parser).
+    """
+    from datetime import UTC, datetime
+
+    from elspeth_lints.core.allowlist import JudgeVerdict
+    from elspeth_lints.core.cli import _build_yaml_entry_text
+
+    with pytest.raises(ValueError, match="judge_rationale is empty or whitespace-only"):
+        _build_yaml_entry_text(
+            key="plugins/widget.py:R1:Widget:lookup:fp=abc",
+            owner="agent",
+            reason="legit Tier-3 boundary",
+            verdict=JudgeVerdict.ACCEPTED,
+            recorded_at=datetime.now(UTC),
+            model_id="anthropic/claude-opus-4",
+            judge_rationale=blank_rationale,
+            file_fingerprint="0" * 64,
+            ast_path="Module.body[0]",
+        )

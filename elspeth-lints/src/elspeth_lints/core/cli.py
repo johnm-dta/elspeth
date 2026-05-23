@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import re
 import sys
 from collections.abc import Callable, Sequence
@@ -17,6 +16,7 @@ from elspeth_lints.core.ast_walker import (
     PythonSyntaxError,
     walk_python_files,
 )
+from elspeth_lints.core.atomic_io import atomic_write_text
 from elspeth_lints.core.emitters.github import render_github
 from elspeth_lints.core.emitters.json import render_json
 from elspeth_lints.core.emitters.sarif import render_sarif
@@ -920,15 +920,20 @@ def _run_justify(args: argparse.Namespace) -> int:
         write_verdict = response.verdict
         model_verdict = None
 
-    # C8-3 binding: compute the source-file fingerprint and capture the
-    # finding's ast_path at write time, alongside the judge metadata.
-    # These two fields make the persisted quartet cryptographically
-    # bound to the bytes + AST node the judge actually inspected — the
-    # loader/matcher pair (allowlist.load_allowlist and
+    # C8-3 binding: reuse the source-file fingerprint that
+    # ``extract_safe_excerpt`` already computed when it read the bytes
+    # for the excerpt + scrubber salt. A single read-and-hash is the
+    # source of truth for both the binding fingerprint persisted into
+    # the YAML quartet AND the per-file salt the scrubber baked into
+    # ``RedactionRecord.redacted_hash`` — re-reading the file here
+    # would race against a concurrent edit and (worse) risk drifting
+    # the two fingerprints out of sync. The persisted quartet remains
+    # cryptographically bound to the bytes + AST node the judge
+    # inspected; the loader/matcher pair (allowlist.load_allowlist and
     # allowlist.verify_entry_binding_against_finding) reads them back
     # and asserts the binding still holds, closing the quartet-
     # transplant attack vector.
-    file_fingerprint = hashlib.sha256(target_file.read_bytes()).hexdigest()
+    file_fingerprint = safe_excerpt.file_fingerprint
     yaml_entry = _build_yaml_entry_text(
         key=finding.canonical_key,
         owner=args.owner,
@@ -1304,7 +1309,7 @@ def _append_entry_to_yaml(target_yaml: Path, entry_text: str) -> None:
     """
     if not target_yaml.exists():
         target_yaml.parent.mkdir(parents=True, exist_ok=True)
-        target_yaml.write_text(f"allow_hits:\n{entry_text}", encoding="utf-8")
+        atomic_write_text(target_yaml, f"allow_hits:\n{entry_text}", encoding="utf-8")
         return
 
     text = target_yaml.read_text(encoding="utf-8")
@@ -1320,7 +1325,7 @@ def _append_entry_to_yaml(target_yaml: Path, entry_text: str) -> None:
 
     if header_index is None:
         prefix = "" if not text or text.endswith("\n") else "\n"
-        target_yaml.write_text(text + f"{prefix}\nallow_hits:\n{entry_text}", encoding="utf-8")
+        atomic_write_text(target_yaml, text + f"{prefix}\nallow_hits:\n{entry_text}", encoding="utf-8")
         return
 
     # Find the end of the allow_hits block: the next line at col 0 that
@@ -1343,7 +1348,7 @@ def _append_entry_to_yaml(target_yaml: Path, entry_text: str) -> None:
         lines[block_end - 1] = lines[block_end - 1] + "\n"
 
     new_lines = [*lines[:block_end], entry_text, *lines[block_end:]]
-    target_yaml.write_text("".join(new_lines), encoding="utf-8")
+    atomic_write_text(target_yaml, "".join(new_lines), encoding="utf-8")
 
 
 def _emit_justify_output(

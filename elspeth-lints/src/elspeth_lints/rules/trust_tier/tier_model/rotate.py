@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Final
 
 from elspeth_lints.core.allowlist import AllowlistEntry, FindingKey, PerFileRule
+from elspeth_lints.core.atomic_io import atomic_write_text
 
 from .rule import (
     Finding,
@@ -505,7 +506,7 @@ def apply_plan(
         if stale_keys:
             text, removed = _remove_stale_entries(text, stale_keys)
 
-        path.write_text(text, encoding="utf-8")
+        atomic_write_text(path, text, encoding="utf-8")
         result[source_file] = ApplyResult(
             rotations_applied=len(rotations),
             stale_entries_removed=removed,

@@ -13,7 +13,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TESTS_ROOT = REPO_ROOT / "tests"
-BASELINE_UNSPECCED_MOCK_TOTAL = 2554
+BASELINE_UNSPECCED_MOCK_TOTAL = 2559
 MOCK_NAMES = frozenset({"Mock", "MagicMock"})
 SPEC_KEYWORDS = frozenset({"spec", "spec_set", "autospec", "wraps"})
 

@@ -30,6 +30,10 @@ from elspeth.web.composer.tools._common import (
     _validate_sink_path,
     validate_composer_file_sink_collision_policy,
 )
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
+)
 
 
 class _SetOutputArgumentsModel(BaseModel):
@@ -55,12 +59,65 @@ def _handle_set_output(
     return _execute_set_output(arguments, state, context)
 
 
+_SET_OUTPUT_DECLARATION = ToolDeclaration(
+    name="set_output",
+    handler=_handle_set_output,
+    kind=ToolKind.MUTATION,
+    description="Add or replace a pipeline output (sink).",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "sink_name": {
+                "type": "string",
+                "description": (
+                    "Sink name. This string is BOTH the sink's identifier (used by "
+                    "patch_output_options/remove_output) AND the connection-name the sink "
+                    "consumes — it MUST equal some upstream's on_success value. Pick a name "
+                    "describing the data being written; it does not need to match an upstream "
+                    "node's id."
+                ),
+                "examples": ["lines_out", "scored_results", "errors_quarantine"],
+            },
+            "plugin": {"type": "string", "description": "Sink plugin name (e.g. 'csv', 'json')."},
+            "options": {
+                "type": "object",
+                "description": (
+                    "Plugin-specific config. For csv/json file sinks in runnable web pipelines, "
+                    "include path, schema, and explicit collision_policy."
+                ),
+            },
+            "on_write_failure": {
+                "type": "string",
+                "description": "How to handle per-row write failures. Use 'discard' to drop with audit record, or a sink name (e.g. 'results_failures') to divert failed rows to that failsink.",
+                "default": "discard",
+            },
+        },
+        "required": ["sink_name", "plugin", "options"],
+    },
+)
+
+
 def _handle_remove_output(
     arguments: dict[str, Any],
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
     return _execute_remove_output(arguments, state, context)
+
+
+_REMOVE_OUTPUT_DECLARATION = ToolDeclaration(
+    name="remove_output",
+    handler=_handle_remove_output,
+    kind=ToolKind.MUTATION,
+    description="Remove a pipeline output (sink) by name.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "sink_name": {"type": "string", "description": "Sink name to remove."},
+        },
+        "required": ["sink_name"],
+    },
+)
 
 
 def _execute_set_output(
@@ -220,3 +277,38 @@ def _handle_patch_output_options(
         plugin_name=output.plugin,
         config_snapshot=output.options,
     )
+
+
+_PATCH_OUTPUT_OPTIONS_DECLARATION = ToolDeclaration(
+    name="patch_output_options",
+    handler=_handle_patch_output_options,
+    kind=ToolKind.MUTATION,
+    description="Apply a shallow merge-patch to an output's options. "
+    "Keys in the patch overwrite existing keys. "
+    "Keys set to null are deleted. Missing keys are unchanged.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "sink_name": {
+                "type": "string",
+                "description": "Name of the output (sink) to patch.",
+            },
+            "patch": {
+                "type": "object",
+                "description": "Merge-patch to apply to output options.",
+            },
+        },
+        "required": ["sink_name", "patch"],
+    },
+)
+
+
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _SET_OUTPUT_DECLARATION,
+    _REMOVE_OUTPUT_DECLARATION,
+    _PATCH_OUTPUT_OPTIONS_DECLARATION,
+)
+"""Every tool declared in this module, in stable order.
+
+``_dispatch.py`` aggregates this tuple alongside every other plane's
+TOOLS_IN_MODULE to build the registered-tool universe."""

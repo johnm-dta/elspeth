@@ -38,6 +38,10 @@ from elspeth.web.composer.tools._common import (
     _validate_mutation_arguments,
     _validate_plugin_name,
 )
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
+)
 
 _NODE_ROUTING_OPTION_PATCH_KEYS: Final[frozenset[str]] = frozenset({"input", "on_success", "on_error", "routes", "fork_to"})
 
@@ -100,12 +104,127 @@ def _handle_list_transforms(
     return _discovery_result(state, context.catalog.list_transforms())
 
 
+_LIST_TRANSFORMS_DECLARATION = ToolDeclaration(
+    name="list_transforms",
+    handler=_handle_list_transforms,
+    kind=ToolKind.DISCOVERY,
+    description="List available transform plugins with name and summary.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+    cacheable=True,
+)
+
+
 def _handle_list_sinks(
     arguments: dict[str, Any],
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
     return _discovery_result(state, context.catalog.list_sinks())
+
+
+_LIST_SINKS_DECLARATION = ToolDeclaration(
+    name="list_sinks",
+    handler=_handle_list_sinks,
+    kind=ToolKind.DISCOVERY,
+    description="List available sink plugins with name and summary.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+    cacheable=True,
+)
+
+
+_UPSERT_NODE_DECLARATION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "description": "Unique node identifier."},
+        "node_type": {
+            "type": "string",
+            "enum": ["transform", "gate", "aggregation", "coalesce"],
+        },
+        "plugin": {
+            "type": ["string", "null"],
+            "description": "Plugin name. Required for transform/aggregation. Null for gate/coalesce.",
+        },
+        "input": {
+            "type": "string",
+            "description": (
+                "Connection-name string this node CONSUMES. MUST equal the value of some "
+                "upstream's on_success (or routes value, or on_error) field. NOT the upstream "
+                "node's id — connections are matched by string, not by graph topology. "
+                "Example: if source.on_success='raw_url_rows', this node sets input='raw_url_rows'."
+            ),
+            "examples": ["raw_url_rows", "fetched_text", "scored_rows"],
+        },
+        "on_success": {
+            "type": ["string", "null"],
+            "description": (
+                "Output connection. Required for transform/aggregation/coalesce. Null for "
+                "gates (routing is via condition/routes). When set, this is the connection-name "
+                "string the node PUBLISHES — some downstream input/sink_name MUST equal this "
+                "value. The runtime matches strings, not topology."
+            ),
+            "examples": ["fetched_text", "scored_rows", "lines_out"],
+        },
+        "on_error": {"type": ["string", "null"], "description": "Error output connection (transform/aggregation only)."},
+        "options": {"type": "object", "description": "Plugin-specific config (transform/aggregation only)."},
+        "condition": {"type": ["string", "null"], "description": "Boolean expression (gate only). Evaluated per row."},
+        "routes": {
+            "type": ["object", "null"],
+            "description": (
+                "Route mapping {true: sink_or_connection_or_discard, false: sink_or_connection_or_discard} "
+                "(gate only, mutually exclusive with fork_to). Use 'discard' to drop that route with "
+                "an audited gate_discarded terminal outcome."
+            ),
+        },
+        "fork_to": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": "Fork destinations — row is copied to all listed paths (gate only, mutually exclusive with routes).",
+        },
+        "branches": {
+            "type": ["array", "object", "null"],
+            "items": {"type": "string"},
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Branches to merge (coalesce only). Use list form when branch identity and input "
+                "connection are the same, or object form {branch_name: input_connection} when a "
+                "branch flows through transforms before coalescing."
+            ),
+        },
+        "policy": {"type": ["string", "null"], "description": "Merge trigger policy (coalesce only)."},
+        "merge": {"type": ["string", "null"], "description": "Field merge strategy (coalesce only)."},
+        "trigger": {
+            "type": ["object", "null"],
+            "description": "Optional early batch trigger config (aggregation only). Omit, null, or {} for end-of-source-only aggregation.",
+            "additionalProperties": False,
+            "properties": {
+                "count": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "description": "Flush after this many accepted rows.",
+                },
+                "timeout_seconds": {
+                    "type": ["number", "null"],
+                    "exclusiveMinimum": 0,
+                    "description": "Flush after this many seconds since the first accepted row.",
+                },
+                "condition": {
+                    "type": ["string", "null"],
+                    "description": "Boolean expression over row['batch_count'] and row['batch_age_seconds']; do not use end_of_source here.",
+                },
+            },
+        },
+        "output_mode": {
+            "type": ["string", "null"],
+            "enum": ["passthrough", "transform", None],
+            "description": "Aggregation output mode (aggregation only). Defaults to 'transform' if omitted.",
+        },
+        "expected_output_count": {
+            "type": ["integer", "null"],
+            "description": "Expected number of output rows from aggregation (aggregation only). Optional; omit when output count depends on group_by distinct values.",
+        },
+    },
+    "required": ["id", "node_type", "input"],
+}
 
 
 def _handle_upsert_node(
@@ -140,12 +259,63 @@ def _handle_upsert_node(
     )
 
 
+_UPSERT_NODE_DECLARATION = ToolDeclaration(
+    name="upsert_node",
+    handler=_handle_upsert_node,
+    kind=ToolKind.MUTATION,
+    description=(
+        "Add or update a pipeline node. "
+        "Fields are node_type-dependent: "
+        "transform/aggregation use plugin+options; "
+        "gate uses condition+routes (or fork_to); "
+        "coalesce uses branches+policy+merge. "
+        "Omit fields that don't apply to your node_type."
+    ),
+    json_schema=_UPSERT_NODE_DECLARATION_JSON_SCHEMA,
+)
+
+
 def _handle_upsert_edge(
     arguments: dict[str, Any],
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
     return _execute_upsert_edge(arguments, state, context)
+
+
+_UPSERT_EDGE_DECLARATION = ToolDeclaration(
+    name="upsert_edge",
+    handler=_handle_upsert_edge,
+    kind=ToolKind.MUTATION,
+    description=(
+        "Add or update a connection between nodes. When the edge targets a sink, "
+        "this also updates the source/node routing field used by runtime "
+        "(on_success, on_error, gate routes, or fork destinations)."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "Unique edge identifier."},
+            "from_node": {"type": "string", "description": "Source node ID or 'source'."},
+            "to_node": {"type": "string", "description": "Destination node ID or sink name."},
+            "edge_type": {
+                "type": "string",
+                "enum": ["on_success", "on_error", "route_true", "route_false", "fork"],
+            },
+            "label": {"type": ["string", "null"], "description": "Display label."},
+        },
+        "required": ["id", "from_node", "to_node", "edge_type"],
+        "examples": [
+            {
+                "id": "e_judge_layers_error",
+                "from_node": "judge_layers",
+                "to_node": "llm_failures",
+                "edge_type": "on_error",
+                "label": "LLM failures",
+            }
+        ],
+    },
+)
 
 
 def _handle_remove_node(
@@ -156,6 +326,21 @@ def _handle_remove_node(
     return _execute_remove_node(arguments, state, context)
 
 
+_REMOVE_NODE_DECLARATION = ToolDeclaration(
+    name="remove_node",
+    handler=_handle_remove_node,
+    kind=ToolKind.MUTATION,
+    description="Remove a node and all its edges.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "Node ID to remove."},
+        },
+        "required": ["id"],
+    },
+)
+
+
 def _handle_remove_edge(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -164,12 +349,49 @@ def _handle_remove_edge(
     return _execute_remove_edge(arguments, state, context)
 
 
+_REMOVE_EDGE_DECLARATION = ToolDeclaration(
+    name="remove_edge",
+    handler=_handle_remove_edge,
+    kind=ToolKind.MUTATION,
+    description="Remove an edge by ID.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "Edge ID to remove."},
+        },
+        "required": ["id"],
+    },
+)
+
+
 def _handle_set_metadata(
     arguments: dict[str, Any],
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
     return _execute_set_metadata(arguments, state, context)
+
+
+_SET_METADATA_DECLARATION = ToolDeclaration(
+    name="set_metadata",
+    handler=_handle_set_metadata,
+    kind=ToolKind.MUTATION,
+    description="Update pipeline metadata (name and description only).",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "patch": {
+                "type": "object",
+                "description": "Partial metadata update. Only included fields are changed.",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+            },
+        },
+        "required": ["patch"],
+    },
+)
 
 
 def _execute_upsert_node(
@@ -514,3 +736,49 @@ def _handle_patch_node_options(
         plugin_name=node.plugin,
         config_snapshot=node.options,
     )
+
+
+_PATCH_NODE_OPTIONS_DECLARATION = ToolDeclaration(
+    name="patch_node_options",
+    handler=_handle_patch_node_options,
+    kind=ToolKind.MUTATION,
+    description="Apply a shallow merge-patch to a node's options. "
+    "Keys in the patch overwrite existing keys. "
+    "Keys set to null are deleted. Missing keys are unchanged. "
+    "Do not use this for node routing fields such as on_success/on_error/input/routes; "
+    "use upsert_edge or upsert_node for routing edits.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "node_id": {
+                "type": "string",
+                "description": "ID of the node to patch.",
+            },
+            "patch": {
+                "type": "object",
+                "description": (
+                    "Merge-patch to apply to plugin options only. "
+                    "Node-level routing fields such as on_success, on_error, input, routes, "
+                    "and fork_to are siblings of options; edit them with upsert_edge or upsert_node."
+                ),
+            },
+        },
+        "required": ["node_id", "patch"],
+    },
+)
+
+
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _LIST_TRANSFORMS_DECLARATION,
+    _LIST_SINKS_DECLARATION,
+    _UPSERT_NODE_DECLARATION,
+    _UPSERT_EDGE_DECLARATION,
+    _REMOVE_NODE_DECLARATION,
+    _REMOVE_EDGE_DECLARATION,
+    _SET_METADATA_DECLARATION,
+    _PATCH_NODE_OPTIONS_DECLARATION,
+)
+"""Every tool declared in this module, in stable order.
+
+``_dispatch.py`` aggregates this tuple alongside every other plane's
+TOOLS_IN_MODULE to build the registered-tool universe."""

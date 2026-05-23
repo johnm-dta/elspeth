@@ -294,7 +294,7 @@ class TestEngineValidatorPluginDrift:
 
 
 class TestComposerToolNameDrift:
-    """Verify the skill's tool-inventory enumeration matches get_tool_definitions().
+    """Verify the skill's tool-inventory enumeration matches the declared tools.
 
     The skill at ``src/elspeth/web/composer/skills/pipeline_composer.md``
     instructs the LLM to load schemas for every composer tool before
@@ -302,18 +302,25 @@ class TestComposerToolNameDrift:
     knowledge (mandatory before any pipeline work)" inside the CRITICAL
     section) is hand-maintained as bulleted categories
     (Discovery / State-preview / Build-edit / Diagnostics / Blobs /
-    Secrets). If ``get_tool_definitions()`` in
-    ``src/elspeth/web/composer/tools.py`` adds, removes, or renames a
-    tool without a matching skill update, the LLM either fails to load
-    a tool it needs (InputValidationError on first call) or wastes a
-    budget turn loading a tool that isn't registered. This drift gate
-    catches both directions and is the Scope-A deliverable from
-    Followup D (docs/skill-rgr/followup-D-tool-inventory-bootstrap.md).
+    Secrets). If a tool is added, removed, or renamed in the
+    ``_REGISTERED_TOOLS`` declarations (or in the
+    dispatch-outside-execute_tool carve-outs ``request_advisor_hint`` /
+    ``request_interpretation_review``) without a matching skill update,
+    the LLM either fails to load a tool it needs (InputValidationError
+    on first call) or wastes a budget turn loading a tool that isn't
+    registered. This drift gate catches both directions and is the
+    Scope-A deliverable from Followup D
+    (docs/skill-rgr/followup-D-tool-inventory-bootstrap.md).
 
     Scope-B (a single ``composer_bootstrap`` tool that returns the
     manifest) is tracked separately as ``elspeth-4f85bd6652`` and is
     deferred until the ``batch3_bootstrap`` harness scenario produces
     RED on production for at least one model.
+
+    Step 4 of elspeth-6c9972ccbf simplified this gate: tool names are now
+    derived from ``_REGISTERED_TOOLS`` declarations + the two named
+    carve-outs, so the assertion reads the canonical declaration set
+    directly rather than re-deriving it via ``get_tool_definitions()``.
 
     Historical note: this section was previously titled
     ``**Step 0 (mandatory before any pipeline work):**`` but was
@@ -354,8 +361,8 @@ class TestComposerToolNameDrift:
                 "Could not locate Foundation-knowledge tool-inventory anchors in "
                 "pipeline_composer.md. If the section was renamed, update "
                 "_extract_skill_tool_inventory_names (start_anchor / end_anchor) "
-                "so the drift gate keeps enforcing the skill ↔ "
-                "get_tool_definitions() invariant."
+                "so the drift gate keeps enforcing the skill ↔ declared-tools "
+                "invariant."
             )
         section = skill_text[start:end]
         names: set[str] = set()
@@ -364,18 +371,30 @@ class TestComposerToolNameDrift:
                 names.update(re.findall(r"`([a-z_][a-z0-9_]*)`", line))
         return names
 
-    def test_skill_tool_inventory_matches_get_tool_definitions(self) -> None:
-        """Skill tool-inventory enumeration == ``get_tool_definitions()`` name set.
+    def test_skill_tool_inventory_matches_declared_tools(self) -> None:
+        """Skill tool-inventory enumeration == declared tool name set.
 
-        Bidirectional check: any tool in the runtime that's missing from
-        the skill is a 'silent gap' (the LLM won't know to load it); any
-        tool in the skill that's not in the runtime is a 'phantom' (the
-        LLM will waste a budget turn on a tool that doesn't exist).
-        Both are caught by the same set-equality assertion.
+        Bidirectional check: any declared tool that's missing from the
+        skill is a 'silent gap' (the LLM won't know to load it); any
+        tool in the skill that's not declared is a 'phantom' (the LLM
+        will waste a budget turn on a tool that doesn't exist). Both
+        are caught by the same set-equality assertion.
+
+        Reads ``_REGISTERED_TOOLS`` (the declaration tuple) plus the
+        two named carve-outs that dispatch outside ``execute_tool``
+        (``request_advisor_hint`` and ``request_interpretation_review``).
         """
-        from elspeth.web.composer.tools import get_tool_definitions
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
 
-        runtime_names = {defn["name"] for defn in get_tool_definitions()}
+        # The advisor and interpretation-review tools dispatch outside
+        # ``execute_tool``; both still appear in ``get_tool_definitions()``
+        # and in the skill, but they are NOT in ``_REGISTERED_TOOLS``.
+        # Adding either to declarations would require widening
+        # ``ToolDeclaration.handler`` typing (see elspeth-f5da936747).
+        runtime_names: set[str] = {decl.name for decl in _REGISTERED_TOOLS} | {
+            "request_advisor_hint",
+            "request_interpretation_review",
+        }
         skill_names = self._extract_skill_tool_inventory_names(_WEB_SKILL_CONTENT)
 
         # Sanity: anchors matched but the regex returned nothing — the
@@ -393,8 +412,8 @@ class TestComposerToolNameDrift:
         phantom_in_skill = skill_names - runtime_names
 
         assert not missing_from_skill, (
-            f"Tools registered in get_tool_definitions() but not enumerated in "
-            f"the skill's Foundation-knowledge tool inventory: "
+            f"Tools declared in _REGISTERED_TOOLS (or carve-outs) but not enumerated "
+            f"in the skill's Foundation-knowledge tool inventory: "
             f"{sorted(missing_from_skill)}. Add them to "
             f"src/elspeth/web/composer/skills/pipeline_composer.md under the "
             f"appropriate category in the Foundation-knowledge section, or the "
@@ -403,11 +422,11 @@ class TestComposerToolNameDrift:
         )
         assert not phantom_in_skill, (
             f"Tools enumerated in the skill's Foundation-knowledge tool inventory "
-            f"but not registered in get_tool_definitions(): "
-            f"{sorted(phantom_in_skill)}. Either register them in "
-            f"src/elspeth/web/composer/tools.py or remove them from the skill — "
-            f"the LLM cannot call a tool that isn't in get_tool_definitions(), "
-            f"and the bullet sets a false expectation."
+            f"but not declared in _REGISTERED_TOOLS or known carve-outs: "
+            f"{sorted(phantom_in_skill)}. Either declare them in the appropriate "
+            f"plane's TOOLS_IN_MODULE tuple or remove them from the skill — "
+            f"the LLM cannot call a tool that isn't dispatched, and the bullet "
+            f"sets a false expectation."
         )
 
 

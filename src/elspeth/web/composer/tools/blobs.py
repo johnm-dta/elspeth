@@ -11,11 +11,10 @@ Hosts:
 - Blob DTOs (``BlobToolRecord`` / ``BlobCreatePayload`` / ``_PreparedBlobCreate``)
   and in-transaction signal exceptions (``_BlobQuotaExceededInTxn`` /
   ``_BlobUpdateBlockedByActiveRun``).
-- Kwarg-shape frozensets (``_BLOB_QUOTA_MUTATION_TOOLS`` /
-  ``_BLOB_PROVENANCE_MUTATION_TOOLS``) describing which extended kwargs the
-  dispatch path threads into each blob handler. Tool-classification name sets
-  and predicates live in ``elspeth.web.composer.tools.discovery``; the trailing
-  comment in this file points to that module.
+- Per-tool blob-kwarg-shape data lives on ``ToolDeclaration``
+  (``needs_blob_quota`` / ``needs_blob_provenance``). Tool-classification name
+  sets and predicates live in ``elspeth.web.composer.tools.discovery``; the
+  trailing comment in this file points to that module.
 
 Patch-target stability: tests that bind ``_BLOB_QUOTA_BYTES`` /
 ``_check_blob_quota`` / ``_sync_get_blob`` by full dotted path must target this
@@ -63,6 +62,10 @@ from elspeth.web.composer.tools._common import (
     ToolResult,
     _discovery_result,
     _failure_result,
+)
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
 )
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
 
@@ -201,6 +204,15 @@ def _handle_list_blobs(
     return _discovery_result(state, blobs)
 
 
+_LIST_BLOBS_DECLARATION = ToolDeclaration(
+    name="list_blobs",
+    handler=_handle_list_blobs,
+    kind=ToolKind.BLOB_DISCOVERY,
+    description="List uploaded/created files (blobs) in this session with metadata.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+)
+
+
 def _handle_get_blob_metadata(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -216,6 +228,21 @@ def _handle_get_blob_metadata(
     # Exclude storage_path from response
     safe_blob = {k: v for k, v in blob.items() if k != "storage_path"}
     return _discovery_result(state, safe_blob)
+
+
+_GET_BLOB_METADATA_DECLARATION = ToolDeclaration(
+    name="get_blob_metadata",
+    handler=_handle_get_blob_metadata,
+    kind=ToolKind.BLOB_DISCOVERY,
+    description="Get metadata for a specific blob (file) by ID.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {"type": "string", "description": "Blob ID."},
+        },
+        "required": ["blob_id"],
+    },
+)
 
 
 _ALLOWED_BLOB_MIME_TYPES: frozenset[str] = frozenset(
@@ -564,6 +591,51 @@ def _execute_create_blob(
         return _failure_result(state, quota_error)
 
     return _discovery_result(state, _blob_create_payload(prepared))
+
+
+_CREATE_BLOB_DECLARATION = ToolDeclaration(
+    name="create_blob",
+    handler=_execute_create_blob,
+    kind=ToolKind.BLOB_MUTATION,
+    description=(
+        "Create a new file (blob) from inline content. "
+        "Use this to create seed input files (URLs, JSON, CSV snippets) "
+        "mid-conversation without requiring manual upload."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "description": "Filename for the blob (e.g. 'urls.csv', 'seed.json').",
+            },
+            "mime_type": {
+                "type": "string",
+                "enum": [
+                    "text/plain",
+                    "application/json",
+                    "text/csv",
+                    "application/x-jsonlines",
+                    "application/jsonl",
+                    "text/jsonl",
+                ],
+                "description": "MIME type of the content.",
+            },
+            "content": {
+                "type": "string",
+                "description": "The file content as a string.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Optional description of the file's purpose.",
+            },
+        },
+        "required": ["filename", "mime_type", "content"],
+    },
+    needs_blob_quota=True,
+    needs_blob_provenance=True,
+    blob_store_only=True,
+)
 
 
 # Per-session mutex guarding blob-file/DB consistency.
@@ -991,6 +1063,31 @@ def _execute_update_blob(
         )
 
 
+_UPDATE_BLOB_DECLARATION = ToolDeclaration(
+    name="update_blob",
+    handler=_execute_update_blob,
+    kind=ToolKind.BLOB_MUTATION,
+    description="Update the content of an existing blob (file). Overwrites the file content while preserving metadata.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {
+                "type": "string",
+                "description": "ID of the blob to update.",
+            },
+            "content": {
+                "type": "string",
+                "description": "New file content.",
+            },
+        },
+        "required": ["blob_id", "content"],
+    },
+    needs_blob_quota=True,
+    needs_blob_provenance=False,
+    blob_store_only=True,
+)
+
+
 def _execute_delete_blob(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -1094,6 +1191,27 @@ def _execute_delete_blob(
             ) from cleanup_exc
 
     return _discovery_result(state, {"blob_id": blob_id, "deleted": True})
+
+
+_DELETE_BLOB_DECLARATION = ToolDeclaration(
+    name="delete_blob",
+    handler=_execute_delete_blob,
+    kind=ToolKind.BLOB_MUTATION,
+    description="Delete a blob (file) and its storage.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {
+                "type": "string",
+                "description": "ID of the blob to delete.",
+            },
+        },
+        "required": ["blob_id"],
+    },
+    needs_blob_quota=False,
+    needs_blob_provenance=False,
+    blob_store_only=True,
+)
 
 
 def _verify_blob_content_integrity(blob: BlobToolRecord, data: bytes) -> None:
@@ -1217,25 +1335,44 @@ def _execute_get_blob_content(
     )
 
 
-_BLOB_QUOTA_MUTATION_TOOLS: frozenset[str] = frozenset(
-    {
-        "create_blob",
-        "update_blob",
-        "apply_pipeline_recipe",
-    }
+_GET_BLOB_CONTENT_DECLARATION = ToolDeclaration(
+    name="get_blob_content",
+    handler=_execute_get_blob_content,
+    kind=ToolKind.BLOB_DISCOVERY,
+    description="Retrieve the content of a blob (file) for inspection. Large files are truncated to 50,000 characters.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {
+                "type": "string",
+                "description": "ID of the blob to read.",
+            },
+        },
+        "required": ["blob_id"],
+    },
 )
 
-_BLOB_PROVENANCE_MUTATION_TOOLS: frozenset[str] = frozenset(
-    {
-        "create_blob",
-        "apply_pipeline_recipe",
-    }
-)
 
 # ``_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES`` and the matching predicate
 # ``is_blob_store_only_mutation_tool`` are declared in
-# ``elspeth.web.composer.tools.discovery``. Import that module to get the
-# canonical declaration. The ``_BLOB_QUOTA_MUTATION_TOOLS`` and
-# ``_BLOB_PROVENANCE_MUTATION_TOOLS`` frozensets above are kwarg-shape
-# distinctions (which dispatch path receives which extended kwargs), not
-# tool-classification sets, so they stay here next to the blob handlers.
+# ``elspeth.web.composer.tools.discovery``. Per-tool blob-kwarg-shape data
+# (``needs_blob_quota`` / ``needs_blob_provenance``) lives on each
+# ``ToolDeclaration`` next to the handler that consumes it; the dispatcher
+# carries the full ``ToolContext`` to every handler, so there is no
+# dispatch-time membership check to gate.
+
+
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _LIST_BLOBS_DECLARATION,
+    _GET_BLOB_METADATA_DECLARATION,
+    _GET_BLOB_CONTENT_DECLARATION,
+    _CREATE_BLOB_DECLARATION,
+    _UPDATE_BLOB_DECLARATION,
+    _DELETE_BLOB_DECLARATION,
+)
+"""Every tool declared in this module, in stable order.
+
+``_dispatch.py`` aggregates this tuple from every plane to build the
+registered-tool universe. Tests that import this module directly see the
+same TOOLS_IN_MODULE that production sees; the aggregation logic lives at
+the consumer site, not in a module-level side effect."""

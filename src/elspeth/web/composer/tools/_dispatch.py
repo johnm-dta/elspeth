@@ -1,14 +1,31 @@
-"""Composer dispatch + registry — the tool execution surface (merges every plane's handlers)."""
+"""Composer dispatch — the tool execution surface.
+
+Tool registration is aggregated in ``_registry.py`` (the single site that
+imports every plane's ``TOOLS_IN_MODULE`` tuple and derives the per-kind
+handler maps and name sets). This module hosts the dispatcher
+(``execute_tool``), the LLM-facing tool-definitions emitter
+(``get_tool_definitions``), and the import-time invariants on async / sync
+registry separation, trailing-tool cache pin, and MANIFEST<->registry
+set-equality.
+
+Imports from ``_registry`` and ``discovery`` are for internal use inside
+this module. Consumers needing the per-kind handler maps or name sets
+should reach for ``_registry`` directly — ``_dispatch.__all__`` lists
+only what this module defines (``execute_tool``, ``get_tool_definitions``,
+``_inject_prior_validation``).
+"""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any, Final, cast
+from typing import Any, Final
 
+from jsonschema import Draft202012Validator
 from sqlalchemy import Engine
 
+from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.state import (
@@ -16,8 +33,6 @@ from elspeth.web.composer.state import (
     ValidationSummary,
 )
 from elspeth.web.composer.tools._common import (
-    _DEFAULT_SOURCE_VALIDATION_FAILURE,
-    _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
     RuntimePreflight,
     ToolContext,
     ToolHandler,
@@ -26,1228 +41,254 @@ from elspeth.web.composer.tools._common import (
     build_plugin_schemas_for_failure,
     should_augment_with_plugin_schemas,
 )
-from elspeth.web.composer.tools.blobs import (
-    _execute_create_blob,
-    _execute_delete_blob,
-    _execute_get_blob_content,
-    _execute_update_blob,
-    _handle_get_blob_metadata,
-    _handle_list_blobs,
-)
-from elspeth.web.composer.tools.discovery import (
-    _BLOB_DISCOVERY_TOOL_NAMES,
+from elspeth.web.composer.tools._registry import (
+    _BLOB_DISCOVERY_TOOLS,
     _BLOB_MUTATION_TOOL_NAMES,
-    _CACHEABLE_DISCOVERY_TOOL_NAMES,
-    _DISCOVERY_TOOL_NAMES,
+    _BLOB_MUTATION_TOOLS,
+    _DISCOVERY_TOOLS,
     _MUTATION_TOOL_NAMES,
-    _SECRET_DISCOVERY_TOOL_NAMES,
+    _MUTATION_TOOLS,
+    _REGISTERED_TOOLS,
+    _SECRET_DISCOVERY_TOOLS,
     _SECRET_MUTATION_TOOL_NAMES,
-    _SESSION_AWARE_TOOL_NAMES,
+    _SECRET_MUTATION_TOOLS,
+    _TOOL_DEFS_BY_NAME,
 )
-from elspeth.web.composer.tools.generation import (
-    _execute_diff_pipeline,
-    _execute_explain_validation_error,
-    _execute_get_audit_info,
-    _execute_get_plugin_assistance,
-    _execute_list_models,
-    _execute_preview_pipeline,
-    _handle_get_expression_grammar,
-    _handle_get_plugin_schema,
-)
-from elspeth.web.composer.tools.outputs import (
-    _handle_patch_output_options,
-    _handle_remove_output,
-    _handle_set_output,
-)
-from elspeth.web.composer.tools.recipes import (
-    _execute_list_recipes,
-)
-from elspeth.web.composer.tools.secrets import (
-    _execute_wire_secret_ref,
-    _handle_list_secret_refs,
-    _handle_validate_secret_ref,
-)
+from elspeth.web.composer.tools.discovery import _SESSION_AWARE_TOOL_NAMES
 from elspeth.web.composer.tools.sessions import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_VALUES,
-    _execute_apply_pipeline_recipe,
-    _execute_get_pipeline_state,
-    _handle_set_pipeline,
 )
-from elspeth.web.composer.tools.sources import (
-    _execute_inspect_source,
-    _execute_set_source_from_blob,
-    _handle_clear_source,
-    _handle_list_sources,
-    _handle_patch_source_options,
-    _handle_set_source,
+
+__all__ = [
+    "_inject_prior_validation",
+    "execute_tool",
+    "get_tool_definitions",
+]
+
+
+# ---------------------------------------------------------------------------
+# LLM-facing tool catalogue
+#
+# The bulk of the catalogue is derived from ``_TOOL_DEFS_BY_NAME``. Two tools
+# are dispatched *outside* ``execute_tool`` and therefore do not carry a
+# ``ToolDeclaration``:
+#
+# - ``request_advisor_hint`` — intercepted in ``service.py`` before dispatch.
+# - ``request_interpretation_review`` — session-aware async handler in
+#   ``sessions._SESSION_AWARE_TOOL_HANDLERS``; widening the declaration's
+#   handler typing to admit async is deferred to ``elspeth-f5da936747``.
+#
+# These two definitions are emitted inline below.  ``wire_secret_ref`` is
+# placed last so the Anthropic prompt-cache marker (pinned by
+# ``test_trailing_tool_name_is_locked``) stays attached to it across deploys.
+# ---------------------------------------------------------------------------
+
+
+def _validate_and_freeze_tool_definition(defn: dict[str, Any]) -> Mapping[str, Any]:
+    """Meta-validate ``defn["parameters"]`` against JSON Schema Draft 2020-12, then deep-freeze.
+
+    Declared tools meta-validate their ``json_schema`` inside
+    ``ToolDeclaration.__post_init__``. The two inline definitions below
+    (``request_advisor_hint`` and ``request_interpretation_review``) do
+    NOT flow through ``ToolDeclaration`` because their handlers are
+    async / coroutine-shaped — but they ARE emitted on every
+    ``get_tool_definitions`` call alongside the declared tools, so they
+    must meet the same schema-validity contract. Without this check a
+    typo in either inline schema would escape to the LLM API edge and
+    fail at compose time with an opaque upstream 400. Systems-thinker
+    recommendation #3 (2026-05-23).
+
+    Validation runs BEFORE ``deep_freeze`` because
+    ``Draft202012Validator.check_schema`` uses ``isinstance(x, dict)`` in
+    its type checker and rejects ``MappingProxyType`` / tuple-coerced
+    arrays the deep-freeze produces.
+    """
+    Draft202012Validator.check_schema(defn["parameters"])
+    frozen: Mapping[str, Any] = deep_freeze(defn)
+    return frozen
+
+
+_REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freeze_tool_definition(
+    {
+        "name": "request_advisor_hint",
+        "description": (
+            "ESCAPE HATCH — call when one of the declared trigger criteria applies: "
+            "reactive validation-loop recovery after two or more unchanged failures, "
+            "proactive security/safety wiring review before `set_pipeline`, or "
+            "proactive red-listed plugin review before `set_pipeline`. The proactive "
+            "security trigger covers content moderation, prompt-injection defence, "
+            "secret routing, PII/regulatory sinks, and externally fetched content "
+            "flowing toward LLMs. Forwards your problem statement and context to a "
+            "frontier model and returns guidance text. The reply is ADVICE, not "
+            "configuration — you must still call the appropriate mutation tool "
+            "yourself to apply any change. Budget is finite (sized per compose "
+            "request, not per session lifetime) and exhausting it returns a "
+            "structured error rather than crashing — inspect budget_remaining "
+            "in each response. Do NOT call this tool in a loop, do NOT use it "
+            "as a substitute for reading validator output. Disabled by default; "
+            "only available when the operator has explicitly enabled it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "trigger": {
+                    "type": "string",
+                    "enum": list(ADVISOR_TRIGGER_VALUES),
+                    "description": (
+                        "Why this advisor call is allowed. Use reactive_validation_loop "
+                        "only after the recovery sequence and at least two unchanged "
+                        "validator failures. Use proactive_security_safety before "
+                        "set_pipeline for security/safety-sensitive flows. Use "
+                        "proactive_red_listed_plugin before set_pipeline when the plan "
+                        "uses a red-listed plugin such as llm, database, dataverse, "
+                        "Azure safety transforms, RAG retrieval, or Chroma sinks."
+                    ),
+                },
+                "problem_summary": {
+                    "type": "string",
+                    "description": (
+                        "Your own statement of what you are trying to do and "
+                        "why you are stuck. One or two sentences. Be specific: "
+                        "'I cannot get llm transform options to validate against "
+                        "the Azure provider schema' is useful; 'help' is not."
+                    ),
+                },
+                "recent_errors": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": ("The last validator error messages verbatim, most recent first. Include up to 5; do not paraphrase."),
+                },
+                "attempted_actions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "What you have already tried, one item per attempt. "
+                        "Include the tool name and a one-line summary of the "
+                        "argument shape. The advisor uses this to avoid "
+                        "suggesting things you have already ruled out."
+                    ),
+                },
+                "schema_excerpt": {
+                    "type": "string",
+                    "description": (
+                        "Optional — the relevant plugin schema snippet you are "
+                        "working against, as returned by `get_plugin_schema`. "
+                        "Including this lets the advisor give field-level "
+                        "guidance grounded in the exact contract."
+                    ),
+                },
+            },
+            "required": ["trigger", "problem_summary", "recent_errors", "attempted_actions"],
+        },
+    }
 )
-from elspeth.web.composer.tools.transforms import (
-    _handle_list_sinks,
-    _handle_list_transforms,
-    _handle_patch_node_options,
-    _handle_remove_edge,
-    _handle_remove_node,
-    _handle_set_metadata,
-    _handle_upsert_edge,
-    _handle_upsert_node,
+
+
+# The description below is normative documentation for the LLM (mirrored
+# in the composer skill markdown) and is reviewed by the audit panel as
+# part of the request_interpretation_review event row's provenance.
+_REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freeze_tool_definition(
+    {
+        "name": "request_interpretation_review",
+        "description": (
+            "Ask the user to review your interpretation of a subjective or "
+            "underspecified term they used. Call this BEFORE you finalise "
+            "the prompt template for any LLM transform whose prompt depends "
+            "on the term. Surface ONE term per call. The composition state "
+            "MUST already contain the affected LLM transform (call upsert_node "
+            "first) and its prompt_template MUST contain the placeholder "
+            "{{interpretation:<term>}}. The user will see your draft and "
+            "either accept it or amend it. Do not ask the user in assistant "
+            "prose; this tool is the review surface. If no composition state "
+            "exists yet, stage the LLM transform with a placeholder first, "
+            "wait for that tool result, then call this tool. Do not call this "
+            "for concrete operators (e.g., 'rate 1-10') or for terms the "
+            "user already defined in the conversation."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["affected_node_id", "user_term", "llm_draft"],
+            "properties": {
+                "affected_node_id": {
+                    "type": "string",
+                    "description": "node_id of the LLM transform whose prompt template depends on this term",
+                },
+                "user_term": {
+                    "type": "string",
+                    "description": "The user-provided term, verbatim (e.g., 'cool', 'important', 'risky')",
+                },
+                "llm_draft": {
+                    "type": "string",
+                    "description": "Your draft interpretation of the term, in your own words, suitable to embed as a phrase in the prompt template",
+                },
+            },
+        },
+    }
 )
 
 
 def get_tool_definitions() -> list[dict[str, Any]]:
     """Return JSON Schema tool definitions for the LLM.
 
-    Returns 39 tools: 13 discovery + 13 mutation + 9 blob tools + 3 secret
-    tools + 1 advisor tool. ``request_advisor_hint`` is the only tool that
-    is filtered out of the LLM-visible list when the operator's
-    ``composer_advisor_enabled`` flag is False (the default) — see
-    ``ComposerServiceImpl._get_litellm_tools``.
+    Returns 40 tools: 13 discovery + 13 mutation + 9 blob tools + 3 secret
+    tools + 1 advisor tool + 1 session-aware interpretation-review tool.
+    ``request_advisor_hint`` is filtered out of the LLM-visible list when
+    the operator's ``composer_advisor_enabled`` flag is False (the default)
+    — see ``ComposerServiceImpl._get_litellm_tools``.
+
+    The tool catalogue is derived from ``_TOOL_DEFS_BY_NAME`` (every
+    declared tool) plus two inline definitions for the dispatch-outside-
+    execute_tool carve-outs (``request_advisor_hint`` and
+    ``request_interpretation_review``). The trailing entry is pinned to
+    ``wire_secret_ref`` by ``test_trailing_tool_name_is_locked`` —
+    Anthropic prompt-cache markers attach to the last tool, and reordering
+    invalidates the cache for every follow-up turn.
 
     The skill at ``src/elspeth/web/composer/skills/pipeline_composer.md``
     enumerates the same tool set in its Foundation-knowledge section
-    (under "## CRITICAL: Tool Schema Availability"). The drift gate
-    ``TestComposerToolNameDrift::test_skill_tool_inventory_matches_get_tool_definitions``
-    in ``tests/unit/web/composer/test_skill_drift.py`` enforces equality
-    between the runtime list returned here and the skill's bulleted
-    categories — adding a tool without updating both sides fails CI.
+    (under "## CRITICAL: Tool Schema Availability"). Any skill ↔ runtime
+    drift is caught by the per-tool prose tests in ``test_skill_drift.py``;
+    the older inventory-parser drift gate (which existed because
+    ``get_tool_definitions()`` was hand-maintained) was retired when
+    declarations became the source of truth.
     """
+    # Every entry on every call is freshly ``deep_thaw``ed from the deeply
+    # immutable module-level registry. This guarantees mutually-isolated
+    # mutable copies — a caller modifying ``result[0]["parameters"]["required"]``
+    # cannot taint the registry's source-of-truth, nor a subsequent call's
+    # output (Python-engineer H1 review finding, 2026-05-23). The cost is
+    # one deep-walk per emission; ``get_tool_definitions`` is called once per
+    # compose turn, so the cost is negligible against correctness.
+    declared = [deep_thaw(defn) for name, defn in _TOOL_DEFS_BY_NAME.items() if name != "wire_secret_ref"]
     return [
-        # Discovery tools
-        {
-            "name": "list_sources",
-            "description": "List available source plugins with name and summary.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "list_transforms",
-            "description": "List available transform plugins with name and summary.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "list_sinks",
-            "description": "List available sink plugins with name and summary.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "get_plugin_schema",
-            "description": "Get the full configuration schema for a plugin.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "plugin_type": {
-                        "type": "string",
-                        "enum": ["source", "transform", "sink"],
-                        "description": "Plugin type.",
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Plugin name (e.g. 'csv').",
-                    },
-                },
-                "required": ["plugin_type", "name"],
-            },
-        },
-        {
-            "name": "get_expression_grammar",
-            "description": "Get the gate expression syntax reference.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        # Mutation tools
-        {
-            "name": "set_source",
-            "description": "Set or replace the pipeline source.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "plugin": {"type": "string", "description": "Source plugin name."},
-                    "on_success": {
-                        "type": "string",
-                        "description": (
-                            "Connection-name string this source PUBLISHES. Some downstream consumer "
-                            "(transform 'input' or output 'sink_name') MUST equal this value for wiring "
-                            "to resolve. The runtime matches strings, not graph topology — pick any "
-                            "name unique within the pipeline; it does not need to be the downstream "
-                            "node's id."
-                        ),
-                        "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
-                    },
-                    "options": {"type": "object", "description": "Plugin-specific config."},
-                    "on_validation_failure": {
-                        "type": "string",
-                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
-                    },
-                },
-                "required": ["plugin", "on_success", "options", "on_validation_failure"],
-            },
-        },
-        {
-            "name": "upsert_node",
-            "description": (
-                "Add or update a pipeline node. "
-                "Fields are node_type-dependent: "
-                "transform/aggregation use plugin+options; "
-                "gate uses condition+routes (or fork_to); "
-                "coalesce uses branches+policy+merge. "
-                "Omit fields that don't apply to your node_type."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string", "description": "Unique node identifier."},
-                    "node_type": {
-                        "type": "string",
-                        "enum": ["transform", "gate", "aggregation", "coalesce"],
-                    },
-                    "plugin": {
-                        "type": ["string", "null"],
-                        "description": "Plugin name. Required for transform/aggregation. Null for gate/coalesce.",
-                    },
-                    "input": {
-                        "type": "string",
-                        "description": (
-                            "Connection-name string this node CONSUMES. MUST equal the value of some "
-                            "upstream's on_success (or routes value, or on_error) field. NOT the upstream "
-                            "node's id — connections are matched by string, not by graph topology. "
-                            "Example: if source.on_success='raw_url_rows', this node sets input='raw_url_rows'."
-                        ),
-                        "examples": ["raw_url_rows", "fetched_text", "scored_rows"],
-                    },
-                    "on_success": {
-                        "type": ["string", "null"],
-                        "description": (
-                            "Output connection. Required for transform/aggregation/coalesce. Null for "
-                            "gates (routing is via condition/routes). When set, this is the connection-name "
-                            "string the node PUBLISHES — some downstream input/sink_name MUST equal this "
-                            "value. The runtime matches strings, not topology."
-                        ),
-                        "examples": ["fetched_text", "scored_rows", "lines_out"],
-                    },
-                    "on_error": {"type": ["string", "null"], "description": "Error output connection (transform/aggregation only)."},
-                    "options": {"type": "object", "description": "Plugin-specific config (transform/aggregation only)."},
-                    "condition": {"type": ["string", "null"], "description": "Boolean expression (gate only). Evaluated per row."},
-                    "routes": {
-                        "type": ["object", "null"],
-                        "description": (
-                            "Route mapping {true: sink_or_connection_or_discard, false: sink_or_connection_or_discard} "
-                            "(gate only, mutually exclusive with fork_to). Use 'discard' to drop that route with "
-                            "an audited gate_discarded terminal outcome."
-                        ),
-                    },
-                    "fork_to": {
-                        "type": ["array", "null"],
-                        "items": {"type": "string"},
-                        "description": "Fork destinations — row is copied to all listed paths (gate only, mutually exclusive with routes).",
-                    },
-                    "branches": {
-                        "type": ["array", "object", "null"],
-                        "items": {"type": "string"},
-                        "additionalProperties": {"type": "string"},
-                        "description": (
-                            "Branches to merge (coalesce only). Use list form when branch identity and input "
-                            "connection are the same, or object form {branch_name: input_connection} when a "
-                            "branch flows through transforms before coalescing."
-                        ),
-                    },
-                    "policy": {"type": ["string", "null"], "description": "Merge trigger policy (coalesce only)."},
-                    "merge": {"type": ["string", "null"], "description": "Field merge strategy (coalesce only)."},
-                    "trigger": {
-                        "type": ["object", "null"],
-                        "description": "Optional early batch trigger config (aggregation only). Omit, null, or {} for end-of-source-only aggregation.",
-                        "additionalProperties": False,
-                        "properties": {
-                            "count": {
-                                "type": ["integer", "null"],
-                                "minimum": 1,
-                                "description": "Flush after this many accepted rows.",
-                            },
-                            "timeout_seconds": {
-                                "type": ["number", "null"],
-                                "exclusiveMinimum": 0,
-                                "description": "Flush after this many seconds since the first accepted row.",
-                            },
-                            "condition": {
-                                "type": ["string", "null"],
-                                "description": "Boolean expression over row['batch_count'] and row['batch_age_seconds']; do not use end_of_source here.",
-                            },
-                        },
-                    },
-                    "output_mode": {
-                        "type": ["string", "null"],
-                        "enum": ["passthrough", "transform", None],
-                        "description": "Aggregation output mode (aggregation only). Defaults to 'transform' if omitted.",
-                    },
-                    "expected_output_count": {
-                        "type": ["integer", "null"],
-                        "description": "Expected number of output rows from aggregation (aggregation only). Optional; omit when output count depends on group_by distinct values.",
-                    },
-                },
-                "required": ["id", "node_type", "input"],
-            },
-        },
-        {
-            "name": "upsert_edge",
-            "description": (
-                "Add or update a connection between nodes. When the edge targets a sink, "
-                "this also updates the source/node routing field used by runtime "
-                "(on_success, on_error, gate routes, or fork destinations)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string", "description": "Unique edge identifier."},
-                    "from_node": {"type": "string", "description": "Source node ID or 'source'."},
-                    "to_node": {"type": "string", "description": "Destination node ID or sink name."},
-                    "edge_type": {
-                        "type": "string",
-                        "enum": ["on_success", "on_error", "route_true", "route_false", "fork"],
-                    },
-                    "label": {"type": ["string", "null"], "description": "Display label."},
-                },
-                "required": ["id", "from_node", "to_node", "edge_type"],
-                "examples": [
-                    {
-                        "id": "e_judge_layers_error",
-                        "from_node": "judge_layers",
-                        "to_node": "llm_failures",
-                        "edge_type": "on_error",
-                        "label": "LLM failures",
-                    }
-                ],
-            },
-        },
-        {
-            "name": "remove_node",
-            "description": "Remove a node and all its edges.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string", "description": "Node ID to remove."},
-                },
-                "required": ["id"],
-            },
-        },
-        {
-            "name": "remove_edge",
-            "description": "Remove an edge by ID.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string", "description": "Edge ID to remove."},
-                },
-                "required": ["id"],
-            },
-        },
-        {
-            "name": "set_metadata",
-            "description": "Update pipeline metadata (name and description only).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "patch": {
-                        "type": "object",
-                        "description": "Partial metadata update. Only included fields are changed.",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "description": {"type": "string"},
-                        },
-                    },
-                },
-                "required": ["patch"],
-            },
-        },
-        {
-            "name": "set_output",
-            "description": "Add or replace a pipeline output (sink).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sink_name": {
-                        "type": "string",
-                        "description": (
-                            "Sink name. This string is BOTH the sink's identifier (used by "
-                            "patch_output_options/remove_output) AND the connection-name the sink "
-                            "consumes — it MUST equal some upstream's on_success value. Pick a name "
-                            "describing the data being written; it does not need to match an upstream "
-                            "node's id."
-                        ),
-                        "examples": ["lines_out", "scored_results", "errors_quarantine"],
-                    },
-                    "plugin": {"type": "string", "description": "Sink plugin name (e.g. 'csv', 'json')."},
-                    "options": {
-                        "type": "object",
-                        "description": (
-                            "Plugin-specific config. For csv/json file sinks in runnable web pipelines, "
-                            "include path, schema, and explicit collision_policy."
-                        ),
-                    },
-                    "on_write_failure": {
-                        "type": "string",
-                        "description": "How to handle per-row write failures. Use 'discard' to drop with audit record, or a sink name (e.g. 'results_failures') to divert failed rows to that failsink.",
-                        "default": "discard",
-                    },
-                },
-                "required": ["sink_name", "plugin", "options"],
-            },
-        },
-        {
-            "name": "remove_output",
-            "description": "Remove a pipeline output (sink) by name.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sink_name": {"type": "string", "description": "Sink name to remove."},
-                },
-                "required": ["sink_name"],
-            },
-        },
-        {
-            "name": "patch_source_options",
-            "description": "Apply a shallow merge-patch to the current source options. "
-            "Keys in the patch overwrite existing keys. "
-            "Keys set to null are deleted. Missing keys are unchanged.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "patch": {
-                        "type": "object",
-                        "description": "Merge-patch to apply to source options.",
-                    },
-                },
-                "required": ["patch"],
-            },
-        },
-        {
-            "name": "patch_node_options",
-            "description": "Apply a shallow merge-patch to a node's options. "
-            "Keys in the patch overwrite existing keys. "
-            "Keys set to null are deleted. Missing keys are unchanged. "
-            "Do not use this for node routing fields such as on_success/on_error/input/routes; "
-            "use upsert_edge or upsert_node for routing edits.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "node_id": {
-                        "type": "string",
-                        "description": "ID of the node to patch.",
-                    },
-                    "patch": {
-                        "type": "object",
-                        "description": (
-                            "Merge-patch to apply to plugin options only. "
-                            "Node-level routing fields such as on_success, on_error, input, routes, "
-                            "and fork_to are siblings of options; edit them with upsert_edge or upsert_node."
-                        ),
-                    },
-                },
-                "required": ["node_id", "patch"],
-            },
-        },
-        {
-            "name": "patch_output_options",
-            "description": "Apply a shallow merge-patch to an output's options. "
-            "Keys in the patch overwrite existing keys. "
-            "Keys set to null are deleted. Missing keys are unchanged.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sink_name": {
-                        "type": "string",
-                        "description": "Name of the output (sink) to patch.",
-                    },
-                    "patch": {
-                        "type": "object",
-                        "description": "Merge-patch to apply to output options.",
-                    },
-                },
-                "required": ["sink_name", "patch"],
-            },
-        },
-        {
-            "name": "set_pipeline",
-            "description": "Atomically replace the entire pipeline. Provide the "
-            "complete source, nodes, edges, outputs, and metadata in one call. "
-            "This is more efficient than calling set_source + upsert_node + "
-            "upsert_edge + set_output sequentially.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "source": {
-                        "type": "object",
-                        "description": (
-                            "Source configuration: {plugin, on_success, options?, on_validation_failure?, blob_id?, inline_blob?}. "
-                            "Use blob_id to bind an already uploaded session blob, or inline_blob to "
-                            "materialize user-provided literal data while atomically setting the full pipeline."
-                        ),
-                        "properties": {
-                            "plugin": {"type": "string"},
-                            "blob_id": {
-                                "type": "string",
-                                "description": (
-                                    "Existing ready session blob ID to bind as this source. "
-                                    "The tool resolves path/blob_ref authoritatively exactly like set_source_from_blob."
-                                ),
-                            },
-                            "options": {
-                                "type": "object",
-                                "description": (
-                                    "Plugin-specific source config. Required by most file/data sources even though "
-                                    "the schema leaves it optional so the handler can return plugin-specific repair "
-                                    "feedback instead of a generic missing-argument error."
-                                ),
-                            },
-                            "on_success": {
-                                "type": "string",
-                                "description": (
-                                    "Connection-name string the source PUBLISHES. Some downstream "
-                                    "consumer (node 'input' or output 'sink_name') MUST equal this. "
-                                    "Connections match by string, not by node id."
-                                ),
-                                "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
-                            },
-                            "on_validation_failure": {
-                                "type": "string",
-                                "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
-                            },
-                            "inline_blob": {
-                                "type": "object",
-                                "description": (
-                                    "Optional inline source content to create as a session blob before binding the source. "
-                                    "Fields mirror create_blob: filename, mime_type, content, and optional description."
-                                ),
-                                "properties": {
-                                    "filename": {"type": "string"},
-                                    "mime_type": {
-                                        "type": "string",
-                                        "enum": [
-                                            "text/plain",
-                                            "application/json",
-                                            "text/csv",
-                                            "application/x-jsonlines",
-                                            "application/jsonl",
-                                            "text/jsonl",
-                                        ],
-                                    },
-                                    "content": {"type": "string"},
-                                    "description": {"type": "string"},
-                                },
-                                "required": ["filename", "mime_type", "content"],
-                            },
-                        },
-                        "required": ["plugin", "on_success"],
-                    },
-                    "nodes": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "string"},
-                                "node_type": {"type": "string"},
-                                "plugin": {"type": "string"},
-                                "input": {
-                                    "type": "string",
-                                    "description": (
-                                        "Connection-name string this node CONSUMES. MUST equal some "
-                                        "upstream's on_success/routes value/on_error. NOT the upstream "
-                                        "node's id. If source.on_success='raw_url_rows', this node sets "
-                                        "input='raw_url_rows'."
-                                    ),
-                                    "examples": ["raw_url_rows", "fetched_text", "scored_rows"],
-                                },
-                                "on_success": {
-                                    "type": "string",
-                                    "description": (
-                                        "Connection-name string this node PUBLISHES (transform/aggregation/"
-                                        "coalesce). Some downstream input/sink_name MUST equal this. Omit "
-                                        "for gates (routing is via condition+routes)."
-                                    ),
-                                    "examples": ["fetched_text", "scored_rows", "lines_out"],
-                                },
-                                "on_error": {"type": "string"},
-                                "options": {"type": "object"},
-                                "condition": {"type": "string"},
-                                "routes": {
-                                    "type": "object",
-                                    "description": (
-                                        "Gate route mapping to sink names, downstream connection names, 'fork', or "
-                                        "'discard' for an audited terminal drop."
-                                    ),
-                                },
-                                "fork_to": {"type": "array", "items": {"type": "string"}},
-                                "branches": {
-                                    "type": ["array", "object"],
-                                    "items": {"type": "string"},
-                                    "additionalProperties": {"type": "string"},
-                                },
-                                "policy": {"type": "string"},
-                                "merge": {"type": "string"},
-                                "trigger": {"type": "object"},
-                                "output_mode": {"type": "string"},
-                                "expected_output_count": {"type": "integer"},
-                            },
-                            "required": ["id", "node_type", "input"],
-                        },
-                        "description": "Array of node specs: [{id, input, plugin?, node_type, options?, on_success?, on_error?, condition?, routes?, fork_to?, branches?, policy?, merge?, trigger?, output_mode?, expected_output_count?}]",
-                    },
-                    "edges": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "string"},
-                                "from_node": {"type": "string"},
-                                "to_node": {"type": "string"},
-                                "edge_type": {"type": "string"},
-                                "label": {"type": "string"},
-                            },
-                            "required": ["id", "from_node", "to_node", "edge_type"],
-                        },
-                        "description": "Array of edge specs: [{id, from_node, to_node, edge_type}]",
-                    },
-                    "outputs": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "sink_name": {
-                                    "type": "string",
-                                    "description": (
-                                        "Sink name. BOTH the sink's identifier AND the connection-name "
-                                        "the sink consumes — it MUST equal some upstream's on_success "
-                                        "value. Pick a descriptive name; it does not need to match an "
-                                        "upstream node's id."
-                                    ),
-                                    "examples": ["lines_out", "scored_results", "errors_quarantine"],
-                                },
-                                "plugin": {"type": "string"},
-                                "options": {
-                                    "type": "object",
-                                    "description": (
-                                        "Plugin-specific sink config. For csv/json file sinks in runnable web "
-                                        "pipelines, include path, schema, and explicit collision_policy."
-                                    ),
-                                },
-                                "on_write_failure": {"type": "string"},
-                            },
-                            "required": ["sink_name", "plugin"],
-                            "examples": [
-                                {
-                                    "sink_name": "results",
-                                    "plugin": "json",
-                                    "options": {
-                                        "path": "outputs/results.json",
-                                        "schema": {"mode": "observed"},
-                                        "collision_policy": "auto_increment",
-                                    },
-                                    "on_write_failure": "discard",
-                                }
-                            ],
-                        },
-                        "description": (
-                            "Array of output specs: [{sink_name, plugin, options, on_write_failure?}]. "
-                            "For csv/json file sinks in runnable web pipelines, options must include "
-                            "path, schema, and explicit collision_policy."
-                        ),
-                    },
-                    "metadata": {
-                        "type": "object",
-                        "description": "Pipeline metadata: {name?, description?}",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "description": {"type": "string"},
-                        },
-                    },
-                },
-                "required": ["source", "nodes", "edges", "outputs"],
-            },
-        },
-        # Source-reset and validation-explanation tools.
-        {
-            "name": "clear_source",
-            "description": "Remove the source from the pipeline composition state.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "explain_validation_error",
-            "description": "Get a human-readable explanation of a validation error "
-            "with suggested fixes. Pass the exact error text from a validation result.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "error_text": {
-                        "type": "string",
-                        "description": "The validation error message to explain.",
-                    },
-                },
-                "required": ["error_text"],
-            },
-        },
-        {
-            "name": "request_advisor_hint",
-            "description": (
-                "ESCAPE HATCH — call when one of the declared trigger criteria applies: "
-                "reactive validation-loop recovery after two or more unchanged failures, "
-                "proactive security/safety wiring review before `set_pipeline`, or "
-                "proactive red-listed plugin review before `set_pipeline`. The proactive "
-                "security trigger covers content moderation, prompt-injection defence, "
-                "secret routing, PII/regulatory sinks, and externally fetched content "
-                "flowing toward LLMs. Forwards your problem statement and context to a "
-                "frontier model and returns guidance text. The reply is ADVICE, not "
-                "configuration — you must still call the appropriate mutation tool "
-                "yourself to apply any change. Budget is finite (sized per compose "
-                "request, not per session lifetime) and exhausting it returns a "
-                "structured error rather than crashing — inspect budget_remaining "
-                "in each response. Do NOT call this tool in a loop, do NOT use it "
-                "as a substitute for reading validator output. Disabled by default; "
-                "only available when the operator has explicitly enabled it."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "trigger": {
-                        "type": "string",
-                        "enum": list(ADVISOR_TRIGGER_VALUES),
-                        "description": (
-                            "Why this advisor call is allowed. Use reactive_validation_loop "
-                            "only after the recovery sequence and at least two unchanged "
-                            "validator failures. Use proactive_security_safety before "
-                            "set_pipeline for security/safety-sensitive flows. Use "
-                            "proactive_red_listed_plugin before set_pipeline when the plan "
-                            "uses a red-listed plugin such as llm, database, dataverse, "
-                            "Azure safety transforms, RAG retrieval, or Chroma sinks."
-                        ),
-                    },
-                    "problem_summary": {
-                        "type": "string",
-                        "description": (
-                            "Your own statement of what you are trying to do and "
-                            "why you are stuck. One or two sentences. Be specific: "
-                            "'I cannot get llm transform options to validate against "
-                            "the Azure provider schema' is useful; 'help' is not."
-                        ),
-                    },
-                    "recent_errors": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "The last validator error messages verbatim, most recent first. Include up to 5; do not paraphrase."
-                        ),
-                    },
-                    "attempted_actions": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "What you have already tried, one item per attempt. "
-                            "Include the tool name and a one-line summary of the "
-                            "argument shape. The advisor uses this to avoid "
-                            "suggesting things you have already ruled out."
-                        ),
-                    },
-                    "schema_excerpt": {
-                        "type": "string",
-                        "description": (
-                            "Optional — the relevant plugin schema snippet you are "
-                            "working against, as returned by `get_plugin_schema`. "
-                            "Including this lets the advisor give field-level "
-                            "guidance grounded in the exact contract."
-                        ),
-                    },
-                },
-                "required": ["trigger", "problem_summary", "recent_errors", "attempted_actions"],
-            },
-        },
-        {
-            "name": "get_plugin_assistance",
-            "description": (
-                "Retrieve plugin-owned guidance for a source, transform, or sink. "
-                "Two modes by ``issue_code``:\n"
-                "  * Omit ``issue_code`` (or pass null) to get discovery-time guidance "
-                "    — a summary of the plugin and composer_hints. (The same hints "
-                "    are also carried on list_sources / list_transforms / list_sinks / "
-                "    get_plugin_schema responses; this tool is the explicit path.)\n"
-                "  * Pass an ``issue_code`` (validators emit these as requirement_code "
-                "    on semantic_contracts entries) to get failure-time guidance — "
-                "    summary, suggested_fixes, and example before/after configurations."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "plugin_type": {
-                        "type": "string",
-                        "enum": ["source", "transform", "sink"],
-                        "description": "Plugin family. 'source', 'transform', or 'sink'.",
-                    },
-                    "plugin_name": {
-                        "type": "string",
-                        "description": "Plugin name (e.g. 'csv', 'web_scrape', 'database').",
-                    },
-                    "issue_code": {
-                        "type": ["string", "null"],
-                        "description": (
-                            "Optional. Stable issue identifier owned by the plugin "
-                            "for failure-time guidance. Omit or pass null for "
-                            "discovery-time guidance."
-                        ),
-                    },
-                },
-                "required": ["plugin_type", "plugin_name"],
-            },
-        },
-        {
-            "name": "list_models",
-            "description": "List available LLM model identifiers. Without a provider "
-            "filter, returns provider names and counts. With a provider filter, "
-            "returns matching model IDs (capped at limit). For provider='openrouter/' "
-            "the returned slugs are normalised to OpenRouter's HTTP API form "
-            "(without the litellm-internal 'openrouter/' routing prefix) — these "
-            "are the values to put directly in `model:`.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "provider": {
-                        "type": "string",
-                        "description": "Provider prefix to filter by (e.g. 'openrouter/', 'azure/'). "
-                        "Omit to get a provider summary instead of individual models.",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max models to return (default 50).",
-                    },
-                },
-                "required": [],
-            },
-        },
-        {
-            "name": "get_audit_info",
-            "description": (
-                "Return facts about ELSPETH's Landscape audit trail. Call this BEFORE "
-                "answering any user question that mentions audit logging, audit "
-                "database, SQLite/Postgres audit, audit backend, audit export, "
-                "Landscape, or 'how do I record what the pipeline did'. Audit is "
-                "mandatory and operator-managed; the composer cannot configure the "
-                "backend (security boundary — see yaml_generator.py:179, fix S1). "
-                "Returns enabled status, composer_modifiable flag, and a canonical "
-                "summary to paraphrase. Does NOT return the audit URL/path/DSN — "
-                "that is operator-internal and intentionally not surfaced to the LLM."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "preview_pipeline",
-            "description": "Preview the current pipeline configuration — returns "
-            "validation status, source summary, and node/output overview "
-            "without executing. Use this to confirm the pipeline is set up "
-            "correctly before running.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "get_pipeline_state",
-            "description": "Inspect the full current pipeline state including all "
-            "options for source, nodes, and outputs. Use this during correction "
-            "loops to see what is currently configured before patching.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "component": {
-                        "type": "string",
-                        "description": (
-                            "Optional: return only one component — 'source', a node ID, or an output name. "
-                            "Accepted full-state aliases: omit component, pass 'full', 'all', 'pipeline', "
-                            "or pass the empty string."
-                        ),
-                    },
-                },
-                "required": [],
-            },
-        },
-        {
-            "name": "diff_pipeline",
-            "description": "Show what changed since the session was loaded or created. "
-            "Returns added, removed, and modified nodes/edges/outputs, "
-            "plus warnings introduced or resolved.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        # Blob tools
-        {
-            "name": "list_blobs",
-            "description": "List uploaded/created files (blobs) in this session with metadata.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "get_blob_metadata",
-            "description": "Get metadata for a specific blob (file) by ID.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {"type": "string", "description": "Blob ID."},
-                },
-                "required": ["blob_id"],
-            },
-        },
-        {
-            "name": "set_source_from_blob",
-            "description": "Wire a blob as the pipeline source. Resolves the blob's storage path internally and infers the source plugin from its MIME type. "
-            "Use 'options' for plugin-specific config (e.g., 'column' and 'schema' for text sources).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {"type": "string", "description": "Blob ID to use as source."},
-                    "plugin": {"type": "string", "description": "Source plugin override (e.g. 'csv'). Inferred from MIME type if omitted."},
-                    "on_success": {
-                        "type": "string",
-                        "description": (
-                            "Connection-name string the source PUBLISHES. Some downstream consumer "
-                            "(node 'input' or output 'sink_name') MUST equal this value. Despite the "
-                            "field name, this is NOT a node id — connections match by string, not by "
-                            "topology."
-                        ),
-                        "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
-                    },
-                    "on_validation_failure": {
-                        "type": "string",
-                        "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
-                        "default": _DEFAULT_SOURCE_VALIDATION_FAILURE,
-                    },
-                    "options": {
-                        "type": "object",
-                        "description": "Plugin-specific config (merged with blob path). Required fields vary by plugin: "
-                        "text sources need 'column' (output field name) and 'schema' (e.g., {mode: 'observed'}).",
-                    },
-                },
-                "required": ["blob_id", "on_success"],
-            },
-        },
-        {
-            "name": "create_blob",
-            "description": "Create a new file (blob) from inline content. "
-            "Use this to create seed input files (URLs, JSON, CSV snippets) "
-            "mid-conversation without requiring manual upload.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filename": {
-                        "type": "string",
-                        "description": "Filename for the blob (e.g. 'urls.csv', 'seed.json').",
-                    },
-                    "mime_type": {
-                        "type": "string",
-                        "enum": [
-                            "text/plain",
-                            "application/json",
-                            "text/csv",
-                            "application/x-jsonlines",
-                            "application/jsonl",
-                            "text/jsonl",
-                        ],
-                        "description": "MIME type of the content.",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The file content as a string.",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Optional description of the file's purpose.",
-                    },
-                },
-                "required": ["filename", "mime_type", "content"],
-            },
-        },
-        {
-            "name": "update_blob",
-            "description": "Update the content of an existing blob (file). Overwrites the file content while preserving metadata.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {
-                        "type": "string",
-                        "description": "ID of the blob to update.",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "New file content.",
-                    },
-                },
-                "required": ["blob_id", "content"],
-            },
-        },
-        {
-            "name": "delete_blob",
-            "description": "Delete a blob (file) and its storage.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {
-                        "type": "string",
-                        "description": "ID of the blob to delete.",
-                    },
-                },
-                "required": ["blob_id"],
-            },
-        },
-        {
-            "name": "get_blob_content",
-            "description": "Retrieve the content of a blob (file) for inspection. Large files are truncated to 50,000 characters.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {
-                        "type": "string",
-                        "description": "ID of the blob to read.",
-                    },
-                },
-                "required": ["blob_id"],
-            },
-        },
-        {
-            "name": "list_recipes",
-            "description": (
-                "List the registered pipeline recipes — deterministic scaffolds for common simple "
-                "intents. Each recipe declares its required slots; apply_pipeline_recipe then "
-                "instantiates the recipe with operator-supplied slot values. Recipes accelerate "
-                "the highest-frequency 'classify CSV with LLM' and 'split rows by threshold' "
-                "patterns; for shapes outside the recipe set, hand-author with set_pipeline."
-            ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "apply_pipeline_recipe",
-            "description": (
-                "Apply a registered pipeline recipe with operator-supplied slot values and replace "
-                "the current pipeline state with the resulting configuration. Slots are validated "
-                "against the recipe's declared schema before scaffolding — invalid slots are "
-                "rejected with a repair hint. Call list_recipes to discover available recipes and "
-                "their slot schemas. The resulting state is identical to a hand-authored "
-                "set_pipeline call; the model can refine via patch_*_options afterwards."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "recipe_name": {
-                        "type": "string",
-                        "description": "Recipe identifier (e.g., 'classify-rows-llm-jsonl')",
-                    },
-                    "slots": {
-                        "type": "object",
-                        "description": "Operator-supplied slot values; must match the recipe's slot schema",
-                    },
-                },
-                "required": ["recipe_name", "slots"],
-            },
-        },
-        {
-            "name": "inspect_source",
-            "description": (
-                "Return bounded structural facts about a blob-backed source: source kind, observed "
-                "headers, sample row count, inferred scalar types per column, URL candidates, and "
-                "warnings. Reads at most 8 KiB of the blob and parses at most 100 rows. Use this "
-                "before declaring a fixed CSV/JSON schema — observed headers and inferred types "
-                "tell you which fields the source actually contains and what numeric coercion is "
-                "needed before any gate or value_transform numeric op. Never returns raw row "
-                "content; only summary facts."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "blob_id": {
-                        "type": "string",
-                        "description": "ID of the blob to inspect.",
-                    },
-                },
-                "required": ["blob_id"],
-            },
-        },
-        # Secret tools
-        {
-            "name": "list_secret_refs",
-            "description": "List available secret references (API keys, credentials). Shows names and scopes, never values.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-        {
-            "name": "validate_secret_ref",
-            "description": "Check if a secret reference exists and is accessible to the current user.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Secret reference name (e.g. 'OPENROUTER_API_KEY')."},
-                },
-                "required": ["name"],
-            },
-        },
-        # Composer-LLM-callable tool surface for surfacing an interpretation
-        # of a subjective or under-specified term for user review.
-        # The description below is normative documentation for the LLM (mirrored
-        # in the composer skill markdown) and is reviewed by the audit panel as
-        # part of the request_interpretation_review event row's provenance.
-        #
-        # Position note: this tool is inserted BEFORE ``wire_secret_ref`` so
-        # the trailing tool name remains ``wire_secret_ref`` — the Anthropic
-        # cache-marker test (``test_trailing_tool_name_is_locked``) pins the
-        # trailing position to preserve prompt-cache stability across deploys.
-        {
-            "name": "request_interpretation_review",
-            "description": (
-                "Ask the user to review your interpretation of a subjective or "
-                "underspecified term they used. Call this BEFORE you finalise "
-                "the prompt template for any LLM transform whose prompt depends "
-                "on the term. Surface ONE term per call. The composition state "
-                "MUST already contain the affected LLM transform (call upsert_node "
-                "first) and its prompt_template MUST contain the placeholder "
-                "{{interpretation:<term>}}. The user will see your draft and "
-                "either accept it or amend it. Do not ask the user in assistant "
-                "prose; this tool is the review surface. If no composition state "
-                "exists yet, stage the LLM transform with a placeholder first, "
-                "wait for that tool result, then call this tool. Do not call this "
-                "for concrete operators (e.g., 'rate 1-10') or for terms the "
-                "user already defined in the conversation."
-            ),
-            "parameters": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["affected_node_id", "user_term", "llm_draft"],
-                "properties": {
-                    "affected_node_id": {
-                        "type": "string",
-                        "description": "node_id of the LLM transform whose prompt template depends on this term",
-                    },
-                    "user_term": {
-                        "type": "string",
-                        "description": "The user-provided term, verbatim (e.g., 'cool', 'important', 'risky')",
-                    },
-                    "llm_draft": {
-                        "type": "string",
-                        "description": "Your draft interpretation of the term, in your own words, suitable to embed as a phrase in the prompt template",
-                    },
-                },
-            },
-        },
-        {
-            "name": "wire_secret_ref",
-            "description": "Place a secret reference marker in the pipeline config. The secret will be resolved at execution time.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Secret reference name."},
-                    "target": {
-                        "type": "string",
-                        "enum": ["source", "node", "output"],
-                        "description": "Which component to wire the secret into.",
-                    },
-                    "target_id": {"type": "string", "description": "Node ID or output name (required for node/output targets)."},
-                    "option_key": {"type": "string", "description": "Config option key to set (e.g. 'api_key')."},
-                },
-                "required": ["name", "target", "option_key"],
-            },
-        },
+        *declared,
+        deep_thaw(_REQUEST_ADVISOR_HINT_DEFINITION),
+        deep_thaw(_REQUEST_INTERPRETATION_REVIEW_DEFINITION),
+        deep_thaw(_TOOL_DEFS_BY_NAME["wire_secret_ref"]),
     ]
 
 
-_DISCOVERY_TOOLS: dict[str, ToolHandler] = {
-    "list_sources": _handle_list_sources,
-    "list_transforms": _handle_list_transforms,
-    "list_sinks": _handle_list_sinks,
-    "get_plugin_schema": _handle_get_plugin_schema,
-    "get_expression_grammar": _handle_get_expression_grammar,
-    "explain_validation_error": _execute_explain_validation_error,
-    "get_plugin_assistance": _execute_get_plugin_assistance,
-    "list_models": _execute_list_models,
-    "get_audit_info": _execute_get_audit_info,
-    "list_recipes": _execute_list_recipes,
-    "get_pipeline_state": _execute_get_pipeline_state,
-    "preview_pipeline": _execute_preview_pipeline,
-    "diff_pipeline": _execute_diff_pipeline,
-}
-
-# Backwards-compatible alias — the canonical declaration lives in
-# ``tools.discovery``. Re-exported here because ``tools/__init__.py`` and a
-# few external call sites historically imported the name from
-# ``_dispatch``.
-_CACHEABLE_DISCOVERY_TOOLS: frozenset[str] = _CACHEABLE_DISCOVERY_TOOL_NAMES
-
-
-_MUTATION_TOOLS: dict[str, ToolHandler] = {
-    "set_source": _handle_set_source,
-    "upsert_node": _handle_upsert_node,
-    "upsert_edge": _handle_upsert_edge,
-    "remove_node": _handle_remove_node,
-    "remove_edge": _handle_remove_edge,
-    "set_metadata": _handle_set_metadata,
-    "set_output": _handle_set_output,
-    "remove_output": _handle_remove_output,
-    "patch_source_options": _handle_patch_source_options,
-    "patch_node_options": _handle_patch_node_options,
-    "patch_output_options": _handle_patch_output_options,
-    "set_pipeline": _handle_set_pipeline,
-    "clear_source": _handle_clear_source,
-}
-
-_BLOB_DISCOVERY_TOOLS: dict[str, ToolHandler] = {
-    "list_blobs": _handle_list_blobs,
-    "get_blob_metadata": _handle_get_blob_metadata,
-    "get_blob_content": _execute_get_blob_content,
-    "inspect_source": _execute_inspect_source,
-}
-
-
-_BLOB_MUTATION_TOOLS: dict[str, ToolHandler] = {
-    "set_source_from_blob": _execute_set_source_from_blob,
-    "create_blob": _execute_create_blob,
-    "update_blob": _execute_update_blob,
-    "delete_blob": _execute_delete_blob,
-    "apply_pipeline_recipe": _execute_apply_pipeline_recipe,
-}
-
-_SECRET_DISCOVERY_TOOLS: dict[str, ToolHandler] = {
-    "list_secret_refs": _handle_list_secret_refs,
-    "validate_secret_ref": _handle_validate_secret_ref,
-}
-
-
-_SECRET_MUTATION_TOOLS: dict[str, ToolHandler] = {
-    "wire_secret_ref": _execute_wire_secret_ref,
-}
-
-# Registry-vs-declaration parity assertions — the canonical name sets live in
-# ``tools.discovery``; the handler maps above are subordinate. A regression
-# in either direction (a name in the registry without a declaration, or a
-# declaration without a registered handler) fails the build at import time.
-assert set(_DISCOVERY_TOOLS) == _DISCOVERY_TOOL_NAMES, (
-    "_DISCOVERY_TOOLS keys diverge from _DISCOVERY_TOOL_NAMES: "
-    f"+{set(_DISCOVERY_TOOLS) - _DISCOVERY_TOOL_NAMES} "
-    f"-{_DISCOVERY_TOOL_NAMES - set(_DISCOVERY_TOOLS)}"
-)
-assert set(_MUTATION_TOOLS) == _MUTATION_TOOL_NAMES, (
-    "_MUTATION_TOOLS keys diverge from _MUTATION_TOOL_NAMES: "
-    f"+{set(_MUTATION_TOOLS) - _MUTATION_TOOL_NAMES} "
-    f"-{_MUTATION_TOOL_NAMES - set(_MUTATION_TOOLS)}"
-)
-assert set(_BLOB_DISCOVERY_TOOLS) == _BLOB_DISCOVERY_TOOL_NAMES, (
-    "_BLOB_DISCOVERY_TOOLS keys diverge from _BLOB_DISCOVERY_TOOL_NAMES: "
-    f"+{set(_BLOB_DISCOVERY_TOOLS) - _BLOB_DISCOVERY_TOOL_NAMES} "
-    f"-{_BLOB_DISCOVERY_TOOL_NAMES - set(_BLOB_DISCOVERY_TOOLS)}"
-)
-assert set(_BLOB_MUTATION_TOOLS) == _BLOB_MUTATION_TOOL_NAMES, (
-    "_BLOB_MUTATION_TOOLS keys diverge from _BLOB_MUTATION_TOOL_NAMES: "
-    f"+{set(_BLOB_MUTATION_TOOLS) - _BLOB_MUTATION_TOOL_NAMES} "
-    f"-{_BLOB_MUTATION_TOOL_NAMES - set(_BLOB_MUTATION_TOOLS)}"
-)
-assert set(_SECRET_DISCOVERY_TOOLS) == _SECRET_DISCOVERY_TOOL_NAMES, (
-    "_SECRET_DISCOVERY_TOOLS keys diverge from _SECRET_DISCOVERY_TOOL_NAMES: "
-    f"+{set(_SECRET_DISCOVERY_TOOLS) - _SECRET_DISCOVERY_TOOL_NAMES} "
-    f"-{_SECRET_DISCOVERY_TOOL_NAMES - set(_SECRET_DISCOVERY_TOOLS)}"
-)
-assert set(_SECRET_MUTATION_TOOLS) == _SECRET_MUTATION_TOOL_NAMES, (
-    "_SECRET_MUTATION_TOOLS keys diverge from _SECRET_MUTATION_TOOL_NAMES: "
-    f"+{set(_SECRET_MUTATION_TOOLS) - _SECRET_MUTATION_TOOL_NAMES} "
-    f"-{_SECRET_MUTATION_TOOL_NAMES - set(_SECRET_MUTATION_TOOLS)}"
-)
-assert set(_SESSION_AWARE_TOOL_HANDLERS) == _SESSION_AWARE_TOOL_NAMES, (
-    "_SESSION_AWARE_TOOL_HANDLERS keys diverge from _SESSION_AWARE_TOOL_NAMES: "
-    f"+{set(_SESSION_AWARE_TOOL_HANDLERS) - _SESSION_AWARE_TOOL_NAMES} "
-    f"-{_SESSION_AWARE_TOOL_NAMES - set(_SESSION_AWARE_TOOL_HANDLERS)}"
-)
-assert set(_DISCOVERY_TOOLS) >= _CACHEABLE_DISCOVERY_TOOL_NAMES, (
-    f"Cacheable tools not in discovery registry: {_CACHEABLE_DISCOVERY_TOOL_NAMES - set(_DISCOVERY_TOOLS)}"
-)
+# Import-time trailing-pin invariant. ``test_trailing_tool_name_is_locked``
+# also tests this, but a test only fires at CI time; this check fires at
+# module import, including at every web-service boot. An accidental
+# reordering of ``get_tool_definitions()`` (e.g., moving ``wire_secret_ref``
+# out of the trailing slot) would otherwise silently invalidate Anthropic's
+# prompt-cache marker for every follow-up turn until the new trailing-tool
+# prefix warmed up — visible only as a deploy-time cost spike and a
+# latency regression, never as a crash. LLM-safety review finding #1 +
+# solution-architect L1 + adapted from the test docstring (2026-05-23).
+_TRAILING_TOOL_NAME: Final[str] = "wire_secret_ref"
+_trailing_seen = get_tool_definitions()[-1]["name"]
+if _trailing_seen != _TRAILING_TOOL_NAME:
+    raise RuntimeError(
+        f"Trailing tool in get_tool_definitions() is {_trailing_seen!r}, expected {_TRAILING_TOOL_NAME!r}. "
+        "Anthropic cache_control markers attach to the last tool; reordering invalidates the "
+        "prompt cache for every follow-up turn. If intentional, update _TRAILING_TOOL_NAME here "
+        "and test_trailing_tool_name_is_locked, and consider the cache-miss cost on next deploy."
+    )
+del _trailing_seen
 
 
 def _inject_prior_validation(
@@ -1411,60 +452,106 @@ def execute_tool(
     return _augment_with_plugin_schemas(result, tool_name, catalog)
 
 
-# Module-level assertions — F-18 dual-registry invariant enforcement.
+# ---------------------------------------------------------------------------
+# Module-level invariants — F-18 dual-registry invariant enforcement.
 #
 # These execute at module import, so a regression (e.g., copy-pasting an async
 # handler into a sync registry, or registering one tool name in two registries)
 # fails the build before any compose() call could trigger silent
 # "coroutine was never awaited" warnings or first-registry-wins overrides.
-_all_tools = (
-    set(_DISCOVERY_TOOLS)
-    | set(_MUTATION_TOOLS)
-    | set(_BLOB_DISCOVERY_TOOLS)
-    | set(_BLOB_MUTATION_TOOLS)
-    | set(_SECRET_DISCOVERY_TOOLS)
-    | set(_SECRET_MUTATION_TOOLS)
-    | set(_SESSION_AWARE_TOOL_HANDLERS)
-)
-assert len(_all_tools) == (
-    len(_DISCOVERY_TOOLS)
-    + len(_MUTATION_TOOLS)
-    + len(_BLOB_DISCOVERY_TOOLS)
-    + len(_BLOB_MUTATION_TOOLS)
-    + len(_SECRET_DISCOVERY_TOOLS)
-    + len(_SECRET_MUTATION_TOOLS)
-    + len(_SESSION_AWARE_TOOL_HANDLERS)
-), (
-    "Tool registry overlap detected — a tool name appears in more than one of "
-    "_DISCOVERY_TOOLS / _MUTATION_TOOLS / blob / secret / _SESSION_AWARE_TOOL_HANDLERS"
-)
+#
+# The six sync per-kind registries are derived in ``_registry`` from
+# ``_REGISTERED_TOOLS``; ``derive_handler_map_for`` partitions by kind so
+# within-kind overlap is impossible by construction. The cross-kind overlap
+# (a name appearing under two kinds) is prevented by ``assert_unique_names``
+# in ``_registry``. The session-aware-vs-sync overlap below catches the
+# remaining gap: a tool name shared between ``_SESSION_AWARE_TOOL_HANDLERS``
+# (hand-maintained in ``sessions.py``) and any declared sync handler.
+# ---------------------------------------------------------------------------
+
+# Session-aware ↔ declared name parity. The hand-maintained
+# ``_SESSION_AWARE_TOOL_HANDLERS`` dict in ``sessions.py`` is the source of
+# truth for session-aware handlers; ``_SESSION_AWARE_TOOL_NAMES`` in
+# ``discovery.py`` enumerates the same set. Drift would mean a tool is
+# dispatched without a name-set membership (or vice versa).
+if set(_SESSION_AWARE_TOOL_HANDLERS) != _SESSION_AWARE_TOOL_NAMES:
+    raise RuntimeError(
+        "_SESSION_AWARE_TOOL_HANDLERS keys diverge from _SESSION_AWARE_TOOL_NAMES: "
+        f"+{set(_SESSION_AWARE_TOOL_HANDLERS) - _SESSION_AWARE_TOOL_NAMES} "
+        f"-{_SESSION_AWARE_TOOL_NAMES - set(_SESSION_AWARE_TOOL_HANDLERS)}"
+    )
+
+# No tool name may be both a declared sync handler and a session-aware
+# async handler. Detects the regression of a sync handler being given the
+# same name as an existing session-aware async one.
+_sync_declared_names: frozenset[str] = frozenset(decl.name for decl in _REGISTERED_TOOLS)
+if _sync_declared_names & set(_SESSION_AWARE_TOOL_HANDLERS):
+    raise RuntimeError(
+        "Tool name appears in both _REGISTERED_TOOLS and _SESSION_AWARE_TOOL_HANDLERS: "
+        f"{_sync_declared_names & set(_SESSION_AWARE_TOOL_HANDLERS)}"
+    )
 
 # Every session-aware handler must be a coroutine function. A sync function
 # accidentally registered here would silently return a non-Awaitable; the
 # compose-loop ``await`` would crash with TypeError at the worst time.
 for _name, _handler in _SESSION_AWARE_TOOL_HANDLERS.items():
-    assert asyncio.iscoroutinefunction(_handler), (
-        f"_SESSION_AWARE_TOOL_HANDLERS[{_name!r}] is not async; sync handlers belong in _MUTATION_TOOLS / _DISCOVERY_TOOLS instead."
-    )
-
-# Every sync-registry handler must NOT be a coroutine. Catches the reverse
-# regression: an async handler dropped into the sync dispatch path that
-# would return a coroutine object as if it were a ToolResult.
-#
-# The six sync registries have heterogeneous handler value-types (the blob
-# and secret registries carry handlers with extra session-context kwargs),
-# so the local ``_sync_registry`` is typed broadly as
-# ``Mapping[str, Callable[..., Any]]`` for the duration of this check.
-_sync_registries_for_check: tuple[tuple[str, Mapping[str, Callable[..., Any]]], ...] = (
-    ("_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _DISCOVERY_TOOLS)),
-    ("_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _MUTATION_TOOLS)),
-    ("_BLOB_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _BLOB_DISCOVERY_TOOLS)),
-    ("_BLOB_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _BLOB_MUTATION_TOOLS)),
-    ("_SECRET_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _SECRET_DISCOVERY_TOOLS)),
-    ("_SECRET_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _SECRET_MUTATION_TOOLS)),
-)
-for _sync_registry_name, _sync_registry in _sync_registries_for_check:
-    for _name, _handler in _sync_registry.items():
-        assert not asyncio.iscoroutinefunction(_handler), (
-            f"{_sync_registry_name}[{_name!r}] is async; async handlers belong in _SESSION_AWARE_TOOL_HANDLERS instead."
+    if not asyncio.iscoroutinefunction(_handler):
+        raise RuntimeError(
+            f"_SESSION_AWARE_TOOL_HANDLERS[{_name!r}] is not async; sync handlers belong in _MUTATION_TOOLS / _DISCOVERY_TOOLS instead."
         )
+
+# Every declared (non-session-aware) handler must NOT be a coroutine.
+# Catches the reverse regression: an async handler dropped into a
+# ``ToolDeclaration`` with a sync kind that would return a coroutine
+# object as if it were a ToolResult.
+for _decl in _REGISTERED_TOOLS:
+    if asyncio.iscoroutinefunction(_decl.handler):
+        raise RuntimeError(
+            f"ToolDeclaration({_decl.name!r}).handler is async but kind={_decl.kind.value!r} is a sync kind. "
+            "Async handlers belong in _SESSION_AWARE_TOOL_HANDLERS instead."
+        )
+
+del _decl, _name, _handler  # keep module namespace clean
+
+
+# ---------------------------------------------------------------------------
+# MANIFEST ↔ registry set-equality invariant.
+#
+# Closes LLM-safety review finding #2 (2026-05-23): a tool registered in the
+# composer-tools surface but not present in ``redaction.MANIFEST`` is the
+# asymmetric failure mode of the existing call-time guard. The dispatcher
+# would route the call, the handler would run, and the response-redaction
+# path at ``service.py`` would skip redaction silently because its lookup
+# (``if tool_name in MANIFEST:``) gates on presence. Raw LLM-supplied
+# arguments and raw handler responses would then land in ``chat_messages``
+# without sanitisation — a Tier-1 audit-integrity breach.
+#
+# The reverse direction (MANIFEST entry without registered tool) was already
+# caught at call time by ``redact_tool_call_response``'s ``not in MANIFEST``
+# guard. This block closes the forward direction.
+#
+# Cycle note: ``redaction.py`` cannot perform this check itself — it is
+# imported BY every plane module (which ``_registry.py`` aggregates). At
+# the point ``_dispatch.py``'s module body executes, both ``redaction.MANIFEST``
+# and the registry have fully loaded, so the import is safe here.
+#
+# ``request_advisor_hint`` lives in MANIFEST but not in any handler dict —
+# it is intercepted in ``service.py`` before ``execute_tool``. Including
+# it in the expected set keeps the equality precise.
+# ---------------------------------------------------------------------------
+
+from elspeth.web.composer.redaction import MANIFEST as _MANIFEST  # noqa: E402  (after-registry by design)
+
+_expected_manifest_names: frozenset[str] = (
+    frozenset(decl.name for decl in _REGISTERED_TOOLS) | frozenset(_SESSION_AWARE_TOOL_HANDLERS) | frozenset({"request_advisor_hint"})
+)
+_manifest_names: frozenset[str] = frozenset(_MANIFEST.keys())
+if _expected_manifest_names != _manifest_names:
+    raise RuntimeError(
+        "redaction.MANIFEST diverges from the composer tool registry — every "
+        "dispatchable tool MUST have a MANIFEST entry or its response will be "
+        "persisted without redaction. "
+        f"+{_expected_manifest_names - _manifest_names} (registered but no MANIFEST entry) "
+        f"-{_manifest_names - _expected_manifest_names} (MANIFEST entry without a registered tool)"
+    )
+del _expected_manifest_names, _manifest_names

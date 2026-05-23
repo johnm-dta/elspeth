@@ -2291,43 +2291,54 @@ class TestToolRegistry:
     """Tests for the tool registry pattern — two dicts + cacheable frozenset."""
 
     def test_discovery_tools_membership(self) -> None:
-        from elspeth.web.composer.tools import _DISCOVERY_TOOLS
+        """``_DISCOVERY_TOOLS`` keys equal the DISCOVERY-kind declaration name set.
 
-        expected = {
-            "list_sources",
-            "list_transforms",
-            "list_sinks",
-            "get_plugin_schema",
-            "get_expression_grammar",
-            "explain_validation_error",
-            "get_plugin_assistance",
-            "list_models",
-            "get_audit_info",
-            "list_recipes",
-            "get_pipeline_state",
-            "preview_pipeline",
-            "diff_pipeline",
-        }
+        Step 6 falsification recovery (elspeth-6c9972ccbf, surface 1 of 2):
+        the literal name enumeration previously here was a per-tool growth
+        surface — every new discovery tool required updating this test in
+        addition to its declaration. The literal was vestigial: it had no
+        docstring framing it as a deliberate design-review gate and only
+        duplicated the derivation pipeline that ``_DISCOVERY_TOOLS`` already
+        runs at import time in ``_registry.py``.
+
+        Retargeted at ``derive_name_set_for(_REGISTERED_TOOLS,
+        ToolKind.DISCOVERY)`` so the assertion sources truth from the
+        declaration tuple. The test still smoke-checks that
+        ``_dispatch.py``'s consumed handler-map agrees with ``_registry.py``'s
+        derivation, but no longer re-enumerates the names. The
+        design-review gate for stateful discovery tools (the three
+        ``diff_pipeline`` / ``get_pipeline_state`` / ``preview_pipeline``
+        names) lives unchanged in
+        ``test_cacheable_discovery_is_opt_in_with_named_mutable_complement``
+        below, which retains its literal enumeration deliberately.
+        """
+        from elspeth.web.composer.tools import _DISCOVERY_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools.declarations import (
+            ToolKind,
+            derive_name_set_for,
+        )
+
+        expected = derive_name_set_for(_REGISTERED_TOOLS, ToolKind.DISCOVERY)
         assert set(_DISCOVERY_TOOLS.keys()) == expected
 
     def test_mutation_tools_membership(self) -> None:
-        from elspeth.web.composer.tools import _MUTATION_TOOLS
+        """``_MUTATION_TOOLS`` keys equal the MUTATION-kind declaration name set.
 
-        expected = {
-            "set_source",
-            "upsert_node",
-            "upsert_edge",
-            "remove_node",
-            "remove_edge",
-            "set_metadata",
-            "set_output",
-            "remove_output",
-            "patch_source_options",
-            "patch_node_options",
-            "patch_output_options",
-            "set_pipeline",
-            "clear_source",
-        }
+        See ``test_discovery_tools_membership`` for the rationale behind
+        retargeting away from a literal enumeration. The plain-mutation kind
+        has no design-review gate — every new mutation tool is just another
+        declaration, and the literal here served only as accidental
+        documentation that grew with every addition.
+        """
+        from elspeth.web.composer.tools import _MUTATION_TOOLS
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
+        from elspeth.web.composer.tools.declarations import (
+            ToolKind,
+            derive_name_set_for,
+        )
+
+        expected = derive_name_set_for(_REGISTERED_TOOLS, ToolKind.MUTATION)
         assert set(_MUTATION_TOOLS.keys()) == expected
 
     def test_no_overlap_between_registries(self) -> None:
@@ -2362,12 +2373,9 @@ class TestToolRegistry:
         the opt-OUT pattern the production code deliberately moved away
         from in commit e34f53c30.
         """
-        from elspeth.web.composer.tools import (
-            _CACHEABLE_DISCOVERY_TOOLS,
-            _DISCOVERY_TOOLS,
-        )
-        from elspeth.web.composer.tools.discovery import (
+        from elspeth.web.composer.tools._registry import (
             _CACHEABLE_DISCOVERY_TOOL_NAMES,
+            _DISCOVERY_TOOLS,
             _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES,
         )
 
@@ -2388,17 +2396,13 @@ class TestToolRegistry:
         # decision per tool).
         assert frozenset(_DISCOVERY_TOOLS.keys()) == (_CACHEABLE_DISCOVERY_TOOL_NAMES | _SESSION_MUTABLE_DISCOVERY_TOOL_NAMES)
 
-        # The compiled export from the dispatch facade matches the
-        # discovery-module source of truth.
-        assert _CACHEABLE_DISCOVERY_TOOLS == _CACHEABLE_DISCOVERY_TOOL_NAMES
-
     def test_cacheable_is_subset_of_discovery(self) -> None:
         from elspeth.web.composer.tools import (
-            _CACHEABLE_DISCOVERY_TOOLS,
+            _CACHEABLE_DISCOVERY_TOOL_NAMES,
             _DISCOVERY_TOOLS,
         )
 
-        assert set(_DISCOVERY_TOOLS.keys()) >= _CACHEABLE_DISCOVERY_TOOLS
+        assert set(_DISCOVERY_TOOLS.keys()) >= _CACHEABLE_DISCOVERY_TOOL_NAMES
 
     def test_is_discovery_tool(self) -> None:
         from elspeth.web.composer.tools import is_discovery_tool

@@ -49,6 +49,10 @@ from elspeth.web.composer.tools.blobs import (
     _sync_get_blob,
     _verify_blob_content_integrity,
 )
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
+)
 from elspeth.web.composer.tools.sessions import (
     _authoring_validation_payload,
 )
@@ -117,6 +121,30 @@ def _handle_get_plugin_schema(
         return _failure_result(state, str(exc))
 
 
+_GET_PLUGIN_SCHEMA_DECLARATION = ToolDeclaration(
+    name="get_plugin_schema",
+    handler=_handle_get_plugin_schema,
+    kind=ToolKind.DISCOVERY,
+    description="Get the full configuration schema for a plugin.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "plugin_type": {
+                "type": "string",
+                "enum": ["source", "transform", "sink"],
+                "description": "Plugin type.",
+            },
+            "name": {
+                "type": "string",
+                "description": "Plugin name (e.g. 'csv').",
+            },
+        },
+        "required": ["plugin_type", "name"],
+    },
+    cacheable=True,
+)
+
+
 def _handle_get_expression_grammar(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -124,6 +152,16 @@ def _handle_get_expression_grammar(
 ) -> ToolResult:
     del context  # unused; signature uniformity with the other handlers.
     return _discovery_result(state, get_expression_grammar())
+
+
+_GET_EXPRESSION_GRAMMAR_DECLARATION = ToolDeclaration(
+    name="get_expression_grammar",
+    handler=_handle_get_expression_grammar,
+    kind=ToolKind.DISCOVERY,
+    description="Get the gate expression syntax reference.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+    cacheable=True,
+)
 
 
 _VALIDATION_ERROR_PATTERNS: Final[tuple[tuple[str, str, str], ...]] = (
@@ -309,6 +347,26 @@ def _execute_explain_validation_error(
     )
 
 
+_EXPLAIN_VALIDATION_ERROR_DECLARATION = ToolDeclaration(
+    name="explain_validation_error",
+    handler=_execute_explain_validation_error,
+    kind=ToolKind.DISCOVERY,
+    description="Get a human-readable explanation of a validation error "
+    "with suggested fixes. Pass the exact error text from a validation result.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "error_text": {
+                "type": "string",
+                "description": "The validation error message to explain.",
+            },
+        },
+        "required": ["error_text"],
+    },
+    cacheable=True,
+)
+
+
 def _serialize_plugin_assistance_example(
     example: Any,
 ) -> dict[str, Any]:
@@ -401,6 +459,48 @@ def _execute_get_plugin_assistance(
     return _discovery_result(state, payload)
 
 
+_GET_PLUGIN_ASSISTANCE_DECLARATION = ToolDeclaration(
+    name="get_plugin_assistance",
+    handler=_execute_get_plugin_assistance,
+    kind=ToolKind.DISCOVERY,
+    description=(
+        "Retrieve plugin-owned guidance for a source, transform, or sink. "
+        "Two modes by ``issue_code``:\n"
+        "  * Omit ``issue_code`` (or pass null) to get discovery-time guidance "
+        "    — a summary of the plugin and composer_hints. (The same hints "
+        "    are also carried on list_sources / list_transforms / list_sinks / "
+        "    get_plugin_schema responses; this tool is the explicit path.)\n"
+        "  * Pass an ``issue_code`` (validators emit these as requirement_code "
+        "    on semantic_contracts entries) to get failure-time guidance — "
+        "    summary, suggested_fixes, and example before/after configurations."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "plugin_type": {
+                "type": "string",
+                "enum": ["source", "transform", "sink"],
+                "description": "Plugin family. 'source', 'transform', or 'sink'.",
+            },
+            "plugin_name": {
+                "type": "string",
+                "description": "Plugin name (e.g. 'csv', 'web_scrape', 'database').",
+            },
+            "issue_code": {
+                "type": ["string", "null"],
+                "description": (
+                    "Optional. Stable issue identifier owned by the plugin "
+                    "for failure-time guidance. Omit or pass null for "
+                    "discovery-time guidance."
+                ),
+            },
+        },
+        "required": ["plugin_type", "plugin_name"],
+    },
+    cacheable=True,
+)
+
+
 def _execute_get_audit_info(
     args: dict[str, Any],
     state: CompositionState,
@@ -446,6 +546,26 @@ def _execute_get_audit_info(
         ),
     }
     return _discovery_result(state, payload)
+
+
+_GET_AUDIT_INFO_DECLARATION = ToolDeclaration(
+    name="get_audit_info",
+    handler=_execute_get_audit_info,
+    kind=ToolKind.DISCOVERY,
+    description=(
+        "Return facts about ELSPETH's Landscape audit trail. Call this BEFORE "
+        "answering any user question that mentions audit logging, audit "
+        "database, SQLite/Postgres audit, audit backend, audit export, "
+        "Landscape, or 'how do I record what the pipeline did'. Audit is "
+        "mandatory and operator-managed; the composer cannot configure the "
+        "backend (security boundary — see yaml_generator.py:179, fix S1). "
+        "Returns enabled status, composer_modifiable flag, and a canonical "
+        "summary to paraphrase. Does NOT return the audit URL/path/DSN — "
+        "that is operator-internal and intentionally not surfaced to the LLM."
+    ),
+    json_schema={"type": "object", "properties": {}, "required": []},
+    cacheable=True,
+)
 
 
 def _execute_list_models(
@@ -517,6 +637,35 @@ def _execute_list_models(
         }
 
     return _discovery_result(state, data)
+
+
+_LIST_MODELS_DECLARATION = ToolDeclaration(
+    name="list_models",
+    handler=_execute_list_models,
+    kind=ToolKind.DISCOVERY,
+    description="List available LLM model identifiers. Without a provider "
+    "filter, returns provider names and counts. With a provider filter, "
+    "returns matching model IDs (capped at limit). For provider='openrouter/' "
+    "the returned slugs are normalised to OpenRouter's HTTP API form "
+    "(without the litellm-internal 'openrouter/' routing prefix) — these "
+    "are the values to put directly in `model:`.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "provider": {
+                "type": "string",
+                "description": "Provider prefix to filter by (e.g. 'openrouter/', 'azure/'). "
+                "Omit to get a provider summary instead of individual models.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max models to return (default 50).",
+            },
+        },
+        "required": [],
+    },
+    cacheable=True,
+)
 
 
 _BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
@@ -1102,6 +1251,19 @@ def _execute_preview_pipeline(
     )
 
 
+_PREVIEW_PIPELINE_DECLARATION = ToolDeclaration(
+    name="preview_pipeline",
+    handler=_execute_preview_pipeline,
+    kind=ToolKind.DISCOVERY,
+    description="Preview the current pipeline configuration — returns "
+    "validation status, source summary, and node/output overview "
+    "without executing. Use this to confirm the pipeline is set up "
+    "correctly before running.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+    cacheable=False,
+)
+
+
 def _execute_diff_pipeline(
     args: dict[str, Any],
     state: CompositionState,
@@ -1131,3 +1293,31 @@ def _execute_diff_pipeline(
 
     changes = diff_states(baseline, state, current_validation=current_validation)
     return _discovery_result(state, changes)
+
+
+_DIFF_PIPELINE_DECLARATION = ToolDeclaration(
+    name="diff_pipeline",
+    handler=_execute_diff_pipeline,
+    kind=ToolKind.DISCOVERY,
+    description="Show what changed since the session was loaded or created. "
+    "Returns added, removed, and modified nodes/edges/outputs, "
+    "plus warnings introduced or resolved.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+    cacheable=False,
+)
+
+
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _GET_PLUGIN_SCHEMA_DECLARATION,
+    _GET_EXPRESSION_GRAMMAR_DECLARATION,
+    _EXPLAIN_VALIDATION_ERROR_DECLARATION,
+    _GET_PLUGIN_ASSISTANCE_DECLARATION,
+    _GET_AUDIT_INFO_DECLARATION,
+    _LIST_MODELS_DECLARATION,
+    _PREVIEW_PIPELINE_DECLARATION,
+    _DIFF_PIPELINE_DECLARATION,
+)
+"""Every tool declared in this module, in stable order.
+
+``_dispatch.py`` aggregates this tuple alongside every other plane's
+TOOLS_IN_MODULE to build the registered-tool universe."""

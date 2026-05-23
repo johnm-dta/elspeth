@@ -54,16 +54,18 @@ from elspeth.web.composer.tools._common import (
     validate_composer_file_sink_collision_policy,
 )
 from elspeth.web.composer.tools._dispatch import (
+    _inject_prior_validation,
+    execute_tool,
+    get_tool_definitions,
+)
+from elspeth.web.composer.tools._registry import (
     _BLOB_DISCOVERY_TOOLS,
     _BLOB_MUTATION_TOOLS,
-    _CACHEABLE_DISCOVERY_TOOLS,
+    _CACHEABLE_DISCOVERY_TOOL_NAMES,
     _DISCOVERY_TOOLS,
     _MUTATION_TOOLS,
     _SECRET_DISCOVERY_TOOLS,
     _SECRET_MUTATION_TOOLS,
-    _inject_prior_validation,
-    execute_tool,
-    get_tool_definitions,
 )
 from elspeth.web.composer.tools.blobs import (
     _ALLOWED_BLOB_MIME_TYPES,
@@ -130,7 +132,7 @@ __all__ = [
     "_BLOB_DISCOVERY_TOOLS",
     "_BLOB_MUTATION_TOOLS",
     "_BLOCKING_DIAGNOSTIC_CODES",
-    "_CACHEABLE_DISCOVERY_TOOLS",
+    "_CACHEABLE_DISCOVERY_TOOL_NAMES",
     "_DATA_ERROR_KEY",
     "_DISCOVERY_TOOLS",
     "_MUTATION_TOOLS",

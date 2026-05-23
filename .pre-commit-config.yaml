@@ -155,6 +155,20 @@ repos:
         # Run when either the Python Literal definition or its TypeScript mirror changes.
         files: ^(src/elspeth/web/composer/recipes\.py|src/elspeth/web/frontend/src/types/guided\.ts)$
 
+      # Composer skill tool-inventory generator drift gate.
+      # The Foundation-knowledge bullets in pipeline_composer.md are derived
+      # from _REGISTERED_TOOLS + the two named carve-outs. Adding a new tool
+      # declaration must be matched by re-running
+      # `scripts/cicd/generate_skill_inventory.py --write`; this hook fails
+      # the commit if the skill block drifts from the generator output.
+      # See elspeth-6c9972ccbf Step 6 / falsification recovery.
+      - id: generate-skill-inventory-check
+        name: composer skill tool-inventory drift check
+        entry: .venv/bin/python scripts/cicd/generate_skill_inventory.py --check
+        language: system
+        pass_filenames: false
+        files: ^(src/elspeth/web/composer/(skills/pipeline_composer\.md|tools/(declarations|_registry|_dispatch|blobs|generation|outputs|recipes|secrets|sessions|sources|transforms)\.py)|scripts/cicd/generate_skill_inventory\.py)$
+
       # Telemetry-backfill cohort-attribution trailer enforcement.
       # Runs at commit-msg stage; rejects commits that touch a cohort directory
       # without the matching `telemetry-backfill: <cohort-token>` trailer.  See

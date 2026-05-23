@@ -44,12 +44,14 @@ The web composer sends the JSON Schema for every LiteLLM function tool with each
 
 **Foundation knowledge (mandatory before any pipeline work):** know the composer tool categories available in this runtime. The authoritative list is whatever `get_tool_definitions()` returns; the canonical groupings are:
 
-- **Discovery:** `list_sources`, `list_transforms`, `list_sinks`, `get_plugin_schema`, `get_plugin_assistance`, `get_expression_grammar`, `list_models`, `list_recipes`, `get_audit_info`
+<!-- BEGIN AUTOGEN: tool-inventory (generate_skill_inventory.py) -->
+- **Discovery:** `list_sources`, `get_plugin_schema`, `get_expression_grammar`, `get_plugin_assistance`, `get_audit_info`, `list_models`, `list_recipes`, `list_transforms`, `list_sinks`
 - **State / preview:** `get_pipeline_state` (for full state, omit the component argument or use full, all, pipeline, or the empty string), `preview_pipeline`, `diff_pipeline`
-- **Build / edit:** `set_pipeline`, `set_source`, `set_output`, `set_source_from_blob`, `apply_pipeline_recipe`, `upsert_node`, `upsert_edge`, `remove_node`, `remove_edge`, `remove_output`, `clear_source`, `set_metadata`, `patch_source_options`, `patch_node_options`, `patch_output_options`
+- **Build / edit:** `set_source`, `patch_source_options`, `clear_source`, `set_source_from_blob`, `set_pipeline`, `apply_pipeline_recipe`, `upsert_node`, `upsert_edge`, `remove_node`, `remove_edge`, `set_metadata`, `patch_node_options`, `set_output`, `remove_output`, `patch_output_options`
 - **Diagnostics:** `explain_validation_error`, `request_advisor_hint`, `request_interpretation_review`
-- **Blobs:** `create_blob`, `list_blobs`, `get_blob_metadata`, `get_blob_content`, `inspect_source`, `update_blob`, `delete_blob`
+- **Blobs:** `list_blobs`, `get_blob_metadata`, `get_blob_content`, `create_blob`, `update_blob`, `delete_blob`, `inspect_source`
 - **Secrets:** `list_secret_refs`, `validate_secret_ref`, `wire_secret_ref`
+<!-- END AUTOGEN: tool-inventory -->
 
 When an LLM transform needs a model identifier, do not assume a familiar model is available in this deployment. Use `list_models` first: the no-argument form gives provider counts, and a provider-filtered call gives the concrete model IDs that validation accepts.
 

@@ -17,6 +17,10 @@ from elspeth.web.composer.tools._common import (
     _mutation_result,
     _secret_ref_placement_error,
 )
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
+)
 
 
 def _handle_list_secret_refs(
@@ -32,6 +36,15 @@ def _handle_list_secret_refs(
     return _discovery_result(state, data)
 
 
+_LIST_SECRET_REFS_DECLARATION = ToolDeclaration(
+    name="list_secret_refs",
+    handler=_handle_list_secret_refs,
+    kind=ToolKind.SECRET_DISCOVERY,
+    description="List available secret references (API keys, credentials). Shows names and scopes, never values.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+)
+
+
 def _handle_validate_secret_ref(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -42,6 +55,21 @@ def _handle_validate_secret_ref(
     name = arguments["name"]
     available = context.secret_service.has_ref(context.user_id, name)
     return _discovery_result(state, {"name": name, "available": available})
+
+
+_VALIDATE_SECRET_REF_DECLARATION = ToolDeclaration(
+    name="validate_secret_ref",
+    handler=_handle_validate_secret_ref,
+    kind=ToolKind.SECRET_DISCOVERY,
+    description="Check if a secret reference exists and is accessible to the current user.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Secret reference name (e.g. 'OPENROUTER_API_KEY')."},
+        },
+        "required": ["name"],
+    },
+)
 
 
 def _execute_wire_secret_ref(
@@ -112,3 +140,36 @@ def _execute_wire_secret_ref(
 
     else:
         return _failure_result(state, f"Unknown target type: '{target}'.")
+
+
+_WIRE_SECRET_REF_DECLARATION = ToolDeclaration(
+    name="wire_secret_ref",
+    handler=_execute_wire_secret_ref,
+    kind=ToolKind.SECRET_MUTATION,
+    description="Place a secret reference marker in the pipeline config. The secret will be resolved at execution time.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Secret reference name."},
+            "target": {
+                "type": "string",
+                "enum": ["source", "node", "output"],
+                "description": "Which component to wire the secret into.",
+            },
+            "target_id": {"type": "string", "description": "Node ID or output name (required for node/output targets)."},
+            "option_key": {"type": "string", "description": "Config option key to set (e.g. 'api_key')."},
+        },
+        "required": ["name", "target", "option_key"],
+    },
+)
+
+
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _LIST_SECRET_REFS_DECLARATION,
+    _VALIDATE_SECRET_REF_DECLARATION,
+    _WIRE_SECRET_REF_DECLARATION,
+)
+"""Every tool declared in this module, in stable order.
+
+``_dispatch.py`` aggregates this tuple alongside every other plane's
+TOOLS_IN_MODULE to build the registered-tool universe."""

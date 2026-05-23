@@ -32,6 +32,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
+    _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
     ToolContext,
     ToolResult,
     _apply_merge_patch,
@@ -52,6 +53,10 @@ from elspeth.web.composer.tools.blobs import (
     _sync_get_blob,
     _verify_blob_content_integrity,
 )
+from elspeth.web.composer.tools.declarations import (
+    ToolDeclaration,
+    ToolKind,
+)
 from elspeth.web.sessions.models import blobs_table
 
 
@@ -61,6 +66,16 @@ def _handle_list_sources(
     context: ToolContext,
 ) -> ToolResult:
     return _discovery_result(state, context.catalog.list_sources())
+
+
+_LIST_SOURCES_DECLARATION = ToolDeclaration(
+    name="list_sources",
+    handler=_handle_list_sources,
+    kind=ToolKind.DISCOVERY,
+    description="List available source plugins with name and summary.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+    cacheable=True,
+)
 
 
 def _handle_set_source(
@@ -79,6 +94,37 @@ def _handle_set_source(
         plugin_name=result.updated_state.source.plugin,
         config_snapshot=result.updated_state.source.options,
     )
+
+
+_SET_SOURCE_DECLARATION = ToolDeclaration(
+    name="set_source",
+    handler=_handle_set_source,
+    kind=ToolKind.MUTATION,
+    description="Set or replace the pipeline source.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "plugin": {"type": "string", "description": "Source plugin name."},
+            "on_success": {
+                "type": "string",
+                "description": (
+                    "Connection-name string this source PUBLISHES. Some downstream consumer "
+                    "(transform 'input' or output 'sink_name') MUST equal this value for wiring "
+                    "to resolve. The runtime matches strings, not graph topology — pick any "
+                    "name unique within the pipeline; it does not need to be the downstream "
+                    "node's id."
+                ),
+                "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
+            },
+            "options": {"type": "object", "description": "Plugin-specific config."},
+            "on_validation_failure": {
+                "type": "string",
+                "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+            },
+        },
+        "required": ["plugin", "on_success", "options", "on_validation_failure"],
+    },
+)
 
 
 _MIME_TO_SOURCE: dict[str, tuple[str, dict[str, str]]] = {
@@ -350,6 +396,54 @@ def _execute_set_source_from_blob(
     return _mutation_result(new_state, ("source",), data={**data, "source_blob": resolved.payload})
 
 
+_SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
+    name="set_source_from_blob",
+    handler=_execute_set_source_from_blob,
+    kind=ToolKind.BLOB_MUTATION,
+    description=(
+        "Wire a blob as the pipeline source. Resolves the blob's storage path "
+        "internally and infers the source plugin from its MIME type. "
+        "Use 'options' for plugin-specific config (e.g., 'column' and 'schema' for text sources)."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {"type": "string", "description": "Blob ID to use as source."},
+            "plugin": {
+                "type": "string",
+                "description": "Source plugin override (e.g. 'csv'). Inferred from MIME type if omitted.",
+            },
+            "on_success": {
+                "type": "string",
+                "description": (
+                    "Connection-name string the source PUBLISHES. Some downstream consumer "
+                    "(node 'input' or output 'sink_name') MUST equal this value. Despite the "
+                    "field name, this is NOT a node id — connections match by string, not by "
+                    "topology."
+                ),
+                "examples": ["raw_url_rows", "csv_rows", "fetched_text"],
+            },
+            "on_validation_failure": {
+                "type": "string",
+                "description": _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
+                "default": _DEFAULT_SOURCE_VALIDATION_FAILURE,
+            },
+            "options": {
+                "type": "object",
+                "description": (
+                    "Plugin-specific config (merged with blob path). Required fields vary by plugin: "
+                    "text sources need 'column' (output field name) and 'schema' (e.g., {mode: 'observed'})."
+                ),
+            },
+        },
+        "required": ["blob_id", "on_success"],
+    },
+    needs_blob_quota=False,
+    needs_blob_provenance=False,
+    blob_store_only=False,
+)
+
+
 def _first_nonempty_csv_row(content: str) -> tuple[str, ...] | None:
     """Return the first non-empty CSV row, if any."""
     for row in csv.reader(io.StringIO(content)):
@@ -474,6 +568,32 @@ def _execute_inspect_source(
     return _discovery_result(state, facts_to_dict(facts))
 
 
+_INSPECT_SOURCE_DECLARATION = ToolDeclaration(
+    name="inspect_source",
+    handler=_execute_inspect_source,
+    kind=ToolKind.BLOB_DISCOVERY,
+    description=(
+        "Return bounded structural facts about a blob-backed source: source kind, observed "
+        "headers, sample row count, inferred scalar types per column, URL candidates, and "
+        "warnings. Reads at most 8 KiB of the blob and parses at most 100 rows. Use this "
+        "before declaring a fixed CSV/JSON schema — observed headers and inferred types "
+        "tell you which fields the source actually contains and what numeric coercion is "
+        "needed before any gate or value_transform numeric op. Never returns raw row "
+        "content; only summary facts."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "blob_id": {
+                "type": "string",
+                "description": "ID of the blob to inspect.",
+            },
+        },
+        "required": ["blob_id"],
+    },
+)
+
+
 def _execute_patch_source_options(
     args: dict[str, Any],
     state: CompositionState,
@@ -571,6 +691,26 @@ def _handle_patch_source_options(
     )
 
 
+_PATCH_SOURCE_OPTIONS_DECLARATION = ToolDeclaration(
+    name="patch_source_options",
+    handler=_handle_patch_source_options,
+    kind=ToolKind.MUTATION,
+    description="Apply a shallow merge-patch to the current source options. "
+    "Keys in the patch overwrite existing keys. "
+    "Keys set to null are deleted. Missing keys are unchanged.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "patch": {
+                "type": "object",
+                "description": "Merge-patch to apply to source options.",
+            },
+        },
+        "required": ["patch"],
+    },
+)
+
+
 def _execute_clear_source(
     args: dict[str, Any],
     state: CompositionState,
@@ -590,3 +730,26 @@ def _handle_clear_source(
     context: ToolContext,
 ) -> ToolResult:
     return _execute_clear_source(arguments, state, context)
+
+
+_CLEAR_SOURCE_DECLARATION = ToolDeclaration(
+    name="clear_source",
+    handler=_handle_clear_source,
+    kind=ToolKind.MUTATION,
+    description="Remove the source from the pipeline composition state.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+)
+
+
+TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
+    _LIST_SOURCES_DECLARATION,
+    _SET_SOURCE_DECLARATION,
+    _PATCH_SOURCE_OPTIONS_DECLARATION,
+    _CLEAR_SOURCE_DECLARATION,
+    _SET_SOURCE_FROM_BLOB_DECLARATION,
+    _INSPECT_SOURCE_DECLARATION,
+)
+"""Every tool declared in this module, in stable order.
+
+``_dispatch.py`` aggregates this tuple alongside every other plane's
+TOOLS_IN_MODULE to build the registered-tool universe."""

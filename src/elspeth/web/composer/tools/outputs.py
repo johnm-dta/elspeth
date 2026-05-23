@@ -16,11 +16,6 @@ from elspeth.web.composer.state import (
     CompositionState,
     OutputSpec,
 )
-
-# Slice 2 — moved to ._common; re-imported so the helpers/classes still in this
-# file resolve them via the in-module namespace as before.
-# Slice 4 — moved to ._common; re-imported so helpers still in this file
-# resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools._common import (
     ToolResult,
     _apply_merge_patch,
@@ -34,9 +29,6 @@ from elspeth.web.composer.tools._common import (
     _validate_sink_path,
     validate_composer_file_sink_collision_policy,
 )
-
-# Slice 3 — moved to .blobs; re-imported so helpers/handlers still in this
-# file resolve them via the in-module namespace as before.
 
 
 class _SetOutputArgumentsModel(BaseModel):

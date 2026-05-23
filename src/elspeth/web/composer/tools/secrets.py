@@ -13,11 +13,6 @@ from elspeth.web.composer.state import (
     OutputSpec,
     SourceSpec,
 )
-
-# Slice 2 — moved to ._common; re-imported so the helpers/classes still in this
-# file resolve them via the in-module namespace as before.
-# Slice 4 — moved to ._common; re-imported so helpers still in this file
-# resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools._common import (
     ToolResult,
     _discovery_result,
@@ -25,9 +20,6 @@ from elspeth.web.composer.tools._common import (
     _mutation_result,
     _secret_ref_placement_error,
 )
-
-# Slice 3 — moved to .blobs; re-imported so helpers/handlers still in this
-# file resolve them via the in-module namespace as before.
 
 SecretToolHandler = Callable[..., ToolResult]
 

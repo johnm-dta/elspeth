@@ -34,11 +34,6 @@ from elspeth.web.composer.state import (
     _batch_aware_required_input_fields_error,
     _validate_gate_expression,
 )
-
-# Slice 2 — moved to ._common; re-imported so the helpers/classes still in this
-# file resolve them via the in-module namespace as before.
-# Slice 4 — moved to ._common; re-imported so helpers still in this file
-# resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
     ToolResult,
@@ -64,9 +59,6 @@ from elspeth.web.composer.tools._common import (
     _vf_destination_note,
     validate_composer_file_sink_collision_policy,
 )
-
-# Slice 3 — moved to .blobs; re-imported so helpers/handlers still in this
-# file resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools.blobs import (
     _blob_create_payload,
     _persist_prepared_blob_create,

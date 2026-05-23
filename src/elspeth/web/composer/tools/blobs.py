@@ -65,9 +65,6 @@ from elspeth.web.composer.redaction import (
 from elspeth.web.composer.state import (
     CompositionState,
 )
-
-# Slice 2 — moved to ._common; re-imported so the helpers/classes still in this
-# file resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools._common import (
     ToolResult,
     _discovery_result,
@@ -583,6 +580,59 @@ def _execute_create_blob(
     return _discovery_result(state, _blob_create_payload(prepared))
 
 
+# Per-session mutex guarding blob-file/DB consistency.
+#
+# ``_execute_update_blob`` reads the prior file content, writes new
+# content, then opens a DB transaction that updates the size/hash
+# metadata.  Two concurrent callers on the same session+blob can
+# otherwise interleave these steps so that:
+#
+#   1. Thread A reads ``old_A`` from storage_path.
+#   2. Thread A writes ``new_A``.
+#   3. Thread B reads ``new_A`` (believing it to be ``old_B``).
+#   4. Thread B writes ``new_B`` and commits the DB row with ``new_B``'s
+#      size/hash.
+#   5. Thread A's DB transaction fails.
+#   6. Thread A's rollback writes ``old_A`` back to storage_path —
+#      clobbering B's committed content.  File = ``old_A``, DB row =
+#      ``new_B`` metadata: silent file/DB divergence with no signal.
+#
+# The composer tool layer is the only writer with this
+# read→write→commit shape.  ``BlobServiceImpl.create_blob`` allocates a
+# unique storage_path per blob, so it cannot hit this race; only the
+# update path shares a storage_path between sequential writers.
+#
+# Serialising per-session (rather than per-blob) is deliberate: composer
+# blob operations are low-frequency and a human typically interacts with
+# one session at a time, so contention is benign.  Per-blob locking
+# would require bookkeeping (reference counting, stale-lock GC) without
+# a meaningful throughput win.
+#
+# The registry is a plain dict protected by a registry mutex.  A
+# ``WeakValueDictionary`` cannot hold ``threading.Lock`` because the
+# lock primitive does not support weak references.  Stale entries
+# accumulate at roughly one entry per unique session_id observed during
+# process lifetime (~150 bytes each) — negligible for the expected
+# deployment (hundreds of sessions per server process).  If this ever
+# becomes a concern, ``clear_session_blob_lock(session_id)`` below is
+# the single-site cleanup hook; today there is no caller because
+# session teardown is not yet observable from this module.
+#
+# PROCESS-LOCAL CORRECTNESS PRECONDITION:
+# This registry holds Python ``threading.Lock`` objects — in-process
+# mutexes with zero cross-process visibility.  The I4 blob-file/DB
+# rollback race is serialised correctly ONLY because the web app
+# refuses to start in multi-worker mode: see the startup guard in
+# ``create_app`` (web/app.py) that raises ``RuntimeError`` on
+# ``--workers > 1`` / ``-w > 1`` / ``--workers=N``.  If that guard is
+# ever relaxed, every per-session lock becomes silently per-worker
+# and two workers handling the same session can interleave
+# blob-file writes and DB rollbacks.  The fix at that point is not
+# to widen this registry but to move the lock into a cross-process
+# coordination primitive (advisory DB lock / file lock / Redis) —
+# changing this dict from process-local is a design-level decision
+# that needs to be made alongside the multi-worker relaxation, not
+# after it.
 _SESSION_BLOB_LOCKS: dict[str, threading.Lock] = {}
 
 _SESSION_BLOB_LOCKS_REGISTRY_MUTEX = threading.Lock()

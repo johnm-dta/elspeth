@@ -30,11 +30,6 @@ from elspeth.web.composer.state import (
     CompositionState,
     SourceSpec,
 )
-
-# Slice 2 — moved to ._common; re-imported so the helpers/classes still in this
-# file resolve them via the in-module namespace as before.
-# Slice 4 — moved to ._common; re-imported so helpers still in this file
-# resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
     ToolResult,
@@ -49,9 +44,6 @@ from elspeth.web.composer.tools._common import (
     _validate_source_path,
     _vf_destination_note,
 )
-
-# Slice 3 — moved to .blobs; re-imported so helpers/handlers still in this
-# file resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools.blobs import (
     BlobToolRecord,
     _blob_row_to_tool_dict,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any, cast
@@ -13,11 +14,6 @@ from elspeth.web.composer.state import (
     CompositionState,
     ValidationSummary,
 )
-
-# Slice 2 — moved to ._common; re-imported so the helpers/classes still in this
-# file resolve them via the in-module namespace as before.
-# Slice 4 — moved to ._common; re-imported so helpers still in this file
-# resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
     _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
@@ -26,9 +22,6 @@ from elspeth.web.composer.tools._common import (
     ToolResult,
     _failure_result,
 )
-
-# Slice 3 — moved to .blobs; re-imported so helpers/handlers still in this
-# file resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools.blobs import (
     _BLOB_PROVENANCE_MUTATION_TOOLS,
     _BLOB_QUOTA_MUTATION_TOOLS,
@@ -40,8 +33,6 @@ from elspeth.web.composer.tools.blobs import (
     _handle_get_blob_metadata,
     _handle_list_blobs,
 )
-
-# Cross-plane handler imports — _dispatch merges every plane's registries.
 from elspeth.web.composer.tools.generation import (
     _execute_diff_pipeline,
     _execute_explain_validation_error,
@@ -1215,6 +1206,18 @@ _all_tools = (
     | set(_SECRET_DISCOVERY_TOOLS)
     | set(_SECRET_MUTATION_TOOLS)
 )
+assert len(_all_tools) == (
+    len(_DISCOVERY_TOOLS)
+    + len(_MUTATION_TOOLS)
+    + len(_BLOB_DISCOVERY_TOOLS)
+    + len(_BLOB_MUTATION_TOOLS)
+    + len(_SECRET_DISCOVERY_TOOLS)
+    + len(_SECRET_MUTATION_TOOLS)
+), "Tool registry overlap detected"
+
+assert set(_DISCOVERY_TOOLS) >= _CACHEABLE_DISCOVERY_TOOLS, (
+    f"Cacheable tools not in discovery registry: {_CACHEABLE_DISCOVERY_TOOLS - set(_DISCOVERY_TOOLS)}"
+)
 
 
 def is_discovery_tool(name: str) -> bool:
@@ -1389,6 +1392,12 @@ def execute_tool(
     return _failure_result(state, f"Unknown tool: {tool_name}")
 
 
+# Module-level assertions — F-18 dual-registry invariant enforcement.
+#
+# These execute at module import, so a regression (e.g., copy-pasting an async
+# handler into a sync registry, or registering one tool name in two registries)
+# fails the build before any compose() call could trigger silent
+# "coroutine was never awaited" warnings or first-registry-wins overrides.
 _all_tools_v2 = (
     set(_DISCOVERY_TOOLS)
     | set(_MUTATION_TOOLS)
@@ -1398,7 +1407,35 @@ _all_tools_v2 = (
     | set(_SECRET_MUTATION_TOOLS)
     | set(_SESSION_AWARE_TOOL_HANDLERS)
 )
+assert len(_all_tools_v2) == (
+    len(_DISCOVERY_TOOLS)
+    + len(_MUTATION_TOOLS)
+    + len(_BLOB_DISCOVERY_TOOLS)
+    + len(_BLOB_MUTATION_TOOLS)
+    + len(_SECRET_DISCOVERY_TOOLS)
+    + len(_SECRET_MUTATION_TOOLS)
+    + len(_SESSION_AWARE_TOOL_HANDLERS)
+), (
+    "Tool registry overlap detected — a tool name appears in more than one of "
+    "_DISCOVERY_TOOLS / _MUTATION_TOOLS / blob / secret / _SESSION_AWARE_TOOL_HANDLERS"
+)
 
+# Every session-aware handler must be a coroutine function. A sync function
+# accidentally registered here would silently return a non-Awaitable; the
+# compose-loop ``await`` would crash with TypeError at the worst time.
+for _name, _handler in _SESSION_AWARE_TOOL_HANDLERS.items():
+    assert asyncio.iscoroutinefunction(_handler), (
+        f"_SESSION_AWARE_TOOL_HANDLERS[{_name!r}] is not async; sync handlers belong in _MUTATION_TOOLS / _DISCOVERY_TOOLS instead."
+    )
+
+# Every sync-registry handler must NOT be a coroutine. Catches the reverse
+# regression: an async handler dropped into the sync dispatch path that
+# would return a coroutine object as if it were a ToolResult.
+#
+# The six sync registries have heterogeneous handler value-types (the blob
+# and secret registries carry handlers with extra session-context kwargs),
+# so the local ``_sync_registry`` is typed broadly as
+# ``Mapping[str, Callable[..., Any]]`` for the duration of this check.
 _sync_registries_for_check: tuple[tuple[str, Mapping[str, Callable[..., Any]]], ...] = (
     ("_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _DISCOVERY_TOOLS)),
     ("_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _MUTATION_TOOLS)),
@@ -1407,3 +1444,8 @@ _sync_registries_for_check: tuple[tuple[str, Mapping[str, Callable[..., Any]]], 
     ("_SECRET_DISCOVERY_TOOLS", cast(Mapping[str, Callable[..., Any]], _SECRET_DISCOVERY_TOOLS)),
     ("_SECRET_MUTATION_TOOLS", cast(Mapping[str, Callable[..., Any]], _SECRET_MUTATION_TOOLS)),
 )
+for _sync_registry_name, _sync_registry in _sync_registries_for_check:
+    for _name, _handler in _sync_registry.items():
+        assert not asyncio.iscoroutinefunction(_handler), (
+            f"{_sync_registry_name}[{_name!r}] is async; async handlers belong in _SESSION_AWARE_TOOL_HANDLERS instead."
+        )

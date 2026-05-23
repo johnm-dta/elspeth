@@ -950,8 +950,6 @@ def _prevalidate_plugin_options(
             for sources). Merged into options for validation only —
             not stored.
     """
-    from pydantic import ValidationError
-
     secret_ref_placement_error = _secret_ref_placement_error(plugin_type, plugin_name, options)
     if secret_ref_placement_error is not None:
         return secret_ref_placement_error
@@ -1006,7 +1004,7 @@ def _prevalidate_plugin_options(
 
         # Secret refs were stripped.  Filter out errors on those fields.
         cause = exc.__cause__
-        if not isinstance(cause, ValidationError):
+        if not isinstance(cause, PydanticValidationError):
             # ValueError path (model validators) — can't filter per-field.
             msg = exc.cause if exc.cause is not None else str(exc)
             return f"Invalid options for {plugin_type} '{plugin_name}': {msg}"

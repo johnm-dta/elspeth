@@ -28,11 +28,6 @@ from elspeth.web.composer.state import (
     _source_options_have_schema,
     _validate_gate_expression,
 )
-
-# Slice 2 — moved to ._common; re-imported so the helpers/classes still in this
-# file resolve them via the in-module namespace as before.
-# Slice 4 — moved to ._common; re-imported so helpers still in this file
-# resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools._common import (
     _DATA_ERROR_KEY,
     RuntimePreflight,
@@ -41,9 +36,6 @@ from elspeth.web.composer.tools._common import (
     _failure_result,
     diff_states,
 )
-
-# Slice 3 — moved to .blobs; re-imported so helpers/handlers still in this
-# file resolve them via the in-module namespace as before.
 from elspeth.web.composer.tools.blobs import (
     _sync_get_blob,
     _verify_blob_content_integrity,

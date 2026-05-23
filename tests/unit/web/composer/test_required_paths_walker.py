@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from elspeth.web.composer.service import (
+from elspeth.web.composer._required_paths_validator import (
     _ARRAY_ITEM_SEGMENT,
     _collect_required_paths,
     _CompiledRequiredPath,

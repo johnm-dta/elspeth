@@ -42,7 +42,7 @@ If the user pushes back ("but I want it inside the YAML", "I really need to see 
 
 The web composer sends the JSON Schema for every LiteLLM function tool with each model request. Do not call discovery tools just to load function signatures; use tool calls for real discovery, mutation, validation, or preview work.
 
-**Step 0 (mandatory before any pipeline work):** know the composer tool categories available in this runtime. The authoritative list is whatever `get_tool_definitions()` returns; the canonical groupings are:
+**Foundation knowledge (mandatory before any pipeline work):** know the composer tool categories available in this runtime. The authoritative list is whatever `get_tool_definitions()` returns; the canonical groupings are:
 
 - **Discovery:** `list_sources`, `list_transforms`, `list_sinks`, `get_plugin_schema`, `get_plugin_assistance`, `get_expression_grammar`, `list_models`, `list_recipes`, `get_audit_info`
 - **State / preview:** `get_pipeline_state` (for full state, omit the component argument or use full, all, pipeline, or the empty string), `preview_pipeline`, `diff_pipeline`
@@ -526,6 +526,51 @@ This is the canonical shape for "split rows by predicate into two files." Two no
 
 ---
 
+## Step 0 — Plugin Schema Inventory (MANDATORY before any state-mutating tool call)
+
+The web composer system context lists plugin **names**, plugin tier counts, and one-line `composer_hints` per plugin (see `available_plugins` in the context payload). **It does not pre-load each plugin's option schema.** The schema — the field shapes the tool-side Pydantic validators will accept or reject — is reachable only via `get_plugin_schema`.
+
+This is **data the model does not have**, not type-checking. The validator cannot supply what schema discovery would have told you upfront. Skipping discovery is the single most expensive class of trajectory in this skill: each rejected `set_pipeline` costs at minimum two LLM round-trips (read the error → re-attempt), and rejections often surface one plugin's gaps at a time, so a 4-plugin pipeline with no pre-discovery routinely costs 5+ extra round-trips beyond the discover-first floor.
+
+### Mandatory precondition for every state-mutating tool call
+
+For every distinct plugin referenced by the planned call — the `source.plugin`, every entry in `nodes[*].plugin`, and every entry in `outputs[*].plugin` — you MUST have already called `get_plugin_schema(kind, plugin)` in this session before calling any of:
+
+- `set_pipeline`
+- `set_source` / `set_source_from_blob`
+- `apply_pipeline_recipe`
+- `upsert_node`
+- `set_output`
+
+This applies on the **first authoring** of a plugin. Surgical re-edits via `patch_node_options` / `patch_source_options` / `patch_output_options` may proceed without re-discovery **if** the same plugin's schema was already loaded earlier in the session. The inventory rule is about new authoring, not surgical patches.
+
+### The system context surfaces the gap explicitly
+
+Each turn, the system context payload includes a `composer_progress.schemas_gap` field — a list of `"kind/plugin"` references that appear in (or are planned for) the current state but have not yet been discovered this session. The rule is mechanical:
+
+- `schemas_gap` is empty → you are clear to call mutation tools (Step 0 satisfied).
+- `schemas_gap` is non-empty → you must call `get_plugin_schema` for each entry before any mutation tool. Calling `set_pipeline` while `schemas_gap` is non-empty is the canonical anti-pattern this section exists to prevent.
+
+The companion field `composer_progress.schemas_loaded_this_session` lists what you have already loaded; use it to avoid re-discovering plugins you have already seen.
+
+### Cheaper-looking shortcuts that are actually more expensive
+
+- **"I will just call `set_pipeline` and let the validator tell me what's wrong."** Empirically this costs the most round-trips of any strategy in the skill. The validator surfaces one failing plugin at a time; a 4-plugin pipeline burns 5+ extra turns this way before convergence.
+- **"The plugin name looks familiar, I have the shape in my head."** Plugin option schemas evolve. The `json` sink's `headers` field is `dict[str,str]`, not a string; `web_scrape` requires `http.scraping_reason` and rejects RFC-2606-reserved `abuse_contact` domains; the `csv` source requires an explicit `schema` block on the source options. These are not the shapes the base model "remembers" by default. Always discover.
+- **"I will discover only the plugin the validator complained about and retry."** This is the canonical thrash pattern. The model fixes plugin #1, re-submits, hits plugin #2's gap, fixes it, re-submits, hits plugin #3's, and so on. Discover **all referenced plugins once**, build once.
+
+### Mental gate before any state-mutating tool call
+
+Ask yourself: *"For every plugin referenced in this call's source / nodes / outputs, have I already received a `get_plugin_schema` response in this session?"*
+
+If `composer_progress.schemas_gap` is non-empty when you are about to mutate state, you have not yet earned the right to call the mutation tool — call `get_plugin_schema` for each gap entry first, then proceed.
+
+### Failure recovery (when a mutation tool does reject)
+
+If a mutation tool returns `success: false` with validation errors of the form `Invalid options for <kind> '<plugin>': <field>: <message>`, the response now includes a `plugin_schemas` field carrying the full `get_plugin_schema` payload for every plugin named in the errors. **Read those schemas before retrying the mutation** — the data is already on the wire, you do not need a separate `get_plugin_schema` call. Your next tool invocation should be the corrected mutation, not another discovery call for a plugin whose schema is already in your message history.
+
+---
+
 ## Schema Vocabulary — Five Distinct Concepts
 
 The composer's schema/contract system has **five distinct runtime concepts**. Casual prose calls them all "schema"; the runtime keeps them strictly separate. When fixing an edge-contract violation you MUST name the right concept — patching the wrong one wastes the user's time, corrupts audit evidence, or both.
@@ -572,18 +617,23 @@ When `preview_pipeline` returns an unsatisfied `edge_contract`, **name the conce
 
 ## Workflow
 
-1. **Orient** — read `available_plugins` in the system context; call `list_sources`, `list_transforms`, or `list_sinks` only when you need refreshed summaries or the context is insufficient
-2. **Check selected plugin schemas** — call `get_plugin_schema` before configuring a plugin whose exact option schema is not already visible
-3. **Build** — use `set_pipeline` for a complete pipeline, or individual tools for edits
-4. **Validate** — every tool returns validation state; fix all errors before responding
-5. **Preview** — call `preview_pipeline` to confirm the pipeline is correct
-6. **Summarise** — explain what was built and why; **and disclose every data-loss path explicitly** (see "Build Summary Discipline" — name each `on_error` / `on_validation_failure` / `on_write_failure` setting and state in plain English what happens to a failing row, especially when the value is `discard`)
+1. **Orient** — read `available_plugins` and `composer_progress` in the system context; do not call `list_*` tools merely to rediscover plugin names
+2. **Choose components** — decide on the source plugin, the transforms, and the sinks needed for the user's intent; consult the Plugin Quick Reference and Shape Catalog for canonical wiring
+3. **Discover plugin schemas (Step 0)** — for every distinct plugin you intend to configure, call `get_plugin_schema(kind, plugin)` unless its schema has already been loaded this session. Check `composer_progress.schemas_gap` for the live gap and `composer_progress.schemas_loaded_this_session` for what you already have. **This step is mandatory; skipping it is the single most expensive class of trajectory in this skill** — see Step 0.
+4. **Build** — use `set_pipeline` for a complete pipeline, or individual tools (`upsert_node`, `set_source`, `set_output`, `patch_*_options`) for incremental edits to an existing pipeline
+5. **Validate** — every tool returns validation state; fix all errors before responding
+6. **Preview** — call `preview_pipeline` to confirm the pipeline is correct
+7. **Summarise** — explain what was built and why; **and disclose every data-loss path explicitly** (see "Build Summary Discipline" — name each `on_error` / `on_validation_failure` / `on_write_failure` setting and state in plain English what happens to a failing row, especially when the value is `discard`)
 
 ## Building a Pipeline
 
-### Prefer `set_pipeline` for Complete Pipelines
+### After Schema Discovery, Build Atomically with `set_pipeline`
 
-When the user describes a complete pipeline, build it atomically with `set_pipeline` rather than calling `set_source` + `upsert_node` + `set_output` sequentially. This is faster and avoids intermediate validation errors.
+**Precondition:** Step 0 (Plugin Schema Inventory) has been satisfied for every plugin in the planned pipeline. Do not call `set_pipeline` while `composer_progress.schemas_gap` is non-empty — that produces the failure trajectory Step 0 exists to prevent.
+
+Given complete schema knowledge, `set_pipeline` is the right primitive: it commits source + nodes + edges + outputs in one validation pass, so the validator can check the full graph as a unit (edge sanity, output-name uniqueness, contract chains). Sequential `set_source` → `upsert_node` × N → `set_output` introduces multiple intermediate validation passes against incomplete graphs, each of which can surface false-negative or red-herring rejections that disappear once the rest of the graph exists.
+
+A prior version of this section claimed "atomic is faster and avoids intermediate validation errors." That is true **conditional on prior schema discovery**. Atomic-without-discovery is the single most expensive trajectory in the skill — see Step 0.
 
 For complete new pipelines with an already uploaded file, include `source.blob_id` in the same `set_pipeline` call. This binds the exact ready session blob and lets the tool resolve `path`/`blob_ref` authoritatively. For complete new pipelines with inline/literal source data from the user's message, include `source.inline_blob` instead. `inline_blob` is only for data the user actually provided in the conversation; do not create a header-only inline CSV when a matching uploaded CSV is ready in the session.
 
@@ -702,9 +752,13 @@ If the user asks to **undo** a previous change ("go back to the version before X
 
 Forward-patching is appropriate only when the user describes the *desired final shape* (whether or not it matches an earlier version) rather than asking to undo.
 
-### Discover Only When Context Is Insufficient
+### Plugin Names vs Plugin Schemas — Two Distinct Discoveries
 
-Never guess plugin names or option fields. The web system context already lists available plugin names, so do not call `list_sources`, `list_transforms`, or `list_sinks` merely to rediscover that inventory. Call `get_plugin_schema` for the selected plugins when you need exact option fields before setting options.
+The web system context already lists available plugin **names** in `available_plugins` (sources, transforms, sinks) along with one-line `composer_hints` per plugin. **Do not** call `list_sources`, `list_transforms`, or `list_sinks` merely to rediscover that inventory — the names are pre-loaded and the `composer_hints` are pre-attached.
+
+The context does **not** include plugin **option schemas** — the field shapes the validator will accept. Those are reachable only via `get_plugin_schema(kind, plugin)`, and you must always call it before setting options on a plugin whose option shape you have not seen this session. See Step 0 for the canonical rule and the `composer_progress.schemas_gap` mechanism.
+
+The two halves of this rule are independent: pre-loaded names mean no `list_*` thrash; absent option schemas mean mandatory `get_plugin_schema` calls before mutation.
 
 Every pipeline needs: **one source**, **one or more sinks**, and **connections between them**.
 
@@ -1319,9 +1373,7 @@ If the user's intent matches a known pattern, use its safe defaults and build im
 
 ### Always call `get_plugin_schema` before configuring
 
-Each plugin has a Pydantic config model that defines exactly which options are required, their types, and constraints. **Call `get_plugin_schema` for every plugin you configure** — it returns the JSON Schema for that plugin's config.
-
-The mutation tools (`set_source`, `upsert_node`, `set_output`, `set_pipeline`) pre-validate options against the plugin's config model. If required options are missing or malformed, the tool returns an error explaining what's needed — fix the options and retry.
+See **Step 0 — Plugin Schema Inventory** (near the top of this skill) for the canonical rule, the `composer_progress.schemas_gap` mechanism, and the failure-recovery flow. Briefly: every distinct plugin you intend to configure must have had `get_plugin_schema(kind, plugin)` called for it earlier in the session. The plugin quick reference below summarises the most common shapes but is **not a substitute for tool-call discovery** — option schemas evolve and the quick reference will drift.
 
 ### Sources
 

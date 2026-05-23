@@ -911,6 +911,18 @@ class ComposerServiceImpl:
         # per service instance. Subsequent compose() calls observe the
         # flag set and skip the upsert.
         self._skill_markdown_history_upserted: bool = False
+        # Per-session set of ``(kind, plugin_name)`` pairs for which
+        # ``get_plugin_schema`` has returned successfully in this service
+        # instance. Surfaced in the per-turn system context as
+        # ``schemas_loaded_this_session`` so the LLM can see at a glance
+        # which plugins it has already introspected and which schemas it
+        # still needs to read before constructing a config (see
+        # ``prompts.build_context_string``). A new session_id transparently
+        # gets an empty set on first access; in-memory only because the
+        # tracker is convergence guidance, not auditable state.
+        # Concurrency: a single session is driven serially through one
+        # compose() call at a time; a plain dict is sufficient.
+        self._schemas_loaded_by_session: dict[str, set[tuple[str, str]]] = {}
 
     async def _run_one_turn_for_test(
         self,
@@ -1968,7 +1980,7 @@ class ComposerServiceImpl:
         # still gate behind a per-instance flag so steady-state compose()
         # calls don't churn the connection pool.
         await self._maybe_upsert_skill_markdown_history()
-        llm_messages = self._build_messages(messages, state, message, guided_terminal)
+        llm_messages = self._build_messages(messages, state, message, guided_terminal, session_id=session_id)
         tools = self._get_litellm_tools()
         # Per-call audit recorder. Surfaced on ComposerResult and on
         # the three partial-state-carrier exceptions so the route handler
@@ -3258,6 +3270,21 @@ class ComposerServiceImpl:
                 state = result.updated_state
                 last_validation = result.validation
                 last_runtime_preflight = result.runtime_preflight or last_runtime_preflight
+                # Mark the (plugin_type, plugin_name) pair as
+                # schema-loaded for this session when a get_plugin_schema
+                # call returned a discovery success. The per-turn system
+                # context renders this set as
+                # ``composer_progress.schemas_loaded_this_session`` so
+                # the model can compute its own schemas_gap without
+                # re-introspecting plugins it has already seen. See
+                # ``ComposerServiceImpl._mark_plugin_schema_loaded`` and
+                # ``prompts.build_context_string``.
+                if tool_name == "get_plugin_schema" and result.success:
+                    self._mark_plugin_schema_loaded(
+                        session_id,
+                        str(arguments["plugin_type"]),
+                        str(arguments["name"]),
+                    )
                 # §7.7 anchor tracking. ``finish_success`` records the audit
                 # invocation regardless of ``result.success`` — the dispatch
                 # itself ran without raising. But for anchor purposes we look
@@ -3581,12 +3608,46 @@ class ComposerServiceImpl:
         with self._session_engine.begin() as conn:
             conn.execute(update(sessions_table).where(sessions_table.c.id == session_id).values(updated_at=now))
 
+    def _schemas_loaded_for_session(self, session_id: str | None) -> frozenset[tuple[str, str]]:
+        """Return the immutable view of plugins whose schema has loaded.
+
+        Returns an empty frozenset when ``session_id`` is None (the
+        unsaved-session fast path) or when no ``get_plugin_schema`` call
+        has yet succeeded for this session. The returned frozenset is a
+        snapshot — subsequent ``_mark_plugin_schema_loaded`` calls do not
+        mutate it.
+        """
+        if session_id is None:
+            return frozenset()
+        loaded = self._schemas_loaded_by_session.get(session_id)
+        if loaded is None:
+            return frozenset()
+        return frozenset(loaded)
+
+    def _mark_plugin_schema_loaded(
+        self,
+        session_id: str | None,
+        plugin_type: str,
+        plugin_name: str,
+    ) -> None:
+        """Record that ``get_plugin_schema`` returned successfully for this plugin.
+
+        No-op when ``session_id`` is None (unsaved sessions have no
+        persistent identity for the tracker; the next turn would not see
+        the marking anyway).
+        """
+        if session_id is None:
+            return
+        bucket = self._schemas_loaded_by_session.setdefault(session_id, set())
+        bucket.add((plugin_type, plugin_name))
+
     def _build_messages(
         self,
         chat_history: list[dict[str, Any]],
         state: CompositionState,
         user_message: str,
         guided_terminal: TerminalState | None = None,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the message list. Returns a NEW list on every call.
 
@@ -3623,6 +3684,7 @@ class ComposerServiceImpl:
                 data_dir=self._data_dir,
                 advisor_enabled=self._settings.composer_advisor_enabled,
                 guided_terminal=guided_terminal,
+                schemas_loaded=self._schemas_loaded_for_session(session_id),
             )
         except OSError as exc:
             raise ComposerServiceError(f"Failed to load deployment skill ({type(exc).__name__})") from exc

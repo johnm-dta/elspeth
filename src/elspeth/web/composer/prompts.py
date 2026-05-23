@@ -75,7 +75,7 @@ def _strip_advisor_content(text: str) -> str:
 
     The transformation operates on the loaded skill text without touching
     the on-disk file, so the parity test
-    ``TestComposerToolNameDrift::test_skill_step0_matches_get_tool_definitions``
+    ``TestComposerToolNameDrift::test_skill_tool_inventory_matches_get_tool_definitions``
     (which scans the unfiltered file content) is unaffected.
     """
     text = text.replace(", `request_advisor_hint`", "")
@@ -141,15 +141,52 @@ def build_system_prompt(data_dir: str | None = None, *, advisor_enabled: bool = 
     return core
 
 
+def _state_referenced_plugins(state: CompositionState) -> set[tuple[str, str]]:
+    """Return ``(kind, plugin)`` pairs for every plugin currently named in state.
+
+    Reads the active source plugin (when configured), every transform /
+    aggregation node carrying a ``plugin`` field (gates and coalesces have
+    ``plugin is None`` and are intentionally skipped — they have no
+    plugin-options schema), and every output's sink plugin. The pairs are
+    returned as a plain set; the caller is responsible for sorting before
+    rendering. Used by ``build_context_string`` to compute the
+    ``schemas_referenced_by_state`` and ``schemas_gap`` telemetry fields.
+    """
+    referenced: set[tuple[str, str]] = set()
+    if state.source is not None:
+        referenced.add(("source", state.source.plugin))
+    for node in state.nodes:
+        # gate / coalesce nodes have plugin=None — no plugin-options
+        # schema to load, so they don't contribute to the gap.
+        if node.plugin is not None:
+            referenced.add(("transform", node.plugin))
+    for output in state.outputs:
+        referenced.add(("sink", output.plugin))
+    return referenced
+
+
 def build_context_string(
     state: CompositionState,
     catalog: CatalogService,
+    *,
+    schemas_loaded: frozenset[tuple[str, str]] = frozenset(),
 ) -> str:
     """Build the injected context string with current state and plugin summary.
 
     Args:
         state: Current composition state.
         catalog: For building the plugin summary.
+        schemas_loaded: Per-session set of ``(kind, plugin_name)`` pairs
+            for which ``get_plugin_schema`` has returned successfully in
+            this session. Sourced from
+            ``ComposerServiceImpl._schemas_loaded_for_session``. Surfaces
+            in ``composer_progress`` as
+            ``schemas_loaded_this_session`` (sorted list of
+            ``"<kind>/<plugin>"``), and is differenced against the set of
+            plugins currently named in state to compute
+            ``schemas_referenced_by_state`` and ``schemas_gap``. Empty by
+            default so non-service callers (unit tests of pure prompt
+            building) need not thread the tracker.
 
     Returns:
         A string with state and plugin info, suitable for appending to the
@@ -176,10 +213,27 @@ def build_context_string(
     def composer_hint_map(plugins: list[Any]) -> dict[str, list[str]]:
         return {p.name: list(p.composer_hints) for p in plugins if p.composer_hints}
 
+    # JIT-discovery convergence aid (composer session 47cfbb5e on staging:
+    # 13 tool calls / 18 LLM rounds for a 4-plugin pipeline because the
+    # model never preloaded any schema). Surface three derived views so
+    # the model can see at a glance which schemas it has already
+    # introspected and which it still needs to read before constructing a
+    # config. ``schemas_loaded_this_session`` is service-tracked;
+    # ``schemas_referenced_by_state`` is computed from state; ``schemas_gap``
+    # is the difference (referenced minus loaded).
+    referenced = _state_referenced_plugins(state)
+    gap = referenced - schemas_loaded
+
+    def _format_pairs(pairs: set[tuple[str, str]] | frozenset[tuple[str, str]]) -> list[str]:
+        return sorted(f"{kind}/{plugin}" for (kind, plugin) in pairs)
+
     context = {
         "current_state": serialized,
         "composer_progress": {
             "state_exists": state.source is not None or bool(state.nodes) or bool(state.outputs),
+            "schemas_loaded_this_session": _format_pairs(schemas_loaded),
+            "schemas_referenced_by_state": _format_pairs(referenced),
+            "schemas_gap": _format_pairs(gap),
         },
         "available_plugins": {
             "sources": source_names,
@@ -205,6 +259,7 @@ def build_messages(
     *,
     advisor_enabled: bool = True,
     guided_terminal: TerminalState | None = None,
+    schemas_loaded: frozenset[tuple[str, str]] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Build the full message list for the LLM.
 
@@ -298,7 +353,7 @@ def build_messages(
     # 2. Dynamic state/plugin context. Keep this outside the first
     # system message so provider prompt-cache markers cover only the
     # stable skill/deployment prefix.
-    context_str = build_context_string(state, catalog)
+    context_str = build_context_string(state, catalog, schemas_loaded=schemas_loaded)
     messages.append({"role": "system", "content": context_str})
 
     # 3. Chat history

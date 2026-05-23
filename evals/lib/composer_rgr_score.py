@@ -16,9 +16,47 @@ Detection rules (ordered by reliability):
      'If you want, I can…' / 'Should I…' rationalisation pattern that
      the skill's anti-passivity section explicitly forbids.
 
-Persisted chat history (`tool_calls` field) is NOT a useful signal —
-the composer drops internal tool-call assistant turns before persisting,
-so even a successful build shows zero persisted tool calls.
+Tool sequence shape: with ``include_tool_rows=true`` the harness fetch
+returns three role kinds — ``user``, ``assistant``, ``tool``. Assistant
+rows that emitted tool calls carry a ``tool_calls`` array in LiteLLM
+wire format (``{id, type, function:{name, arguments(JSON-string)}}``).
+Each call has a corresponding ``role="tool"`` row whose
+``content`` is the canonical-JSON serialisation of the dispatched
+ToolResult (``{success: bool, validation: …, …}``) linked back via
+``tool_call_id``. Rejection signal: ``content.success == false``.
+
+Tool-sequence rules (added 2026-05-23 for the gov-pages-rate-cool
+scenario which targets two failure modes invisible to message-only
+scoring):
+
+  max_persisted_tool_calls (red_criteria)
+      Integer. RED if the trajectory persisted more than N tool
+      invocations (assistant rows' tool_calls union). Catches the
+      "model thrashed for many calls" shape — distinct from passivity
+      (no calls at all) and from converged success (small number of
+      productive calls).
+
+  set_pipeline_rejection_without_success (red_criteria)
+      Boolean. RED if at least one set_pipeline invocation returned
+      success=false (a rejected mutation) AND no set_pipeline
+      invocation ever returned success=true. Catches the "model
+      attempted the build but never converged on a valid call",
+      distinct from passivity (model never attempted).
+
+  must_discover_schema_before_first_mutation (green_criteria)
+      Boolean. AMBER if no get_plugin_schema invocation precedes the
+      first state-mutating tool call (set_source, set_output,
+      upsert_node, set_pipeline, set_source_from_blob,
+      apply_pipeline_recipe). A get_plugin_schema call that fires
+      ONLY after a rejection still earns an AMBER — the discover-first
+      signal requires the schema lookup before the first mutation.
+
+These rules require the harness to fetch ``messages`` with
+``?include_tool_rows=true`` so the role=tool rows carrying the
+serialised ToolResult JSON (with the ``success`` discriminator) are
+present. Without that, the rules silently no-op as if no tool
+sequence is available; ``run_scenario.sh`` was updated in the same
+commit to request the audit-grade view.
 
 Convergence-bar GREEN criteria (added 2026-05-08 for the
 simple-pipeline-convergence program):
@@ -52,6 +90,7 @@ simple-pipeline-convergence program):
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 
@@ -265,6 +304,189 @@ def _check_max_repair_turns(state: Any, max_turns: int) -> str | None:
     return None
 
 
+# Tool-name set considered "state-mutating" for the discover-first check.
+# Sourced from src/elspeth/web/composer/tools/_dispatch.py manifests
+# (see _MUTATING_TOOLS membership in the dispatcher) — these are the
+# entry points that change CompositionState. Discovery tools
+# (get_plugin_schema, list_*, diff_pipeline, preview_pipeline,
+# explain_validation_error) do NOT belong here even though they
+# successfully complete.
+_MUTATING_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "set_pipeline",
+        "set_source",
+        "set_source_from_blob",
+        "upsert_node",
+        "set_output",
+        "remove_node",
+        "remove_output",
+        "remove_edge",
+        "upsert_edge",
+        "patch_source_options",
+        "patch_node_options",
+        "patch_output_options",
+        "apply_pipeline_recipe",
+        "set_metadata",
+    }
+)
+
+
+def _iter_assistant_tool_calls(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return all tool-call records across all assistant rows, in emission order.
+
+    Each entry is the LiteLLM wire-format ToolCall dict
+    (``{id, type, function:{name, arguments(JSON-string)}}``). Assistant
+    rows without tool_calls contribute nothing. Multi-tool turns yield
+    one entry per call. Used by the tool-sequence scoring rules.
+    """
+    calls: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        tcs = msg.get("tool_calls")
+        if not isinstance(tcs, list):
+            continue
+        for tc in tcs:
+            if isinstance(tc, dict):
+                calls.append(tc)
+    return calls
+
+
+def _tool_call_name(call: dict[str, Any]) -> str | None:
+    """Extract the tool function name from a ToolCall dict, or None if malformed."""
+    fn = call.get("function")
+    if not isinstance(fn, dict):
+        return None
+    name = fn.get("name")
+    return name if isinstance(name, str) else None
+
+
+def _tool_result_by_call_id(messages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map tool_call_id -> parsed ToolResult dict from role=tool rows.
+
+    Rows whose ``content`` is not parseable JSON or not a dict are
+    skipped — they're either an ARG_ERROR envelope
+    (``{error_class, error_message}``) or a redaction summary. The
+    rejection-vs-success discriminator (``success`` key) only lives on
+    the well-formed ToolResult shape, so callers checking for that key
+    naturally treat malformed rows as "result unknown" rather than
+    silently coerced to success or failure.
+    """
+    results: dict[str, dict[str, Any]] = {}
+    for msg in messages:
+        if msg.get("role") != "tool":
+            continue
+        tcid = msg.get("tool_call_id")
+        if not isinstance(tcid, str):
+            continue
+        content_raw = msg.get("content")
+        if not isinstance(content_raw, str):
+            continue
+        try:
+            parsed = json.loads(content_raw)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            results[tcid] = parsed
+    return results
+
+
+def _check_set_pipeline_rejection_without_success(messages: list[dict[str, Any]]) -> str | None:
+    """Return a RED reason if set_pipeline was attempted but never succeeded.
+
+    "Attempted" = at least one assistant tool_call with name set_pipeline
+    whose persisted result row carries success=false. "Succeeded" = any
+    set_pipeline whose result row carries success=true. The rule fires
+    only when BOTH (1) at least one rejection observed AND (2) zero
+    successes observed — that is the empirically-attested failure
+    shape (staging session 47cfbb5e-...) where the model retried
+    several rejected set_pipeline calls without ever landing a valid
+    one.
+    """
+    calls = _iter_assistant_tool_calls(messages)
+    results = _tool_result_by_call_id(messages)
+    rejections = 0
+    successes = 0
+    for call in calls:
+        if _tool_call_name(call) != "set_pipeline":
+            continue
+        tcid = call.get("id")
+        if not isinstance(tcid, str):
+            continue
+        result = results.get(tcid)
+        if result is None:
+            continue
+        success = result.get("success")
+        if success is True:
+            successes += 1
+        elif success is False:
+            rejections += 1
+    if rejections > 0 and successes == 0:
+        return (
+            f"set_pipeline was called {rejections} time(s) with all results success=false and 0 successful set_pipeline calls "
+            "— the model attempted the build but never converged on a valid construction"
+        )
+    return None
+
+
+def _check_max_persisted_tool_calls(messages: list[dict[str, Any]], max_calls: int) -> str | None:
+    """Return a RED reason if the trajectory exceeded ``max_calls`` tool invocations.
+
+    Counts assistant-side tool_calls (one entry per LLM-emitted call),
+    not role=tool result rows — they're equivalent in number under
+    normal operation, but the assistant-side count is what the
+    canonical staging trace (13 calls) and the skill's discover-first
+    guidance both reason about.
+    """
+    n = len(_iter_assistant_tool_calls(messages))
+    if n > max_calls:
+        return f"trajectory persisted {n} tool calls (max allowed: {max_calls})"
+    return None
+
+
+def _check_discover_before_mutation(messages: list[dict[str, Any]]) -> str | None:
+    """Return an AMBER reason if no get_plugin_schema precedes the first mutation.
+
+    Walks the assistant tool-call sequence left-to-right. If
+    a state-mutating tool fires before any get_plugin_schema, the
+    discover-first contract is violated. A discovery that fires only
+    AFTER a rejection (e.g. as a panic response) is still a violation
+    — the contract is about preparing the call, not recovering from it.
+
+    Returns None (GREEN signal) when:
+      - get_plugin_schema appears before the first mutating call, OR
+      - there are no mutating calls at all (vacuously satisfied — the
+        is_valid criterion catches the empty-build failure shape).
+    """
+    calls = _iter_assistant_tool_calls(messages)
+    first_schema_idx: int | None = None
+    first_mutation_idx: int | None = None
+    first_mutation_name: str | None = None
+    for idx, call in enumerate(calls):
+        name = _tool_call_name(call)
+        if name is None:
+            continue
+        if name == "get_plugin_schema" and first_schema_idx is None:
+            first_schema_idx = idx
+        if name in _MUTATING_TOOL_NAMES and first_mutation_idx is None:
+            first_mutation_idx = idx
+            first_mutation_name = name
+    if first_mutation_idx is None:
+        return None
+    if first_schema_idx is not None and first_schema_idx < first_mutation_idx:
+        return None
+    if first_schema_idx is None:
+        return (
+            f"first mutating call ({first_mutation_name!r} at index {first_mutation_idx}) "
+            "was not preceded by any get_plugin_schema discovery"
+        )
+    return (
+        f"first mutating call ({first_mutation_name!r} at index {first_mutation_idx}) "
+        f"preceded the first get_plugin_schema (at index {first_schema_idx}) — "
+        "discovery as a post-rejection recovery does not satisfy discover-first"
+    )
+
+
 def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) -> dict[str, Any]:
     """Score a captured composer-rgr run. Pure function — no I/O.
 
@@ -299,7 +521,27 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
     if credential_hits:
         red_reasons.append(f"credential misnarration phrases in final message: {credential_hits}")
 
+    # Tool-sequence RED rules (require ?include_tool_rows=true on the fetch;
+    # see module docstring). Each helper returns None when the rule doesn't
+    # apply (e.g. no tool rows fetched, no mutations attempted) so omission
+    # of the flag from the scenario is the correct no-op.
+    max_tool_calls = red.get("max_persisted_tool_calls")
+    if isinstance(max_tool_calls, int):
+        too_many_reason = _check_max_persisted_tool_calls(messages, max_tool_calls)
+        if too_many_reason is not None:
+            red_reasons.append(too_many_reason)
+
+    if red.get("set_pipeline_rejection_without_success") is True:
+        rejection_reason = _check_set_pipeline_rejection_without_success(messages)
+        if rejection_reason is not None:
+            red_reasons.append(rejection_reason)
+
     amber_reasons: list[str] = []
+
+    if green.get("must_discover_schema_before_first_mutation") is True:
+        discover_reason = _check_discover_before_mutation(messages)
+        if discover_reason is not None:
+            amber_reasons.append(discover_reason)
 
     if isinstance(state, dict):
         node_plugins = _node_plugins(state)
@@ -411,5 +653,6 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
             "is_valid": is_valid,
             "state_node_count": len(state.get("nodes", [])) if isinstance(state, dict) else None,
             "state_output_count": (len(state.get("outputs", [])) if isinstance(state, dict) else None),
+            "persisted_tool_call_count": len(_iter_assistant_tool_calls(messages)),
         },
     }

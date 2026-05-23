@@ -21,6 +21,8 @@ from elspeth.web.composer.tools._common import (
     ToolHandler,
     ToolResult,
     _failure_result,
+    build_plugin_schemas_for_failure,
+    should_augment_with_plugin_schemas,
 )
 from elspeth.web.composer.tools.blobs import (
     _BLOB_PROVENANCE_MUTATION_TOOLS,
@@ -97,8 +99,9 @@ def get_tool_definitions() -> list[dict[str, Any]]:
     ``ComposerServiceImpl._get_litellm_tools``.
 
     The skill at ``src/elspeth/web/composer/skills/pipeline_composer.md``
-    enumerates the same tool set in its Step-0 section. The drift gate
-    ``TestComposerToolNameDrift::test_skill_step0_matches_get_tool_definitions``
+    enumerates the same tool set in its Foundation-knowledge section
+    (under "## CRITICAL: Tool Schema Availability"). The drift gate
+    ``TestComposerToolNameDrift::test_skill_tool_inventory_matches_get_tool_definitions``
     in ``tests/unit/web/composer/test_skill_drift.py`` enforces equality
     between the runtime list returned here and the skill's bulleted
     categories — adding a tool without updating both sides fails CI.
@@ -1249,6 +1252,37 @@ def _inject_prior_validation(
     return result
 
 
+def _augment_with_plugin_schemas(
+    result: ToolResult,
+    tool_name: str,
+    catalog: CatalogService,
+) -> ToolResult:
+    """Attach inline ``plugin_schemas`` to a failed option-shape rejection.
+
+    For the mutation tools listed in
+    ``_PLUGIN_SCHEMA_AUGMENTATION_TOOLS``, scan ``result.validation.errors``
+    for ``Invalid options for <kind> '<plugin>'`` messages and embed the
+    full ``get_plugin_schema`` payload for every named plugin. Eliminates
+    the second round-trip the LLM would otherwise burn calling
+    ``get_plugin_schema`` after each rejection (see composer session
+    47cfbb5e on staging: 13 tool calls + 18 LLM rounds to converge a
+    4-plugin pipeline because the model never preloaded schemas).
+
+    No-op when the mutation succeeded, when no error message matches the
+    option-shape pattern, when the result already carries
+    ``plugin_schemas`` (handler set it directly), or when ``tool_name`` is
+    not one of the augmentation-eligible tools.
+    """
+    if not should_augment_with_plugin_schemas(tool_name):
+        return result
+    if result.success or result.plugin_schemas is not None:
+        return result
+    schemas = build_plugin_schemas_for_failure(result, catalog)
+    if schemas is None:
+        return result
+    return replace(result, plugin_schemas=schemas)
+
+
 def execute_tool(
     tool_name: str,
     arguments: dict[str, Any],
@@ -1299,7 +1333,7 @@ def execute_tool(
     # plus session context (session_engine, session_id) so the proof step
     # can inspect blob-backed sources.
     if tool_name == "preview_pipeline":
-        return _execute_preview_pipeline(
+        result = _execute_preview_pipeline(
             arguments,
             state,
             catalog,
@@ -1308,10 +1342,11 @@ def execute_tool(
             session_engine=session_engine,
             session_id=session_id,
         )
+        return _augment_with_plugin_schemas(result, tool_name, catalog)
 
     # diff_pipeline has an extended signature with baseline kwarg
     if tool_name == "diff_pipeline":
-        return _execute_diff_pipeline(
+        result = _execute_diff_pipeline(
             arguments,
             state,
             catalog,
@@ -1319,6 +1354,7 @@ def execute_tool(
             baseline=baseline,
             current_validation=prior_validation,
         )
+        return _augment_with_plugin_schemas(result, tool_name, catalog)
 
     # set_pipeline has the standard mutation shape for ordinary sources, but
     # can also own source.inline_blob, which requires session context to create
@@ -1335,23 +1371,27 @@ def execute_tool(
             user_message_id=user_message_id,
             max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
         )
-        return _inject_prior_validation(result, prior)
+        result = _inject_prior_validation(result, prior)
+        return _augment_with_plugin_schemas(result, tool_name, catalog)
 
     # Check standard tools first
     discovery_handler = _DISCOVERY_TOOLS.get(tool_name)
     if discovery_handler is not None:
-        return discovery_handler(arguments, state, catalog, data_dir)
+        result = discovery_handler(arguments, state, catalog, data_dir)
+        return _augment_with_plugin_schemas(result, tool_name, catalog)
 
     mutation_handler = _MUTATION_TOOLS.get(tool_name)
     if mutation_handler is not None:
         prior = prior_validation if prior_validation is not None else state.validate()
         result = mutation_handler(arguments, state, catalog, data_dir)
-        return _inject_prior_validation(result, prior)
+        result = _inject_prior_validation(result, prior)
+        return _augment_with_plugin_schemas(result, tool_name, catalog)
 
     # Check blob tools (extended signature with session context)
     blob_discovery = _BLOB_DISCOVERY_TOOLS.get(tool_name)
     if blob_discovery is not None:
-        return blob_discovery(arguments, state, catalog, data_dir, session_engine=session_engine, session_id=session_id)
+        result = blob_discovery(arguments, state, catalog, data_dir, session_engine=session_engine, session_id=session_id)
+        return _augment_with_plugin_schemas(result, tool_name, catalog)
 
     blob_mutation = _BLOB_MUTATION_TOOLS.get(tool_name)
     if blob_mutation is not None:
@@ -1376,18 +1416,21 @@ def execute_tool(
             data_dir,
             **blob_kwargs,
         )
-        return _inject_prior_validation(result, prior)
+        result = _inject_prior_validation(result, prior)
+        return _augment_with_plugin_schemas(result, tool_name, catalog)
 
     # Check secret tools (extended signature with secret_service + user_id)
     secret_discovery = _SECRET_DISCOVERY_TOOLS.get(tool_name)
     if secret_discovery is not None:
-        return secret_discovery(arguments, state, catalog, data_dir, secret_service=secret_service, user_id=user_id)
+        result = secret_discovery(arguments, state, catalog, data_dir, secret_service=secret_service, user_id=user_id)
+        return _augment_with_plugin_schemas(result, tool_name, catalog)
 
     secret_mutation = _SECRET_MUTATION_TOOLS.get(tool_name)
     if secret_mutation is not None:
         prior = prior_validation if prior_validation is not None else state.validate()
         result = secret_mutation(arguments, state, catalog, data_dir, secret_service=secret_service, user_id=user_id)
-        return _inject_prior_validation(result, prior)
+        result = _inject_prior_validation(result, prior)
+        return _augment_with_plugin_schemas(result, tool_name, catalog)
 
     return _failure_result(state, f"Unknown tool: {tool_name}")
 

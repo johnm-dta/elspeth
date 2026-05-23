@@ -25,7 +25,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Final, TypedDict
+from typing import Any, Final, TypedDict, cast
 
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
@@ -357,6 +357,15 @@ class ToolResult:
             part of any audit hash. ``to_dict`` emits this field
             *only when non-empty* so existing tool consumers see no
             schema change.
+        plugin_schemas: Inline ``get_plugin_schema`` payloads for every
+            plugin named in a validation error of the form
+            ``Invalid options for <kind> '<plugin>'``. Populated only on
+            failed mutations (``success=False``) for the option-shape
+            tools by ``execute_tool``. Keys are ``"<kind>/<plugin>"``
+            strings sorted deterministically. ``to_dict`` emits this
+            field *only when non-empty*. Eliminates the second
+            round-trip the LLM would otherwise burn calling
+            ``get_plugin_schema`` separately after each rejection.
     """
 
     success: bool
@@ -367,11 +376,14 @@ class ToolResult:
     prior_validation: ValidationSummary | None = None
     runtime_preflight: ValidationResult | None = None
     post_call_hints: tuple[str, ...] = ()
+    plugin_schemas: Mapping[str, Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         freeze_fields(self, "affected_nodes", "post_call_hints")
         if self.data is not None:
             freeze_fields(self, "data")
+        if self.plugin_schemas is not None:
+            freeze_fields(self, "plugin_schemas")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dict suitable for LLM tool response.
@@ -417,6 +429,9 @@ class ToolResult:
 
         if self.post_call_hints:
             result["post_call_hints"] = list(self.post_call_hints)
+
+        if self.plugin_schemas:
+            result["plugin_schemas"] = deep_thaw(self.plugin_schemas)
 
         return result
 
@@ -597,6 +612,89 @@ def _failure_result(
         affected_nodes=(),
         data={_DATA_ERROR_KEY: error_msg},
     )
+
+
+# Regex matching the option-shape failure messages emitted by
+# ``_prevalidate_plugin_options`` (see ``_prevalidate_source`` /
+# ``_prevalidate_transform`` / ``_prevalidate_sink``). The kind token is
+# pinned to the three valid PluginKind values so an unrelated message
+# containing ``Invalid options for ...`` text cannot trigger augmentation.
+# The plugin name group accepts any non-apostrophe characters because
+# plugin names are validated upstream.
+_INVALID_OPTIONS_PLUGIN_RE: Final[re.Pattern[str]] = re.compile(
+    r"Invalid options for (source|transform|sink) '([^']+)'",
+)
+
+
+# Tools that emit ``Invalid options for <kind> '<plugin>'`` rejection
+# messages and therefore benefit from inline schema augmentation when
+# they fail. CLOSED LIST — extend only when adding a new mutation tool
+# that surfaces the same option-validation message shape from
+# ``_prevalidate_plugin_options``. ``apply_pipeline_recipe`` and
+# ``set_source_from_blob`` are included because they internally route
+# through the same option-validation paths as the plain ``set_*`` /
+# ``patch_*`` tools.
+_PLUGIN_SCHEMA_AUGMENTATION_TOOLS: Final[frozenset[str]] = frozenset(
+    {
+        "set_pipeline",
+        "upsert_node",
+        "set_source",
+        "set_source_from_blob",
+        "set_output",
+        "apply_pipeline_recipe",
+        "patch_node_options",
+        "patch_source_options",
+        "patch_output_options",
+    }
+)
+
+
+def should_augment_with_plugin_schemas(tool_name: str) -> bool:
+    """Return True when failures from ``tool_name`` should carry inline schemas."""
+    return tool_name in _PLUGIN_SCHEMA_AUGMENTATION_TOOLS
+
+
+def build_plugin_schemas_for_failure(
+    result: ToolResult,
+    catalog: CatalogService,
+) -> Mapping[str, Mapping[str, Any]] | None:
+    """Build the ``plugin_schemas`` augmentation dict for a failed mutation.
+
+    Scans every entry in ``result.validation.errors`` (including both the
+    leading ``rejected_mutation`` entry and any state-level errors that
+    follow). Each entry's ``message`` is regex-matched against
+    ``_INVALID_OPTIONS_PLUGIN_RE``; every distinct ``(kind, plugin)`` pair
+    is resolved through ``catalog.get_schema`` and dumped to a plain dict
+    via ``PluginSchemaInfo.model_dump()`` so the payload is byte-identical
+    to what the LLM would otherwise receive from a discrete
+    ``get_plugin_schema`` tool call.
+
+    Returns ``None`` when the result is successful or when no error
+    message matches the option-shape pattern. The caller is responsible
+    for restricting the call to the tool names in
+    ``_PLUGIN_SCHEMA_AUGMENTATION_TOOLS``.
+
+    Trust tier: server-controlled response shaping. A regex match implies
+    the validator already resolved the plugin in the catalog (the unknown
+    -plugin path emits ``"Unknown <kind> plugin '<name>'"`` instead).
+    Therefore ``catalog.get_schema`` returning ``ValueError`` here is a
+    Tier-1 anomaly — propagate, do not silently omit.
+    """
+    if result.success:
+        return None
+    discovered: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for entry in result.validation.errors:
+        for match in _INVALID_OPTIONS_PLUGIN_RE.finditer(entry.message):
+            kind = cast(PluginKind, match.group(1))
+            plugin_name = match.group(2)
+            key = (kind, plugin_name)
+            if key in discovered:
+                continue
+            schema = catalog.get_schema(kind, plugin_name)
+            discovered[key] = schema.model_dump()
+    if not discovered:
+        return None
+    return {f"{kind}/{plugin_name}": payload for (kind, plugin_name), payload in sorted(discovered.items())}
 
 
 def _prepend_rejection_entry(

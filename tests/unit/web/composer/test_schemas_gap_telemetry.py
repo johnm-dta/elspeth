@@ -114,8 +114,12 @@ def _composer_progress(context_str: str) -> dict[str, Any]:
 
 class TestSchemasGapTelemetry:
     def test_schemas_loaded_starts_empty(self) -> None:
-        """No get_plugin_schema calls yet — the loaded list is empty."""
-        progress = _composer_progress(build_context_string(_empty_state(), _stub_catalog()))
+        """No get_plugin_schema calls yet — explicit empty frozenset means
+        "tracked, nothing loaded" and produces empty lists (the LLM's
+        signal to discover plugins). Distinct from the
+        ``_SCHEMAS_LOADED_UNSET`` sentinel reading exercised below.
+        """
+        progress = _composer_progress(build_context_string(_empty_state(), _stub_catalog(), schemas_loaded=frozenset()))
         assert progress["schemas_loaded_this_session"] == []
         assert progress["schemas_referenced_by_state"] == []
         assert progress["schemas_gap"] == []
@@ -217,6 +221,76 @@ class TestSchemasGapTelemetry:
         progress = _composer_progress(build_context_string(state, _stub_catalog()))
         # source and sink only — the gate contributes nothing.
         assert progress["schemas_referenced_by_state"] == ["sink/json", "source/csv"]
+
+
+class TestSchemasLoadedUnsetSentinel:
+    """The unset-sentinel default surfaces a distinct ``composer_progress``
+    marker so a service-side regression (caller stops threading the
+    ``schemas_loaded`` kwarg) is observable in every audited turn rather
+    than masquerading as "tracked, nothing loaded yet".
+
+    Two adjacent regressions to pin:
+
+    1. The default value is identity-tested by call sites — using the
+       sentinel constant directly (rather than constructing a new
+       ``frozenset`` with the same poisoned pair on each call) means the
+       ``is`` check inside ``build_context_string`` triggers.
+    2. ``frozenset()`` passed explicitly continues to mean "tracked,
+       nothing loaded" — the sentinel branch must not fire on a real
+       empty frozenset.
+    """
+
+    def test_sentinel_default_emits_distinct_loaded_marker(self) -> None:
+        """No ``schemas_loaded`` kwarg → ``schemas_loaded_this_session``
+        renders the ``<schemas-loaded-tracker-not-threaded>`` marker,
+        distinguishable from the legitimate ``[]`` produced by
+        ``frozenset()`` (the "tracked, nothing loaded" reading).
+        """
+        progress = _composer_progress(build_context_string(_empty_state(), _stub_catalog()))
+        assert progress["schemas_loaded_this_session"] == ["<schemas-loaded-tracker-not-threaded>"]
+        assert progress["schemas_gap"] == ["<schemas-loaded-tracker-not-threaded>"]
+
+    def test_sentinel_default_emits_distinct_gap_marker_even_with_referenced_plugins(self) -> None:
+        """The sentinel branch overrides the normal ``referenced - loaded``
+        gap calculation; the gap field carries the marker rather than
+        the (potentially misleading) ``referenced`` set so a tracker
+        regression cannot masquerade as "the model has discovered
+        nothing yet"."""
+        progress = _composer_progress(build_context_string(_three_plugin_state(), _stub_catalog()))
+        assert progress["schemas_loaded_this_session"] == ["<schemas-loaded-tracker-not-threaded>"]
+        assert progress["schemas_gap"] == ["<schemas-loaded-tracker-not-threaded>"]
+        # ``schemas_referenced_by_state`` is computed independently from
+        # ``state`` and must NOT carry the sentinel marker — the referenced
+        # view is a fact about state, not about the tracker.
+        assert progress["schemas_referenced_by_state"] == [
+            "sink/json",
+            "source/csv",
+            "transform/web_scrape",
+        ]
+
+    def test_explicit_empty_frozenset_is_distinguishable_from_sentinel(self) -> None:
+        """Passing ``frozenset()`` explicitly produces empty-list readings
+        — the "I tracked, nothing has loaded yet" signal. Pins the
+        contract that the sentinel branch fires on identity, not on
+        emptiness."""
+        progress = _composer_progress(build_context_string(_empty_state(), _stub_catalog(), schemas_loaded=frozenset()))
+        assert progress["schemas_loaded_this_session"] == []
+        assert progress["schemas_gap"] == []
+
+    def test_sentinel_constant_identity_is_stable_across_calls(self) -> None:
+        """The default-value expression evaluates once at function-def
+        time. The sentinel must be module-level so repeated calls see
+        the same object (``is`` check), not a fresh frozenset on every
+        call site."""
+        from elspeth.web.composer.prompts import _SCHEMAS_LOADED_UNSET
+
+        first = _SCHEMAS_LOADED_UNSET
+        second = _SCHEMAS_LOADED_UNSET
+        assert first is second
+        # The sentinel's poisoned pair cannot collide with a real
+        # ``(kind, plugin)`` — guards against a future refactor that
+        # accidentally normalises the sentinel into a "valid" set.
+        assert ("__elspeth_internal__", "__sentinel_schemas_loaded_unset__") in first
 
 
 class TestComposerServiceTracker:

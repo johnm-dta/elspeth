@@ -13,7 +13,7 @@ import json
 import re
 from collections.abc import Mapping
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.guided.errors import InvariantError
@@ -141,6 +141,41 @@ def build_system_prompt(data_dir: str | None = None, *, advisor_enabled: bool = 
     return core
 
 
+# Sentinel marking "caller did not thread the schemas-loaded tracker."
+#
+# ``build_context_string`` / ``build_messages`` advertise a
+# ``schemas_loaded`` kwarg whose production source is
+# ``ComposerServiceImpl._schemas_loaded_for_session`` — the per-session
+# tracker of which ``get_plugin_schema`` calls have already succeeded. If
+# the service ever stops threading that tracker (refactor regression,
+# missed call site, accidental removal of the kwarg), the prompt would
+# silently fall back to "no schemas loaded yet" — the LLM's signal for
+# "you still need to discover plugins" — and the audit trail would lose
+# the distinction between "the service tracked, and nothing was loaded"
+# and "the service forgot to track at all". Using an empty frozenset as
+# the default made those two cases observationally identical.
+#
+# This sentinel carries a poisoned pair that cannot collide with a real
+# ``(kind, plugin)`` (no production catalog uses ``__elspeth_internal__``
+# as a plugin kind). Call sites detect it via ``is`` identity and emit
+# distinct ``composer_progress`` markers so a "tracker not threaded"
+# regression surfaces in the rendered system context — the LLM sees a
+# field value that cannot occur in normal operation, and any test that
+# exercises the prompt builders directly without threading the tracker
+# now produces an audit-trail telltale rather than masquerading as a
+# legitimate "nothing loaded yet" state.
+#
+# Passing ``frozenset()`` explicitly remains a valid caller move and
+# carries its true meaning ("I tracked, and nothing has loaded").
+_SCHEMAS_LOADED_UNSET: Final[frozenset[tuple[str, str]]] = frozenset({("__elspeth_internal__", "__sentinel_schemas_loaded_unset__")})
+
+# Distinct ``composer_progress`` markers emitted when the unset sentinel
+# reaches the renderer. Surfaced inside the JSON payload the LLM reads,
+# so a service-side regression is visible to every audited turn.
+_SCHEMAS_LOADED_UNSET_MARKER: Final[str] = "<schemas-loaded-tracker-not-threaded>"
+_SCHEMAS_GAP_UNSET_MARKER: Final[str] = "<schemas-loaded-tracker-not-threaded>"
+
+
 def _state_referenced_plugins(state: CompositionState) -> set[tuple[str, str]]:
     """Return ``(kind, plugin)`` pairs for every plugin currently named in state.
 
@@ -169,7 +204,7 @@ def build_context_string(
     state: CompositionState,
     catalog: CatalogService,
     *,
-    schemas_loaded: frozenset[tuple[str, str]] = frozenset(),
+    schemas_loaded: frozenset[tuple[str, str]] = _SCHEMAS_LOADED_UNSET,
 ) -> str:
     """Build the injected context string with current state and plugin summary.
 
@@ -184,9 +219,16 @@ def build_context_string(
             ``schemas_loaded_this_session`` (sorted list of
             ``"<kind>/<plugin>"``), and is differenced against the set of
             plugins currently named in state to compute
-            ``schemas_referenced_by_state`` and ``schemas_gap``. Empty by
-            default so non-service callers (unit tests of pure prompt
-            building) need not thread the tracker.
+            ``schemas_referenced_by_state`` and ``schemas_gap``. Defaults
+            to the ``_SCHEMAS_LOADED_UNSET`` sentinel rather than
+            ``frozenset()`` so a service-side regression that stops
+            threading the tracker is observable: an explicit empty
+            frozenset means "I tracked, and nothing has loaded", while
+            the sentinel renders the
+            ``"<schemas-loaded-tracker-not-threaded>"`` marker in the
+            payload. Non-service callers exercising the prompt builder
+            directly should pass ``frozenset()`` to opt into the
+            "tracked, empty" reading.
 
     Returns:
         A string with state and plugin info, suitable for appending to the
@@ -221,19 +263,32 @@ def build_context_string(
     # config. ``schemas_loaded_this_session`` is service-tracked;
     # ``schemas_referenced_by_state`` is computed from state; ``schemas_gap``
     # is the difference (referenced minus loaded).
+    #
+    # When the caller did not thread the tracker (sentinel reached), the
+    # ``loaded`` and ``gap`` views emit distinct marker strings rather
+    # than the empty list a real ``frozenset()`` would produce — so a
+    # silent service-side regression ("we stopped passing the kwarg") is
+    # observable in every audited turn, instead of masquerading as a
+    # legitimate "tracked, nothing loaded yet" state.
     referenced = _state_referenced_plugins(state)
-    gap = referenced - schemas_loaded
 
     def _format_pairs(pairs: set[tuple[str, str]] | frozenset[tuple[str, str]]) -> list[str]:
         return sorted(f"{kind}/{plugin}" for (kind, plugin) in pairs)
+
+    if schemas_loaded is _SCHEMAS_LOADED_UNSET:
+        schemas_loaded_view: list[str] = [_SCHEMAS_LOADED_UNSET_MARKER]
+        schemas_gap_view: list[str] = [_SCHEMAS_GAP_UNSET_MARKER]
+    else:
+        schemas_loaded_view = _format_pairs(schemas_loaded)
+        schemas_gap_view = _format_pairs(referenced - schemas_loaded)
 
     context = {
         "current_state": serialized,
         "composer_progress": {
             "state_exists": state.source is not None or bool(state.nodes) or bool(state.outputs),
-            "schemas_loaded_this_session": _format_pairs(schemas_loaded),
+            "schemas_loaded_this_session": schemas_loaded_view,
             "schemas_referenced_by_state": _format_pairs(referenced),
-            "schemas_gap": _format_pairs(gap),
+            "schemas_gap": schemas_gap_view,
         },
         "available_plugins": {
             "sources": source_names,
@@ -259,7 +314,7 @@ def build_messages(
     *,
     advisor_enabled: bool = True,
     guided_terminal: TerminalState | None = None,
-    schemas_loaded: frozenset[tuple[str, str]] = frozenset(),
+    schemas_loaded: frozenset[tuple[str, str]] = _SCHEMAS_LOADED_UNSET,
 ) -> list[dict[str, Any]]:
     """Build the full message list for the LLM.
 
@@ -302,6 +357,13 @@ def build_messages(
             should not learn about the ``request_advisor_hint`` tool when
             the operator has it disabled (otherwise it tries to call the
             tool and hits a "disabled" rejection, wasting a turn).
+        schemas_loaded: Forwarded verbatim to ``build_context_string``.
+            Defaults to the ``_SCHEMAS_LOADED_UNSET`` sentinel; the
+            production caller (``ComposerServiceImpl._build_messages``)
+            always threads ``_schemas_loaded_for_session(session_id)``
+            (a real frozenset, possibly empty). Non-service callers
+            wanting the "tracked, empty" reading must pass
+            ``frozenset()`` explicitly.
 
     Returns:
         A new list of message dicts for the LLM.

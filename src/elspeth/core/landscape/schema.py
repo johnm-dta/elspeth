@@ -69,7 +69,13 @@ metadata = MetaData()
 #  14 → Durable scheduler sink handoff: token_work_items can persist a
 #        pending sink outcome without replaying the transform that produced it;
 #        run_sources.lifecycle_state is mechanically constrained.
-SQLITE_SCHEMA_EPOCH = 14
+#  15 → Multi-worker scheduler durability: token_work_items grows a
+#        CHECK constraint that LEASED rows have a non-empty lease_owner
+#        (closes the wedge that elspeth-28aaa36a62's recovery sweep tolerates)
+#        and a covering index on (run_id, status, lease_owner,
+#        lease_expires_at) so the RC6 multi-worker drain sweep is index-only
+#        rather than O(workers²) per drain wave (elspeth-9990c81e14).
+SQLITE_SCHEMA_EPOCH = 15
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -354,6 +360,16 @@ token_work_items_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("run_id", "token_id", "node_id", "attempt"),
+    # ``status=LEASED`` must imply a non-empty ``lease_owner``. The
+    # ``recover_expired_leases`` sweep's OR-NULL predicate (elspeth-28aaa36a62)
+    # treats ``lease_owner=NULL`` as a recoverable wedge, so the CHECK closes
+    # the structural gap by preventing the wedge from being written in the
+    # first place (filigree elspeth-9990c81e14, embedded-database-reviewer).
+    # The constraint runs independently of ``PRAGMA foreign_keys`` in SQLite.
+    CheckConstraint(
+        "(status = 'LEASED' AND lease_owner IS NOT NULL AND length(lease_owner) > 0) OR status != 'LEASED'",
+        name="ck_token_work_items_lease_owner_required_when_leased",
+    ),
     ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
     ForeignKeyConstraint(["row_id", "run_id"], ["rows.row_id", "rows.run_id"]),
     ForeignKeyConstraint(["node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
@@ -362,6 +378,22 @@ token_work_items_table = Table(
 Index("ix_token_work_items_ready", token_work_items_table.c.run_id, token_work_items_table.c.status, token_work_items_table.c.available_at)
 Index(
     "ix_token_work_items_lease", token_work_items_table.c.run_id, token_work_items_table.c.status, token_work_items_table.c.lease_expires_at
+)
+# Covering index for the multi-worker drain ``recover_expired_leases`` sweep.
+# ``ix_token_work_items_lease`` covers ``(run_id, status, lease_expires_at)``
+# which served the pre-multi-worker predicate; the worker-skipping predicate
+# ``lease_owner != caller_owner`` (elspeth-28aaa36a62, elspeth-941f1508f5)
+# leaves SQLite to apply the inequality as a row filter against the existing
+# index. Bounded by run-LEASED rows today, but the RC6 multi-worker target
+# runs the sweep per-worker-per-iteration: O(workers²) per drain wave. The
+# wider index puts ``lease_owner`` into the seek key so the sweep is index-
+# only (filigree elspeth-9990c81e14, embedded-database-reviewer MED).
+Index(
+    "ix_token_work_items_recovery",
+    token_work_items_table.c.run_id,
+    token_work_items_table.c.status,
+    token_work_items_table.c.lease_owner,
+    token_work_items_table.c.lease_expires_at,
 )
 Index(
     "uq_token_work_items_terminal_identity",

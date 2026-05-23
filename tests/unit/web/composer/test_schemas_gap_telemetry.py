@@ -354,94 +354,22 @@ class TestComposerServiceTracker:
         assert snapshot == frozenset({("source", "csv")})
 
 
-class TestGetPluginSchemaMarksLoadedContract:
-    """Verify the dispatch-side contract feeding ``_mark_plugin_schema_loaded``.
-
-    The compose loop body (see ``service.py``) guards the marking with::
-
-        if tool_name == "get_plugin_schema" and result.success:
-            self._mark_plugin_schema_loaded(session_id, plugin_type, plugin_name)
-
-    Two preconditions therefore need coverage at the unit level:
-
-    1. A *successful* ``execute_tool("get_plugin_schema", ...)`` produces
-       ``result.success is True`` (so the guard passes and marking happens
-       upstream).
-    2. A *failed* ``execute_tool("get_plugin_schema", ...)`` produces
-       ``result.success is False`` (so the guard rejects and marking is
-       skipped, even though the tool name matches).
-
-    A future refactor that drops the ``result.success`` check would slip
-    past the dispatch-level tests; this contract pair pins the behaviour
-    the service relies on.
-    """
-
-    def test_successful_get_plugin_schema_returns_success_true(self) -> None:
-        """The marker condition passes when execute_tool's ToolResult is successful."""
-        from unittest.mock import MagicMock
-
-        from elspeth.web.catalog.schemas import PluginSchemaInfo
-        from elspeth.web.composer.tools import execute_tool
-
-        catalog = MagicMock(spec=CatalogService)
-        catalog.list_sources.return_value = []
-        catalog.list_transforms.return_value = []
-        catalog.list_sinks.return_value = []
-        catalog.get_schema.return_value = PluginSchemaInfo(
-            name="csv",
-            plugin_type="source",
-            description="CSV source",
-            json_schema={"title": "CsvSourceConfig", "properties": {}},
-            knob_schema={"fields": []},
-        )
-
-        result = execute_tool(
-            "get_plugin_schema",
-            {"plugin_type": "source", "name": "csv"},
-            _empty_state(),
-            catalog,
-        )
-        assert result.success is True
-
-        # Mirror the service guard exactly. A future regression that
-        # forgets the ``result.success`` test would still call the
-        # marker here; we want to lock in that the dispatch surface
-        # produces the right success flag.
-        service = TestComposerServiceTracker._make_service_with_tracker(
-            TestComposerServiceTracker()  # type: ignore[arg-type]
-        )
-        if result.success:
-            service._mark_plugin_schema_loaded("session-A", "source", "csv")
-        assert service._schemas_loaded_for_session("session-A") == frozenset({("source", "csv")})
-
-    def test_failed_get_plugin_schema_does_not_mark_loaded(self) -> None:
-        """A failed schema lookup must NOT cause marking under the service guard."""
-        from unittest.mock import MagicMock
-
-        from elspeth.web.composer.tools import execute_tool
-
-        catalog = MagicMock(spec=CatalogService)
-        catalog.list_sources.return_value = []
-        catalog.list_transforms.return_value = []
-        catalog.list_sinks.return_value = []
-        catalog.get_schema.side_effect = ValueError("Unknown plugin: ghost")
-
-        result = execute_tool(
-            "get_plugin_schema",
-            {"plugin_type": "source", "name": "ghost"},
-            _empty_state(),
-            catalog,
-        )
-        assert result.success is False
-
-        # Apply the same service guard. The ``result.success`` check is
-        # the contract: failed schema lookups must not pollute the
-        # tracker. Otherwise the next turn's system context would tell
-        # the LLM that ``source/ghost`` has been schema-loaded — wrong
-        # signal that would suppress a legitimate retry.
-        service = TestComposerServiceTracker._make_service_with_tracker(
-            TestComposerServiceTracker()  # type: ignore[arg-type]
-        )
-        if result.success:
-            service._mark_plugin_schema_loaded("session-A", "source", "ghost")
-        assert service._schemas_loaded_for_session("session-A") == frozenset()
+# NOTE: ``TestGetPluginSchemaMarksLoadedContract`` was deleted as part of
+# elspeth-59cdfcaf67. Its two tests re-implemented the service guard
+# (``if result.success:``) in the test body before asserting the marker
+# state — pinning the test's own filter, not the service's. The contract
+# it claimed to cover is decomposed across:
+#
+# - ``TestComposerServiceTracker`` above (the marker semantics in
+#   isolation).
+# - ``tests/unit/web/composer/test_tools.py::TestToolDispatch`` and
+#   ``TestSetSourceTool`` (covers ``execute_tool("get_plugin_schema", ...)``
+#   producing ``result.success is True`` on success and ``False`` on a
+#   catalog-side ``ValueError`` — see ``test_get_plugin_schema_delegates``
+#   and ``test_unknown_plugin_fails``).
+#
+# The single line that genuinely needed coverage —
+# ``service.py`` line 3317's ``if tool_name == "get_plugin_schema" and
+# result.success:`` — is the compose-loop dispatch site exercised by
+# ``test_compose_loop_audit_wiring.py``'s integration tests, not a
+# unit-testable surface on the marker.

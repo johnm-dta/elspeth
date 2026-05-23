@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,10 +19,6 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.catalog.protocol import CatalogService
-from elspeth.web.catalog.schemas import (
-    PluginSchemaInfo,
-    PluginSummary,
-)
 from elspeth.web.composer.progress import ComposerProgressEvent
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
@@ -42,7 +38,6 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools import ToolResult
 from elspeth.web.composer.tools import execute_tool as _execute_tool
-from elspeth.web.config import WebSettings
 from elspeth.web.execution.preflight import runtime_preflight_settings_hash
 from elspeth.web.execution.schemas import (
     ValidationCheck,
@@ -59,12 +54,17 @@ from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
-
-
-@dataclass
-class FakeFunction:
-    name: str
-    arguments: str
+from tests.unit.web.composer._helpers import (
+    FakeChoice,
+    FakeFunction,
+    FakeLLMResponse,
+    FakeMessage,
+    FakeToolCall,
+    _empty_state,
+    _make_llm_response,
+    _make_settings,
+    _mock_catalog,
+)
 
 
 def _execution_ready() -> ValidationReadiness:
@@ -118,127 +118,6 @@ def ValidationResult(
         readiness=readiness or (_execution_ready() if is_valid else _not_authoring_ready()),
         **kwargs,
     )
-
-
-@dataclass
-class FakeToolCall:
-    id: str
-    function: FakeFunction
-
-
-@dataclass
-class FakeMessage:
-    content: str | None
-    tool_calls: list[FakeToolCall] | None
-
-
-@dataclass
-class FakeChoice:
-    message: FakeMessage
-
-
-@dataclass
-class FakeLLMResponse:
-    choices: list[FakeChoice]
-
-
-def _empty_state() -> CompositionState:
-    return CompositionState(
-        source=None,
-        nodes=(),
-        edges=(),
-        outputs=(),
-        metadata=PipelineMetadata(),
-        version=1,
-    )
-
-
-def _mock_catalog() -> MagicMock:
-    """Mock CatalogService with real PluginSummary/PluginSchemaInfo instances.
-
-    AC #16: Tests must use real PluginSummary and PluginSchemaInfo instances,
-    not plain dicts. Mock return types must match the CatalogService protocol.
-    """
-    catalog = MagicMock(spec=CatalogService)
-    catalog.list_sources.return_value = [
-        PluginSummary(
-            name="csv",
-            description="CSV source",
-            plugin_type="source",
-            config_fields=[],
-        ),
-    ]
-    catalog.list_transforms.return_value = [
-        PluginSummary(
-            name="passthrough",
-            description="Uppercase",
-            plugin_type="transform",
-            config_fields=[],
-        ),
-    ]
-    catalog.list_sinks.return_value = [
-        PluginSummary(
-            name="csv",
-            description="CSV sink",
-            plugin_type="sink",
-            config_fields=[],
-        ),
-    ]
-    catalog.get_schema.return_value = PluginSchemaInfo(
-        name="csv",
-        plugin_type="source",
-        description="CSV source",
-        json_schema={"title": "Config", "properties": {}},
-        knob_schema={"fields": []},
-    )
-    return catalog
-
-
-def _make_llm_response(
-    content: str | None = None,
-    tool_calls: list[dict[str, Any]] | None = None,
-) -> FakeLLMResponse:
-    """Build a typed fake LiteLLM response.
-
-    Uses typed dataclasses instead of MagicMock so tests fail if production
-    code accesses an attribute that doesn't exist on the real response shape.
-    """
-    fake_tool_calls: list[FakeToolCall] | None = None
-    if tool_calls:
-        fake_tool_calls = [
-            FakeToolCall(
-                id=tc["id"],
-                function=FakeFunction(
-                    name=tc["name"],
-                    arguments=json.dumps(tc["arguments"]),
-                ),
-            )
-            for tc in tool_calls
-        ]
-
-    message = FakeMessage(content=content, tool_calls=fake_tool_calls)
-    return FakeLLMResponse(choices=[FakeChoice(message=message)])
-
-
-def _make_settings(**overrides: Any) -> WebSettings:
-    """Build WebSettings with Pydantic-enforced defaults.
-
-    Use keyword arguments to override specific fields for a test.
-    Defaults come from the Pydantic model — no drift possible.
-
-    data_dir defaults to /data (absolute) so test paths like
-    /data/blobs/file.csv pass S2 path validation.
-    """
-    defaults: dict[str, Any] = {
-        "data_dir": Path("/data"),
-        "composer_max_composition_turns": 15,
-        "composer_max_discovery_turns": 10,
-        "composer_timeout_seconds": 85.0,
-        "composer_rate_limit_per_minute": 10,
-        "shareable_link_signing_key": b"\x00" * 32,
-    }
-    defaults.update(overrides)
-    return WebSettings(**defaults)
 
 
 def _assert_no_mutation_empty_state_blocker(

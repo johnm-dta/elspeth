@@ -52,6 +52,7 @@ def _make_factory(
     query.get_routing_events_for_states.return_value = routing_events or []
     query.get_calls_for_states.return_value = calls or []
     query.get_token_parents.return_value = token_parents or []
+    query.get_scheduler_events.return_value = []
 
     data_flow = Mock()
     data_flow.get_token_outcomes_for_row.return_value = token_outcomes or []
@@ -116,6 +117,8 @@ def _make_row_lineage() -> RowLineage:
         run_id="run-1",
         source_node_id="source-0",
         row_index=0,
+        source_row_index=0,
+        ingest_sequence=0,
         source_data_hash="hash-1",
         created_at=datetime(2026, 1, 15, tzinfo=UTC),
         source_data={"id": 1, "name": "test"},

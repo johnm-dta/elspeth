@@ -191,6 +191,27 @@ class TokenOutcomeExportRecord(TypedDict):
     expected_branches_json: str | None
 
 
+class SchedulerEventExportRecord(TypedDict):
+    record_type: Literal["scheduler_event"]
+    run_id: str
+    event_id: str
+    token_id: str
+    work_item_id: str
+    node_id: str | None
+    event_type: str
+    from_status: str | None
+    to_status: str
+    from_lease_owner: str | None
+    to_lease_owner: str | None
+    from_lease_expires_at: str | None
+    to_lease_expires_at: str | None
+    from_attempt: int | None
+    to_attempt: int
+    recorded_at: str
+    caller_owner: str | None
+    context_json: str
+
+
 class NodeStateExportRecord(TypedDict):
     """Processing record for a token passing through a node.
 
@@ -280,6 +301,7 @@ ExportRecord = (
     | TokenExportRecord
     | TokenParentExportRecord
     | TokenOutcomeExportRecord
+    | SchedulerEventExportRecord
     | NodeStateExportRecord
     | RoutingEventExportRecord
     | BatchExportRecord

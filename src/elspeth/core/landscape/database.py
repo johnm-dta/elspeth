@@ -196,6 +196,23 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("token_work_items", "lease_expires_at"),
     ("token_work_items", "created_at"),
     ("token_work_items", "updated_at"),
+    ("scheduler_events", "event_id"),
+    ("scheduler_events", "run_id"),
+    ("scheduler_events", "token_id"),
+    ("scheduler_events", "work_item_id"),
+    ("scheduler_events", "node_id"),
+    ("scheduler_events", "event_type"),
+    ("scheduler_events", "from_status"),
+    ("scheduler_events", "to_status"),
+    ("scheduler_events", "from_lease_owner"),
+    ("scheduler_events", "to_lease_owner"),
+    ("scheduler_events", "from_lease_expires_at"),
+    ("scheduler_events", "to_lease_expires_at"),
+    ("scheduler_events", "from_attempt"),
+    ("scheduler_events", "to_attempt"),
+    ("scheduler_events", "recorded_at"),
+    ("scheduler_events", "caller_owner"),
+    ("scheduler_events", "context_json"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).
@@ -205,6 +222,7 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
 _REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
     ("validation_errors", "row_id", "rows"),
     ("preflight_results", "run_id", "runs"),
+    ("scheduler_events", "run_id", "runs"),
 )
 
 # Required composite foreign keys for run-scoped audit integrity.
@@ -229,6 +247,8 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
     ("token_work_items", ("row_id", "run_id"), "rows", ("row_id", "run_id")),
     ("token_work_items", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("token_work_items", ("coalesce_node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("scheduler_events", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("scheduler_events", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
 )
 
 # Required check constraints for audit integrity.
@@ -239,6 +259,11 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("auth_events", "ck_auth_events_provider"),
     ("run_attributions", "ck_run_attributions_auth_provider_type"),
     ("run_sources", "ck_run_sources_lifecycle_state"),
+    ("scheduler_events", "ck_scheduler_events_event_type"),
+    ("scheduler_events", "ck_scheduler_events_from_status"),
+    ("scheduler_events", "ck_scheduler_events_to_status"),
+    ("scheduler_events", "ck_scheduler_events_from_attempt_non_negative"),
+    ("scheduler_events", "ck_scheduler_events_to_attempt_non_negative"),
     ("calls", "calls_has_parent"),
     ("preflight_results", "ck_preflight_result_type"),
 )
@@ -259,6 +284,8 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("token_work_items", "ix_token_work_items_ready"),
     ("token_work_items", "ix_token_work_items_lease"),
     ("token_work_items", "uq_token_work_items_terminal_identity"),
+    ("scheduler_events", "ix_scheduler_events_run_token_time"),
+    ("scheduler_events", "ix_scheduler_events_work_item"),
     ("validation_errors", "ix_validation_errors_run_row"),
 )
 

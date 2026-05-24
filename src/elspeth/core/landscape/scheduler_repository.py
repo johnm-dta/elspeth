@@ -10,25 +10,34 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from typing import ClassVar
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from elspeth.contracts.errors import AuditIntegrityError, SchedulerLeaseLostError
-from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
+from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkItem, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import Tier1Engine
 from elspeth.core.landscape.errors import LandscapeRecordError
-from elspeth.core.landscape.schema import nodes_table, rows_table, token_work_items_table, tokens_table
+from elspeth.core.landscape.schema import nodes_table, rows_table, scheduler_events_table, token_work_items_table, tokens_table
 
 
 class TokenSchedulerRepository:
     """Persistence boundary for token scheduler work items."""
 
     _SCRUBBED_ROW_PAYLOAD_JSON = canonical_json({"row_payload": "purged", "payload_hash": None})
+    _TRANSITION_EVENT_TYPES: ClassVar[dict[TokenWorkStatus, SchedulerEventType]] = {
+        TokenWorkStatus.WAITING: SchedulerEventType.MARK_WAITING,
+        TokenWorkStatus.BLOCKED: SchedulerEventType.MARK_BLOCKED,
+        TokenWorkStatus.TERMINAL: SchedulerEventType.MARK_TERMINAL,
+        TokenWorkStatus.FAILED: SchedulerEventType.MARK_FAILED,
+        TokenWorkStatus.PENDING_SINK: SchedulerEventType.MARK_PENDING_SINK,
+    }
 
     def __init__(self, engine: Tier1Engine) -> None:
         # Runtime PRAGMA probe — defence in depth against a caller that slips
@@ -134,7 +143,23 @@ class TokenSchedulerRepository:
                 node_id=node_id,
                 coalesce_node_id=coalesce_node_id,
             )
-            self._insert_work_item_idempotent(conn, values=values, operation="enqueue READY scheduler work")
+            inserted = self._insert_work_item_idempotent(conn, values=values, operation="enqueue READY scheduler work")
+            if inserted:
+                self._record_scheduler_event(
+                    conn,
+                    event_type=SchedulerEventType.ENQUEUE,
+                    run_id=run_id,
+                    token_id=token_id,
+                    work_item_id=work_item_id,
+                    node_id=node_id,
+                    from_status=None,
+                    to_status=TokenWorkStatus.READY,
+                    from_lease_owner=None,
+                    to_lease_owner=None,
+                    from_attempt=None,
+                    to_attempt=attempt,
+                    recorded_at=available_at,
+                )
             row = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
         return self._item_from_mapping(row)
 
@@ -215,6 +240,22 @@ class TokenSchedulerRepository:
             )
             if row is None:
                 self._insert_work_item(conn, values=values, operation="restore BLOCKED scheduler work")
+                self._record_scheduler_event(
+                    conn,
+                    event_type=SchedulerEventType.RESTORE_BLOCKED,
+                    run_id=run_id,
+                    token_id=token_id,
+                    work_item_id=work_item_id,
+                    node_id=node_id,
+                    from_status=None,
+                    to_status=TokenWorkStatus.BLOCKED,
+                    from_lease_owner=None,
+                    to_lease_owner=None,
+                    from_attempt=None,
+                    to_attempt=attempt,
+                    recorded_at=available_at,
+                    context={"barrier_key": barrier_key},
+                )
                 row = (
                     conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id))
                     .mappings()
@@ -340,8 +381,83 @@ class TokenSchedulerRepository:
                 f"Scheduler {operation} affected {result.rowcount} rows for {identity}; expected exactly one audit row."
             )
 
+    def _record_scheduler_event(
+        self,
+        conn: Connection,
+        *,
+        event_type: SchedulerEventType,
+        run_id: str,
+        token_id: str,
+        work_item_id: str,
+        node_id: str | None,
+        from_status: TokenWorkStatus | None,
+        to_status: TokenWorkStatus,
+        from_lease_owner: str | None,
+        to_lease_owner: str | None,
+        from_attempt: int | None,
+        to_attempt: int,
+        recorded_at: datetime,
+        from_lease_expires_at: datetime | None = None,
+        to_lease_expires_at: datetime | None = None,
+        caller_owner: str | None = None,
+        context: Mapping[str, object] | None = None,
+    ) -> None:
+        context_json = canonical_json({} if context is None else dict(context))
+        event_identity = canonical_json(
+            {
+                "caller_owner": caller_owner,
+                "context_json": context_json,
+                "event_type": event_type.value,
+                "from_attempt": from_attempt,
+                "from_lease_expires_at": None if from_lease_expires_at is None else from_lease_expires_at.isoformat(),
+                "from_lease_owner": from_lease_owner,
+                "from_status": None if from_status is None else from_status.value,
+                "node_id": node_id,
+                "recorded_at": recorded_at.isoformat(),
+                "run_id": run_id,
+                "to_attempt": to_attempt,
+                "to_lease_expires_at": None if to_lease_expires_at is None else to_lease_expires_at.isoformat(),
+                "to_lease_owner": to_lease_owner,
+                "to_status": to_status.value,
+                "token_id": token_id,
+                "work_item_id": work_item_id,
+            }
+        )
+        event_id = hashlib.sha256(event_identity.encode()).hexdigest()
+        values = {
+            "event_id": event_id,
+            "run_id": run_id,
+            "token_id": token_id,
+            "work_item_id": work_item_id,
+            "node_id": node_id,
+            "event_type": event_type.value,
+            "from_status": None if from_status is None else from_status.value,
+            "to_status": to_status.value,
+            "from_lease_owner": from_lease_owner,
+            "to_lease_owner": to_lease_owner,
+            "from_lease_expires_at": from_lease_expires_at,
+            "to_lease_expires_at": to_lease_expires_at,
+            "from_attempt": from_attempt,
+            "to_attempt": to_attempt,
+            "recorded_at": recorded_at,
+            "caller_owner": caller_owner,
+            "context_json": context_json,
+        }
+        try:
+            result = conn.execute(scheduler_events_table.insert().values(**values))
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"Scheduler event {event_type.value!r} failed for run_id={run_id!r} "
+                f"work_item_id={work_item_id!r} — database rejected audit write: {type(exc).__name__}"
+            ) from exc
+        if result.rowcount != 1:
+            raise LandscapeRecordError(
+                f"Scheduler event {event_type.value!r} affected {result.rowcount} rows for "
+                f"run_id={run_id!r} work_item_id={work_item_id!r}; expected exactly one audit row."
+            )
+
     @staticmethod
-    def _insert_work_item_idempotent(conn: Connection, *, values: dict[str, object], operation: str) -> None:
+    def _insert_work_item_idempotent(conn: Connection, *, values: dict[str, object], operation: str) -> bool:
         """Insert a work item or accept an exact existing continuation.
 
         Child continuations are persisted before their parent claim is marked
@@ -352,7 +468,7 @@ class TokenSchedulerRepository:
         """
         try:
             TokenSchedulerRepository._insert_work_item(conn, values=values, operation=operation)
-            return
+            return True
         except LandscapeRecordError as exc:
             cause = exc.__cause__
             if type(cause) is not IntegrityError:
@@ -404,6 +520,7 @@ class TokenSchedulerRepository:
                 f"Scheduler {operation} found incompatible existing work item for "
                 f"{TokenSchedulerRepository._work_item_identity(values)}: {mismatches!r}"
             )
+        return False
 
     @staticmethod
     def _work_item_identity(values: dict[str, object]) -> str:
@@ -502,6 +619,24 @@ class TokenSchedulerRepository:
                     f"work_item_id={row['work_item_id']!r}: SELECT saw READY but UPDATE matched "
                     f"{result.rowcount} rows for lease_owner={lease_owner!r}. Concurrent claim by another worker."
                 )
+            self._record_scheduler_event(
+                conn,
+                event_type=SchedulerEventType.CLAIM_READY,
+                run_id=run_id,
+                token_id=row["token_id"],
+                work_item_id=row["work_item_id"],
+                node_id=row["node_id"],
+                from_status=TokenWorkStatus.READY,
+                to_status=TokenWorkStatus.LEASED,
+                from_lease_owner=row["lease_owner"],
+                to_lease_owner=lease_owner,
+                from_attempt=row["attempt"],
+                to_attempt=row["attempt"],
+                recorded_at=now,
+                from_lease_expires_at=row["lease_expires_at"],
+                to_lease_expires_at=lease_expires_at,
+                caller_owner=lease_owner,
+            )
             claimed = (
                 conn.execute(
                     select(token_work_items_table)
@@ -571,6 +706,24 @@ class TokenSchedulerRepository:
                     f"Scheduler claim_pending_sink lost race on run_id={run_id!r} work_item_id={row['work_item_id']!r}: "
                     f"UPDATE matched {result.rowcount} rows for lease_owner={lease_owner!r}."
                 )
+            self._record_scheduler_event(
+                conn,
+                event_type=SchedulerEventType.CLAIM_PENDING_SINK,
+                run_id=run_id,
+                token_id=row["token_id"],
+                work_item_id=row["work_item_id"],
+                node_id=row["node_id"],
+                from_status=TokenWorkStatus.PENDING_SINK,
+                to_status=TokenWorkStatus.LEASED,
+                from_lease_owner=row["lease_owner"],
+                to_lease_owner=lease_owner,
+                from_attempt=row["attempt"],
+                to_attempt=row["attempt"],
+                recorded_at=now,
+                from_lease_expires_at=row["lease_expires_at"],
+                to_lease_expires_at=lease_expires_at,
+                caller_owner=lease_owner,
+            )
             claimed = (
                 conn.execute(
                     select(token_work_items_table)
@@ -684,8 +837,72 @@ class TokenSchedulerRepository:
                         updated_at=now,
                     )
                 )
+                if result.rowcount == 1:
+                    self._record_scheduler_event(
+                        conn,
+                        event_type=SchedulerEventType.RECOVER_EXPIRED_LEASE,
+                        run_id=run_id,
+                        token_id=row["token_id"],
+                        work_item_id=next_work_item_id,
+                        node_id=row["node_id"],
+                        from_status=TokenWorkStatus.LEASED,
+                        to_status=TokenWorkStatus(recovered_status),
+                        from_lease_owner=row["lease_owner"],
+                        to_lease_owner=None,
+                        from_attempt=row["attempt"],
+                        to_attempt=next_attempt,
+                        recorded_at=now,
+                        from_lease_expires_at=row["lease_expires_at"],
+                        to_lease_expires_at=None,
+                        caller_owner=caller_owner,
+                        context=({"previous_work_item_id": row["work_item_id"]} if next_work_item_id != row["work_item_id"] else None),
+                    )
                 recovered += result.rowcount
         return recovered
+
+    @staticmethod
+    def _recovery_event_for_previous_work_item(
+        conn: Connection,
+        *,
+        run_id: str,
+        previous_work_item_id: str,
+    ) -> RowMapping | None:
+        recovery_events = (
+            conn.execute(
+                select(scheduler_events_table)
+                .where(scheduler_events_table.c.run_id == run_id)
+                .where(scheduler_events_table.c.event_type == SchedulerEventType.RECOVER_EXPIRED_LEASE.value)
+                .order_by(
+                    scheduler_events_table.c.recorded_at.desc(),
+                    scheduler_events_table.c.event_id.desc(),
+                )
+            )
+            .mappings()
+            .all()
+        )
+        for event in recovery_events:
+            try:
+                context = json.loads(event["context_json"])
+            except json.JSONDecodeError as exc:
+                raise AuditIntegrityError(
+                    f"Corrupt scheduler recovery event context_json for event_id={event['event_id']!r}: {exc}"
+                ) from exc
+            if type(context) is not dict:
+                raise AuditIntegrityError(
+                    f"Corrupt scheduler recovery event context_json for event_id={event['event_id']!r}: "
+                    f"expected object, got {type(context).__name__}"
+                )
+            if "previous_work_item_id" not in context:
+                continue
+            previous = context["previous_work_item_id"]
+            if type(previous) is not str:
+                raise AuditIntegrityError(
+                    f"Corrupt scheduler recovery event context_json for event_id={event['event_id']!r}: "
+                    f"previous_work_item_id must be str, got {type(previous).__name__}"
+                )
+            if previous == previous_work_item_id:
+                return event
+        return None
 
     def heartbeat_lease(
         self,
@@ -721,28 +938,99 @@ class TokenSchedulerRepository:
         local last-heartbeat-attempt clock without re-reading the row.
         """
         new_expires_at = now + timedelta(seconds=lease_seconds)
-        with self._engine.begin() as conn:
-            result = conn.execute(
-                update(token_work_items_table)
-                .where(
-                    and_(
-                        token_work_items_table.c.work_item_id == work_item_id,
-                        token_work_items_table.c.run_id == run_id,
-                        token_work_items_table.c.status == TokenWorkStatus.LEASED.value,
-                        token_work_items_table.c.lease_owner == lease_owner,
+        lease_lost = False
+        with self._engine.connect() as conn:
+            transaction = conn.begin()
+            try:
+                result = conn.execute(
+                    update(token_work_items_table)
+                    .where(
+                        and_(
+                            token_work_items_table.c.work_item_id == work_item_id,
+                            token_work_items_table.c.run_id == run_id,
+                            token_work_items_table.c.status == TokenWorkStatus.LEASED.value,
+                            token_work_items_table.c.lease_owner == lease_owner,
+                        )
+                    )
+                    .values(
+                        lease_expires_at=new_expires_at,
+                        updated_at=now,
                     )
                 )
-                .values(
-                    lease_expires_at=new_expires_at,
-                    updated_at=now,
-                )
+                if result.rowcount != 1:
+                    current = (
+                        conn.execute(
+                            select(token_work_items_table)
+                            .where(token_work_items_table.c.run_id == run_id)
+                            .where(token_work_items_table.c.work_item_id == work_item_id)
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                    if current is not None:
+                        self._record_scheduler_event(
+                            conn,
+                            event_type=SchedulerEventType.LEASE_LOST,
+                            run_id=run_id,
+                            token_id=current["token_id"],
+                            work_item_id=work_item_id,
+                            node_id=current["node_id"],
+                            from_status=TokenWorkStatus.LEASED,
+                            to_status=TokenWorkStatus(current["status"]),
+                            from_lease_owner=lease_owner,
+                            to_lease_owner=current["lease_owner"],
+                            from_attempt=current["attempt"],
+                            to_attempt=current["attempt"],
+                            recorded_at=now,
+                            from_lease_expires_at=None,
+                            to_lease_expires_at=current["lease_expires_at"],
+                            caller_owner=lease_owner,
+                            context={"reason": "heartbeat_cas_miss"},
+                        )
+                    else:
+                        recovery_event = self._recovery_event_for_previous_work_item(
+                            conn,
+                            run_id=run_id,
+                            previous_work_item_id=work_item_id,
+                        )
+                        if recovery_event is not None:
+                            self._record_scheduler_event(
+                                conn,
+                                event_type=SchedulerEventType.LEASE_LOST,
+                                run_id=run_id,
+                                token_id=recovery_event["token_id"],
+                                work_item_id=work_item_id,
+                                node_id=recovery_event["node_id"],
+                                from_status=TokenWorkStatus.LEASED,
+                                to_status=TokenWorkStatus(recovery_event["to_status"]),
+                                from_lease_owner=lease_owner,
+                                to_lease_owner=recovery_event["to_lease_owner"],
+                                from_attempt=recovery_event["from_attempt"],
+                                to_attempt=recovery_event["to_attempt"],
+                                recorded_at=now,
+                                from_lease_expires_at=recovery_event["from_lease_expires_at"],
+                                to_lease_expires_at=recovery_event["to_lease_expires_at"],
+                                caller_owner=lease_owner,
+                                context={
+                                    "reason": "heartbeat_cas_miss_after_recovery",
+                                    "recovered_work_item_id": recovery_event["work_item_id"],
+                                    "recovery_event_id": recovery_event["event_id"],
+                                },
+                            )
+                    transaction.commit()
+                    lease_lost = True
+                else:
+                    transaction.commit()
+            except Exception:
+                if transaction.is_active:
+                    transaction.rollback()
+                raise
+        if lease_lost:
+            raise SchedulerLeaseLostError(
+                work_item_id=work_item_id,
+                lease_owner=lease_owner,
+                run_id=run_id,
             )
-            if result.rowcount != 1:
-                raise SchedulerLeaseLostError(
-                    work_item_id=work_item_id,
-                    lease_owner=lease_owner,
-                    run_id=run_id,
-                )
         return new_expires_at
 
     def mark_waiting(
@@ -767,17 +1055,61 @@ class TokenSchedulerRepository:
     def release_waiting(self, *, run_id: str, now: datetime) -> int:
         """Release due WAITING items back to READY."""
         with self._engine.begin() as conn:
-            result = conn.execute(
-                update(token_work_items_table)
-                .where(token_work_items_table.c.run_id == run_id)
-                .where(token_work_items_table.c.status == TokenWorkStatus.WAITING.value)
-                .where(token_work_items_table.c.available_at <= now)
-                .values(
-                    status=TokenWorkStatus.READY.value,
-                    updated_at=now,
+            waiting_rows = (
+                conn.execute(
+                    select(token_work_items_table)
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.WAITING.value)
+                    .where(token_work_items_table.c.available_at <= now)
+                    .order_by(
+                        token_work_items_table.c.ingest_sequence,
+                        token_work_items_table.c.step_index,
+                        token_work_items_table.c.work_item_id,
+                    )
                 )
+                .mappings()
+                .all()
             )
-        return result.rowcount
+            released = 0
+            for row in waiting_rows:
+                result = conn.execute(
+                    update(token_work_items_table)
+                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.WAITING.value)
+                    .where(token_work_items_table.c.available_at <= now)
+                    .values(
+                        status=TokenWorkStatus.READY.value,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount == 1:
+                    self._record_scheduler_event(
+                        conn,
+                        event_type=SchedulerEventType.RELEASE_WAITING,
+                        run_id=run_id,
+                        token_id=row["token_id"],
+                        work_item_id=row["work_item_id"],
+                        node_id=row["node_id"],
+                        from_status=TokenWorkStatus.WAITING,
+                        to_status=TokenWorkStatus.READY,
+                        from_lease_owner=row["lease_owner"],
+                        to_lease_owner=None,
+                        from_attempt=row["attempt"],
+                        to_attempt=row["attempt"],
+                        recorded_at=now,
+                        from_lease_expires_at=row["lease_expires_at"],
+                        to_lease_expires_at=None,
+                    )
+                    released += 1
+                elif result.rowcount not in (0, None):
+                    raise AuditIntegrityError(
+                        f"Scheduler release_waiting affected {result.rowcount} rows for "
+                        f"run_id={run_id!r} work_item_id={row['work_item_id']!r}; expected 0 or 1."
+                    )
+        return released
 
     def mark_blocked(
         self,
@@ -880,18 +1212,51 @@ class TokenSchedulerRepository:
                 (token_work_items_table.c.lease_owner.is_(None)) | (token_work_items_table.c.lease_owner == expected_lease_owner)
             )
         with self._engine.begin() as conn:
-            result = conn.execute(
-                update(token_work_items_table)
-                .where(and_(*predicates))
-                .values(
-                    status=TokenWorkStatus.TERMINAL.value,
-                    row_payload_json=self._scrubbed_row_payload_json(token_id),
-                    lease_owner=None,
-                    lease_expires_at=None,
-                    updated_at=now,
-                )
+            rows = (
+                conn.execute(select(token_work_items_table).where(and_(*predicates)).order_by(token_work_items_table.c.work_item_id))
+                .mappings()
+                .all()
             )
-        return int(result.rowcount or 0)
+            terminalized = 0
+            for row in rows:
+                result = conn.execute(
+                    update(token_work_items_table)
+                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                    .where(and_(*predicates))
+                    .values(
+                        status=TokenWorkStatus.TERMINAL.value,
+                        row_payload_json=self._scrubbed_row_payload_json(token_id),
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount == 1:
+                    self._record_scheduler_event(
+                        conn,
+                        event_type=SchedulerEventType.MARK_PENDING_SINK_TERMINAL,
+                        run_id=run_id,
+                        token_id=row["token_id"],
+                        work_item_id=row["work_item_id"],
+                        node_id=row["node_id"],
+                        from_status=TokenWorkStatus(row["status"]),
+                        to_status=TokenWorkStatus.TERMINAL,
+                        from_lease_owner=row["lease_owner"],
+                        to_lease_owner=None,
+                        from_attempt=row["attempt"],
+                        to_attempt=row["attempt"],
+                        recorded_at=now,
+                        from_lease_expires_at=row["lease_expires_at"],
+                        to_lease_expires_at=None,
+                        caller_owner=expected_lease_owner,
+                    )
+                    terminalized += 1
+                elif result.rowcount not in (0, None):
+                    raise AuditIntegrityError(
+                        f"Scheduler pending-sink terminalization affected {result.rowcount} rows for "
+                        f"run_id={run_id!r} token_id={token_id!r} work_item_id={row['work_item_id']!r}; expected 0 or 1."
+                    )
+        return terminalized
 
     def mark_blocked_barrier_terminal(
         self,
@@ -936,28 +1301,62 @@ class TokenSchedulerRepository:
                         f"{matching_count} matching token(s) out of {len(durable_token_ids)} blocked token(s). "
                         f"missing token_ids={sorted(missing_token_ids)!r}; durable token_ids={sorted(durable_token_ids)!r}."
                     )
-            statement = (
-                update(token_work_items_table)
-                .where(token_work_items_table.c.run_id == run_id)
-                .where(token_work_items_table.c.barrier_key == barrier_key)
-                .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
-                .where(token_work_items_table.c.token_id.in_(token_ids))
-            )
-            result = conn.execute(
-                statement.values(
-                    status=TokenWorkStatus.TERMINAL.value,
-                    row_payload_json=self._scrubbed_row_payload_json(barrier_key),
-                    lease_owner=None,
-                    lease_expires_at=None,
-                    updated_at=now,
+            candidate_rows = (
+                conn.execute(
+                    select(token_work_items_table)
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.barrier_key == barrier_key)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+                    .where(token_work_items_table.c.token_id.in_(token_ids))
+                    .order_by(token_work_items_table.c.token_id, token_work_items_table.c.work_item_id)
                 )
+                .mappings()
+                .all()
             )
-            rowcount = result.rowcount
-            if rowcount is None or rowcount < 0:
-                raise AuditIntegrityError(
-                    f"Scheduler barrier terminalization for run_id={run_id!r} barrier_key={barrier_key!r} "
-                    f"returned unsupported rowcount {rowcount!r}; durable/live reconciliation cannot be proven."
+            rowcount = 0
+            for row in candidate_rows:
+                statement = (
+                    update(token_work_items_table)
+                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.barrier_key == barrier_key)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+                    .where(token_work_items_table.c.token_id.in_(token_ids))
                 )
+                result = conn.execute(
+                    statement.values(
+                        status=TokenWorkStatus.TERMINAL.value,
+                        row_payload_json=self._scrubbed_row_payload_json(barrier_key),
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount == 1:
+                    self._record_scheduler_event(
+                        conn,
+                        event_type=SchedulerEventType.MARK_BLOCKED_BARRIER_TERMINAL,
+                        run_id=run_id,
+                        token_id=row["token_id"],
+                        work_item_id=row["work_item_id"],
+                        node_id=row["node_id"],
+                        from_status=TokenWorkStatus.BLOCKED,
+                        to_status=TokenWorkStatus.TERMINAL,
+                        from_lease_owner=row["lease_owner"],
+                        to_lease_owner=None,
+                        from_attempt=row["attempt"],
+                        to_attempt=row["attempt"],
+                        recorded_at=now,
+                        from_lease_expires_at=row["lease_expires_at"],
+                        to_lease_expires_at=None,
+                        context={"barrier_key": barrier_key},
+                    )
+                    rowcount += 1
+                elif result.rowcount not in (0, None):
+                    raise AuditIntegrityError(
+                        f"Scheduler barrier terminalization affected {result.rowcount} rows for "
+                        f"run_id={run_id!r} barrier_key={barrier_key!r} work_item_id={row['work_item_id']!r}; expected 0 or 1."
+                    )
             if requested_token_ids and rowcount != len(requested_token_ids):
                 raise AuditIntegrityError(
                     f"Scheduler barrier terminalization mismatch for run_id={run_id!r} barrier_key={barrier_key!r}: "
@@ -1109,6 +1508,11 @@ class TokenSchedulerRepository:
         if expected_lease_owner is not None:
             predicates.append(token_work_items_table.c.lease_owner == expected_lease_owner)
         with self._engine.begin() as conn:
+            before = (
+                conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id))
+                .mappings()
+                .one_or_none()
+            )
             result = conn.execute(update(token_work_items_table).where(and_(*predicates)).values(**update_values))
             if result.rowcount != 1:
                 actual = (
@@ -1131,6 +1535,47 @@ class TokenSchedulerRepository:
                     f"{expected_owner_message}. Caller assumed ownership but the row is missing or in an unexpected "
                     f"state ({actual_message})."
                 )
+            if before is None:
+                raise AuditIntegrityError(
+                    f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
+                    "updated a row that could not be read before the write; audit transition history cannot be proven."
+                )
+            next_lease_owner = update_values.get("lease_owner", before["lease_owner"])
+            next_lease_expires_at = update_values.get("lease_expires_at", before["lease_expires_at"])
+            next_attempt = update_values.get("attempt", before["attempt"])
+            if next_lease_owner is not None and type(next_lease_owner) is not str:
+                raise AuditIntegrityError(
+                    f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
+                    f"produced invalid lease_owner type {type(next_lease_owner).__name__}; audit transition history cannot be proven."
+                )
+            if next_lease_expires_at is not None and type(next_lease_expires_at) is not datetime:
+                raise AuditIntegrityError(
+                    f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
+                    f"produced invalid lease_expires_at type {type(next_lease_expires_at).__name__}; audit transition history cannot be proven."
+                )
+            if type(next_attempt) is not int:
+                raise AuditIntegrityError(
+                    f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
+                    f"produced invalid attempt type {type(next_attempt).__name__}; audit transition history cannot be proven."
+                )
+            self._record_scheduler_event(
+                conn,
+                event_type=self._TRANSITION_EVENT_TYPES[status],
+                run_id=before["run_id"],
+                token_id=before["token_id"],
+                work_item_id=work_item_id,
+                node_id=before["node_id"],
+                from_status=TokenWorkStatus(before["status"]),
+                to_status=status,
+                from_lease_owner=before["lease_owner"],
+                to_lease_owner=next_lease_owner,
+                from_attempt=before["attempt"],
+                to_attempt=next_attempt,
+                recorded_at=now,
+                from_lease_expires_at=before["lease_expires_at"],
+                to_lease_expires_at=next_lease_expires_at,
+                caller_owner=expected_lease_owner,
+            )
             row = conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id)).mappings().one()
         return self._item_from_mapping(row)
 

@@ -58,7 +58,7 @@ class LandscapeAnalyzer:
         """Initialize analyzer with database connection.
 
         Args:
-            database_url: SQLAlchemy connection URL (e.g., sqlite:///./state/audit.db)
+            database_url: SQLAlchemy connection URL (e.g., sqlite:////home/john/elspeth/data/runs/audit.db)
             passphrase: SQLCipher encryption passphrase (if database is encrypted)
         """
         self._db = LandscapeDB.from_url(database_url, passphrase=passphrase, create_tables=False)

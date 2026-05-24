@@ -15,6 +15,7 @@ from mcp.types import (
 )
 from sqlalchemy import create_engine, text
 
+from elspeth.core.landscape.database import LandscapeDB
 from elspeth.mcp import server as mcp_server
 from elspeth.mcp.server import create_server
 
@@ -71,6 +72,22 @@ async def test_stale_schema_does_not_abort_mcp_server_creation(tmp_path: Path) -
     assert isinstance(tools_response.root, ListToolsResult)
     tool_names = {tool.name for tool in tools_response.root.tools}
     assert tool_names == {"get_mcp_status"}
+
+
+@pytest.mark.asyncio
+async def test_ready_server_tool_list_is_json_serializable(tmp_path: Path) -> None:
+    """Tool schemas must survive the real MCP JSON serialization boundary."""
+    db_path = tmp_path / "audit.db"
+    db = LandscapeDB(f"sqlite:///{db_path}")
+    db.close()
+
+    server = create_server(f"sqlite:///{db_path}")
+
+    tools_response = await server.request_handlers[ListToolsRequest](ListToolsRequest(method="tools/list"))
+    assert isinstance(tools_response.root, ListToolsResult)
+    assert len(tools_response.root.tools) > 1
+
+    tools_response.root.model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,8 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.formatters import dataclass_to_dict, serialize_datetime
 from elspeth.mcp.types import (
+    OPERATION_STATUS_VALUES,
+    OPERATION_TYPE_VALUES,
     CallDetail,
     CollisionFieldRecord,
     CollisionRecord,
@@ -231,18 +233,17 @@ def list_operations(
     status: str | None = None,
     limit: int = 100,
 ) -> list[OperationRecord]:
-    """List source/sink operations for a run.
+    """List runtime operations for a run.
 
-    Operations are the source/sink equivalent of node_states. They track
-    external I/O operations (blob downloads, file writes, database inserts)
-    and provide a parent context for external calls made during source.load()
-    or sink.write().
+    Operations are the run/node equivalent of node_states. They track runtime
+    work that can own external calls, including source loads, sink writes, and
+    runtime preflights.
 
     Args:
         db: Database connection
         factory: Recorder factory
         run_id: Run ID to query
-        operation_type: Filter by type ('source_load' or 'sink_write')
+        operation_type: Filter by operation type
         status: Filter by status ('open', 'completed', 'failed', 'pending')
         limit: Maximum operations to return
 
@@ -277,12 +278,13 @@ def list_operations(
         )
 
         if operation_type is not None:
-            if operation_type not in ("source_load", "sink_write"):
-                raise ValueError(f"Invalid operation_type '{operation_type}'. Valid: source_load, sink_write")
+            if operation_type not in OPERATION_TYPE_VALUES:
+                valid_operation_types = ", ".join(OPERATION_TYPE_VALUES)
+                raise ValueError(f"Invalid operation_type '{operation_type}'. Valid: {valid_operation_types}")
             query = query.where(operations_table.c.operation_type == operation_type)
 
         if status is not None:
-            valid_statuses = ("open", "completed", "failed", "pending")
+            valid_statuses = OPERATION_STATUS_VALUES
             if status not in valid_statuses:
                 raise ValueError(f"Invalid status '{status}'. Valid: {valid_statuses}")
             query = query.where(operations_table.c.status == status)

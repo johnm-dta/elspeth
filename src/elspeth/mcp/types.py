@@ -22,7 +22,9 @@ from typing import Any, Literal, Required, TypedDict
 RunStatusValue = Literal["running", "completed", "completed_with_failures", "failed", "empty", "interrupted"]
 ExportStatusValue = Literal["pending", "completed", "failed"]
 OperationTypeValue = Literal["source_load", "sink_write", "runtime_preflight"]
+OPERATION_TYPE_VALUES: tuple[OperationTypeValue, ...] = ("source_load", "sink_write", "runtime_preflight")
 OperationStatusValue = Literal["open", "completed", "failed", "pending"]
+OPERATION_STATUS_VALUES: tuple[OperationStatusValue, ...] = ("open", "completed", "failed", "pending")
 CallTypeValue = Literal["llm", "http", "http_redirect", "sql", "vector", "filesystem"]
 CallStatusValue = Literal["success", "error"]
 NodeStateStatusValue = Literal["open", "pending", "completed", "failed"]

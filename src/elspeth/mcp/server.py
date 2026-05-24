@@ -6,10 +6,10 @@ infrastructure.
 
 Usage:
     # Direct execution
-    python -m elspeth.mcp.server --database sqlite:///./state/audit.db
+    python -m elspeth.mcp.server --database sqlite:////home/john/elspeth/data/runs/audit.db
 
     # Or as an MCP server
-    elspeth-mcp --database sqlite:///./state/audit.db
+    elspeth-mcp --database sqlite:////home/john/elspeth/data/runs/audit.db
 
 The analyzer logic lives in ``mcp.analyzer`` (facade) and
 ``mcp.analyzers.*`` (domain submodules). This file contains only
@@ -34,6 +34,7 @@ from mcp.types import TextContent, Tool
 from elspeth.contracts.enums import RunStatus
 from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.mcp.analyzer import LandscapeAnalyzer
+from elspeth.mcp.types import OPERATION_STATUS_VALUES, OPERATION_TYPE_VALUES
 
 __all__ = [
     "CallToolResult",
@@ -188,12 +189,12 @@ _TOOLS: dict[str, _ToolDef] = {
             "operation_type": {
                 "type": ["string", "null"],
                 "description": "Filter by type",
-                "enum": ["source_load", "sink_write"],
+                "enum": list(OPERATION_TYPE_VALUES),
             },
             "status": {
                 "type": ["string", "null"],
                 "description": "Filter by status",
-                "enum": ["open", "completed", "failed", "pending"],
+                "enum": list(OPERATION_STATUS_VALUES),
             },
             "limit": {"type": "integer", "description": "Max operations (default 100)", "default": 100},
         },
@@ -603,7 +604,7 @@ def create_server(database_url: str, *, passphrase: str | None = None) -> Server
                 description=defn.description,
                 inputSchema={
                     "type": "object",
-                    "properties": defn.schema_properties,
+                    "properties": dict(defn.schema_properties),
                     **({"required": list(defn.args.required_str)} if defn.args.required_str else {}),
                 },
             )

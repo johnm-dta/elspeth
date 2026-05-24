@@ -1777,10 +1777,10 @@ class TestOperationLoader:
         with pytest.raises(AuditIntegrityError, match="error_message"):
             loader.load(sa_row)
 
-    # === Both operation types accepted ===
+    # === Runtime operation types accepted ===
 
-    @pytest.mark.parametrize("op_type", ["source_load", "sink_write"])
-    def test_both_operation_types_accepted(self, op_type: str) -> None:
+    @pytest.mark.parametrize("op_type", ["source_load", "sink_write", "runtime_preflight"])
+    def test_runtime_operation_types_accepted(self, op_type: str) -> None:
         sa_row = self._make_operation_row(operation_type=op_type)
         loader = OperationLoader()
         result = loader.load(sa_row)

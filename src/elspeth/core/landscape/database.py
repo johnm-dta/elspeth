@@ -93,13 +93,24 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("runs", "llm_call_count"),
     ("runs", "seeded_from_cache"),
     ("runs", "cache_key"),
+    # Preflight results are written after run creation; partial stale tables
+    # otherwise pass schema validation and fail later on insert.
+    ("preflight_results", "result_id"),
+    ("preflight_results", "run_id"),
+    ("preflight_results", "result_type"),
+    ("preflight_results", "name"),
+    ("preflight_results", "result_json"),
+    ("preflight_results", "created_at"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).
 # Format: (table_name, column_name, referenced_table)
 # Use this only for exact single-column contracts. Run-scoped contracts belong in
 # _REQUIRED_COMPOSITE_FOREIGN_KEYS so stale single-column FKs cannot satisfy them.
-_REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (("validation_errors", "row_id", "rows"),)
+_REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("validation_errors", "row_id", "rows"),
+    ("preflight_results", "run_id", "runs"),
+)
 
 # Required composite foreign keys for run-scoped audit integrity.
 # Format: (table_name, constrained_columns, referenced_table, referenced_columns)
@@ -142,6 +153,7 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("calls", "ix_calls_operation_call_index_unique"),
     ("calls", "ix_calls_resolved_prompt_template_hash"),
     ("checkpoints", "ix_checkpoints_run_sequence_unique"),
+    ("preflight_results", "ix_preflight_results_run"),
     ("token_outcomes", "ix_token_outcomes_terminal_unique"),
     ("validation_errors", "ix_validation_errors_run_row"),
 )

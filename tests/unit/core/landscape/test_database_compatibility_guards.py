@@ -549,6 +549,40 @@ class TestSchemaCompatibilityGuards:
         assert "To fix this, either:" in msg
         instance.close()
 
+    def test_validate_schema_rejects_stale_preflight_results_shape(self, tmp_path: Path) -> None:
+        """Runtime preflight result writes must fail fast on stale physical tables."""
+        db_path = tmp_path / "stale_preflight_results.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE preflight_results"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE preflight_results (
+                        result_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL REFERENCES runs(run_id),
+                        result_type TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        CONSTRAINT ck_preflight_result_type
+                            CHECK (result_type IN ('dependency_run', 'commencement_gate', 'readiness_check'))
+                    )
+                    """
+                )
+            )
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "preflight_results.result_json" in msg
+        assert "preflight_results.ix_preflight_results_run" in msg
+        instance.close()
+
     def test_non_sqlite_require_existing_schema_rejects_empty_database(self, tmp_path: Path) -> None:
         """Non-SQLite path must reject empty databases when _require_existing_schema is set."""
         db_path = tmp_path / "empty_non_sqlite.db"

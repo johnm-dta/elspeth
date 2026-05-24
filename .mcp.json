@@ -5,7 +5,7 @@
       "command": "/home/john/elspeth/.venv/bin/elspeth-mcp",
       "args": [
         "--database",
-        "sqlite:///./state/audit.db"
+        "sqlite:////home/john/elspeth/data/runs/audit.db"
       ]
     },
     "elspeth-composer": {

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Literal, Required, get_args, get_origin, get_type_hints
 
 from elspeth.mcp import types
+from elspeth.mcp.server import _TOOLS
 
 
 def _literal_values(hint: object) -> set[str]:
@@ -36,6 +37,15 @@ def test_operation_record_uses_operation_literals() -> None:
         "runtime_preflight",
     }
     assert _literal_values(hints["status"]) == {"open", "completed", "failed", "pending"}
+
+
+def test_operation_type_filter_schema_matches_operation_literals() -> None:
+    """MCP schema must accept every operation type the runtime writes."""
+    hints = get_type_hints(types.OperationRecord)
+    operation_type_values = _literal_values(hints["operation_type"])
+    schema_values = set(_TOOLS["list_operations"].schema_properties["operation_type"]["enum"])
+
+    assert schema_values == operation_type_values
 
 
 def test_node_state_and_dag_literals_match_current_contracts() -> None:

@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import ClassVar, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
+from elspeth.contracts.blobs import ALLOWED_MIME_TYPES as ALLOWED_MIME_TYPES
+from elspeth.contracts.blobs import AllowedMimeType as AllowedMimeType
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import freeze_fields
 
@@ -20,9 +22,9 @@ from elspeth.contracts.freeze import freeze_fields
 # BlobStatus is the full enum stored on a BlobRecord.  FinalizeBlobStatus
 # is the narrower set a pending blob may transition to — pending itself
 # is not a valid finalize target.  BlobCreator mirrors ck_blobs_created_by,
-# BlobRunLinkDirection mirrors ck_blob_run_links_direction, and
-# AllowedMimeType is the closed set of data-oriented MIME types accepted
-# for uploads.
+# and BlobRunLinkDirection mirrors ck_blob_run_links_direction.
+# AllowedMimeType lives at L0 in elspeth.contracts.blobs and is re-exported
+# from this module for existing web-layer import sites.
 #
 # The Literal aliases are authoritative — their matching runtime
 # frozensets are *derived* via typing.get_args() so adding a member is
@@ -38,14 +40,6 @@ BlobStatus = Literal["ready", "pending", "error"]
 FinalizeBlobStatus = Literal["ready", "error"]
 BlobCreator = Literal["user", "assistant", "pipeline"]
 BlobRunLinkDirection = Literal["input", "output"]
-AllowedMimeType = Literal[
-    "text/csv",
-    "text/plain",
-    "application/json",
-    "application/x-jsonlines",
-    "application/jsonl",
-    "text/jsonl",
-]
 
 # Runtime frozensets derived from the Literal aliases above.  These are
 # used by the DB CHECK-mirroring read guards (_row_to_record) and by
@@ -68,8 +62,6 @@ BLOB_CREATORS: frozenset[str] = frozenset(get_args(BlobCreator))
 #   input  — blob consumed by a run as source data
 #   output — blob produced by a run as a pipeline result
 BLOB_RUN_LINK_DIRECTIONS: frozenset[str] = frozenset(get_args(BlobRunLinkDirection))
-# MIME types accepted for data-oriented uploads.
-ALLOWED_MIME_TYPES: frozenset[str] = frozenset(get_args(AllowedMimeType))
 
 
 @dataclass(frozen=True, slots=True)

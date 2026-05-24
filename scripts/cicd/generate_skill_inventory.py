@@ -233,12 +233,12 @@ def _group_by_category(
         grouped[category].append(decl.name)
     for name in carve_outs:
         # Carve-outs are always placed by override (they have no ToolKind here).
-        category = _CATEGORY_OVERRIDES.get(name)
-        if category is None:
+        override_category = _CATEGORY_OVERRIDES.get(name)
+        if override_category is None:
             raise RuntimeError(
                 f"Carve-out tool {name!r} has no entry in _CATEGORY_OVERRIDES; every carve-out must declare its skill category explicitly."
             )
-        grouped[category].append(name)
+        grouped[override_category].append(name)
     return grouped
 
 

@@ -1,7 +1,7 @@
 # Composer Tools: Growth Mechanism Diagnosis
 
-**Date:** 2026-05-23  
-**Scope:** `src/elspeth/web/composer/tools/` post-refactor (RC5.2 branch `composer-tools-rearchitect`)  
+**Date:** 2026-05-23
+**Scope:** `src/elspeth/web/composer/tools/` post-refactor (RC5.2 branch `composer-tools-rearchitect`)
 **Files read:** `_dispatch.py` (1451 lines), `__init__.py` (456 lines), `redaction.py` (2854 lines), `service.py` (4653 lines)
 
 ---

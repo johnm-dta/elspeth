@@ -245,6 +245,11 @@ class CompositionProposalRecord:
     session_id: UUID
     tool_call_id: str
     user_message_id: UUID | None
+    composer_model_identifier: str | None
+    composer_model_version: str | None
+    composer_provider: str | None
+    composer_skill_hash: str | None
+    tool_arguments_hash: str | None
     tool_name: str
     status: ProposalLifecycleStatus
     summary: str
@@ -263,6 +268,15 @@ class CompositionProposalRecord:
             raise AuditIntegrityError(
                 f"Tier 1: composition_proposals.status is {self.status!r}, expected one of {sorted(PROPOSAL_LIFECYCLE_STATUS_VALUES)}"
             )
+        composer_provenance = (
+            self.composer_model_identifier,
+            self.composer_model_version,
+            self.composer_provider,
+            self.composer_skill_hash,
+            self.tool_arguments_hash,
+        )
+        if any(value is None for value in composer_provenance) and any(value is not None for value in composer_provenance):
+            raise AuditIntegrityError("Tier 1: composition_proposals composer provenance fields must be all populated or all NULL")
         freeze_fields(self, "affects", "arguments_json", "arguments_redacted_json")
 
 
@@ -706,6 +720,11 @@ class SessionServiceProtocol(Protocol):
         base_state_id: UUID | None,
         actor: str,
         user_message_id: UUID | None = None,
+        composer_model_identifier: str | None = None,
+        composer_model_version: str | None = None,
+        composer_provider: str | None = None,
+        composer_skill_hash: str | None = None,
+        tool_arguments_hash: str | None = None,
     ) -> CompositionProposalRecord: ...
 
     async def list_composition_proposals(

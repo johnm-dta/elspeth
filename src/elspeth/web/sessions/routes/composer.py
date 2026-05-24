@@ -26,6 +26,7 @@ from ._helpers import (
     ComposerRuntimePreflightError,
     ComposerService,
     ComposerServiceError,
+    CompositionProposalRecord,
     CompositionProposalResponse,
     CompositionStateData,
     CompositionStateRecord,
@@ -140,6 +141,88 @@ from ._helpers import (
     sys,
     uuid4,
 )
+
+_PROPOSAL_COMPOSER_CONTEXT_FIELDS: tuple[str, ...] = (
+    "composer_model_identifier",
+    "composer_model_version",
+    "composer_provider",
+    "composer_skill_hash",
+    "tool_arguments_hash",
+)
+
+
+def _inline_blob_content_for_proposal(
+    proposal: CompositionProposalRecord,
+    arguments: Mapping[str, Any],
+) -> str | None:
+    """Return inline blob content that accept replay would persist, if any."""
+    if proposal.tool_name != "set_pipeline":
+        return None
+    source = arguments.get("source")
+    if not isinstance(source, Mapping):
+        return None
+    inline_blob = source.get("inline_blob")
+    if not isinstance(inline_blob, Mapping):
+        return None
+    content = inline_blob.get("content")
+    return content if isinstance(content, str) else None
+
+
+async def _proposal_user_message_content(
+    service: SessionServiceProtocol,
+    proposal: CompositionProposalRecord,
+) -> str | None:
+    """Recover the immutable originating user-message body for accept replay."""
+    if proposal.user_message_id is None:
+        return None
+    messages = await service.get_messages(proposal.session_id, limit=None)
+    for message in messages:
+        if message.id != proposal.user_message_id:
+            continue
+        if message.role != "user":
+            raise HTTPException(
+                status_code=409,
+                detail="Stored proposal references a non-user originating message; ask ELSPETH to regenerate the proposal.",
+            )
+        return message.content
+    raise HTTPException(
+        status_code=409,
+        detail="Stored proposal references an originating message that could not be recovered; ask ELSPETH to regenerate the proposal.",
+    )
+
+
+def _missing_proposal_composer_context(
+    proposal: CompositionProposalRecord,
+    *,
+    user_message_content: str | None,
+) -> tuple[str, ...]:
+    missing = [name for name in _PROPOSAL_COMPOSER_CONTEXT_FIELDS if getattr(proposal, name) is None]
+    if user_message_content is None:
+        missing.insert(0, "user_message_content")
+    return tuple(missing)
+
+
+def _ensure_inline_blob_proposal_context(
+    proposal: CompositionProposalRecord,
+    arguments: Mapping[str, Any],
+    *,
+    user_message_content: str | None,
+) -> None:
+    inline_blob_content = _inline_blob_content_for_proposal(proposal, arguments)
+    if inline_blob_content is None:
+        return
+    if user_message_content is not None and inline_blob_content in user_message_content:
+        return
+    missing = _missing_proposal_composer_context(proposal, user_message_content=user_message_content)
+    if not missing:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            "Accepted proposal is missing composer provenance required for inline-blob source writes "
+            f"({', '.join(missing)}). Ask ELSPETH to regenerate the proposal."
+        ),
+    )
 
 
 def register_composer_routes(router: APIRouter) -> None:
@@ -291,10 +374,17 @@ def register_composer_routes(router: APIRouter) -> None:
         current_state = (
             _state_from_record(current_record) if current_record is not None else _initial_composition_state_with_guided_session()
         )
+        arguments = cast(dict[str, Any], deep_thaw(proposal.arguments_json))
+        user_message_content = await _proposal_user_message_content(service, proposal)
+        _ensure_inline_blob_proposal_context(
+            proposal,
+            arguments,
+            user_message_content=user_message_content,
+        )
         result = await run_sync_in_worker(
             execute_tool,
             proposal.tool_name,
-            cast(dict[str, Any], deep_thaw(proposal.arguments_json)),
+            arguments,
             current_state,
             request.app.state.catalog_service,
             data_dir=str(request.app.state.settings.data_dir),
@@ -303,6 +393,12 @@ def register_composer_routes(router: APIRouter) -> None:
             secret_service=request.app.state.scoped_secret_resolver,
             user_id=str(user.user_id),
             user_message_id=str(proposal.user_message_id) if proposal.user_message_id is not None else None,
+            user_message_content=user_message_content,
+            composer_model_identifier=proposal.composer_model_identifier,
+            composer_model_version=proposal.composer_model_version,
+            composer_provider=proposal.composer_provider,
+            composer_skill_hash=proposal.composer_skill_hash,
+            tool_arguments_hash=proposal.tool_arguments_hash,
         )
         if result.updated_state.version == current_state.version:
             # The tool ran but did not advance composition state. The route

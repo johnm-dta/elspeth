@@ -544,6 +544,11 @@ class TestComposerSingleToolCall:
         assert proposals[0].tool_name == "set_pipeline"
         assert proposals[0].status == "pending"
         assert "Replace the pipeline" in proposals[0].summary
+        assert proposals[0].composer_model_identifier == composer_service_with_real_sessions._model
+        assert proposals[0].composer_model_version == composer_service_with_real_sessions._model
+        assert proposals[0].composer_provider == "test"
+        assert proposals[0].composer_skill_hash == composer_service_with_real_sessions._composer_skill_hash
+        assert proposals[0].tool_arguments_hash == stable_hash(proposals[0].arguments_json)
         assert result.tool_outcomes[0].post_version == state.version
 
     @pytest.mark.asyncio

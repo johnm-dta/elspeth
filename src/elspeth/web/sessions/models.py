@@ -78,7 +78,10 @@ from sqlalchemy.types import JSON
 #   10 → ``interpretation_events.kind`` added; surface-specific
 #        ``auto_interpreted_opt_out`` rows now carry reviewed LLM artefacts
 #        and V2 argument hashes.
-SESSION_SCHEMA_EPOCH = 10
+#   11 → composition_proposals gains composer provenance fields so deferred
+#        explicit-approval accepts can replay inline-blob writes with the same
+#        model/provider/skill/arguments context as the original compose turn.
+SESSION_SCHEMA_EPOCH = 11
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -409,6 +412,16 @@ composition_proposals_table = Table(
     # same-session ownership so accept/replay cannot bind blobs to another
     # session's message.
     Column("user_message_id", String, nullable=True),
+    # Composer provenance captured at proposal creation. Nullable for
+    # legacy/imported/manual proposals, but all-or-none when present. Accept
+    # replay uses these columns for inline/blob-backed source writes so a
+    # deferred proposal cannot silently downgrade composer-authored bytes to
+    # verbatim merely because the original compose-loop context is gone.
+    Column("composer_model_identifier", String, nullable=True),
+    Column("composer_model_version", String, nullable=True),
+    Column("composer_provider", String, nullable=True),
+    Column("composer_skill_hash", String, nullable=True),
+    Column("tool_arguments_hash", String, nullable=True),
     Column("tool_name", String, nullable=False),
     Column("status", String, nullable=False),
     Column("summary", Text, nullable=False),
@@ -451,6 +464,13 @@ composition_proposals_table = Table(
     CheckConstraint(
         "(status = 'committed') = (committed_state_id IS NOT NULL)",
         name="ck_composition_proposals_committed_state",
+    ),
+    CheckConstraint(
+        "((composer_model_identifier IS NULL AND composer_model_version IS NULL AND "
+        "composer_provider IS NULL AND composer_skill_hash IS NULL AND tool_arguments_hash IS NULL) OR "
+        "(composer_model_identifier IS NOT NULL AND composer_model_version IS NOT NULL AND "
+        "composer_provider IS NOT NULL AND composer_skill_hash IS NOT NULL AND tool_arguments_hash IS NOT NULL))",
+        name="ck_composition_proposals_composer_provenance_all_or_none",
     ),
 )
 

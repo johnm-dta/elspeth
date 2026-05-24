@@ -2629,6 +2629,11 @@ class ComposerServiceImpl:
                         base_state_id=UUID(current_state_id) if current_state_id is not None else None,
                         actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
                         user_message_id=UUID(user_message_id) if user_message_id is not None else None,
+                        composer_model_identifier=self._model,
+                        composer_model_version=safe_response_model(response) or self._model,
+                        composer_provider=self._availability.provider or "unknown",
+                        composer_skill_hash=self._composer_skill_hash,
+                        tool_arguments_hash=audit.arguments_hash,
                     )
                     proposals_this_turn += 1
                     proposal_payload = {

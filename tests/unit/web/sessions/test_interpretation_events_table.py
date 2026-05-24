@@ -194,8 +194,8 @@ def _surface_opt_out_row(*, row_id: str, session_id: str, state_id: str) -> dict
     }
 
 
-def test_interpretation_kind_schema_cohort_epoch_is_10() -> None:
-    assert SESSION_SCHEMA_EPOCH == 10
+def test_proposal_provenance_schema_cohort_epoch_is_11() -> None:
+    assert SESSION_SCHEMA_EPOCH == 11
 
 
 # Test 1 — table exists with all expected columns -----------------------------

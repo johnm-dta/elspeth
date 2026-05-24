@@ -12,6 +12,7 @@ from elspeth.contracts import (
     NodeState,
     RoutingEvent,
     RowLineage,
+    SchedulerEvent,
     Token,
     TokenOutcome,
     TransformErrorRecord,
@@ -54,6 +55,9 @@ class LineageResult:
 
     transform_errors: tuple[TransformErrorRecord, ...] = ()
     """Transform errors for this token (from transform processing)."""
+
+    scheduler_events: tuple[SchedulerEvent, ...] = ()
+    """Scheduler lease and work-item transitions for this token."""
 
     outcome: TokenOutcome | None = None
     """Terminal outcome for this token (COMPLETED, ROUTED, FAILED, etc.)."""
@@ -266,6 +270,9 @@ def explain(
     # Get transform errors for this token
     transform_errors = data_flow.get_transform_errors_for_token(token_id)
 
+    # Get durable scheduler transition history for this token.
+    scheduler_events = query.get_scheduler_events(run_id=run_id, token_id=token_id)
+
     # Get token outcome if recorded
     outcome = data_flow.get_token_outcome(token_id)
 
@@ -278,5 +285,6 @@ def explain(
         parent_tokens=tuple(parent_tokens),
         validation_errors=tuple(validation_errors),
         transform_errors=tuple(transform_errors),
+        scheduler_events=tuple(scheduler_events),
         outcome=outcome,
     )

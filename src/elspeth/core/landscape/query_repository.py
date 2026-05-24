@@ -18,6 +18,7 @@ from elspeth.contracts import (
     RoutingEvent,
     Row,
     RowLineage,
+    SchedulerEvent,
     Token,
     TokenOutcome,
     TokenParent,
@@ -31,6 +32,7 @@ from elspeth.core.landscape.model_loaders import (
     NodeStateLoader,
     RoutingEventLoader,
     RowLoader,
+    SchedulerEventLoader,
     TokenLoader,
     TokenOutcomeLoader,
     TokenParentLoader,
@@ -41,6 +43,7 @@ from elspeth.core.landscape.schema import (
     node_states_table,
     routing_events_table,
     rows_table,
+    scheduler_events_table,
     token_outcomes_table,
     token_parents_table,
     tokens_table,
@@ -65,6 +68,7 @@ class QueryRepository:
         routing_event_loader: RoutingEventLoader,
         call_loader: CallLoader,
         token_outcome_loader: TokenOutcomeLoader,
+        scheduler_event_loader: SchedulerEventLoader | None = None,
         payload_store: PayloadStore | None = None,
     ) -> None:
         self._ops = ops
@@ -75,6 +79,7 @@ class QueryRepository:
         self._routing_event_loader = routing_event_loader
         self._call_loader = call_loader
         self._token_outcome_loader = token_outcome_loader
+        self._scheduler_event_loader = scheduler_event_loader or SchedulerEventLoader()
         self._payload_store = payload_store
 
     def get_rows(self, run_id: str) -> list[Row]:
@@ -245,6 +250,30 @@ class QueryRepository:
         query = select(token_parents_table).where(token_parents_table.c.token_id == token_id).order_by(token_parents_table.c.ordinal)
         db_rows = self._ops.execute_fetchall(query)
         return [self._token_parent_loader.load(r) for r in db_rows]
+
+    def get_scheduler_events(
+        self,
+        *,
+        run_id: str,
+        token_id: str | None = None,
+        work_item_id: str | None = None,
+    ) -> list[SchedulerEvent]:
+        """Get scheduler transition events for a run, optionally narrowed to a token or work item."""
+        predicates = [scheduler_events_table.c.run_id == run_id]
+        if token_id is not None:
+            predicates.append(scheduler_events_table.c.token_id == token_id)
+        if work_item_id is not None:
+            predicates.append(scheduler_events_table.c.work_item_id == work_item_id)
+        query = (
+            select(scheduler_events_table)
+            .where(*predicates)
+            .order_by(
+                scheduler_events_table.c.recorded_at,
+                scheduler_events_table.c.event_id,
+            )
+        )
+        db_rows = self._ops.execute_fetchall(query)
+        return [self._scheduler_event_loader.load(r) for r in db_rows]
 
     def get_token_children(self, parent_token_id: str) -> list[TokenParent]:
         """Get child relationships for a token (forward lineage).

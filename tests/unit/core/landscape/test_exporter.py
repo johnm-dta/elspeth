@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -53,6 +53,7 @@ from elspeth.contracts.enums import (
     TerminalPath,
     TriggerType,
 )
+from elspeth.contracts.scheduler import SchedulerEvent, SchedulerEventType, TokenWorkStatus
 from elspeth.core.landscape.exporter import LandscapeExporter
 
 # ---------------------------------------------------------------------------
@@ -104,6 +105,8 @@ _ROW = Row(
     run_id="run-1",
     source_node_id="node-1",
     row_index=0,
+    source_row_index=0,
+    ingest_sequence=0,
     source_data_hash="data-hash",
     created_at=_DT,
 )
@@ -118,6 +121,26 @@ _TOKEN = Token(
     expand_group_id=None,
     branch_name=None,
     step_in_pipeline=0,
+)
+
+_SCHEDULER_EVENT = SchedulerEvent(
+    event_id="sched-evt-1",
+    run_id="run-1",
+    token_id="tok-1",
+    work_item_id="work-1",
+    node_id="node-2",
+    event_type=SchedulerEventType.CLAIM_READY,
+    from_status=TokenWorkStatus.READY,
+    to_status=TokenWorkStatus.LEASED,
+    from_lease_owner=None,
+    to_lease_owner="worker-a",
+    from_lease_expires_at=None,
+    to_lease_expires_at=_DT2,
+    from_attempt=1,
+    to_attempt=1,
+    recorded_at=_DT,
+    caller_owner="worker-a",
+    context_json="{}",
 )
 
 _TOKEN_PARENT = TokenParent(
@@ -348,6 +371,7 @@ def _make_exporter(
     tokens: list[Any] | None = None,
     token_parents: list[Any] | None = None,
     token_outcomes: list[Any] | None = None,
+    scheduler_events: list[Any] | None = None,
     node_states: list[Any] | None = None,
     routing_events: list[Any] | None = None,
     state_calls: list[Any] | None = None,
@@ -357,7 +381,10 @@ def _make_exporter(
 ) -> LandscapeExporter:
     """Create an exporter with mocked database and factory."""
     mock_db = Mock()
-    exporter = LandscapeExporter(mock_db, signing_key=signing_key)
+    exporter = LandscapeExporter.__new__(LandscapeExporter)
+    exporter._db = mock_db
+    exporter._factory = Mock()
+    exporter._signing_key = signing_key
 
     # Mock all factory sub-repository methods used by _iter_records
     factory = exporter._factory
@@ -385,6 +412,7 @@ def _make_exporter(
     object.__setattr__(factory.query, "get_all_tokens_for_run", Mock(return_value=tokens or []))
     object.__setattr__(factory.query, "get_all_token_parents_for_run", Mock(return_value=token_parents or []))
     object.__setattr__(factory.query, "get_all_token_outcomes_for_run", Mock(return_value=token_outcomes or []))
+    object.__setattr__(factory.query, "get_scheduler_events", Mock(return_value=scheduler_events or []))
     object.__setattr__(factory.query, "get_all_node_states_for_run", Mock(return_value=node_states or []))
     object.__setattr__(factory.query, "get_all_routing_events_for_run", Mock(return_value=routing_events or []))
     object.__setattr__(factory.query, "get_all_calls_for_run", Mock(return_value=state_calls or []))
@@ -402,14 +430,16 @@ class TestConstructor:
 
     def test_creates_factory_from_db(self) -> None:
         db = Mock()
-        exporter = LandscapeExporter(db)
+        with patch("elspeth.core.landscape.exporter.RecorderFactory", return_value=Mock()):
+            exporter = LandscapeExporter(db)
         assert exporter._db is db
         assert exporter._signing_key is None
 
     def test_accepts_signing_key(self) -> None:
         db = Mock()
         key = b"secret-key"
-        exporter = LandscapeExporter(db, signing_key=key)
+        with patch("elspeth.core.landscape.exporter.RecorderFactory", return_value=Mock()):
+            exporter = LandscapeExporter(db, signing_key=key)
         assert exporter._signing_key == key
 
 
@@ -775,14 +805,53 @@ class TestTokenOutcomeRecords:
             tokens=[_TOKEN],
             token_parents=[_TOKEN_PARENT],
             token_outcomes=[_TOKEN_OUTCOME],
+            scheduler_events=[_SCHEDULER_EVENT],
             node_states=[_NODE_STATE_COMPLETED],
         )
         records = list(exporter.export_run("run-1"))
         types = [r["record_type"] for r in records]
         parent_idx = types.index("token_parent")
         outcome_idx = types.index("token_outcome")
+        scheduler_idx = types.index("scheduler_event")
         state_idx = types.index("node_state")
-        assert parent_idx < outcome_idx < state_idx
+        assert parent_idx < outcome_idx < scheduler_idx < state_idx
+
+
+# ===========================================================================
+# Scheduler event records
+# ===========================================================================
+
+
+class TestSchedulerEventRecords:
+    """Tests for scheduler_event record serialization."""
+
+    def test_scheduler_event_follows_token(self) -> None:
+        exporter = _make_exporter(
+            rows=[_ROW],
+            tokens=[_TOKEN],
+            scheduler_events=[_SCHEDULER_EVENT],
+        )
+        records = list(exporter.export_run("run-1"))
+        events = [r for r in records if r["record_type"] == "scheduler_event"]
+        assert len(events) == 1
+        e = events[0]
+        assert e["event_id"] == "sched-evt-1"
+        assert e["run_id"] == "run-1"
+        assert e["token_id"] == "tok-1"
+        assert e["work_item_id"] == "work-1"
+        assert e["node_id"] == "node-2"
+        assert e["event_type"] == "claim_ready"
+        assert e["from_status"] == "ready"
+        assert e["to_status"] == "leased"
+        assert e["from_lease_owner"] is None
+        assert e["to_lease_owner"] == "worker-a"
+        assert e["from_lease_expires_at"] is None
+        assert e["to_lease_expires_at"] == _DT2.isoformat()
+        assert e["from_attempt"] == 1
+        assert e["to_attempt"] == 1
+        assert e["recorded_at"] == _DT.isoformat()
+        assert e["caller_owner"] == "worker-a"
+        assert e["context_json"] == "{}"
 
 
 # ===========================================================================
@@ -1033,6 +1102,7 @@ class TestRecordOrder:
             transform_errors=[_TRANSFORM_ERROR],
             rows=[_ROW],
             tokens=[_TOKEN],
+            scheduler_events=[_SCHEDULER_EVENT],
             node_states=[_NODE_STATE_COMPLETED],
             batches=[_BATCH],
             artifacts=[_ARTIFACT],
@@ -1050,10 +1120,23 @@ class TestRecordOrder:
         validation_error_idx = types.index("validation_error")
         transform_error_idx = types.index("transform_error")
         row_idx = types.index("row")
+        scheduler_idx = types.index("scheduler_event")
         batch_idx = types.index("batch")
         art_idx = types.index("artifact")
 
-        assert run_idx < sec_idx < node_idx < edge_idx < op_idx < validation_error_idx < transform_error_idx < row_idx < batch_idx < art_idx
+        assert (
+            run_idx
+            < sec_idx
+            < node_idx
+            < edge_idx
+            < op_idx
+            < validation_error_idx
+            < transform_error_idx
+            < row_idx
+            < scheduler_idx
+            < batch_idx
+            < art_idx
+        )
 
 
 # ===========================================================================
@@ -1239,6 +1322,7 @@ class TestTimestampPreservation:
             tokens=[_TOKEN],
             token_parents=[_TOKEN_PARENT],
             token_outcomes=[_TOKEN_OUTCOME],
+            scheduler_events=[_SCHEDULER_EVENT],
             node_states=[_NODE_STATE_COMPLETED],
             routing_events=[_ROUTING_EVENT],
             state_calls=[_STATE_CALL],
@@ -1256,6 +1340,7 @@ class TestTimestampPreservation:
             "operation": ["started_at", "completed_at"],
             "row": ["created_at"],
             "token": ["created_at"],
+            "scheduler_event": ["recorded_at"],
             "routing_event": ["created_at"],
             "batch": ["created_at", "completed_at"],
             "artifact": ["created_at"],
@@ -1293,6 +1378,7 @@ class TestFullPipelineExport:
             tokens=[_TOKEN],
             token_parents=[_TOKEN_PARENT],
             token_outcomes=[_TOKEN_OUTCOME],
+            scheduler_events=[_SCHEDULER_EVENT],
             node_states=[_NODE_STATE_COMPLETED],
             routing_events=[_ROUTING_EVENT],
             state_calls=[_STATE_CALL],
@@ -1320,6 +1406,7 @@ class TestFullPipelineExport:
             "token": 1,
             "token_parent": 1,
             "token_outcome": 1,
+            "scheduler_event": 1,
             "node_state": 1,
             "routing_event": 1,
             "batch": 1,

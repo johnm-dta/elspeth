@@ -258,7 +258,7 @@ from elspeth.contracts.routing import (
     RoutingAction,
     RoutingSpec,
 )
-from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
+from elspeth.contracts.scheduler import SchedulerEvent, SchedulerEventType, TokenWorkItem, TokenWorkStatus
 
 # Schema contracts — core types
 from elspeth.contracts.schema_contract import (
@@ -410,6 +410,8 @@ __all__ = [  # Grouped by category for readability
     # identity
     "TokenInfo",
     # scheduler
+    "SchedulerEvent",
+    "SchedulerEventType",
     "TokenWorkItem",
     "TokenWorkStatus",
     # checkpoint

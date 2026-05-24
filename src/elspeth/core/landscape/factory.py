@@ -40,6 +40,7 @@ from elspeth.core.landscape.model_loaders import (
     RoutingEventLoader,
     RowLoader,
     RunLoader,
+    SchedulerEventLoader,
     TokenLoader,
     TokenOutcomeLoader,
     TokenParentLoader,
@@ -292,6 +293,7 @@ class RecorderFactory:
         validation_error_loader = ValidationErrorLoader()
         transform_error_loader = TransformErrorLoader()
         token_outcome_loader = TokenOutcomeLoader()
+        scheduler_event_loader = SchedulerEventLoader()
         artifact_loader = ArtifactLoader()
         batch_member_loader = BatchMemberLoader()
 
@@ -335,6 +337,7 @@ class RecorderFactory:
             routing_event_loader=routing_event_loader,
             call_loader=call_loader,
             token_outcome_loader=token_outcome_loader,
+            scheduler_event_loader=scheduler_event_loader,
             payload_store=payload_store,
         )
         self._scheduler = TokenSchedulerRepository(db.engine)

@@ -75,7 +75,14 @@ metadata = MetaData()
 #        and a covering index on (run_id, status, lease_owner,
 #        lease_expires_at) so the RC6 multi-worker drain sweep is index-only
 #        rather than O(workers²) per drain wave (elspeth-9990c81e14).
-SQLITE_SCHEMA_EPOCH = 15
+#  16 → Scheduler state-transition audit: scheduler_events records immutable
+#        enqueue, claim, recovery, lease-loss, and terminalization transitions
+#        for durable lease attribution (elspeth-2b608abbd3,
+#        elspeth-9030f34c32).
+#  17 → Scheduler event lease-expiry evidence: scheduler_events stores
+#        from/to lease_expires_at timestamps and enforces event/status/attempt
+#        domains so lease recovery and heartbeat loss are exportable facts.
+SQLITE_SCHEMA_EPOCH = 17
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -448,6 +455,64 @@ Index(
     unique=True,
     sqlite_where=token_work_items_table.c.node_id.is_(None),
     postgresql_where=token_work_items_table.c.node_id.is_(None),
+)
+
+scheduler_events_table = Table(
+    "scheduler_events",
+    metadata,
+    Column("event_id", String(64), primary_key=True),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("token_id", String(64), nullable=False),
+    # ``work_item_id`` is a forensic scheduler identity, not a foreign key:
+    # recover_expired_leases intentionally rotates token_work_items.work_item_id
+    # on attempt bump. A FK or ON UPDATE CASCADE would rewrite immutable
+    # history or reject the lease-loss event this table exists to preserve.
+    Column("work_item_id", String(64), nullable=False),
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH)),
+    Column("event_type", String(64), nullable=False),
+    Column("from_status", String(32)),
+    Column("to_status", String(32), nullable=False),
+    Column("from_lease_owner", String(128)),
+    Column("to_lease_owner", String(128)),
+    Column("from_lease_expires_at", DateTime(timezone=True)),
+    Column("to_lease_expires_at", DateTime(timezone=True)),
+    Column("from_attempt", Integer),
+    Column("to_attempt", Integer, nullable=False),
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    Column("caller_owner", String(128)),
+    Column("context_json", Text, nullable=False, server_default=text("'{}'")),
+    CheckConstraint(
+        "event_type IN ('enqueue', 'restore_blocked', 'claim_ready', 'claim_pending_sink', "
+        "'recover_expired_lease', 'lease_lost', 'mark_waiting', 'release_waiting', 'mark_blocked', "
+        "'mark_terminal', 'mark_failed', 'mark_pending_sink', 'mark_pending_sink_terminal', "
+        "'mark_blocked_barrier_terminal')",
+        name="ck_scheduler_events_event_type",
+    ),
+    CheckConstraint(
+        "from_status IS NULL OR from_status IN ('ready', 'leased', 'waiting', 'blocked', 'pending_sink', 'terminal', 'failed')",
+        name="ck_scheduler_events_from_status",
+    ),
+    CheckConstraint(
+        "to_status IN ('ready', 'leased', 'waiting', 'blocked', 'pending_sink', 'terminal', 'failed')",
+        name="ck_scheduler_events_to_status",
+    ),
+    CheckConstraint("from_attempt IS NULL OR from_attempt >= 0", name="ck_scheduler_events_from_attempt_non_negative"),
+    CheckConstraint("to_attempt >= 0", name="ck_scheduler_events_to_attempt_non_negative"),
+    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
+    ForeignKeyConstraint(["node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+)
+Index(
+    "ix_scheduler_events_run_token_time",
+    scheduler_events_table.c.run_id,
+    scheduler_events_table.c.token_id,
+    scheduler_events_table.c.recorded_at,
+    scheduler_events_table.c.event_id,
+)
+Index(
+    "ix_scheduler_events_work_item",
+    scheduler_events_table.c.run_id,
+    scheduler_events_table.c.work_item_id,
+    scheduler_events_table.c.recorded_at,
 )
 
 # === Token Parents (for multi-parent joins) ===

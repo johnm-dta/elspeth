@@ -51,6 +51,7 @@ from elspeth.contracts.enums import (
     TriggerType,
 )
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.scheduler import SchedulerEvent, SchedulerEventType, TokenWorkStatus
 
 _COMPLETED_AT_REQUIRED_RUN_STATUSES = frozenset(
     {
@@ -222,6 +223,31 @@ class TokenParentLoader:
             token_id=row.token_id,
             parent_token_id=row.parent_token_id,
             ordinal=row.ordinal,
+        )
+
+
+class SchedulerEventLoader:
+    """Loader for durable scheduler transition events."""
+
+    def load(self, row: SARow[Any]) -> SchedulerEvent:
+        return SchedulerEvent(
+            event_id=row.event_id,
+            run_id=row.run_id,
+            token_id=row.token_id,
+            work_item_id=row.work_item_id,
+            node_id=row.node_id,
+            event_type=SchedulerEventType(row.event_type),
+            from_status=TokenWorkStatus(row.from_status) if row.from_status is not None else None,
+            to_status=TokenWorkStatus(row.to_status),
+            from_lease_owner=row.from_lease_owner,
+            to_lease_owner=row.to_lease_owner,
+            from_lease_expires_at=row.from_lease_expires_at,
+            to_lease_expires_at=row.to_lease_expires_at,
+            from_attempt=row.from_attempt,
+            to_attempt=row.to_attempt,
+            recorded_at=row.recorded_at,
+            caller_owner=row.caller_owner,
+            context_json=row.context_json,
         )
 
 

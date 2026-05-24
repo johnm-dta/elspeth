@@ -7,10 +7,9 @@ be frozen after construction, and the exception-chain machinery
 ``__notes__``) MUST remain writable so ``raise X from Y`` and
 ``add_note()`` continue to work.
 
-See ``src/elspeth/web/blobs/protocol.py`` — the block comment above
-``_guard_frozen_attr`` explains why the blob family intentionally
-omits the ``capture()`` classmethod gateway used by the composer
-family.  These tests do NOT assert ``capture()`` exists.
+See ``src/elspeth/contracts/blobs.py`` — the block comment above
+``_guard_frozen_attr`` explains the freeze guard in the blob family.
+These tests do NOT assert ``capture()`` exists.
 """
 
 from __future__ import annotations

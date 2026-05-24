@@ -9,8 +9,17 @@ substitution phases. This first slice implements pure discovery only.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Final, cast
+from uuid import UUID
 
+from elspeth.contracts.blobs import (
+    BlobContentMissingError,
+    BlobIntegrityError,
+    BlobNotFoundError,
+    BlobServiceProtocol,
+    BlobStateError,
+)
 from elspeth.contracts.blobs_inline import (
     BlobContentResolutionError,
     BlobInlineRef,
@@ -39,6 +48,63 @@ def _discover_blob_content_refs(config: dict[str, Any]) -> list[BlobInlineRef]:
     if malformed:
         raise BlobContentResolutionError(malformed=malformed)
     return refs
+
+
+async def _fetch_blob_contents(
+    blob_service: BlobServiceProtocol,
+    refs: list[BlobInlineRef],
+) -> dict[BlobInlineRef, bytes]:
+    """Fetch content bytes for discovered refs, deduped by blob id."""
+    unique_blob_ids = _unique_blob_ids(refs)
+    results = await asyncio.gather(
+        *(blob_service.read_blob_content(blob_id) for blob_id in unique_blob_ids),
+        return_exceptions=True,
+    )
+    refs_by_blob = _refs_by_blob_id(refs)
+    bytes_by_blob: dict[UUID, bytes] = {}
+    missing: list[str] = []
+    not_ready: list[tuple[str, str]] = []
+
+    for blob_id, result in zip(unique_blob_ids, results, strict=True):
+        result_type = type(result)
+        if result_type is BlobIntegrityError or result_type is BlobContentMissingError:
+            raise cast(BlobIntegrityError | BlobContentMissingError, result)
+        if result_type is BlobNotFoundError:
+            for ref in refs_by_blob[blob_id]:
+                missing.append(ref.field_path)
+            continue
+        if result_type is BlobStateError:
+            for ref in refs_by_blob[blob_id]:
+                not_ready.append((ref.field_path, str(result)))
+            continue
+        if type(result) is not bytes:
+            raise cast(BaseException, result)
+        bytes_by_blob[blob_id] = result
+
+    if missing or not_ready:
+        raise BlobContentResolutionError(missing=missing, not_ready=not_ready)
+
+    return {ref: bytes_by_blob[ref.blob_id] for ref in refs}
+
+
+def _unique_blob_ids(refs: list[BlobInlineRef]) -> list[UUID]:
+    unique: list[UUID] = []
+    seen: set[UUID] = set()
+    for ref in refs:
+        if ref.blob_id in seen:
+            continue
+        seen.add(ref.blob_id)
+        unique.append(ref.blob_id)
+    return unique
+
+
+def _refs_by_blob_id(refs: list[BlobInlineRef]) -> dict[UUID, list[BlobInlineRef]]:
+    refs_by_blob: dict[UUID, list[BlobInlineRef]] = {}
+    for ref in refs:
+        if ref.blob_id not in refs_by_blob:
+            refs_by_blob[ref.blob_id] = []
+        refs_by_blob[ref.blob_id].append(ref)
+    return refs_by_blob
 
 
 def _walk_source(

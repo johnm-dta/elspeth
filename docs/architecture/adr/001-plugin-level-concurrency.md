@@ -17,7 +17,7 @@ subsequent ADRs amend them independently:
    one-at-a-time, sequential. Preserved by ADR-025 (multi-source
    ingestion); the plural source surface does not commit to concurrent
    iteration. Concurrent multi-source iteration would require a separate
-   future ADR (tracked as G12 / elspeth-bc81207798).
+   future ADR and tracker item.
 
 2. **Worker-execution axis** — within a run, how many workers execute
    token continuations concurrently? Original ADR-001 answer (implicit):

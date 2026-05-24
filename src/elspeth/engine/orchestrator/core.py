@@ -2582,7 +2582,15 @@ class Orchestrator:
         )
 
         try:
-            # 3. Source + Process phase
+            # 3. Source + Process phase. This is sequential multi-source ingest:
+            # each declared source is iterated in turn with the active
+            # ``SourceProtocol`` passed explicitly into the loop.
+            # YAML declaration order is the determinism anchor for cross-source
+            # ``ingest_sequence`` assignment. The scheduler's concurrency
+            # contract is worker-token concurrency, not concurrent source iteration.
+            # Per ADR-025 §1, the prior synthetic
+            # ``replace(config, source=..., sources={...})`` per-iteration
+            # config-mutation pattern is deleted.
             loop_result: LoopResult | None = None
             source_items = tuple(artifacts.source_id_map.items())
             for source_ordinal, (source_name, source_id) in enumerate(source_items):

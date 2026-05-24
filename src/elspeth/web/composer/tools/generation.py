@@ -28,7 +28,9 @@ from elspeth.web.catalog.protocol import PluginKind
 from elspeth.web.composer._producer_resolver import ProducerResolver
 from elspeth.web.composer.source_inspection import (
     derive_extra_column_risk,
+    derive_required_header_mismatch_risk,
     inspect_blob_content,
+    inspect_csv_source_content,
 )
 from elspeth.web.composer.state import (
     CompositionState,
@@ -61,6 +63,56 @@ _AUTHORING_VALIDATION_COUNTER = metrics.get_meter("elspeth.web.composer.tools").
     "composer.authoring_validation.total",
     description="Total authoring (Stage 1) validation outcomes from preview_pipeline",
 )
+
+
+def _csv_source_delimiter(options: Mapping[str, Any]) -> str:
+    raw = options.get("delimiter")
+    if raw is None:
+        return ","
+    if type(raw) is not str:
+        raise ValueError(f"csv source delimiter must be str when present; got {type(raw).__name__}")
+    if len(raw) != 1:
+        raise ValueError(f"csv source delimiter must be one character; got {raw!r}")
+    return raw
+
+
+def _csv_source_skip_rows(options: Mapping[str, Any]) -> int:
+    raw = options.get("skip_rows")
+    if raw is None:
+        return 0
+    if type(raw) is not int:
+        raise ValueError(f"csv source skip_rows must be int when present; got {type(raw).__name__}")
+    if raw < 0:
+        raise ValueError(f"csv source skip_rows must be non-negative; got {raw}")
+    return raw
+
+
+def _csv_source_columns(options: Mapping[str, Any]) -> tuple[str, ...] | None:
+    raw = options.get("columns")
+    if raw is None:
+        return None
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"csv source columns must be a list of strings when present; got {type(raw).__name__}")
+    columns: list[str] = []
+    for idx, item in enumerate(raw):
+        if type(item) is not str:
+            raise ValueError(f"csv source columns[{idx}] must be str; got {type(item).__name__}")
+        columns.append(item)
+    return tuple(columns)
+
+
+def _schema_required_fields(schema: Mapping[str, Any]) -> tuple[str, ...]:
+    raw = schema.get("required_fields")
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"schema.required_fields must be a list of strings when present; got {type(raw).__name__}")
+    required: list[str] = []
+    for idx, item in enumerate(raw):
+        if type(item) is not str:
+            raise ValueError(f"schema.required_fields[{idx}] must be str; got {type(item).__name__}")
+        required.append(item)
+    return tuple(required)
 
 
 _EXPRESSION_GRAMMAR = """\
@@ -673,6 +725,7 @@ _BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
         "aggregation_numeric_value_field_type_mismatch_against_source_schema",
         "csv_duplicate_headers",
         "csv_fixed_schema_omits_observed_columns",
+        "csv_source_blob_header_mismatch",
         "gate_expression_type_mismatch_against_source_schema",
         "text_source_url_without_web_scrape",
         "source_inspection_failed",
@@ -982,6 +1035,10 @@ def compute_proof_diagnostics(
         on_validation_failure=discard + at least one observed column
         absent from declared fields. The combination silently discards
         every row, which is the #1 historical convergence-failure mode.
+      * ``csv_source_blob_header_mismatch`` — CSV source with required
+        declared fields but no overlap with the parsed blob header. This
+        catches headerless CSV/list inputs before the first row is consumed
+        as a header and every data row is discarded.
       * ``text_source_url_without_web_scrape`` — text source whose blob
         content is a single URL but no web_scrape node downstream. The
         URL string itself reaches sinks instead of the URL's content.
@@ -1057,6 +1114,16 @@ def compute_proof_diagnostics(
         mime_type=blob["mime_type"],
         content_hash=blob["content_hash"],
     )
+    if source.plugin == "csv":
+        facts = inspect_csv_source_content(
+            content=content,
+            filename=blob["filename"],
+            mime_type=blob["mime_type"],
+            delimiter=_csv_source_delimiter(source.options),
+            skip_rows=_csv_source_skip_rows(source.options),
+            columns=_csv_source_columns(source.options),
+            content_hash=blob["content_hash"],
+        )
 
     # 1. Fixed CSV schema omits observed columns + discard => silent all-row drop.
     if facts.source_kind in {"csv", "json", "jsonl"}:
@@ -1064,33 +1131,71 @@ def compute_proof_diagnostics(
         # is unstructured and may be absent, so the inner shape probes below
         # remain.
         schema = source.options.get("schema")
-        if isinstance(schema, Mapping) and schema.get("mode") == "fixed":
+        if isinstance(schema, Mapping) and schema.get("mode") in {"fixed", "flexible"}:
             declared = schema.get("fields") or ()
             if isinstance(declared, (list, tuple)):
-                missing = derive_extra_column_risk(facts, tuple(declared))
-                if missing and source.on_validation_failure == "discard":
+                headerless_columns = source.plugin == "csv" and source.options.get("columns") is not None
+                missing_declared = (
+                    ()
+                    if headerless_columns or facts.source_kind != "csv"
+                    else derive_required_header_mismatch_risk(
+                        facts,
+                        tuple(declared),
+                        explicit_required_fields=_schema_required_fields(schema),
+                    )
+                )
+                if missing_declared and source.on_validation_failure == "discard":
                     diagnostics.append(
                         _blocking_diagnostic(
-                            code="csv_fixed_schema_omits_observed_columns",
+                            code="csv_source_blob_header_mismatch",
                             message=(
-                                f"Source schema is mode=fixed but omits observed columns "
-                                f"{list(missing)} (observed: {list(facts.observed_headers or ())}). "
-                                "Combined with on_validation_failure='discard', every row will be "
-                                "dropped because each contains an undeclared column."
+                                f"CSV source declares required field(s) {list(missing_declared)} "
+                                f"but the bound blob's header parses as {list(facts.observed_headers or ())}, "
+                                "with no overlapping field names. Every row will fail validation; "
+                                "with on_validation_failure='discard', the run will terminate empty. "
+                                "Either prepend a header row containing the declared field names or set "
+                                "source options.columns to those names for headerless CSV input."
                             ),
                             suggested_repair=(
-                                "patch_source_options with schema.mode='flexible' to accept extra "
-                                "columns, OR add the missing columns to schema.fields, OR set "
-                                "on_validation_failure to a configured output for inspection."
+                                "For headered CSV, update the blob so line 1 contains the declared "
+                                "schema field names. For headerless CSV, patch_source_options with "
+                                "`columns` set to the declared field names, then re-run preview_pipeline. "
+                                "See pipeline_composer.md rule 10."
                             ),
                             evidence_locator={
                                 "source": "blob",
                                 "blob_id": str(blob_id),
-                                "missing_columns": list(missing),
-                                "observed_columns": list(facts.observed_headers or ()),
+                                "declared_required_fields": list(missing_declared),
+                                "observed_headers": list(facts.observed_headers or ()),
+                                "source_plugin": source.plugin,
                             },
                         )
                     )
+                elif schema.get("mode") == "fixed":
+                    missing = () if headerless_columns else derive_extra_column_risk(facts, tuple(declared))
+                    if missing and source.on_validation_failure == "discard":
+                        diagnostics.append(
+                            _blocking_diagnostic(
+                                code="csv_fixed_schema_omits_observed_columns",
+                                message=(
+                                    f"Source schema is mode=fixed but omits observed columns "
+                                    f"{list(missing)} (observed: {list(facts.observed_headers or ())}). "
+                                    "Combined with on_validation_failure='discard', every row will be "
+                                    "dropped because each contains an undeclared column."
+                                ),
+                                suggested_repair=(
+                                    "patch_source_options with schema.mode='flexible' to accept extra "
+                                    "columns, OR add the missing columns to schema.fields, OR set "
+                                    "on_validation_failure to a configured output for inspection."
+                                ),
+                                evidence_locator={
+                                    "source": "blob",
+                                    "blob_id": str(blob_id),
+                                    "missing_columns": list(missing),
+                                    "observed_columns": list(facts.observed_headers or ()),
+                                },
+                            )
+                        )
 
     # 2. Observed CSV + numeric gate predicate => preview/runtime agreement gap.
     if facts.source_kind == "csv":

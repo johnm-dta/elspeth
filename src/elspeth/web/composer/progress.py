@@ -21,7 +21,11 @@ __all__ = [
     "COMPOSER_PROGRESS_MAX_EVIDENCE",
     "NON_TERMINAL_PROGRESS_PHASES",
     "ComposerProgressEvent",
-    "ComposerProgressPhase",
+    # ``ComposerProgressPhase`` (a PEP 695 ``type`` alias) is intentionally
+    # NOT listed here — CodeQL's ``py/undefined-export`` rule does not model
+    # PEP 695 type-alias bindings as definitions, so listing it trips a
+    # static-analysis error. The alias is importable by name regardless of
+    # ``__all__`` (no wildcard imports of this module exist in the project).
     "ComposerProgressRegistry",
     "ComposerProgressSnapshot",
     "client_cancelled_progress_event",

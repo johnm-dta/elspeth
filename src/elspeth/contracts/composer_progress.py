@@ -20,10 +20,17 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from elspeth.web.composer.progress import ComposerProgressEvent
 
-__all__ = [
-    "ComposerProgressReason",
-    "ComposerProgressSink",
-]
+# No ``__all__`` declared. The two public names below are PEP 695 ``type``
+# aliases (``ComposerProgressReason``, ``ComposerProgressSink``); listing
+# them in ``__all__`` trips CodeQL ``py/undefined-export`` because that
+# rule (as of 2026-05) does not model PEP 695 type-alias bindings as
+# definitions. The project's convention for type-alias modules
+# (``contracts/declaration_contracts.py``, ``contracts/enums.py``,
+# ``plugins/transforms/*.py``) is to omit ``__all__`` entirely — every
+# consumer imports by name (``from elspeth.contracts.composer_progress
+# import ComposerProgressReason``), no wildcard imports exist anywhere
+# in the project, so ``__all__`` carries no functional load on these
+# modules.
 
 
 # Stable machine-readable reason codes for composer progress events.

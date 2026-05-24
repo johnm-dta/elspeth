@@ -8935,6 +8935,82 @@ class TestUpdateBlobActiveRunGuard:
         assert result.success is True
         assert self.storage_path.read_bytes() == b"new,content\n9,9"
 
+    def test_update_rejected_when_blob_is_current_source_blob_ref(self) -> None:
+        """A blob-backed source locks the blob content hash stamped in source_authoring."""
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="output",
+                options={
+                    "blob_ref": self.blob_id,
+                    "path": str(self.storage_path),
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="quarantine",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "update_blob",
+            {"blob_id": self.blob_id, "content": "new,content\n9,9"},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is False
+        assert "source" in result.data["error"].lower()
+        assert self.storage_path.read_bytes() == self.original_content
+        with self.engine.begin() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == self.blob_id)).one()
+        assert row.content_hash == _STUB_SHA256
+
+    def test_unbound_update_recomputes_composer_provenance(self) -> None:
+        """Unbound blob updates that author new bytes refresh blob provenance."""
+        from elspeth.web.blobs.service import content_hash
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        user_message_content = "Generate a replacement CSV for the current scratch blob."
+        user_message_id = _insert_user_message(self.engine, self.session_id, user_message_content)
+        new_content = "name,score\nada,42\n"
+
+        result = execute_tool(
+            "update_blob",
+            {"blob_id": self.blob_id, "content": new_content},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+            user_message_id=user_message_id,
+            user_message_content=user_message_content,
+            composer_model_identifier="openai/gpt-5-mini",
+            composer_model_version="gpt-5-mini-2026-05-01",
+            composer_provider="openai",
+            composer_skill_hash="sha256:composer-skill",
+            tool_arguments_hash="sha256:update-arguments",
+        )
+
+        assert result.success is True
+        assert self.storage_path.read_bytes() == new_content.encode("utf-8")
+        with self.engine.begin() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == self.blob_id)).one()
+        assert row.content_hash == content_hash(new_content.encode("utf-8"))
+        assert row.creation_modality == CreationModality.LLM_GENERATED.value
+        assert row.created_from_message_id == user_message_id
+        assert row.creating_model_identifier == "openai/gpt-5-mini"
+        assert row.creating_model_version == "gpt-5-mini-2026-05-01"
+        assert row.creating_provider == "openai"
+        assert row.creating_composer_skill_hash == "sha256:composer-skill"
+        assert row.creating_arguments_hash == "sha256:update-arguments"
+
     def test_update_rejected_when_pending_run_linked(self) -> None:
         self._insert_run_and_link("pending")
         state = _empty_state()

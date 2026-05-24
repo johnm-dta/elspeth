@@ -877,6 +877,82 @@ def test_accept_inline_blob_proposal_without_composer_provenance_fails_closed(tm
     assert blob_count == []
 
 
+def test_accept_empty_inline_blob_proposal_without_composer_provenance_fails_closed(tmp_path, monkeypatch) -> None:
+    from sqlalchemy import select
+
+    from elspeth.web.catalog.schemas import PluginSchemaInfo
+    from elspeth.web.sessions.models import blobs_table
+
+    app, service = _make_app(tmp_path)
+    app.state.session_engine = service._engine
+    catalog = MagicMock()
+    catalog.get_schema.return_value = PluginSchemaInfo(
+        name="text",
+        plugin_type="source",
+        description="Text source",
+        json_schema={"title": "Config", "properties": {}},
+        knob_schema={"fields": []},
+    )
+    app.state.catalog_service = catalog
+    monkeypatch.setattr(
+        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
+    )
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Legacy empty inline blob proposal"}).json()
+    session_id = uuid.UUID(session["id"])
+    user_message = asyncio.run(
+        service.add_message(
+            session_id,
+            "user",
+            "Create an empty text source.",
+            writer_principal="route_user_message",
+        )
+    )
+    proposal = asyncio.run(
+        service.create_composition_proposal(
+            session_id=session_id,
+            tool_call_id="call_set_pipeline_empty_inline_blob_legacy",
+            tool_name="set_pipeline",
+            summary="Replace the pipeline with an empty inline source.",
+            rationale="Legacy proposal missing composer provenance.",
+            affects=("graph", "blob"),
+            arguments_json={
+                "source": {
+                    "plugin": "text",
+                    "on_success": "rows",
+                    "options": {
+                        "column": "text",
+                        "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                    },
+                    "inline_blob": {
+                        "filename": "empty.txt",
+                        "mime_type": "text/plain",
+                        "content": "",
+                    },
+                },
+                "nodes": [],
+                "edges": [],
+                "outputs": [],
+                "metadata": {"name": "legacy-empty-inline-blob-proposal"},
+            },
+            arguments_redacted_json={"summary": "redacted"},
+            base_state_id=None,
+            actor="composer-web:user:alice",
+            user_message_id=user_message.id,
+        )
+    )
+
+    response = client.post(f"/api/sessions/{session['id']}/proposals/{proposal.id}/accept")
+
+    assert response.status_code == 409
+    assert "missing composer provenance" in response.json()["detail"]
+    assert asyncio.run(service.get_current_state(session_id)) is None
+    with service._engine.begin() as conn:
+        blob_count = conn.execute(select(blobs_table.c.id).where(blobs_table.c.session_id == session["id"])).fetchall()
+    assert blob_count == []
+
+
 def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
     """Create audit records that route three rows to the virtual discard sink."""
     (settings.data_dir / "runs").mkdir(parents=True, exist_ok=True)

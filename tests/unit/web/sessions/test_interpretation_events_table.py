@@ -25,6 +25,7 @@ from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     SESSION_SCHEMA_EPOCH,
     chat_messages_table,
+    composition_proposals_table,
     composition_states_table,
     interpretation_events_table,
     sessions_table,
@@ -196,6 +197,40 @@ def _surface_opt_out_row(*, row_id: str, session_id: str, state_id: str) -> dict
 
 def test_proposal_provenance_schema_cohort_epoch_is_11() -> None:
     assert SESSION_SCHEMA_EPOCH == 11
+
+
+def test_composition_proposal_composer_provenance_is_all_or_none(engine) -> None:
+    session_id = str(uuid.uuid4())
+    with (
+        pytest.raises(IntegrityError, match="ck_composition_proposals_composer_provenance_all_or_none"),
+        engine.begin() as conn,
+    ):
+        _insert_session(conn, session_id)
+        conn.execute(
+            insert(composition_proposals_table).values(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                tool_call_id="call_partial_provenance",
+                user_message_id=None,
+                composer_model_identifier="openai/gpt-5-mini",
+                composer_model_version=None,
+                composer_provider=None,
+                composer_skill_hash=None,
+                tool_arguments_hash=None,
+                tool_name="set_pipeline",
+                status="pending",
+                summary="Partial provenance should fail.",
+                rationale="Schema all-or-none guard.",
+                affects=["graph"],
+                arguments_json={},
+                arguments_redacted_json={},
+                base_state_id=None,
+                committed_state_id=None,
+                audit_event_id=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
 
 
 # Test 1 — table exists with all expected columns -----------------------------

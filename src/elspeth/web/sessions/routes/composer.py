@@ -211,7 +211,7 @@ def _ensure_inline_blob_proposal_context(
     inline_blob_content = _inline_blob_content_for_proposal(proposal, arguments)
     if inline_blob_content is None:
         return
-    if user_message_content is not None and inline_blob_content in user_message_content:
+    if user_message_content is not None and inline_blob_content and inline_blob_content in user_message_content:
         return
     missing = _missing_proposal_composer_context(proposal, user_message_content=user_message_content)
     if not missing:

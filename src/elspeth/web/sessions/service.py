@@ -25,6 +25,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
 from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.blobs_inline import ResolvedBlobContent
 from elspeth.contracts.composer_interpretation import (
     INTERPRETATION_HASH_DOMAIN_V2,
     InterpretationChoice,
@@ -55,6 +56,7 @@ from elspeth.web.interpretation_state import (
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
     audit_access_log_table,
+    blob_inline_resolutions_table,
     chat_messages_table,
     composer_completion_events_table,
     composition_proposals_table,
@@ -3385,6 +3387,48 @@ class SessionServiceImpl:
                     values["rows_quarantined"] = rows_quarantined
 
                 conn.execute(update(runs_table).where(runs_table.c.id == rid).values(**values))
+
+        await self._run_sync(_sync)
+
+    async def record_blob_inline_resolutions(
+        self,
+        *,
+        run_id: UUID,
+        resolutions: Sequence[ResolvedBlobContent],
+        attempt: int = 1,
+    ) -> None:
+        """Write audit rows for runtime-resolved inline blob content.
+
+        This is an audit-primary write site: callers must invoke it before
+        resolved bytes can reach plugin construction. A DB failure is a
+        Tier-1 anomaly and propagates as ``AuditIntegrityError``.
+        """
+        if not resolutions:
+            return
+
+        run_id_str = str(run_id)
+        now = self._now()
+
+        def _sync() -> None:
+            rows = [
+                {
+                    "run_id": run_id_str,
+                    "attempt": attempt,
+                    "field_path": resolution.field_path,
+                    "blob_id": str(resolution.blob_id),
+                    "content_hash": resolution.content_hash,
+                    "byte_length": resolution.byte_length,
+                    "mime_type": resolution.mime_type,
+                    "encoding": resolution.encoding,
+                    "resolved_at": now,
+                }
+                for resolution in resolutions
+            ]
+            try:
+                with self._engine.begin() as conn:
+                    conn.execute(insert(blob_inline_resolutions_table), rows)
+            except SQLAlchemyError as exc:
+                raise AuditIntegrityError(f"Tier 1: failed to record blob_inline_resolutions for run {run_id_str}: {exc}") from exc
 
         await self._run_sync(_sync)
 

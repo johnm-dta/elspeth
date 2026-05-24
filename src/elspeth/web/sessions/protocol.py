@@ -19,6 +19,7 @@ from typing import Any, Literal, Protocol, get_args, runtime_checkable
 from uuid import UUID
 
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.blobs_inline import ResolvedBlobContent
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
     InterpretationEventRecord,
@@ -1057,6 +1058,16 @@ class SessionServiceProtocol(Protocol):
         raise ValueError if landscape_run_id is provided but the run
         already has one set.
         """
+        ...
+
+    async def record_blob_inline_resolutions(
+        self,
+        *,
+        run_id: UUID,
+        resolutions: Sequence[ResolvedBlobContent],
+        attempt: int = 1,
+    ) -> None:
+        """Write audit rows for inline-content blob refs before plugin construction."""
         ...
 
     async def get_active_run(

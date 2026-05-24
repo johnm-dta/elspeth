@@ -1784,7 +1784,7 @@ def test_scheduler_deserialize_row_payload_rejects_corrupt_payload_branches(row_
         TokenSchedulerRepository.deserialize_row_payload(row_payload_json)
 
 
-def test_scheduler_claim_ready_raises_when_selected_row_was_already_claimed() -> None:
+def test_scheduler_claim_ready_returns_none_when_selected_row_was_claimed_by_peer() -> None:
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
 
@@ -1826,10 +1826,87 @@ def test_scheduler_claim_ready_raises_when_selected_row_was_already_claimed() ->
             ),
         )
 
-    with pytest.raises(AuditIntegrityError, match=f"run_id='run-1'.*work_item_id='{item.work_item_id}'"):
-        repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
+    claimed = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
 
     assert raced is True
+    assert claimed is None
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                token_work_items_table.c.work_item_id == item.work_item_id
+            )
+        ).one()
+    assert row.status == TokenWorkStatus.LEASED.value
+    assert row.lease_owner == "worker-racer"
+
+
+def test_scheduler_claim_pending_sink_returns_none_when_selected_row_was_claimed_by_peer() -> None:
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository, TokenWorkStatus
+
+    engine = _make_tier1_engine()
+    metadata.create_all(engine)
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = repo.serialize_row_payload(PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True)))
+    _insert_scheduler_owner_records(engine, token_specs=(("token-1", "row-1", 0),), node_ids=("normalize",))
+    item = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+    first_claim = repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now)
+    assert first_claim is not None
+    repo.mark_pending_sink(
+        work_item_id=item.work_item_id,
+        row_payload_json=payload,
+        sink_name="sink-a",
+        outcome="success",
+        path="completed",
+        error_hash=None,
+        error_message=None,
+        now=now + timedelta(seconds=1),
+        expected_lease_owner="worker-a",
+    )
+    raced = False
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def lease_selected_pending_sink_before_claim_update(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]
+        nonlocal raced
+        compiled_statement = getattr(getattr(context, "compiled", None), "statement", None)
+        if raced or getattr(compiled_statement, "__visit_name__", None) != "update":
+            return
+        if getattr(getattr(compiled_statement, "table", None), "name", None) != token_work_items_table.name:
+            return
+        raced = True
+        cursor.execute(
+            "UPDATE token_work_items SET status = ?, lease_owner = ?, lease_expires_at = ?, updated_at = ? WHERE work_item_id = ?",
+            (
+                TokenWorkStatus.LEASED.value,
+                "worker-racer",
+                (now + timedelta(seconds=30)).isoformat(sep=" "),
+                now.isoformat(sep=" "),
+                item.work_item_id,
+            ),
+        )
+
+    claimed = repo.claim_pending_sink(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now + timedelta(seconds=2))
+
+    assert raced is True
+    assert claimed is None
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                token_work_items_table.c.work_item_id == item.work_item_id
+            )
+        ).one()
+    assert row.status == TokenWorkStatus.LEASED.value
+    assert row.lease_owner == "worker-racer"
 
 
 def test_scheduler_claim_ready_two_workers_claim_distinct_items() -> None:

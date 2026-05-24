@@ -497,7 +497,10 @@ class InterpretationEventResponse(BaseModel):
 
     id: UUID
     session_id: UUID
-    # ``None`` for ``auto_interpreted_opt_out`` rows (no surfacing occurred).
+    # ``None`` for session-level ``auto_interpreted_opt_out`` marker rows
+    # (no surfacing occurred). Surface-specific opt-out rows carry kind,
+    # surface/provenance fields, accepted_value, arguments_hash, and
+    # hash_domain_version='v2'.
     composition_state_id: UUID | None = None
     affected_node_id: str | None = Field(default=None, max_length=256)
     tool_call_id: str | None = Field(default=None, max_length=256)

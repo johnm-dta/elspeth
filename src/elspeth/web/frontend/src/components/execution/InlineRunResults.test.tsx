@@ -88,6 +88,96 @@ describe("InlineRunResults", () => {
     );
   });
 
+  it("warns when an empty run discarded source-validation rows", () => {
+    useExecutionStore.setState({
+      activeRunId: null,
+      progress: null,
+      runs: [
+        {
+          id: "run-empty",
+          session_id: "sess-1",
+          status: "empty",
+          discard_summary: {
+            total: 2,
+            validation_errors: 2,
+            transform_errors: 0,
+            sink_discards: 0,
+            stages: [
+              {
+                stage: "source_validation",
+                node_id: "source_csv_upload",
+                count: 2,
+              },
+            ],
+          },
+        } as never,
+      ],
+    } as never);
+
+    render(<InlineRunResults />);
+
+    const warning = screen.getByRole("alert");
+    expect(warning).toHaveTextContent(/2 rows discarded at source validation/i);
+    expect(warning).toHaveTextContent(/source_csv_upload/i);
+    expect(warning).toHaveTextContent(/run terminated empty/i);
+  });
+
+  it("warns with the transform node when transform validation discards rows", () => {
+    useExecutionStore.setState({
+      activeRunId: null,
+      progress: null,
+      runs: [
+        {
+          id: "run-transform-discard",
+          session_id: "sess-1",
+          status: "completed_with_failures",
+          discard_summary: {
+            total: 1,
+            validation_errors: 0,
+            transform_errors: 1,
+            sink_discards: 0,
+            stages: [
+              {
+                stage: "transform_validation",
+                node_id: "normalize_url",
+                count: 1,
+              },
+            ],
+          },
+        } as never,
+      ],
+    } as never);
+
+    render(<InlineRunResults />);
+
+    const warning = screen.getByRole("alert");
+    expect(warning).toHaveTextContent(/1 row discarded at transform validation/i);
+    expect(warning).toHaveTextContent(/normalize_url/i);
+  });
+
+  it("does not warn for an empty run with zero discard rows", () => {
+    useExecutionStore.setState({
+      activeRunId: null,
+      progress: null,
+      runs: [
+        {
+          id: "run-empty-clean",
+          session_id: "sess-1",
+          status: "empty",
+          discard_summary: null,
+        } as never,
+      ],
+    } as never);
+
+    render(<InlineRunResults />);
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByTestId("run-outputs-stub")).toHaveAttribute(
+      "data-run-id",
+      "run-empty-clean",
+    );
+  });
+
   it("keeps terminal active run status visible", () => {
     useExecutionStore.setState({
       activeRunId: "run-failed",

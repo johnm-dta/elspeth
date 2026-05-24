@@ -414,26 +414,32 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
       },
       onComplete(event: RunEvent, _data: RunEventCompleted) {
         set((state) => applyRunEvent(state, event));
-        // Refresh blob list — pipeline outputs are finalized on completion
+        // Refresh terminal route projections: run rows carry discard summaries,
+        // and blob rows carry finalized output inventory.
         const sessionId = useSessionStore.getState().activeSessionId;
         if (sessionId) {
-          useBlobStore.getState().loadBlobs(sessionId);
+          void get().loadRuns(sessionId);
+          void useBlobStore.getState().loadBlobs(sessionId);
         }
       },
       onCancelled(event: RunEvent, _data: RunEventCancelled) {
         set((state) => applyRunEvent(state, event));
-        // Refresh blob list — partial outputs may exist after cancellation
+        // Refresh terminal route projections: run rows carry discard summaries,
+        // and blob rows may carry partial outputs after cancellation.
         const sessionId = useSessionStore.getState().activeSessionId;
         if (sessionId) {
-          useBlobStore.getState().loadBlobs(sessionId);
+          void get().loadRuns(sessionId);
+          void useBlobStore.getState().loadBlobs(sessionId);
         }
       },
       onFailed(event: RunEvent, _data: RunEventFailed) {
         set((state) => applyRunEvent(state, event));
-        // Refresh blob list — partial outputs may exist after failure
+        // Refresh terminal route projections: run rows carry discard summaries,
+        // and blob rows may carry partial outputs after failure.
         const sessionId = useSessionStore.getState().activeSessionId;
         if (sessionId) {
-          useBlobStore.getState().loadBlobs(sessionId);
+          void get().loadRuns(sessionId);
+          void useBlobStore.getState().loadBlobs(sessionId);
         }
       },
       onAuthFailure() {

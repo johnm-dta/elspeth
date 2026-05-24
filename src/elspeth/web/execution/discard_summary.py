@@ -16,7 +16,7 @@ from elspeth.core.landscape.schema import (
     validation_errors_table,
 )
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.schemas import DiscardSummary
+from elspeth.web.execution.schemas import DiscardStageSummary, DiscardSummary
 
 DISCARD_DESTINATION = "discard"
 
@@ -65,25 +65,52 @@ def load_discard_summaries_from_db(
         }
         for run_id in run_ids
     }
+    stages: dict[str, list[DiscardStageSummary]] = {run_id: [] for run_id in run_ids}
 
     with db.read_only_connection() as conn:
         validation_query = (
-            select(validation_errors_table.c.run_id, func.count().label("count"))
+            select(
+                validation_errors_table.c.run_id,
+                validation_errors_table.c.node_id,
+                func.count().label("count"),
+            )
             .where(validation_errors_table.c.run_id.in_(run_ids))
             .where(validation_errors_table.c.destination == DISCARD_DESTINATION)
-            .group_by(validation_errors_table.c.run_id)
+            .group_by(validation_errors_table.c.run_id, validation_errors_table.c.node_id)
+            .order_by(validation_errors_table.c.run_id.asc(), validation_errors_table.c.node_id.asc())
         )
-        for run_id, count in conn.execute(validation_query):
-            counts[run_id]["validation_errors"] = int(count)
+        for run_id, node_id, count in conn.execute(validation_query):
+            count_value = int(count)
+            counts[run_id]["validation_errors"] += count_value
+            stages[run_id].append(
+                DiscardStageSummary(
+                    stage="source_validation",
+                    node_id=node_id,
+                    count=count_value,
+                )
+            )
 
         transform_query = (
-            select(transform_errors_table.c.run_id, func.count().label("count"))
+            select(
+                transform_errors_table.c.run_id,
+                transform_errors_table.c.transform_id,
+                func.count().label("count"),
+            )
             .where(transform_errors_table.c.run_id.in_(run_ids))
             .where(transform_errors_table.c.destination == DISCARD_DESTINATION)
-            .group_by(transform_errors_table.c.run_id)
+            .group_by(transform_errors_table.c.run_id, transform_errors_table.c.transform_id)
+            .order_by(transform_errors_table.c.run_id.asc(), transform_errors_table.c.transform_id.asc())
         )
-        for run_id, count in conn.execute(transform_query):
-            counts[run_id]["transform_errors"] = int(count)
+        for run_id, transform_id, count in conn.execute(transform_query):
+            count_value = int(count)
+            counts[run_id]["transform_errors"] += count_value
+            stages[run_id].append(
+                DiscardStageSummary(
+                    stage="transform_validation",
+                    node_id=transform_id,
+                    count=count_value,
+                )
+            )
 
         sink_query = (
             select(token_outcomes_table.c.run_id, func.count().label("count"))
@@ -93,13 +120,21 @@ def load_discard_summaries_from_db(
             .group_by(token_outcomes_table.c.run_id)
         )
         for run_id, count in conn.execute(sink_query):
-            counts[run_id]["sink_discards"] = int(count)
+            count_value = int(count)
+            counts[run_id]["sink_discards"] = count_value
+            stages[run_id].append(
+                DiscardStageSummary(
+                    stage="sink_discard",
+                    node_id=None,
+                    count=count_value,
+                )
+            )
 
     summaries: dict[str, DiscardSummary] = {}
     for run_id, run_counts in counts.items():
         total = run_counts["validation_errors"] + run_counts["transform_errors"] + run_counts["sink_discards"]
         if total > 0:
-            summaries[run_id] = DiscardSummary(total=total, **run_counts)
+            summaries[run_id] = DiscardSummary(total=total, stages=tuple(stages[run_id]), **run_counts)
     return summaries
 
 

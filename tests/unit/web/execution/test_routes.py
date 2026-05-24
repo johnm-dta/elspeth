@@ -1507,6 +1507,7 @@ class TestResultsEndpoint:
                 "validation_errors": 1,
                 "transform_errors": 1,
                 "sink_discards": 1,
+                "stages": [],
             }
 
     @pytest.mark.asyncio

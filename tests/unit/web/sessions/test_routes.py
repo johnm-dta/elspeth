@@ -1313,6 +1313,23 @@ class TestSessionCRUDRoutes:
             "validation_errors": 1,
             "transform_errors": 1,
             "sink_discards": 1,
+            "stages": [
+                {
+                    "stage": "source_validation",
+                    "node_id": "source",
+                    "count": 1,
+                },
+                {
+                    "stage": "transform_validation",
+                    "node_id": "transform",
+                    "count": 1,
+                },
+                {
+                    "stage": "sink_discard",
+                    "node_id": None,
+                    "count": 1,
+                },
+            ],
         }
 
     @pytest.mark.asyncio

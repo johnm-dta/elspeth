@@ -299,6 +299,87 @@ class TestCreateRow:
 class TestCreateToken:
     """Tests for DataFlowRepository.create_token — initial token creation."""
 
+    def test_create_row_with_token_preserves_source_identity(self) -> None:
+        db, repo, _fac = _make_repo()
+
+        row, token = repo.create_row_with_token(
+            "run-1",
+            "source-0",
+            5,
+            {"x": 1},
+            source_row_index=7,
+            ingest_sequence=11,
+            row_id="row-fast",
+            token_id="tok-fast",
+        )
+
+        assert row.row_id == "row-fast"
+        assert row.source_row_index == 7
+        assert row.ingest_sequence == 11
+        assert token.token_id == "tok-fast"
+        assert token.row_id == "row-fast"
+        assert token.run_id == "run-1"
+
+        with db.read_only_connection() as conn:
+            stored = (
+                conn.execute(
+                    select(
+                        rows_table.c.source_node_id,
+                        rows_table.c.source_row_index,
+                        rows_table.c.ingest_sequence,
+                        tokens_table.c.run_id,
+                    )
+                    .select_from(rows_table.join(tokens_table, rows_table.c.row_id == tokens_table.c.row_id))
+                    .where(rows_table.c.row_id == "row-fast")
+                )
+                .mappings()
+                .one()
+            )
+        assert dict(stored) == {
+            "source_node_id": "source-0",
+            "source_row_index": 7,
+            "ingest_sequence": 11,
+            "run_id": "run-1",
+        }
+
+    def test_create_row_with_token_requires_source_identity(self) -> None:
+        _db, repo, _fac = _make_repo()
+
+        with pytest.raises(
+            AuditIntegrityError,
+            match=r"run_id='run-1'.*row_id='row-explicit'.*source_node_id='source-0'.*source_row_index.*ingest_sequence",
+        ):
+            repo.create_row_with_token("run-1", "source-0", 5, {"x": 1}, row_id="row-explicit")
+
+    def test_create_row_with_token_rolls_back_row_when_token_insert_fails(self) -> None:
+        db, repo, _fac = _make_repo()
+        repo.create_row_with_token(
+            "run-1",
+            "source-0",
+            0,
+            {"x": 1},
+            source_row_index=0,
+            ingest_sequence=0,
+            row_id="row-ok",
+            token_id="tok-dup",
+        )
+
+        with pytest.raises(IntegrityError):
+            repo.create_row_with_token(
+                "run-1",
+                "source-0",
+                1,
+                {"x": 2},
+                source_row_index=1,
+                ingest_sequence=1,
+                row_id="row-rolled-back",
+                token_id="tok-dup",
+            )
+
+        with db.read_only_connection() as conn:
+            rolled_back = conn.execute(select(rows_table.c.row_id).where(rows_table.c.row_id == "row-rolled-back")).one_or_none()
+        assert rolled_back is None
+
     def test_creates_token_linked_to_row(self) -> None:
         _db, repo, _fac = _make_repo()
         row = _create_test_row(repo, "run-1", "source-0", 0, {"x": 1}, row_id="row-1")

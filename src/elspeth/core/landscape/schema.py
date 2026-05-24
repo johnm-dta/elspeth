@@ -456,6 +456,16 @@ Index(
     token_work_items_table.c.lease_owner,
     token_work_items_table.c.lease_expires_at,
 )
+# Token-scoped lookup for the sink durability callback. Without this, SQLite
+# plans ``mark_pending_sink_terminal`` as a run/status scan for every token,
+# turning large sink batches into an O(n^2) post-write grind.
+Index(
+    "ix_token_work_items_pending_sink_token",
+    token_work_items_table.c.run_id,
+    token_work_items_table.c.token_id,
+    token_work_items_table.c.status,
+    token_work_items_table.c.pending_sink_name,
+)
 Index(
     "uq_token_work_items_terminal_identity",
     token_work_items_table.c.run_id,

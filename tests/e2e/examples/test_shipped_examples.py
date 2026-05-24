@@ -23,16 +23,13 @@ from typing import Any
 import pytest
 import yaml
 from sqlalchemy import select
+from typer.testing import CliRunner
 
-from elspeth.cli_helpers import instantiate_plugins_from_config
+from elspeth.cli import app
 from elspeth.contracts import RunStatus
 from elspeth.core.config import ElspethSettings, load_settings
-from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import rows_table, run_sources_table
-from elspeth.core.payload_store import FilesystemPayloadStore
-from elspeth.engine.orchestrator import Orchestrator
-from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 
 # Examples that contain ${VAR} env var references that would fail
 # load_settings without the env vars being set.
@@ -139,35 +136,20 @@ class TestShippedExamples:
         return copied_example_dir
 
     @staticmethod
-    def _run_example(settings_path: Path) -> tuple[Any, LandscapeDB]:
+    def _run_example(settings_path: Path) -> tuple[dict[str, Any], LandscapeDB]:
         settings = load_settings(settings_path)
-        bundle = instantiate_plugins_from_config(settings)
-        graph = ExecutionGraph.from_plugin_instances(
-            sources=bundle.sources,
-            source_settings_map=bundle.source_settings_map,
-            transforms=bundle.transforms,
-            sinks=bundle.sinks,
-            aggregations=bundle.aggregations,
-            gates=list(settings.gates),
-            coalesce_settings=(list(settings.coalesce) if settings.coalesce else None),
-            queues=settings.queues,
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["run", "--settings", str(settings_path), "--execute", "--format", "json"],
         )
-        config = assemble_and_validate_pipeline_config(
-            sources=bundle.sources,
-            transforms=bundle.transforms,
-            sinks=bundle.sinks,
-            aggregations=bundle.aggregations,
-            settings=settings,
-            graph=graph,
-        )
+        assert result.exit_code == 0, result.output
+
+        events = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+        execution_events = [event for event in events if event["event"] == "execution_result"]
+        assert len(execution_events) == 1, result.output
         db = LandscapeDB(settings.landscape.url)
-        result = Orchestrator(db).run(
-            config,
-            graph=graph,
-            settings=settings,
-            payload_store=FilesystemPayloadStore(settings_path.parent / "runs" / "payloads"),
-        )
-        return result, db
+        return execution_events[0], db
 
     @staticmethod
     def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -307,9 +289,9 @@ class TestShippedExamples:
         try:
             result, db = self._run_example(example_dir / "settings.yaml")
 
-            assert result.status is RunStatus.COMPLETED
-            assert result.rows_processed == 4
-            run_sources, rows = self._audit_source_rows(db, result.run_id)
+            assert result["status"] == RunStatus.COMPLETED.value
+            assert result["rows_processed"] == 4
+            run_sources, rows = self._audit_source_rows(db, str(result["run_id"]))
             assert [(source_name, state) for source_name, _node_id, state in run_sources] == [
                 ("signups", "loaded"),
                 ("tickets", "loaded"),
@@ -344,9 +326,9 @@ class TestShippedExamples:
         try:
             result, db = self._run_example(example_dir / "settings.yaml")
 
-            assert result.status is RunStatus.COMPLETED
-            assert result.rows_processed == 3
-            run_sources, rows = self._audit_source_rows(db, result.run_id)
+            assert result["status"] == RunStatus.COMPLETED.value
+            assert result["rows_processed"] == 3
+            run_sources, rows = self._audit_source_rows(db, str(result["run_id"]))
             assert [(source_name, state) for source_name, _node_id, state in run_sources] == [
                 ("orders", "loaded"),
                 ("refunds", "loaded"),
@@ -419,3 +401,25 @@ class TestShippedExamples:
                 assert "condition" in gate, f"{name}/{path.name}: gate[{i}] missing 'condition'"
                 assert isinstance(gate["condition"], str), f"{name}/{path.name}: gate[{i}] condition must be a string"
                 assert "routes" in gate, f"{name}/{path.name}: gate[{i}] missing 'routes'"
+
+    def test_large_scale_readme_describes_durable_scheduler_performance(self, example_pipeline_dir: Path) -> None:
+        """large_scale_test must not ship pre-durable-scheduler throughput claims."""
+        readme = (example_pipeline_dir / "large_scale_test" / "README.md").read_text()
+
+        assert "durable scheduler" in readme
+        assert "5,000-10,000 rows/sec" not in readme
+
+    def test_chaosllm_endurance_documents_smoke_row_override(self, example_pipeline_dir: Path) -> None:
+        """chaosllm_endurance must expose a bounded dogfood mode."""
+        run_sh = (example_pipeline_dir / "chaosllm_endurance" / "run.sh").read_text()
+        readme = (example_pipeline_dir / "chaosllm_endurance" / "README.md").read_text()
+        agent_guide = (example_pipeline_dir / "AGENTS.md").read_text()
+
+        assert "CHAOSLLM_ENDURANCE_ROWS" in run_sh
+        assert "CHAOSLLM_ENDURANCE_INPUT_PATH" in run_sh
+        assert "input.${ROWS}.csv" in run_sh
+        assert "EXISTING_ROWS" in run_sh
+        assert '--rows "$ROWS"' in run_sh
+        assert "input.<rows>.csv" in readme
+        assert "CHAOSLLM_ENDURANCE_ROWS=20" in readme
+        assert "not gate dogfood" in agent_guide

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TypedDict
+
 from ._helpers import (
     _COMPOSER_REQUESTS_INFLIGHT,
     _DATA_ERROR_KEY,
@@ -223,6 +225,11 @@ def _ensure_inline_blob_proposal_context(
             f"({', '.join(missing)}). Ask ELSPETH to regenerate the proposal."
         ),
     )
+
+
+class StateYamlResponse(TypedDict, total=False):
+    yaml: str
+    source_blob_ids: dict[str, str]
 
 
 def register_composer_routes(router: APIRouter) -> None:
@@ -1143,7 +1150,7 @@ def register_composer_routes(router: APIRouter) -> None:
         session_id: UUID,
         request: Request,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> dict[str, Any]:
+    ) -> StateYamlResponse:
         """Get YAML representation of the current composition state (M1).
 
         Runs runtime preflight on the exact CompositionState reconstructed
@@ -1256,7 +1263,7 @@ def register_composer_routes(router: APIRouter) -> None:
             completion_verb="export_yaml",
         )
 
-        response: dict[str, Any] = {"yaml": yaml_str}
+        response: StateYamlResponse = {"yaml": yaml_str}
         source_blob_ids = {
             source_name: str(source.options["blob_ref"]) for source_name, source in state.sources.items() if "blob_ref" in source.options
         }

@@ -2054,7 +2054,7 @@ class CompositionState:
             state == CompositionState.from_dict(state.to_dict())
         """
         raw_sources = d["sources"] if "sources" in d and d["sources"] is not None else {}
-        if not raw_sources and d.get("source") is not None:
+        if not raw_sources and "source" in d and d["source"] is not None:
             raw_sources = {"source": d["source"]}
         sources = {name: SourceSpec.from_dict(source) for name, source in raw_sources.items()}
         return cls(

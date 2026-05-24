@@ -96,6 +96,7 @@ from elspeth.engine.tokens import TokenManager
 # single-row fan-out; otherwise legal expansion trips the safety valve before
 # the final child runs.
 MAX_WORK_QUEUE_ITERATIONS = 100_000
+SCHEDULER_MAINTENANCE_INTERVAL = 64
 logger = logging.getLogger(__name__)
 
 type _SourceBoundaryFailure = (
@@ -476,6 +477,7 @@ class RowProcessor:
         # so this instance state has no concurrent access.
         self._active_claim_work_item_id: str | None = None
         self._last_heartbeat_at: datetime | None = None
+        self._scheduler_drains_since_maintenance = 0
 
         # Restore aggregation state if provided (crash recovery / resume).
         # Multiple node_id keys may map to the same state — deduplicate by
@@ -1831,6 +1833,17 @@ class RowProcessor:
         state is recorded immediately as COMPLETED or FAILED with duration 0.
         """
         effective_source_node_id = source_node_id or self._source_node_id
+        if status == NodeStateStatus.COMPLETED:
+            self._execution.record_completed_node_state(
+                token_id=token.token_id,
+                node_id=effective_source_node_id,
+                run_id=self._run_id,
+                step_index=0,
+                input_data=input_data,
+                output_data=input_data,
+                duration_ms=0,
+            )
+            return
         source_state = self._execution.begin_node_state(
             token_id=token.token_id,
             node_id=effective_source_node_id,
@@ -1838,14 +1851,6 @@ class RowProcessor:
             step_index=0,
             input_data=input_data,
         )
-        if status == NodeStateStatus.COMPLETED:
-            self._execution.complete_node_state(
-                state_id=source_state.state_id,
-                status=NodeStateStatus.COMPLETED,
-                output_data=input_data,
-                duration_ms=0,
-            )
-            return
         if status == NodeStateStatus.FAILED:
             self._execution.complete_node_state(
                 state_id=source_state.state_id,
@@ -2681,12 +2686,40 @@ class RowProcessor:
         """Drain the scheduler-backed work queue for a single source token."""
         pending_items: dict[str, WorkItem] = {}
 
-        self._enqueue_scheduler_work_item(initial_item, pending_items)
+        initial_claim = self._enqueue_scheduler_work_item(initial_item, pending_items, claim_immediately=True)
+        preclaimed_items = (
+            [initial_claim]
+            if initial_claim.status is TokenWorkStatus.LEASED and initial_claim.lease_owner == self._scheduler_lease_owner
+            else []
+        )
 
         with self._spans.row_span(initial_item.token.row_id, initial_item.token.token_id):
-            results = self._drain_scheduler_claims(ctx=ctx, pending_items=pending_items, recover_pending_sinks=False)
+            results = self._drain_scheduler_claims(
+                ctx=ctx,
+                pending_items=pending_items,
+                recover_pending_sinks=False,
+                preclaimed_items=preclaimed_items,
+            )
 
         return results
+
+    def _run_scheduler_maintenance(self, now: datetime) -> int:
+        """Release due delayed work and recover expired peer leases."""
+        released = self._scheduler.release_waiting(run_id=self._run_id, now=now)
+        recovered = self._scheduler.recover_expired_leases(
+            run_id=self._run_id,
+            now=now,
+            caller_owner=self._scheduler_lease_owner,
+        )
+        self._scheduler_drains_since_maintenance = 0
+        return released + recovered
+
+    def _scheduler_maintenance_due(self, *, recover_pending_sinks: bool) -> bool:
+        """Return whether this drain should run scheduler maintenance up front."""
+        if recover_pending_sinks:
+            return True
+        self._scheduler_drains_since_maintenance += 1
+        return self._scheduler_drains_since_maintenance >= SCHEDULER_MAINTENANCE_INTERVAL
 
     def _drain_scheduler_claims(
         self,
@@ -2694,6 +2727,7 @@ class RowProcessor:
         ctx: PluginContext,
         pending_items: dict[str, WorkItem],
         recover_pending_sinks: bool,
+        preclaimed_items: list[TokenWorkItem] | None = None,
     ) -> list[RowResult]:
         """Claim and advance scheduler work until no READY work remains.
 
@@ -2730,6 +2764,11 @@ class RowProcessor:
             self._drain_preexisting_pending_sinks(results)
 
         iterations = 0
+        maintenance_iteration = 0
+        preclaimed_queue = list(preclaimed_items or ())
+
+        if self._scheduler_maintenance_due(recover_pending_sinks=recover_pending_sinks):
+            self._run_scheduler_maintenance(self._clock.now_utc())
 
         while True:
             iterations += 1
@@ -2737,19 +2776,24 @@ class RowProcessor:
                 raise RuntimeError(f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. Possible infinite loop in pipeline.")
 
             now = self._clock.now_utc()
-            self._scheduler.release_waiting(run_id=self._run_id, now=now)
-            self._scheduler.recover_expired_leases(
-                run_id=self._run_id,
-                now=now,
-                caller_owner=self._scheduler_lease_owner,
-            )
-            claimed = self._scheduler.claim_ready(
-                run_id=self._run_id,
-                lease_owner=self._scheduler_lease_owner,
-                lease_seconds=self._scheduler_lease_seconds,
-                now=now,
-            )
+            if iterations - maintenance_iteration >= SCHEDULER_MAINTENANCE_INTERVAL:
+                self._run_scheduler_maintenance(now)
+                maintenance_iteration = iterations
+            claimed: TokenWorkItem | None
+            if preclaimed_queue:
+                claimed = preclaimed_queue.pop(0)
+            else:
+                claimed = self._scheduler.claim_ready(
+                    run_id=self._run_id,
+                    lease_owner=self._scheduler_lease_owner,
+                    lease_seconds=self._scheduler_lease_seconds,
+                    now=now,
+                )
             if claimed is None:
+                if recover_pending_sinks:
+                    recovered = self._run_scheduler_maintenance(self._clock.now_utc())
+                    if recovered:
+                        continue
                 if pending_items:
                     raise OrchestrationInvariantError(
                         f"Scheduler has {len(pending_items)} in-memory continuations for run {self._run_id!r} "
@@ -2780,7 +2824,7 @@ class RowProcessor:
                         on_success_sink=item.on_success_sink,
                         attempt_offset=max(claimed.attempt - 1, 0),
                     )
-                except SchedulerLeaseLostError:
+                except SchedulerLeaseLostError as exc:
                     # The lease was reaped by a peer mid-processing. The
                     # original ``work_item_id`` no longer exists (peer rewrote
                     # it under a bumped attempt) or no longer carries this
@@ -2788,10 +2832,12 @@ class RowProcessor:
                     # CAS-fail and cascade into Tier-1 AuditIntegrityError —
                     # the exact failure mode this primitive exists to
                     # eliminate. Abandon the in-flight work, do NOT emit the
-                    # (lost) result, and let the drain loop's next iteration
-                    # pick up the row from its new owner (or, if reaped to
-                    # READY, claim it fresh under a new attempt).
-                    continue
+                    # (lost) result, and return the results that were already
+                    # proven before this lease was lost. The caller's
+                    # post-sink scheduler invariant check will refuse run
+                    # completion if active work remains.
+                    exc.add_note("scheduler lease lost during row processing; in-flight token result was abandoned")
+                    return results
                 except Exception as processing_exc:
                     try:
                         self._scheduler.mark_failed(
@@ -2827,10 +2873,14 @@ class RowProcessor:
                     queue_key=None,
                     barrier_key=self._barrier_key_for_buffered_scheduler_result(result),
                 )
+                if not recover_pending_sinks and not pending_items:
+                    break
                 continue
 
             if result is None and not child_items:
                 self._mark_claimed_scheduler_work_blocked(claimed, item, now=self._clock.now_utc())
+                if not recover_pending_sinks and not pending_items:
+                    break
                 continue
 
             if self._scheduler_result_failed_claimed_token(result, claimed.token_id):
@@ -2857,6 +2907,9 @@ class RowProcessor:
                     now=self._clock.now_utc(),
                     expected_lease_owner=claimed_lease_owner,
                 )
+
+            if not recover_pending_sinks and not pending_items:
+                break
 
         return results
 
@@ -2897,6 +2950,13 @@ class RowProcessor:
                 now=now,
                 caller_owner=self._scheduler_lease_owner,
             )
+            repaired = self._scheduler.terminalize_pending_sinks_with_terminal_outcomes(
+                run_id=self._run_id,
+                now=now,
+                caller_owner=self._scheduler_lease_owner,
+            )
+            if repaired:
+                continue
             pending_sink = self._scheduler.claim_pending_sink(
                 run_id=self._run_id,
                 lease_owner=self._scheduler_lease_owner,
@@ -2909,12 +2969,31 @@ class RowProcessor:
 
     def mark_sink_bound_scheduler_terminal(self, token_id: str) -> None:
         """Terminalize scheduler work after sink outcome durability."""
-        self._scheduler.mark_pending_sink_terminal(
+        terminalized = self._scheduler.mark_pending_sink_terminal(
             run_id=self._run_id,
             token_id=token_id,
             now=self._clock.now_utc(),
             expected_lease_owner=self._scheduler_lease_owner,
         )
+        if terminalized != 1:
+            raise AuditIntegrityError(
+                f"Scheduler pending-sink terminalization for run_id={self._run_id!r} token_id={token_id!r} "
+                f"terminalized {terminalized} rows; expected exactly one durable scheduler handoff."
+            )
+
+    def mark_sink_bound_scheduler_terminal_many(self, token_ids: tuple[str, ...]) -> None:
+        """Terminalize a durable sink batch after sink outcome durability."""
+        terminalized = self._scheduler.mark_pending_sink_terminal_many(
+            run_id=self._run_id,
+            token_ids=token_ids,
+            now=self._clock.now_utc(),
+            expected_lease_owner=self._scheduler_lease_owner,
+        )
+        if terminalized != len(token_ids):
+            raise AuditIntegrityError(
+                f"Scheduler pending-sink batch terminalization for run_id={self._run_id!r} terminalized "
+                f"{terminalized} rows for {len(token_ids)} durable sink outcomes."
+            )
 
     def _row_result_from_pending_sink(self, scheduled: TokenWorkItem) -> RowResult:
         """Rebuild a sink-bound row result without re-running its producer node."""
@@ -3123,28 +3202,65 @@ class RowProcessor:
         self,
         item: WorkItem,
         pending_items: dict[str, WorkItem],
+        *,
+        claim_immediately: bool = False,
     ) -> TokenWorkItem:
         """Persist a READY scheduler item and retain the live token payload."""
-        scheduled = self._scheduler.enqueue_ready(
-            run_id=self._run_id,
-            token_id=item.token.token_id,
-            row_id=item.token.row_id,
-            node_id=self._scheduler_node_id(item.current_node_id),
-            step_index=self._scheduler_step_index(item.current_node_id),
-            ingest_sequence=self._data_flow.resolve_row_ingest_sequence(item.token.row_id),
-            row_payload_json=self._scheduler.serialize_row_payload(item.token.row_data),
-            available_at=self._clock.now_utc(),
-            queue_key=self._queue_key_for_blocked_item(item),
-            barrier_key=self._barrier_key_for_blocked_item(item),
-            on_success_sink=item.on_success_sink,
-            branch_name=item.token.branch_name,
-            fork_group_id=item.token.fork_group_id,
-            join_group_id=item.token.join_group_id,
-            expand_group_id=item.token.expand_group_id,
-            coalesce_node_id=str(item.coalesce_node_id) if item.coalesce_node_id is not None else None,
-            coalesce_name=str(item.coalesce_name) if item.coalesce_name is not None else None,
-        )
-        if scheduled.status is TokenWorkStatus.READY:
+        available_at = self._clock.now_utc()
+        node_id = self._scheduler_node_id(item.current_node_id)
+        step_index = self._scheduler_step_index(item.current_node_id)
+        ingest_sequence = self._data_flow.resolve_row_ingest_sequence(item.token.row_id)
+        row_payload_json = self._scheduler.serialize_row_payload(item.token.row_data)
+        queue_key = self._queue_key_for_blocked_item(item)
+        barrier_key = self._barrier_key_for_blocked_item(item)
+        coalesce_node_id = str(item.coalesce_node_id) if item.coalesce_node_id is not None else None
+        coalesce_name = str(item.coalesce_name) if item.coalesce_name is not None else None
+        if claim_immediately:
+            scheduled = self._scheduler.enqueue_ready_claimed(
+                run_id=self._run_id,
+                token_id=item.token.token_id,
+                row_id=item.token.row_id,
+                node_id=node_id,
+                step_index=step_index,
+                ingest_sequence=ingest_sequence,
+                row_payload_json=row_payload_json,
+                available_at=available_at,
+                queue_key=queue_key,
+                barrier_key=barrier_key,
+                on_success_sink=item.on_success_sink,
+                branch_name=item.token.branch_name,
+                fork_group_id=item.token.fork_group_id,
+                join_group_id=item.token.join_group_id,
+                expand_group_id=item.token.expand_group_id,
+                coalesce_node_id=coalesce_node_id,
+                coalesce_name=coalesce_name,
+                lease_owner=self._scheduler_lease_owner,
+                lease_seconds=self._scheduler_lease_seconds,
+                now=available_at,
+            )
+        else:
+            scheduled = self._scheduler.enqueue_ready(
+                run_id=self._run_id,
+                token_id=item.token.token_id,
+                row_id=item.token.row_id,
+                node_id=node_id,
+                step_index=step_index,
+                ingest_sequence=ingest_sequence,
+                row_payload_json=row_payload_json,
+                available_at=available_at,
+                queue_key=queue_key,
+                barrier_key=barrier_key,
+                on_success_sink=item.on_success_sink,
+                branch_name=item.token.branch_name,
+                fork_group_id=item.token.fork_group_id,
+                join_group_id=item.token.join_group_id,
+                expand_group_id=item.token.expand_group_id,
+                coalesce_node_id=coalesce_node_id,
+                coalesce_name=coalesce_name,
+            )
+        if scheduled.status is TokenWorkStatus.READY or (
+            scheduled.status is TokenWorkStatus.LEASED and scheduled.lease_owner == self._scheduler_lease_owner
+        ):
             pending_items[scheduled.work_item_id] = item
         return scheduled
 

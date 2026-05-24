@@ -105,8 +105,9 @@ class TokenManager:
         # Convert to PipelineRow
         pipeline_row = source_row.to_pipeline_row()
 
-        # Create row record - recorder stores dict representation
-        row = self._data_flow.create_row(
+        # Create row record and initial token atomically; the repository owns
+        # run/source identity and payload persistence for both audit rows.
+        row, token = self._data_flow.create_row_with_token(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
@@ -114,9 +115,6 @@ class TokenManager:
             ingest_sequence=ingest_sequence,
             data=pipeline_row.to_dict(),
         )
-
-        # Create initial token
-        token = self._data_flow.create_token(row_id=row.row_id)
 
         return TokenInfo(
             row_id=row.row_id,

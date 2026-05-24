@@ -56,8 +56,18 @@ class RunSourceResumeRecord:
 
     source_node_id: str
     source_name: str
+    lifecycle_state: str
     source_schema_json: str
     schema_contract: SchemaContract
+
+
+@dataclass(frozen=True, slots=True)
+class RunSourceLifecycleRecord:
+    """Per-source lifecycle metadata used before resume replay reconstruction."""
+
+    source_node_id: str
+    source_name: str
+    lifecycle_state: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -633,6 +643,7 @@ class RunLifecycleRepository:
             select(
                 run_sources_table.c.source_node_id,
                 run_sources_table.c.source_name,
+                run_sources_table.c.lifecycle_state,
                 run_sources_table.c.schema_json,
                 run_sources_table.c.schema_contract_json,
                 run_sources_table.c.schema_contract_hash,
@@ -663,10 +674,36 @@ class RunLifecycleRepository:
             records[row.source_node_id] = RunSourceResumeRecord(
                 source_node_id=row.source_node_id,
                 source_name=row.source_name,
+                lifecycle_state=row.lifecycle_state,
                 source_schema_json=row.schema_json,
                 schema_contract=contract,
             )
         return records
+
+    def get_run_source_lifecycle_records(self, run_id: str) -> dict[str, RunSourceLifecycleRecord]:
+        """Return per-source lifecycle records without requiring replay schemas.
+
+        Resume must refuse incomplete sources before reconstructing row replay
+        schemas. A declared source that never started is intentionally
+        lifecycle_state=ready and may not yet have first-row-inferred contract
+        data; treating that as schema corruption would hide the clearer
+        source-exhaustion refusal.
+        """
+        rows = self._ops.execute_fetchall(
+            select(
+                run_sources_table.c.source_node_id,
+                run_sources_table.c.source_name,
+                run_sources_table.c.lifecycle_state,
+            ).where(run_sources_table.c.run_id == run_id)
+        )
+        return {
+            row.source_node_id: RunSourceLifecycleRecord(
+                source_node_id=row.source_node_id,
+                source_name=row.source_name,
+                lifecycle_state=row.lifecycle_state,
+            )
+            for row in rows
+        }
 
     def get_source_field_resolution(self, run_id: str) -> dict[str, str] | None:
         """Get source field resolution mapping for a run.

@@ -1196,6 +1196,56 @@ sinks:
         assert "message" in event
         assert run_id in event["message"]
 
+    def test_resume_emits_not_resumable_event_when_source_was_not_exhausted(self, tmp_path: Path) -> None:
+        """Interrupted source exhaustion failures get a clean JSON refuse event.
+
+        ``IncompleteSourceResumeError`` is raised from the execute-time
+        orchestrator path after topology validation has already succeeded. The
+        CLI must keep it out of the Tier-1 fatal-traceback path and give
+        operators the precise "source was not exhausted" reason.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.cli import app
+        from elspeth.contracts.checkpoint import ResumeCheck, ResumePoint
+        from elspeth.contracts.errors import IncompleteSourceResumeError
+
+        settings_file, _db_path = self._make_settings_with_landscape_db(tmp_path)
+        settings_file.write_text(settings_file.read_text().replace("output.json", "output.jsonl"))
+        (tmp_path / "payloads").mkdir()
+
+        run_id = "run-source-not-exhausted-50cec0a02a"
+        mock_resume_point = MagicMock(spec=ResumePoint)
+        mock_resume_point.token_id = "tok-1"
+        mock_resume_point.node_id = "node-1"
+        mock_resume_point.sequence_number = 0
+        mock_resume_point.aggregation_state = None
+        mock_resume_point.coalesce_state = None
+
+        with (
+            patch("elspeth.core.checkpoint.RecoveryManager") as MockRecovery,
+            patch(
+                "elspeth.cli._execute_resume_with_instances",
+                side_effect=IncompleteSourceResumeError(run_id, {"refunds": "interrupted"}),
+            ),
+        ):
+            MockRecovery.return_value.can_resume.return_value = ResumeCheck(can_resume=True)
+            MockRecovery.return_value.get_resume_point.return_value = mock_resume_point
+            MockRecovery.return_value.get_unprocessed_rows.return_value = []
+
+            result = runner.invoke(app, ["resume", run_id, "-s", str(settings_file), "--execute", "--format", "json"])
+
+        assert result.exit_code == 1, f"Expected exit 1, got {result.exit_code}; output={result.output!r}; exception={result.exception!r}"
+        assert "Traceback" not in result.output
+
+        event_lines = [line for line in result.output.splitlines() if '"event"' in line]
+        assert event_lines, f"Expected a JSON event with 'event' key in output; got {result.output!r}"
+        event = json.loads(event_lines[0])
+        assert event["event"] == "not_resumable"
+        assert event["run_id"] == run_id
+        assert event["reason"] == "source_not_exhausted"
+        assert "refunds=interrupted" in event["message"]
+
     def test_resume_rejects_missing_payload_directory(self, tmp_path: Path) -> None:
         """resume --execute exits cleanly when payload directory doesn't exist.
 

@@ -19,15 +19,27 @@ only on the parameters passed in.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import threading
+from typing import TYPE_CHECKING, cast
 
+from elspeth.contracts import errors as contract_errors
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.errors import PluginRetryableError
 from elspeth.core.operations import track_operation
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.orchestrator.types import PipelineConfig
+    from elspeth.engine.retry import RetryManager
+
+
+def _runtime_preflight_is_retryable(exc: BaseException) -> bool:
+    if issubclass(type(exc), PluginRetryableError):
+        return cast(PluginRetryableError, exc).retryable
+    if issubclass(type(exc), contract_errors.RuntimePreflightFailedError):
+        return cast(contract_errors.RuntimePreflightFailedError, exc).retryable
+    return False
 
 
 def run_transform_runtime_preflights(
@@ -35,6 +47,9 @@ def run_transform_runtime_preflights(
     run_id: str,
     config: PipelineConfig,
     ctx: PluginContext,
+    *,
+    retry_manager: RetryManager | None = None,
+    shutdown_event: threading.Event | None = None,
 ) -> None:
     """Run transform-declared external readiness checks before source load."""
     for transform in config.transforms:
@@ -54,6 +69,17 @@ def run_transform_runtime_preflights(
                 ctx=ctx,
                 input_data={"transform_plugin": transform.name},
             ):
-                transform.runtime_preflight(ctx)
+                if retry_manager is None:
+                    transform.runtime_preflight(ctx)
+                else:
+
+                    def run_runtime_preflight() -> None:
+                        transform.runtime_preflight(ctx)
+
+                    retry_manager.execute_with_retry(
+                        run_runtime_preflight,
+                        is_retryable=_runtime_preflight_is_retryable,
+                        shutdown_event=shutdown_event,
+                    )
         finally:
             ctx.node_id = previous_node_id

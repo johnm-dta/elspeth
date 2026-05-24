@@ -41,7 +41,7 @@ class SchedulerEventType(StrEnum):
 
 
 def _validate_scheduler_enum(value: object, enum_type: type, field_name: str) -> None:
-    if value is not None and not isinstance(value, enum_type):
+    if value is not None and type(value) is not enum_type:
         raise TypeError(f"{field_name} must be {enum_type.__name__}, got {type(value).__name__}: {value!r}")
 
 

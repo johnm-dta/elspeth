@@ -16,13 +16,15 @@ from sqlalchemy import select
 
 from elspeth.cli_helpers import instantiate_plugins_from_config
 from elspeth.contracts import Determinism, NodeID, NodeType, PipelineRow, RoutingMode, RunStatus, SinkName, SourceRow
-from elspeth.contracts.errors import OrchestrationInvariantError, SourceGuaranteedFieldsViolation
+from elspeth.contracts.errors import OrchestrationInvariantError, RuntimePreflightFailedError, SourceGuaranteedFieldsViolation
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.core.config import ElspethSettings, RetrySettings, SinkSettings, SourceSettings
 from elspeth.core.landscape.schema import rows_table, run_sources_table
 from elspeth.engine.orchestrator import PipelineConfig
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.types import AggregationFlushResult, ExecutionCounters, LoopContext
 from elspeth.plugins.infrastructure.base import BaseTransform
+from elspeth.plugins.infrastructure.clients.llm import RateLimitError
 from elspeth.testing import make_pipeline_row, make_source_row
 from tests.fixtures.base_classes import _TestSchema, _TestSourceBase, as_sink, as_source, as_transform
 from tests.fixtures.landscape import make_factory, make_landscape_db
@@ -142,6 +144,27 @@ class RuntimePreflightFailingTransform(PassTransform):
 
     def runtime_preflight(self, ctx: Any) -> None:
         raise RuntimeError("pre_flight_failed: provider auth exploded")
+
+
+class RuntimePreflightTransientTransform(PassTransform):
+    """Transform whose runtime preflight succeeds after one transient provider failure."""
+
+    name = "runtime_preflight_transient"
+    determinism = Determinism.DETERMINISTIC
+    requires_runtime_preflight = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.preflight_attempts = 0
+
+    def runtime_preflight(self, ctx: Any) -> None:
+        self.preflight_attempts += 1
+        if self.preflight_attempts == 1:
+            raise RuntimePreflightFailedError(
+                plugin_name=self.name,
+                provider="openrouter",
+                cause=RateLimitError("429 Too Many Requests"),
+            )
 
 
 def test_idle_timeout_polling_does_not_mutate_source_context_during_next(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,6 +293,49 @@ class TestOrchestrator:
         assert operation.error_message is not None
         assert "pre_flight_failed" in operation.error_message
         assert "provider auth exploded" in operation.error_message
+
+    def test_runtime_preflight_retries_transient_failures_before_source_load(
+        self,
+        landscape_db: LandscapeDB,
+        payload_store,
+    ) -> None:
+        """Transient runtime preflight provider failures use the run retry policy."""
+        source = LoadTrackingSource([{"value": 1}])
+        transform = RuntimePreflightTransientTransform()
+        transform.on_success = "default"
+        sink = CollectSink()
+        run_id = "run-runtime-preflight-retries-transient"
+
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[as_transform(transform)],
+            sinks={"default": as_sink(sink)},
+        )
+        settings = ElspethSettings(
+            sources={"primary": SourceSettings(plugin="list", on_success="default")},
+            sinks={"default": SinkSettings(plugin="collect", on_write_failure="discard")},
+            retry=RetrySettings(max_attempts=2, initial_delay_seconds=0.01, max_delay_seconds=0.1),
+        )
+
+        orchestrator = Orchestrator(landscape_db)
+        run_result = orchestrator.run(
+            config,
+            graph=build_production_graph(config),
+            settings=settings,
+            payload_store=payload_store,
+            run_id=run_id,
+        )
+
+        assert run_result.status == RunStatus.COMPLETED
+        assert transform.preflight_attempts == 2
+        assert source.load_started is True
+        assert sink.results == [{"value": 1}]
+
+        factory = make_factory(landscape_db)
+        operations = factory.execution.get_operations_for_run(run_id)
+        runtime_preflight_ops = [op for op in operations if op.operation_type == "runtime_preflight"]
+        assert len(runtime_preflight_ops) == 1
+        assert runtime_preflight_ops[0].status == "completed"
 
     def test_first_row_inferred_source_contract_persisted_before_processing_failure(self, landscape_db: LandscapeDB, payload_store) -> None:
         """A first-valid-row contract must reach run_sources before process_row can fail.

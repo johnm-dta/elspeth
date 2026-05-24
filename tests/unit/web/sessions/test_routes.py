@@ -25,6 +25,7 @@ from elspeth.contracts.composer_audit import (
     ComposerToolStatus,
 )
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus, ComposerLLMCall, ComposerLLMCallStatus
+from elspeth.contracts.composer_progress import ComposerProgressEvent
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -41,7 +42,7 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import GuidedSession, GuidedStep, TerminalKind, TerminalReason, TerminalState
-from elspeth.web.composer.progress import ComposerProgressEvent, ComposerProgressRegistry
+from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.protocol import ComposerPluginCrashError, ComposerResult
 from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationSummary

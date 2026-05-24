@@ -41,7 +41,7 @@ from elspeth.contracts.composer_llm_audit import (
     ComposerLLMCall,
     ComposerLLMCallStatus,
 )
-from elspeth.contracts.composer_progress import ComposerProgressSink
+from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.async_workers import run_sync_in_worker
@@ -80,7 +80,6 @@ from elspeth.web.composer.llm_response_parsing import (
     token_usage_from_response,
 )
 from elspeth.web.composer.progress import (
-    ComposerProgressEvent,
     convergence_progress_event,
     emit_progress,
     model_call_progress_event,

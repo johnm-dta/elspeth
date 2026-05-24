@@ -4,28 +4,32 @@ The progress surface is a UI status channel, not a reasoning transcript.
 Snapshots summarize visible composer lifecycle boundaries and tool categories;
 they must never carry raw tool arguments, tool results, secrets, or provider
 chain-of-thought.
+
+The L0-suitable progress contracts (``ComposerProgressEvent``,
+``ComposerProgressPhase``, ``ComposerProgressReason``,
+``ComposerProgressSink``, ``COMPOSER_PROGRESS_MAX_EVIDENCE``,
+``NON_TERMINAL_PROGRESS_PHASES``) live in
+``elspeth.contracts.composer_progress``.  This module owns only the
+L3-dependent residue: the in-memory ``ComposerProgressRegistry`` (which
+uses threading), the snapshot subclass that joins event with session
+identity, and the per-phase event factory functions whose copy
+references tool names from ``elspeth.web.composer.tools``.
 """
 
 from __future__ import annotations
 
 import threading
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Self
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
-
-from elspeth.contracts.composer_progress import ComposerProgressReason, ComposerProgressSink
+from elspeth.contracts.composer_progress import (
+    NON_TERMINAL_PROGRESS_PHASES,
+    ComposerProgressEvent,
+    ComposerProgressSink,
+)
 from elspeth.web.composer.tools import is_discovery_tool
 
 __all__ = [
-    "COMPOSER_PROGRESS_MAX_EVIDENCE",
-    "NON_TERMINAL_PROGRESS_PHASES",
-    "ComposerProgressEvent",
-    # ``ComposerProgressPhase`` (a PEP 695 ``type`` alias) is intentionally
-    # NOT listed here — CodeQL's ``py/undefined-export`` rule does not model
-    # PEP 695 type-alias bindings as definitions, so listing it trips a
-    # static-analysis error. The alias is importable by name regardless of
-    # ``__all__`` (no wildcard imports of this module exist in the project).
     "ComposerProgressRegistry",
     "ComposerProgressSnapshot",
     "client_cancelled_progress_event",
@@ -36,103 +40,6 @@ __all__ = [
     "tool_completed_progress_event",
     "tool_started_progress_event",
 ]
-
-COMPOSER_PROGRESS_MAX_EVIDENCE = 4
-_MAX_PROGRESS_TEXT_CHARS = 180
-
-type ComposerProgressPhase = Literal[
-    "idle",
-    "starting",
-    "calling_model",
-    "using_tools",
-    "validating",
-    "saving",
-    "complete",
-    "failed",
-    "cancelled",
-]
-
-# Phases that indicate the composer is actively working on a request. The
-# in-flight enumeration endpoint filters on this set so an operator polling
-# /_active sees the live composer requests for their own sessions even if
-# the SPA tab that posted them is no longer connected.
-NON_TERMINAL_PROGRESS_PHASES: frozenset[ComposerProgressPhase] = frozenset(
-    {
-        "starting",
-        "calling_model",
-        "using_tools",
-        "validating",
-        "saving",
-    }
-)
-
-# `ComposerProgressReason` (the failure-code discriminator Literal) and
-# `ComposerProgressSink` (the async event-emission callable shape) are
-# defined at L0 in `elspeth.contracts.composer_progress` so that
-# `web/composer/protocol.py` can reference them without forming a cycle
-# back through `web/composer/tools.py`. See that module for the taxonomy
-# rationale and the per-code semantics.
-
-
-class _StrictProgressModel(BaseModel):
-    """Strict model for system-owned progress snapshots."""
-
-    model_config = ConfigDict(strict=True, extra="forbid")
-
-
-class ComposerProgressEvent(_StrictProgressModel):
-    """Provider-safe progress event emitted by the composer path."""
-
-    phase: ComposerProgressPhase
-    headline: str
-    evidence: tuple[str, ...] = ()
-    likely_next: str | None = None
-    reason: ComposerProgressReason | None = None
-
-    @field_validator("headline")
-    @classmethod
-    def _validate_headline(cls, value: str) -> str:
-        return _clean_required_text(value, field_name="headline")
-
-    @field_validator("likely_next")
-    @classmethod
-    def _validate_likely_next(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return _clean_required_text(value, field_name="likely_next")
-
-    @field_validator("evidence")
-    @classmethod
-    def _bound_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        bounded: list[str] = []
-        for item in value:
-            cleaned = _clean_required_text(item, field_name="evidence")
-            bounded.append(cleaned)
-            if len(bounded) == COMPOSER_PROGRESS_MAX_EVIDENCE:
-                break
-        return tuple(bounded)
-
-    @model_validator(mode="after")
-    def _require_reason_when_terminal_non_success(self) -> Self:
-        # Mechanically forbids the drift the original bug exhibited: a
-        # phase="failed" event was emitted with text-only differentiation
-        # at three distinct sites and three sub-causes collapsed into one
-        # generic message because nothing in the contract required a
-        # discriminator. With this validator, a new failure site cannot
-        # be added without choosing a code from ComposerProgressReason.
-        # The same rule applies to phase == "cancelled" (added with the
-        # in-flight observability work) — operator dashboards branch on
-        # reason to distinguish client_cancelled from a future operator-
-        # initiated cancel without parsing the headline.
-        # Other phases keep reason optional — they're status pings, not
-        # routing decisions.
-        if self.phase in ("failed", "cancelled") and self.reason is None:
-            raise ValueError(
-                "ComposerProgressEvent.reason is required when phase is 'failed' or "
-                "'cancelled' so the frontend, audit logs, and HTTP response body can "
-                "branch on a stable taxonomy instead of free-text headline parsing."
-            )
-        return self
 
 
 class ComposerProgressSnapshot(ComposerProgressEvent):
@@ -274,7 +181,7 @@ def convergence_progress_event(
       the service implementation;
     - taking a string discriminator (not the exception) avoids importing
       ``ComposerConvergenceError`` from ``composer.protocol``, which already
-      imports ``ComposerProgressSink`` from this module — keeping the helper
+      imports ``ComposerProgressSink`` from contracts — keeping the helper
       here would otherwise create a circular import.
 
     Recovery copy is what the user can act on:
@@ -340,15 +247,6 @@ def _idle_snapshot(session_id: str) -> ComposerProgressSnapshot:
         reason="composer_idle",
         updated_at=datetime.now(UTC),
     )
-
-
-def _clean_required_text(value: str, *, field_name: str) -> str:
-    cleaned = value.strip()
-    if not cleaned:
-        raise ValueError(f"composer progress {field_name} must contain visible text")
-    if len(cleaned) > _MAX_PROGRESS_TEXT_CHARS:
-        return cleaned[: _MAX_PROGRESS_TEXT_CHARS - 1].rstrip() + "."
-    return cleaned
 
 
 # ---------------------------------------------------------------------------

@@ -18,8 +18,8 @@ import structlog
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.composer_progress import ComposerProgressEvent
 from elspeth.web.catalog.protocol import CatalogService
-from elspeth.web.composer.progress import ComposerProgressEvent
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
     ComposerPluginCrashError,

@@ -25,6 +25,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.composer_progress import ComposerProgressEvent
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.secrets import SecretInventoryItem
@@ -35,7 +36,6 @@ from elspeth.testing import make_field, make_row
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer import yaml_generator as composer_yaml_generator
-from elspeth.web.composer.progress import ComposerProgressEvent
 from elspeth.web.composer.protocol import ComposerConvergenceError, ComposerPluginCrashError
 from elspeth.web.composer.redaction import (
     REDACTED_UNKNOWN_RESPONSE_KEY,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -68,6 +69,20 @@ def _empty_state() -> CompositionState:
         metadata=PipelineMetadata(),
         version=1,
     )
+
+
+def _default_source(state: CompositionState) -> SourceSpec | None:
+    return state.sources.get("source")
+
+
+def _pipeline_state_default_source(data: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    sources = data["sources"]
+    if not isinstance(sources, Mapping):
+        raise AssertionError("get_pipeline_state data['sources'] must be a mapping")
+    source = sources.get("source")
+    if source is not None and not isinstance(source, Mapping):
+        raise AssertionError("get_pipeline_state data['sources']['source'] must be a mapping")
+    return source
 
 
 def _mock_catalog() -> MagicMock:
@@ -406,8 +421,8 @@ class TestSetSource:
             catalog,
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "csv"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).plugin == "csv"
         assert result.updated_state.version == 2
         assert "source" in result.affected_nodes
 
@@ -509,8 +524,8 @@ class TestSetSource:
             catalog,
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.on_validation_failure == "bad_rows_sink"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).on_validation_failure == "bad_rows_sink"
 
     def test_unknown_plugin_fails(self) -> None:
         state = _empty_state()
@@ -528,7 +543,7 @@ class TestSetSource:
             catalog,
         )
         assert result.success is False
-        assert result.updated_state.source is None  # unchanged
+        assert _default_source(result.updated_state) is None  # unchanged
         assert result.updated_state.version == 1
         assert result.data is not None
         assert "foobar" in result.data["error"].lower()
@@ -572,7 +587,7 @@ class TestSetSource:
             catalog,
         )
         assert result.success is False
-        assert result.updated_state.source is None
+        assert _default_source(result.updated_state) is None
         assert "set_source_from_blob" in result.data["error"]
 
     def test_set_source_rejects_manual_source_authoring_in_options(self) -> None:
@@ -601,7 +616,7 @@ class TestSetSource:
         )
 
         assert result.success is False
-        assert result.updated_state.source is None
+        assert "source" not in result.updated_state.sources
         assert SOURCE_AUTHORING_KEY in result.data["error"]
 
 
@@ -1331,8 +1346,8 @@ class TestUpsertEdge:
             catalog,
         )
         assert r3.success is True
-        assert r3.updated_state.source is not None
-        assert r3.updated_state.source.on_success == "main"
+        assert _default_source(r3.updated_state) is not None
+        assert _default_source(r3.updated_state).on_success == "main"
 
     def test_edge_to_node_does_not_sync(self) -> None:
         """Edge from node to another node does NOT change connection fields."""
@@ -2706,8 +2721,8 @@ class TestGetPipelineState:
 
         # Use to_dict() for structural checks — result.data is frozen by ToolResult.__post_init__
         data = result.to_dict()["data"]
-        assert data["source"] is not None
-        assert data["source"]["plugin"] == "csv"
+        assert _pipeline_state_default_source(data) is not None
+        assert _pipeline_state_default_source(data)["plugin"] == "csv"
         assert len(data["nodes"]) == 1
         assert data["nodes"][0]["id"] == "t1"
         assert len(data["outputs"]) == 1
@@ -2727,7 +2742,7 @@ class TestGetPipelineState:
         data = result.to_dict()["data"]
         assert data["inspection"]["resolved_component"] == "full"
         assert "full" in data["inspection"]["accepted_full_state_aliases"]
-        assert data["source"] is not None
+        assert _pipeline_state_default_source(data) is not None
         assert data["nodes"][0]["id"] == "t1"
         assert data["outputs"][0]["sink_name"] == "out"
         assert data["edges"][0]["id"] == "e1"
@@ -2755,7 +2770,7 @@ class TestGetPipelineState:
 
         # to_dict() runs deep_thaw on result.data — options must be plain dicts
         data = result.to_dict()["data"]
-        source_opts = data["source"]["options"]
+        source_opts = _pipeline_state_default_source(data)["options"]
         assert isinstance(source_opts, dict)
         assert isinstance(source_opts.get("schema"), dict)
 
@@ -2770,8 +2785,8 @@ class TestGetPipelineState:
         result = execute_tool("get_pipeline_state", {"component": "source"}, state, catalog)
         assert result.success is True
         data = result.to_dict()["data"]
-        assert "source" in data
-        assert data["source"]["plugin"] == "csv"
+        assert "sources" in data
+        assert _pipeline_state_default_source(data)["plugin"] == "csv"
         # Should not contain nodes/outputs/edges
         assert "nodes" not in data
         assert "outputs" not in data
@@ -2784,7 +2799,7 @@ class TestGetPipelineState:
         result = execute_tool("get_pipeline_state", {"component": "source"}, state, catalog)
         assert result.success is True
         data = result.to_dict()["data"]
-        assert data["source"] is None
+        assert _pipeline_state_default_source(data) is None
 
     def test_component_node_by_id(self) -> None:
         """component=<node_id> returns that node's details."""
@@ -2855,7 +2870,7 @@ class TestGetPipelineState:
         result = execute_tool("get_pipeline_state", {}, state, catalog)
         assert result.success is True
         data = result.to_dict()["data"]
-        assert data["source"] is None
+        assert _pipeline_state_default_source(data) is None
         assert data["nodes"] == []
         assert data["outputs"] == []
         assert data["edges"] == []
@@ -2891,8 +2906,8 @@ class TestGetPipelineState:
         data = result.to_dict()["data"]
         # path key remains visible so the LLM can tell the source is configured,
         # but the internal storage value itself is not exposed.
-        assert data["source"]["options"]["path"] == EXPECTED_REDACTED_BLOB_SOURCE_PATH
-        assert data["source"]["options"]["blob_ref"] == "abc123"
+        assert _pipeline_state_default_source(data)["options"]["path"] == EXPECTED_REDACTED_BLOB_SOURCE_PATH
+        assert _pipeline_state_default_source(data)["options"]["blob_ref"] == "abc123"
         assert "/internal/blobs/abc123.csv" not in str(data)
 
 
@@ -3103,9 +3118,9 @@ class TestBlobTools:
             **_verbatim_blob_context(self.engine, self.session_id, "post,run\n1,1"),
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "csv"
-        assert result.updated_state.source.on_validation_failure == "discard"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).plugin == "csv"
+        assert _default_source(result.updated_state).on_validation_failure == "discard"
 
     def test_set_source_from_blob_wires_named_source(self) -> None:
         """Blob-backed sources must be reachable as explicit named roots."""
@@ -3128,7 +3143,7 @@ class TestBlobTools:
         assert result.success is True
         assert result.updated_state.sources["orders"].plugin == "csv"
         assert result.updated_state.sources["orders"].options["blob_ref"] == self.blob_id
-        assert result.affected_nodes == ("sources.orders",)
+        assert result.affected_nodes == ("source:orders",)
 
     def test_set_source_from_plain_text_blob_uses_text_source(self) -> None:
         """text/plain blob should auto-resolve to the 'text' source plugin."""
@@ -3151,8 +3166,8 @@ class TestBlobTools:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "text"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).plugin == "text"
 
     def test_set_source_from_jsonl_blob_uses_json_plugin_with_format(self) -> None:
         """Regression: JSONL MIME types must resolve to 'json' plugin with format='jsonl'."""
@@ -3175,9 +3190,9 @@ class TestBlobTools:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "json"
-        assert result.updated_state.source.options["format"] == "jsonl"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).plugin == "json"
+        assert _default_source(result.updated_state).options["format"] == "jsonl"
 
     def test_set_source_from_blob_merges_caller_options(self) -> None:
         """Caller-provided options are merged with blob-derived options.
@@ -3212,14 +3227,14 @@ class TestBlobTools:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "text"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).plugin == "text"
         # Caller options merged in
-        assert result.updated_state.source.options["column"] == "line"
-        assert result.updated_state.source.options["schema"] == {"mode": "observed"}
+        assert _default_source(result.updated_state).options["column"] == "line"
+        assert _default_source(result.updated_state).options["schema"] == {"mode": "observed"}
         # Blob-derived options still present (path is internal, blob_ref is visible)
-        assert "blob_ref" in result.updated_state.source.options
-        assert result.updated_state.source.options["blob_ref"] == self.blob_id
+        assert "blob_ref" in _default_source(result.updated_state).options
+        assert _default_source(result.updated_state).options["blob_ref"] == self.blob_id
 
     def test_set_source_from_blob_blob_options_override_caller(self) -> None:
         """Blob-derived path and blob_ref cannot be overridden by caller.
@@ -3249,10 +3264,10 @@ class TestBlobTools:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
+        assert _default_source(result.updated_state) is not None
         # Blob's path and ref take precedence — caller cannot override
-        assert result.updated_state.source.options["blob_ref"] == self.blob_id
-        assert result.updated_state.source.options["path"] != "/etc/passwd"
+        assert _default_source(result.updated_state).options["blob_ref"] == self.blob_id
+        assert _default_source(result.updated_state).options["path"] != "/etc/passwd"
 
     def test_set_source_from_blob_gets_prior_validation(self) -> None:
         """Blob mutation tools must populate prior_validation for validation delta."""
@@ -4818,9 +4833,9 @@ class TestSecretTools:
             user_id="test-user",
         )
         assert r2.success is True
-        assert r2.updated_state.source is not None
+        assert _default_source(r2.updated_state) is not None
 
-        opts = deep_thaw(r2.updated_state.source.options)
+        opts = deep_thaw(_default_source(r2.updated_state).options)
         assert opts["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
         # Original options preserved
         assert opts["path"] == "/data/in.csv"
@@ -5280,9 +5295,9 @@ class TestPatchSourceOptions:
             catalog,
         )
         assert result.success is True
-        assert result.updated_state.source is not None
+        assert _default_source(result.updated_state) is not None
 
-        opts = deep_thaw(result.updated_state.source.options)
+        opts = deep_thaw(_default_source(result.updated_state).options)
         assert opts["path"] == "/b"
 
     def test_patch_source_options_adds_key(self) -> None:
@@ -5296,8 +5311,8 @@ class TestPatchSourceOptions:
         )
         assert result.success is True
 
-        assert result.updated_state.source is not None
-        opts = deep_thaw(result.updated_state.source.options)
+        assert _default_source(result.updated_state) is not None
+        opts = deep_thaw(_default_source(result.updated_state).options)
         assert opts["path"] == "/a"
         assert opts["encoding"] == "utf-8"
 
@@ -5331,8 +5346,8 @@ class TestPatchSourceOptions:
         )
         assert result.success is True
 
-        assert result.updated_state.source is not None
-        opts = deep_thaw(result.updated_state.source.options)
+        assert _default_source(result.updated_state) is not None
+        opts = deep_thaw(_default_source(result.updated_state).options)
         assert opts["path"] == "/a"
         assert "encoding" not in opts
 
@@ -5418,8 +5433,8 @@ class TestPatchSourceOptions:
         )
         assert result.success is False
         assert "Cannot patch 'blob_ref'" in result.data["error"]
-        assert result.updated_state.source is not None
-        opts = deep_thaw(result.updated_state.source.options)
+        assert _default_source(result.updated_state) is not None
+        opts = deep_thaw(_default_source(result.updated_state).options)
         assert "blob_ref" not in opts
         assert opts["path"] == "/a.csv"
 
@@ -5459,8 +5474,8 @@ class TestPatchSourceOptions:
             catalog,
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        opts = deep_thaw(result.updated_state.source.options)
+        assert _default_source(result.updated_state) is not None
+        opts = deep_thaw(_default_source(result.updated_state).options)
         assert opts["encoding"] == "utf-8"
         assert opts["path"] == "/canon/abc123_x.csv"
         assert opts["blob_ref"] == "abc123"
@@ -5787,13 +5802,11 @@ class TestPatchOutputPathSecurity:
 def _valid_pipeline_args() -> dict[str, Any]:
     """Return a minimal valid set_pipeline args dict."""
     return {
-        "sources": {
-            "primary": {
-                "plugin": "csv",
-                "on_success": "source_out",
-                "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
-                "on_validation_failure": "quarantine",
-            }
+        "source": {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+            "on_validation_failure": "quarantine",
         },
         "nodes": [
             {
@@ -6092,7 +6105,7 @@ class TestSetPipeline:
 
         assert result.success is True
         assert tuple(result.updated_state.sources) == ("customers", "orders")
-        assert result.updated_state.source == result.updated_state.sources["customers"]
+        assert result.updated_state.sources["customers"].plugin == "csv"
         assert "source:customers" in result.affected_nodes
         assert "source:orders" in result.affected_nodes
 
@@ -6106,8 +6119,8 @@ class TestSetPipeline:
         result = execute_tool("set_pipeline", args, state, catalog)
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.on_validation_failure == "discard"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).on_validation_failure == "discard"
         assert result.data is None
 
     def test_set_pipeline_missing_json_output_options_returns_exact_repair_hint(self) -> None:
@@ -6437,7 +6450,7 @@ class TestSetPipeline:
         result = execute_tool("set_pipeline", args, state, catalog)
 
         assert result.success is False
-        assert result.updated_state.source is None
+        assert _default_source(result.updated_state) is None
         assert result.updated_state.version == 1
         assert "set_source_from_blob" in result.data["error"]
         assert "source.inline_blob" in result.data["error"]
@@ -6520,8 +6533,8 @@ class TestSetPipeline:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        source_options = result.updated_state.source.options
+        assert _default_source(result.updated_state) is not None
+        source_options = _default_source(result.updated_state).options
         assert source_options["blob_ref"] == uploaded_id
         assert source_options["path"] == str(uploaded_path)
         assert source_options["path"] != str(header_only_path)
@@ -6585,7 +6598,7 @@ class TestSetPipeline:
         )
 
         assert result.success is False
-        assert result.updated_state.source is None
+        assert _default_source(result.updated_state) is None
         assert "header-only inline CSV" in result.data["error"]
         assert uploaded_id in result.data["error"]
 
@@ -6836,22 +6849,20 @@ class TestSetPipeline:
         engine, session_id = _session_engine_with_session()
         output_path = tmp_path / "outputs" / "append.csv"
         args = {
-            "sources": {
-                "primary": {
-                    "plugin": "text",
-                    "on_success": "source_out",
-                    "options": {
-                        "column": "text",
-                        "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
-                    },
-                    "inline_blob": {
-                        "filename": "input.txt",
-                        "mime_type": "text/plain",
-                        "content": "hello",
-                        "description": "literal input from the user prompt",
-                    },
-                    "on_validation_failure": "discard",
-                }
+            "source": {
+                "plugin": "text",
+                "on_success": "source_out",
+                "options": {
+                    "column": "text",
+                    "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                },
+                "inline_blob": {
+                    "filename": "input.txt",
+                    "mime_type": "text/plain",
+                    "content": "hello",
+                    "description": "literal input from the user prompt",
+                },
+                "on_validation_failure": "discard",
             },
             "nodes": [
                 {
@@ -6918,8 +6929,8 @@ class TestSetPipeline:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        source_options = result.updated_state.source.options
+        assert _default_source(result.updated_state) is not None
+        source_options = _default_source(result.updated_state).options
         assert source_options["column"] == "text"
         assert source_options["blob_ref"] == result.data["inline_blob"]["blob_id"]
         assert "hello" not in str(result.to_dict())
@@ -7020,11 +7031,11 @@ class TestClearSource:
             state,
             catalog,
         )
-        assert r1.updated_state.source is not None
+        assert _default_source(r1.updated_state) is not None
         # Now clear it
         r2 = execute_tool("clear_source", {}, r1.updated_state, catalog)
         assert r2.success is True
-        assert r2.updated_state.source is None
+        assert _default_source(r2.updated_state) is None
         assert r2.updated_state.version == 3
 
     def test_clear_source_no_source_fails(self) -> None:
@@ -7860,7 +7871,7 @@ class TestPreviewPipeline:
         result = execute_tool("preview_pipeline", {}, state, catalog)
         assert result.success is True
         assert result.data["is_valid"] is False
-        assert result.data["source"] is None
+        assert _pipeline_state_default_source(result.data) is None
         assert result.data["node_count"] == 0
 
     def test_preview_valid_pipeline(self) -> None:
@@ -7899,8 +7910,8 @@ class TestPreviewPipeline:
         )
         result = execute_tool("preview_pipeline", {}, r3.updated_state, catalog)
         assert result.success is True
-        assert result.data["source"]["plugin"] == "csv"
-        assert result.data["source"]["has_schema_config"] is True
+        assert _pipeline_state_default_source(result.data)["plugin"] == "csv"
+        assert _pipeline_state_default_source(result.data)["has_schema_config"] is True
         assert result.data["node_count"] == 1
         assert result.data["output_count"] == 1
 
@@ -8076,8 +8087,8 @@ class TestPreviewPipeline:
         result = execute_tool("preview_pipeline", {}, state, catalog)
 
         assert result.success is True
-        assert result.data["source"]["plugin"] == "csv"
-        assert result.data["source"]["has_schema_config"] is True
+        assert _pipeline_state_default_source(result.data)["plugin"] == "csv"
+        assert _pipeline_state_default_source(result.data)["has_schema_config"] is True
 
     def test_preview_pipeline_surfaces_runtime_preflight_failure(self) -> None:
         state = (

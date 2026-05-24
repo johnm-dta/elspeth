@@ -37,7 +37,7 @@ describe("executionStore.validate", () => {
     useExecutionStore.getState().reset();
     useSessionStore.setState({
       activeSessionId: "session-1",
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] },
+      compositionState: { version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
     } as never);
   });
 
@@ -179,7 +179,7 @@ describe("executionStore.validate", () => {
 
     const validatePromise = useExecutionStore.getState().validate("session-1");
     useSessionStore.setState({
-      compositionState: { version: 2, source: null, nodes: [], outputs: [] },
+      compositionState: { version: 2, sources: {}, nodes: [], edges: [], outputs: [] },
     } as never);
     resolveValidation(staleResult);
     const applied = await validatePromise;

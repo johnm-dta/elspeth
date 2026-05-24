@@ -9,7 +9,7 @@ describe("HeaderVersionSelector", () => {
       activeSessionId: "sess-1",
       compositionState: {
         version: 3,
-        source: null,
+        sources: {},
         nodes: [],
         edges: [],
         outputs: [],

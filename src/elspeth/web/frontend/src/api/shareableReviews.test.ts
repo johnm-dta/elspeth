@@ -152,7 +152,7 @@ describe("shareableReviews API client", () => {
       composition_snapshot: {
         version: 1,
         metadata: { name: "Demo", description: "" },
-        source: null,
+        sources: {},
         nodes: [],
         edges: [],
         outputs: [],
@@ -188,7 +188,7 @@ describe("shareableReviews API client", () => {
       composition_snapshot: {
         version: 1,
         metadata: { name: "Demo", description: "" },
-        source: null,
+        sources: {},
         nodes: [],
         edges: [],
         outputs: [],
@@ -222,7 +222,7 @@ describe("shareableReviews API client", () => {
       composition_snapshot: {
         version: 1,
         metadata: { name: "Demo", description: "" },
-        source: null,
+        sources: {},
         nodes: [],
         edges: [],
         outputs: [],
@@ -304,7 +304,7 @@ describe("shareableReviews API client", () => {
         composition_snapshot: {
           version: 1,
           metadata: { name: "Demo", description: "" },
-          source: null,
+          sources: {},
           edges: [],
           outputs: [],
         },
@@ -321,7 +321,7 @@ describe("shareableReviews API client", () => {
         composition_snapshot: {
           version: 1,
           metadata: { name: "Demo", description: "" },
-          source: null,
+          sources: {},
           nodes: "not-array",
           edges: [],
           outputs: [],
@@ -338,7 +338,7 @@ describe("shareableReviews API client", () => {
       _buildValidSharedInspectBody({
         composition_snapshot: {
           version: 1,
-          source: null,
+          sources: {},
           nodes: [],
           edges: [],
           outputs: [],

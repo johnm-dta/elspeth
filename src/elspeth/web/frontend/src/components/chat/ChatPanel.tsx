@@ -32,6 +32,7 @@ import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
 import { InlineSourceDisambiguationTurn } from "./InlineSourceDisambiguationTurn";
 import { InlineSourceFallbackPrompt } from "./InlineSourceFallbackPrompt";
 import { InterpretationReviewInlineMessage } from "./InterpretationReviewInlineMessage";
+import { sortedSourceEntries } from "@/utils/compositionState";
 import type {
   BlobMetadata,
   ChatMessage,
@@ -290,11 +291,8 @@ function readSourceBlobRef(source: { options: Record<string, unknown> } | null):
 
 function readBlobRef(state: CompositionState | null): string | null {
   if (state === null) return null;
-  const compatibilityRef = readSourceBlobRef(state.source);
-  if (compatibilityRef !== null) return compatibilityRef;
-  const sources = state.sources ?? {};
-  for (const sourceName of Object.keys(sources).sort()) {
-    const ref = readSourceBlobRef(sources[sourceName]);
+  for (const [, source] of sortedSourceEntries(state)) {
+    const ref = readSourceBlobRef(source);
     if (ref !== null) return ref;
   }
   return null;
@@ -900,12 +898,11 @@ export function ChatPanel({
   }, [messages, inflightSourceToolNames]);
 
   // Source-bound predicate. The shape mirrors the spec: either no
-  // composition state OR no source OR the source plugin slot is the
+  // composition state OR no named source OR every source plugin slot is the
   // empty string (the composer's pre-source-bound representation).
   const compositionHasSource =
     compositionState !== null &&
-    compositionState.source !== null &&
-    compositionState.source.plugin !== "";
+    Object.values(compositionState.sources).some((source) => source.plugin !== "");
 
   // F-20 session-scoped dismissal. The store action `markDismissed`
   // populates `dismissedAt[sessionId]`; we read via the Map identity

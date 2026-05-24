@@ -1099,7 +1099,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
 // ── Inline-source projection (Phase 5a Task 3) ────────────────────────────────
 //
 // These tests cover the wiring that derives an InlineSourceSummary from
-// `compositionState.source.options["blob_ref"]` and the corresponding session
+// `compositionState.sources[*].options["blob_ref"]` and the corresponding session
 // blob's metadata + preview, then surfaces the InlineSourceCreatedTurn widget
 // in the message stream.
 //
@@ -1160,7 +1160,7 @@ describe("ChatPanel inline-source projection", () => {
     });
   });
 
-  it("renders the widget when compositionState.source.options['blob_ref'] resolves to a session blob", async () => {
+  it("renders the widget when a composition source blob_ref resolves to a session blob", async () => {
     (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeBlobMetadata(),
     );
@@ -1169,9 +1169,11 @@ describe("ChatPanel inline-source projection", () => {
     ).mockResolvedValue(twoRowInlineSourceText);
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-inline-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
       },
     });
 
@@ -1208,7 +1210,6 @@ describe("ChatPanel inline-source projection", () => {
     ).mockResolvedValue(twoRowInlineSourceText);
 
     const composition = makeComposition(1, {
-      source: { plugin: "csv_file", options: { path: "data.csv" } },
       sources: {
         created: {
           plugin: "inline_blob",
@@ -1254,9 +1255,11 @@ describe("ChatPanel inline-source projection", () => {
     );
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "csv_file",
-        options: { blob_ref: "blob-inline-1", path: "/data/upload.csv" },
+      sources: {
+        source: {
+          plugin: "csv_file",
+          options: { blob_ref: "blob-inline-1", path: "/data/upload.csv" },
+        },
       },
     });
 
@@ -1284,7 +1287,7 @@ describe("ChatPanel inline-source projection", () => {
 
   it("does NOT render the widget when compositionState has no inline source", () => {
     const composition = makeComposition(1, {
-      source: { plugin: "csv_file", options: { path: "data.csv" } },
+      sources: { source: { plugin: "csv_file", options: { path: "data.csv" } } },
     });
 
     useSessionStore.setState({
@@ -1322,9 +1325,11 @@ describe("ChatPanel inline-source projection", () => {
       }),
     );
     const composition = makeComposition(1, {
-      source: {
-        plugin: "csv_file",
-        options: { blob_ref: "uploaded-blob" },
+      sources: {
+        source: {
+          plugin: "csv_file",
+          options: { blob_ref: "uploaded-blob" },
+        },
       },
     });
 
@@ -1343,8 +1348,8 @@ describe("ChatPanel inline-source projection", () => {
     expect(apiClient.previewBlobContent).not.toHaveBeenCalled();
   });
 
-  it("does NOT render the widget when compositionState.source is null", () => {
-    const composition = makeComposition(1, { source: null });
+  it("does NOT render the widget when compositionState has no sources", () => {
+    const composition = makeComposition(1, { sources: {} });
 
     useSessionStore.setState({
       activeSessionId: "session-inline",
@@ -1386,9 +1391,11 @@ describe("ChatPanel inline-source projection", () => {
       .mockImplementation(() => {});
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-inline-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
       },
     });
 
@@ -1428,9 +1435,11 @@ describe("ChatPanel inline-source projection", () => {
       .mockImplementation(() => {});
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-inline-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
       },
     });
 
@@ -1474,9 +1483,11 @@ describe("ChatPanel inline-source projection", () => {
       .mockImplementation(() => {});
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-inline-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
       },
     });
 
@@ -1524,9 +1535,11 @@ describe("ChatPanel inline-source projection", () => {
       .mockImplementation(() => {});
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-inline-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
       },
     });
 
@@ -2487,9 +2500,11 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
     ).mockResolvedValue("a\nb\nc\nd\ne\nf");
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-routing-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-routing-1" },
+        },
       },
     });
     useSessionStore.setState({

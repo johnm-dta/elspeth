@@ -1,6 +1,7 @@
 // src/components/chat/ComposingIndicator.tsx
 
 import type { ComposerProgressSnapshot, CompositionState } from "@/types/api";
+import { hasSources } from "@/utils/compositionState";
 
 interface ComposingIndicatorProps {
   latestRequest?: string | null;
@@ -46,7 +47,7 @@ function setupCount(count: number, singular: string, pluralLabel = `${singular}s
 }
 
 function describeCurrentSetup(compositionState: CompositionState | null | undefined): string {
-  const input = compositionState?.source ? "input configured" : "no input yet";
+  const input = hasSources(compositionState) ? "input configured" : "no input yet";
   const steps = setupCount(compositionState?.nodes.length ?? 0, "processing step");
   const outputs = setupCount(compositionState?.outputs.length ?? 0, "output");
   return `Current setup: ${input}, ${steps}, ${outputs}.`;

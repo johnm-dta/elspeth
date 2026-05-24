@@ -496,7 +496,7 @@ async def _seed_session_and_state(
         session_id,
         CompositionStateData(
             nodes=state_dict["nodes"],
-            source=state_dict["source"],
+            sources=state_dict["sources"],
             metadata_=state_dict["metadata"],
             is_valid=True,
         ),

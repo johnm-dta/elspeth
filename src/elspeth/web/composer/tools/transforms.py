@@ -531,12 +531,12 @@ def _execute_upsert_edge(
     # must match the output name for the pipeline to work at runtime.
     output_names = {o.name for o in new_state.outputs}
     if to_node in output_names:
-        if from_node == "source":
+        if from_node in new_state.sources:
             if edge_type != "on_success":
                 return _failure_result(state, "Source sink edges must use 'on_success'.")
-            if new_state.source is not None and new_state.source.on_success != to_node:
-                new_source = replace(new_state.source, on_success=to_node)
-                new_state = new_state.with_source(new_source)
+            source = new_state.sources[from_node]
+            if source.on_success != to_node:
+                new_state = new_state.with_named_source(from_node, replace(source, on_success=to_node))
         else:
             node = next((n for n in new_state.nodes if n.id == from_node), None)
             if node is not None:

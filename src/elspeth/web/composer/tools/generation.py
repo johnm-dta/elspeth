@@ -993,7 +993,8 @@ def _source_field_reaches_connection_without_type_change(
     proof step abstains instead of emitting a false positive.
     """
     resolver = ProducerResolver.build(
-        source=state.source,
+        source=None,
+        sources=state.sources,
         nodes=state.nodes,
         sink_names=frozenset(output.name for output in state.outputs),
     )
@@ -1139,7 +1140,7 @@ def compute_proof_diagnostics(
     """
     diagnostics: list[Mapping[str, Any]] = []
 
-    source = state.source
+    source = state.sources.get("source")
     blob_id: Any | None = None
     if source is not None and "blob_ref" in source.options:
         blob_id = source.options["blob_ref"]
@@ -1507,19 +1508,19 @@ def _execute_preview_pipeline(
         "authoring_validation": authoring_payload,
         "runtime_preflight": runtime_result.model_dump() if runtime_result is not None else None,
         "proof_diagnostics": proof_diagnostics,
-        "source": None,
+        "sources": {
+            name: {
+                "plugin": source.plugin,
+                "on_success": source.on_success,
+                "has_schema_config": _source_options_have_schema(source.options),
+            }
+            for name, source in state.sources.items()
+        },
         "node_count": len(state.nodes),
         "output_count": len(state.outputs),
         "nodes": [{"id": n.id, "node_type": n.node_type, "plugin": n.plugin} for n in state.nodes],
         "outputs": [{"name": o.name, "plugin": o.plugin} for o in state.outputs],
     }
-
-    if state.source is not None:
-        summary["source"] = {
-            "plugin": state.source.plugin,
-            "on_success": state.source.on_success,
-            "has_schema_config": _source_options_have_schema(state.source.options),
-        }
 
     return ToolResult(
         success=True,

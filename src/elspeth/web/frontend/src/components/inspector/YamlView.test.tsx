@@ -13,7 +13,7 @@ function makeState(version = 1) {
   return {
     id: "state-1",
     version,
-    source: { plugin: "text", options: { content: "hello" } },
+    sources: { source: { plugin: "text", options: { content: "hello" } } },
     nodes: [],
     edges: [],
     outputs: [],
@@ -24,7 +24,7 @@ function makeState(version = 1) {
 function makeMetadataOnlyState(version = 1) {
   return {
     ...makeState(version),
-    source: null,
+    sources: {},
   };
 }
 

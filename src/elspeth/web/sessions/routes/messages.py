@@ -648,7 +648,6 @@ def register_message_routes(router: APIRouter) -> None:
                     _transition_state = result.state
                     _transition_state_d = _transition_state.to_dict()
                     _transition_state_data = CompositionStateData(
-                        source=_transition_state_d["source"],
                         sources=_transition_state_d["sources"],
                         nodes=_transition_state_d["nodes"],
                         edges=_transition_state_d["edges"],

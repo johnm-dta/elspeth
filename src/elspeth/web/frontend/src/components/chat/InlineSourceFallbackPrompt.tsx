@@ -48,7 +48,7 @@ export interface InlineSourceFallbackPromptProps {
    * Predicate gate computed by the caller (ChatPanel). When false the
    * widget renders nothing — the gate handles ALL of:
    *   - F-20 dismiss persistence (caller checks inlineSourceStore.isDismissed).
-   *   - Source-not-yet-bound check (compositionState.source).
+   *   - Source-not-yet-bound check (compositionState.sources).
    *   - Inflight source-tool-call check (last assistant message's tool_calls).
    *   - Source-shaped-text detection (looksLikeData on latest user message).
    * Encapsulating the gate in the caller keeps the widget a dumb render.

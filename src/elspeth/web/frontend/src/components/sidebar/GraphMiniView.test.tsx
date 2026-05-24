@@ -14,7 +14,7 @@ describe("GraphMiniView", () => {
     useSessionStore.setState({
       compositionState: {
         version: 1,
-        source: { plugin: "csv", options: {} } as never,
+        sources: { source: { plugin: "csv", options: {} } },
         nodes: [
           { id: "tx-1", node_type: "transform", plugin: "field_mapper", options: {} } as never,
         ],
@@ -56,7 +56,7 @@ describe("GraphMiniView", () => {
     useSessionStore.setState({ compositionState: null } as never);
     const override: CompositionState = {
       version: 99,
-      source: { plugin: "csv", options: {} } as never,
+      sources: { source: { plugin: "csv", options: {} } },
       nodes: [
         { id: "tx-1", node_type: "transform", plugin: "field_mapper", options: {} } as never,
         { id: "tx-2", node_type: "transform", plugin: "select_columns", options: {} } as never,

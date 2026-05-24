@@ -38,7 +38,7 @@ describe("useNarrativeMode", () => {
   it("returns true when a composition node's plugin has the narrative-summary tag", async () => {
     _stubCatalog([TAGGED]);
     _setComposition({
-      source: null,
+      sources: {},
       nodes: [
         { id: "n1", node_type: "transform", plugin: "batch_classifier_metrics", input: "src", on_success: null, on_error: null, options: {} },
       ],
@@ -55,7 +55,7 @@ describe("useNarrativeMode", () => {
   it("returns false when only untagged plugins are in the composition", async () => {
     _stubCatalog([UNTAGGED, TAGGED]);
     _setComposition({
-      source: null,
+      sources: {},
       nodes: [
         { id: "n1", node_type: "transform", plugin: "passthrough", input: "src", on_success: null, on_error: null, options: {} },
       ],
@@ -72,7 +72,7 @@ describe("useNarrativeMode", () => {
   it("returns true when a SOURCE plugin has the narrative-summary tag", async () => {
     _stubCatalog([], [TAGGED]);
     _setComposition({
-      source: { plugin: "batch_classifier_metrics", options: {} },
+      sources: { source: { plugin: "batch_classifier_metrics", options: {} } },
       nodes: [],
       edges: [],
       outputs: [],
@@ -87,7 +87,7 @@ describe("useNarrativeMode", () => {
   it("returns true when a SINK plugin has the narrative-summary tag", async () => {
     _stubCatalog([], [], [TAGGED]);
     _setComposition({
-      source: null,
+      sources: {},
       nodes: [],
       edges: [],
       outputs: [
@@ -106,7 +106,7 @@ describe("useNarrativeMode", () => {
     vi.spyOn(apiClient, "listSources").mockResolvedValue([]);
     vi.spyOn(apiClient, "listSinks").mockResolvedValue([]);
     _setComposition({
-      source: null,
+      sources: {},
       nodes: [{ id: "n1", node_type: "transform", plugin: "anything", input: "src", on_success: null, on_error: null, options: {} }],
       edges: [],
       outputs: [],
@@ -132,7 +132,7 @@ describe("useNarrativeMode", () => {
       { name: "p2", capability_tags: ["Narrative-Summary"] } as never,
     ]);
     _setComposition({
-      source: null,
+      sources: {},
       nodes: [
         { id: "n1", node_type: "transform", plugin: "p1", input: "src", on_success: null, on_error: null, options: {} },
         { id: "n2", node_type: "transform", plugin: "p2", input: "n1", on_success: null, on_error: null, options: {} },

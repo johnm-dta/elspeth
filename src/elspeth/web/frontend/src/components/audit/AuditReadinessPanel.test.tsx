@@ -677,7 +677,7 @@ describe("AuditReadinessPanel", () => {
       activeSessionId: SESSION_ID,
       compositionState: {
         ...makeComposition(1),
-        source: null,
+        sources: {},
         nodes: [],
         outputs: [],
       },

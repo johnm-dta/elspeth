@@ -60,7 +60,7 @@ function makeCompositionState(): CompositionState {
   return {
     id: "state-2",
     version: 2,
-    source: null,
+    sources: {},
     nodes: [],
     edges: [],
     outputs: [],

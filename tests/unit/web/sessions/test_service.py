@@ -377,7 +377,6 @@ class TestCompositionStateVersioning:
         await service.save_composition_state(
             session.id,
             CompositionStateData(
-                source=sources["orders"],
                 sources=sources,
                 outputs=[
                     {"name": "orders_out", "plugin": "json", "options": {"path": "orders.jsonl"}, "on_write_failure": "discard"},
@@ -393,7 +392,6 @@ class TestCompositionStateVersioning:
 
         assert current is not None
         assert current.sources == sources
-        assert current.source == sources["orders"]
 
     @pytest.mark.asyncio
     async def test_get_current_state_returns_none_when_empty(
@@ -637,7 +635,7 @@ class TestSetActiveState:
         reverted = await service.set_active_state(session.id, v1.id)
         assert reverted.version == 3
         # Content should match v1, not v2
-        assert reverted.source == v1.source
+        assert reverted.sources == v1.sources
         # Lineage: reverted state records where it came from (D6)
         assert reverted.derived_from_state_id == v1.id
 
@@ -655,7 +653,7 @@ class TestSetActiveState:
         }
         v1 = await service.save_composition_state(
             session.id,
-            CompositionStateData(source=sources["orders"], sources=sources, is_valid=True),
+            CompositionStateData(sources=sources, is_valid=True),
             provenance="session_seed",
         )
         await service.save_composition_state(
@@ -666,7 +664,6 @@ class TestSetActiveState:
 
         reverted = await service.set_active_state(session.id, v1.id)
 
-        assert reverted.source == sources["orders"]
         assert reverted.sources == sources
 
     @pytest.mark.asyncio

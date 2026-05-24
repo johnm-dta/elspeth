@@ -608,7 +608,6 @@ def _execute_set_pipeline(
 
     # 5. Build new state
     new_state = CompositionState(
-        source=next(iter(source_specs.values())),
         sources=source_specs,
         nodes=tuple(node_specs),
         edges=tuple(edge_specs),
@@ -719,7 +718,7 @@ def _execute_apply_pipeline_recipe(
     # set_pipeline path. Frozen-dataclass fields, so capturing the integers
     # now is sufficient — the post-call result.updated_state is a fresh
     # CompositionState produced by set_pipeline.
-    pre_source_present = state.source is not None
+    pre_source_present = bool(state.sources)
     pre_node_count = len(state.nodes)
     pre_output_count = len(state.outputs)
 
@@ -1043,7 +1042,6 @@ def _is_full_state_component_alias(component: Any) -> bool:
 def _serialize_full_pipeline_state(state: CompositionState, *, requested_component: Any) -> _FullPipelineStatePayload:
     """Serialize the full state and expose accepted full-state spellings."""
     return {
-        "source": _serialize_source(state.source) if state.source is not None else None,
         "sources": {name: _serialize_source(source) for name, source in state.sources.items()},
         "nodes": [_serialize_node(n) for n in state.nodes],
         "outputs": [_serialize_output(o) for o in state.outputs],
@@ -1073,7 +1071,7 @@ def _execute_get_pipeline_state(
     component = args.get("component")
 
     if component == "source":
-        data: Any = {"source": _serialize_source(state.source) if state.source is not None else None}
+        data: Any = {"sources": {name: _serialize_source(source) for name, source in state.sources.items()}}
     elif component is not None:
         # Try node, then output
         node = next((n for n in state.nodes if n.id == component), None)
@@ -1199,13 +1197,14 @@ def _assert_affected_component(
                 expected="'source' for invented_source",
                 actual_type="node id",
             )
-        if state.source is None or SOURCE_AUTHORING_KEY not in state.source.options:
+        source = state.sources.get(SOURCE_COMPONENT_ID)
+        if source is None or SOURCE_AUTHORING_KEY not in source.options:
             raise ToolArgumentError(
                 argument="affected_node_id",
                 expected="source with composer-authored source metadata",
                 actual_type="source without metadata",
             )
-        if INTERPRETATION_REQUIREMENTS_KEY not in state.source.options:
+        if INTERPRETATION_REQUIREMENTS_KEY not in source.options:
             raise ToolArgumentError(
                 argument="affected_node_id",
                 expected=f"source to contain a pending {kind.value} requirement for {user_term!r}",
@@ -1219,7 +1218,7 @@ def _assert_affected_component(
                 actual_type=f"missing pending {kind.value} review site",
             )
         if llm_draft is not None:
-            requirements = state.source.options.get(INTERPRETATION_REQUIREMENTS_KEY)
+            requirements = source.options.get(INTERPRETATION_REQUIREMENTS_KEY)
             draft = None
             if isinstance(requirements, (list, tuple)):
                 for requirement in requirements:

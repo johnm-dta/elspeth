@@ -213,7 +213,7 @@ describe("ChatInput empty-state placeholder", () => {
     return {
       id: "comp-1",
       version,
-      source: null,
+      sources: {},
       nodes: [],
       edges: [],
       outputs: [],

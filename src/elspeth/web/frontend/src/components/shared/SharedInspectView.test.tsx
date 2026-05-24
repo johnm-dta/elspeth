@@ -54,7 +54,7 @@ const _validResponse: SharedInspectResponse = {
   composition_snapshot: {
     version: 1,
     metadata: { name: "Demo Pipeline", description: "A test" },
-    source: null,
+    sources: {},
     nodes: [],
     edges: [],
     outputs: [],
@@ -203,7 +203,7 @@ describe("SharedInspectView", () => {
       composition_snapshot: {
         version: 1,
         metadata: { name: "Demo Pipeline", description: "A test" },
-        source: { plugin: "csv", options: {} },
+        sources: { source: { plugin: "csv", options: {} } },
         nodes: [
           {
             id: "tx-1",

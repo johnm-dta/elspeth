@@ -1733,7 +1733,7 @@ def _check_schema_contracts(
     return tuple(errors), tuple(contract_warnings), tuple(edge_contracts)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class CompositionState:
     """Immutable, versioned snapshot of a pipeline under construction.
 
@@ -1741,8 +1741,6 @@ class CompositionState:
     All container fields are deep-frozen via freeze_fields().
 
     Attributes:
-        source: Legacy compatibility view of the first named source. None until
-            a source is set.
         sources: Named source roots keyed by stable composer/audit-visible name.
         nodes: Ordered tuple of transform, gate, aggregation, coalesce nodes.
         edges: Connections between nodes.
@@ -1754,7 +1752,6 @@ class CompositionState:
             guided sessions (spec §5.2).
     """
 
-    source: SourceSpec | None
     nodes: tuple[NodeSpec, ...]
     edges: tuple[EdgeSpec, ...]
     outputs: tuple[OutputSpec, ...]
@@ -1763,37 +1760,48 @@ class CompositionState:
     guided_session: GuidedSession | None = None
     sources: Mapping[str, SourceSpec] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        if self.version < 1:
-            raise ValueError(f"CompositionState.version must be >= 1, got {self.version}")
-        sources = dict(self.sources)
-        if not sources and self.source is not None:
-            sources["source"] = self.source
-        if sources:
-            first_source = next(iter(sources.values()))
-            if self.source != first_source:
-                object.__setattr__(self, "source", first_source)
-        elif self.source is not None:
-            object.__setattr__(self, "source", None)
-        object.__setattr__(self, "sources", sources)
+    def __init__(
+        self,
+        *,
+        nodes: tuple[NodeSpec, ...],
+        edges: tuple[EdgeSpec, ...],
+        outputs: tuple[OutputSpec, ...],
+        metadata: PipelineMetadata,
+        version: int,
+        guided_session: GuidedSession | None = None,
+        sources: Mapping[str, SourceSpec] | None = None,
+        source: SourceSpec | None = None,
+    ) -> None:
+        if version < 1:
+            raise ValueError(f"CompositionState.version must be >= 1, got {version}")
+        if source is not None and sources:
+            raise ValueError("CompositionState accepts either source or sources, not both")
+        source_map = {"source": source} if source is not None else dict(sources or {})
+        object.__setattr__(self, "nodes", nodes)
+        object.__setattr__(self, "edges", edges)
+        object.__setattr__(self, "outputs", outputs)
+        object.__setattr__(self, "metadata", metadata)
+        object.__setattr__(self, "version", version)
+        object.__setattr__(self, "guided_session", guided_session)
+        object.__setattr__(self, "sources", source_map)
         freeze_fields(self, "sources")
 
     # --- Mutation methods ---
 
     def with_source(self, source: SourceSpec) -> CompositionState:
-        """Return new state with the given source, version incremented."""
+        """Return new state with the default named source, version incremented."""
         return self.with_named_source("source", source)
 
     def without_source(self) -> CompositionState:
-        """Return new state with the source removed, version incremented."""
-        return replace(self, source=None, sources={}, version=self.version + 1)
+        """Return new state with all sources removed, version incremented."""
+        return replace(self, sources={}, version=self.version + 1)
 
     def with_named_source(self, source_name: str, source: SourceSpec) -> CompositionState:
         """Add or replace a named source root. Version incremented."""
         validate_composer_source_name(source_name)
         sources = dict(self.sources)
         sources[source_name] = source
-        return replace(self, source=next(iter(sources.values())), sources=sources, version=self.version + 1)
+        return replace(self, sources=sources, version=self.version + 1)
 
     def without_named_source(self, source_name: str) -> CompositionState | None:
         """Remove one named source. Returns None if the source is not found."""
@@ -1801,8 +1809,7 @@ class CompositionState:
             return None
         sources = dict(self.sources)
         del sources[source_name]
-        source = next(iter(sources.values()), None)
-        return replace(self, source=source, sources=sources, version=self.version + 1)
+        return replace(self, sources=sources, version=self.version + 1)
 
     def with_node(self, node: NodeSpec) -> CompositionState:
         """Add or replace a node (matched by id). Version incremented."""
@@ -1891,20 +1898,12 @@ class CompositionState:
                 "name": self.metadata.name,
                 "description": self.metadata.description,
             },
-            "source": None,
             "sources": {},
             "nodes": [],
             "edges": [],
             "outputs": [],
         }
 
-        if self.source is not None:
-            result["source"] = {
-                "plugin": self.source.plugin,
-                "on_success": self.source.on_success,
-                "options": deep_thaw(self.source.options),
-                "on_validation_failure": self.source.on_validation_failure,
-            }
         for source_name, source in self.sources.items():
             result["sources"][source_name] = {
                 "plugin": source.plugin,
@@ -1975,11 +1974,11 @@ class CompositionState:
         The round-trip invariant holds:
             state == CompositionState.from_dict(state.to_dict())
         """
-        source_data = d["source"]
         raw_sources = d["sources"] if "sources" in d and d["sources"] is not None else {}
+        if not raw_sources and d.get("source") is not None:
+            raw_sources = {"source": d["source"]}
         sources = {name: SourceSpec.from_dict(source) for name, source in raw_sources.items()}
         return cls(
-            source=SourceSpec.from_dict(source_data) if source_data is not None else None,
             sources=sources,
             nodes=tuple(NodeSpec.from_dict(n) for n in d["nodes"]),
             edges=tuple(EdgeSpec.from_dict(e) for e in d["edges"]),

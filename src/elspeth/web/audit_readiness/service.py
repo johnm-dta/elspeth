@@ -443,8 +443,9 @@ def _build_plugin_trust_row(state: CompositionState) -> ReadinessRow:
         if kind in ("source", "sink") or plugin_cls.determinism in _AUDIT_FLAGGED_DETERMINISMS:
             boundary.append((kind, component_id, name))
 
-    if state.source is not None:
-        _record("source", "source", state.source.plugin)
+    for source_name, source in state.sources.items():
+        component_id = "source" if source_name == "source" else f"source:{source_name}"
+        _record("source", component_id, source.plugin)
     for node in state.nodes:
         if node.node_type == "transform":
             _record("transform", node.id, node.plugin)

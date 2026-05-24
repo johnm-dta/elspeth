@@ -2744,7 +2744,6 @@ class TestEdgeContractFailureFormatting:
             on_validation_failure="discard",
         )
         state = CompositionState(
-            source=orders,
             sources={"orders": orders, "refunds": refunds},
             nodes=(
                 NodeSpec(

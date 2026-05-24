@@ -12,7 +12,7 @@ CompositionStateData is the input DTO for saving new state versions.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, get_args, runtime_checkable
@@ -373,7 +373,7 @@ class CompositionStateData:
     Contains mutable container fields -- requires freeze guard.
     """
 
-    source: Mapping[str, Any] | None = None
+    source: InitVar[Mapping[str, Any] | None] = None
     sources: Mapping[str, Mapping[str, Any]] | None = None
     nodes: Sequence[Mapping[str, Any]] | None = None
     edges: Sequence[Mapping[str, Any]] | None = None
@@ -386,10 +386,12 @@ class CompositionStateData:
     # is honest for revert/fork paths and for non-compose write paths.
     composer_meta: Mapping[str, Any] | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, source: Mapping[str, Any] | None) -> None:
+        if source is not None:
+            if self.sources is not None:
+                raise AuditIntegrityError("CompositionStateData accepts either source or sources, not both")
+            object.__setattr__(self, "sources", {"source": source})
         non_none = []
-        if self.source is not None:
-            non_none.append("source")
         if self.sources is not None:
             non_none.append("sources")
         if self.nodes is not None:
@@ -418,7 +420,6 @@ class CompositionStateRecord:
     id: UUID
     session_id: UUID
     version: int
-    source: Mapping[str, Any] | None
     nodes: Sequence[Mapping[str, Any]] | None
     edges: Sequence[Mapping[str, Any]] | None
     outputs: Sequence[Mapping[str, Any]] | None
@@ -432,6 +433,7 @@ class CompositionStateRecord:
     # is honest for revert/fork paths and for non-compose write paths.
     composer_meta: Mapping[str, Any] | None = None
     sources: Mapping[str, Mapping[str, Any]] | None = None
+    source: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         non_none = []

@@ -405,7 +405,7 @@ describe("InlineRunResults", () => {
     ]);
     useSessionStore.setState({
       compositionState: {
-        source: null,
+        sources: {},
         nodes: [
           {
             id: "n1",
@@ -445,7 +445,7 @@ describe("InlineRunResults", () => {
     ]);
     useSessionStore.setState({
       compositionState: {
-        source: null,
+        sources: {},
         nodes: [
           {
             id: "n1",

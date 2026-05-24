@@ -61,7 +61,7 @@ function makeCompositionState(version: number, nodeIds: string[] = []): Composit
   return {
     id: `state-${version}`,
     version,
-    source: null,
+    sources: {},
     nodes: nodeIds.map((id) => ({
       id,
       node_type: "transform",

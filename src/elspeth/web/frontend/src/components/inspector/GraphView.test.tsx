@@ -134,7 +134,7 @@ function makeState(overrides: Partial<CompositionState> = {}): CompositionState 
   return {
     id: "test-session",
     version: 1,
-    source: null,
+    sources: {},
     nodes: [],
     edges: [],
     outputs: [],
@@ -310,10 +310,12 @@ describe("GraphView", () => {
     );
     useSessionStore.setState({
       compositionState: makeState({
-        source: {
-          plugin: "csv",
-          options: {},
-          on_success: "gate_in",
+        sources: {
+          source: {
+            plugin: "csv",
+            options: {},
+            on_success: "gate_in",
+          },
         },
         nodes: [
           {
@@ -372,10 +374,12 @@ describe("GraphView", () => {
       // name that must match node.input for data to flow.
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "text",
-            options: {},
-            on_success: "transform_in",  // Connection point name
+          sources: {
+            source: {
+              plugin: "text",
+              options: {},
+              on_success: "transform_in",  // Connection point name
+            },
           },
           nodes: [
             makeNode({
@@ -396,10 +400,12 @@ describe("GraphView", () => {
     it("infers transform→transform edge when inputs match on_success values", () => {
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "step1_in",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "step1_in",
+            },
           },
           nodes: [
             makeNode({
@@ -427,10 +433,12 @@ describe("GraphView", () => {
       // Error handler receives rows via on_error connection point matching
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "process_in",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "process_in",
+            },
           },
           nodes: [
             makeNode({
@@ -463,10 +471,12 @@ describe("GraphView", () => {
       // Gate routes to different nodes via connection point matching
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "gate_in",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "gate_in",
+            },
           },
           nodes: [
             {
@@ -511,10 +521,12 @@ describe("GraphView", () => {
       // When some edges are explicit and others need inference
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "step1_in",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "step1_in",
+            },
           },
           nodes: [
             makeNode({
@@ -544,10 +556,12 @@ describe("GraphView", () => {
       // When on_success points directly to a sink name (not a connection point)
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "process_in",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "process_in",
+            },
           },
           nodes: [
             makeNode({

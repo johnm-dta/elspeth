@@ -20,7 +20,7 @@ export function makeComposition(
   return {
     id: "comp-1",
     version,
-    source: { plugin: "csv_file", options: { path: "x.csv" } },
+    sources: { source: { plugin: "csv_file", options: { path: "x.csv" } } },
     nodes: [
       {
         id: "select_columns",

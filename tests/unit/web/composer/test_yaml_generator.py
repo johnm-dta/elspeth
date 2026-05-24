@@ -214,7 +214,7 @@ class TestGenerateYaml:
         pipeline_dict = generate_pipeline_dict(state)
 
         assert pipeline_dict == yaml.safe_load(generate_yaml(state))
-        assert set(pipeline_dict) == {"source", "gates", "coalesce", "sinks"}
+        assert set(pipeline_dict) == {"sources", "gates", "coalesce", "sinks"}
 
     def test_generate_pipeline_dict_strips_web_metadata(self) -> None:
         state = _make_linear_pipeline().with_source(
@@ -228,11 +228,8 @@ class TestGenerateYaml:
 
         pipeline_dict = generate_pipeline_dict(state)
 
-        # ``with_source(...)`` stores the singular source under the legacy
-        # composer key ``"source"`` (see ``CompositionState.with_source``);
-        # the YAML generator emits whatever key the ``sources`` map carries.
-        # ``with_named_source`` callers can produce ``"primary"`` instead;
-        # both shapes round-trip through ``load_settings_from_yaml_string``.
+        # ``with_source(...)`` stores the default named source under the
+        # composer key ``"source"``; YAML always emits plural ``sources``.
         assert "blob_ref" not in pipeline_dict["sources"]["source"]["options"]
         assert "blob_ref" not in yaml.safe_load(generate_yaml(state))["sources"]["source"]["options"]
 
@@ -257,9 +254,9 @@ class TestGenerateYaml:
         )
 
         pipeline_dict = generate_pipeline_dict(state)
-        yaml_options = yaml.safe_load(generate_yaml(state))["source"]["options"]
+        yaml_options = yaml.safe_load(generate_yaml(state))["sources"]["source"]["options"]
 
-        assert SOURCE_AUTHORING_KEY not in pipeline_dict["source"]["options"]
+        assert SOURCE_AUTHORING_KEY not in pipeline_dict["sources"]["source"]["options"]
         assert SOURCE_AUTHORING_KEY not in yaml_options
         assert yaml_options["schema"] == {"mode": "observed"}
 
@@ -337,10 +334,10 @@ class TestGenerateYaml:
         parsed = yaml.safe_load(yaml_str)
 
         # Source
-        assert parsed["sources"]["primary"]["plugin"] == "csv"
-        assert parsed["sources"]["primary"]["on_success"] == "transform_1"
-        assert parsed["sources"]["primary"]["options"]["path"] == "/data/input.csv"
-        assert parsed["sources"]["primary"]["options"]["on_validation_failure"] == "quarantine"
+        assert parsed["sources"]["source"]["plugin"] == "csv"
+        assert parsed["sources"]["source"]["on_success"] == "transform_1"
+        assert parsed["sources"]["source"]["options"]["path"] == "/data/input.csv"
+        assert parsed["sources"]["source"]["options"]["on_validation_failure"] == "quarantine"
 
         # Transform
         assert len(parsed["transforms"]) == 1
@@ -472,10 +469,10 @@ class TestGenerateYaml:
         parsed = yaml.safe_load(yaml_str)
 
         # blob_ref must not appear in the YAML
-        assert "blob_ref" not in parsed["sources"]["primary"]["options"]
+        assert "blob_ref" not in parsed["sources"]["source"]["options"]
         # Other options should still be present
-        assert parsed["sources"]["primary"]["options"]["path"] == "/data/input.txt"
-        assert parsed["sources"]["primary"]["options"]["column"] == "line"
+        assert parsed["sources"]["source"]["options"]["path"] == "/data/input.txt"
+        assert parsed["sources"]["source"]["options"]["column"] == "line"
 
     def test_on_error_emitted_when_set(self) -> None:
         state = CompositionState(
@@ -707,9 +704,9 @@ class TestGenerateYaml:
         # State has been through freeze_fields() -- options are MappingProxyType
         yaml_str = generate_yaml(state)
         parsed = yaml.safe_load(yaml_str)
-        assert parsed["sources"]["primary"]["plugin"] == "csv"
+        assert parsed["sources"]["source"]["plugin"] == "csv"
         # Nested frozen options must serialize correctly
-        assert parsed["sources"]["primary"]["options"]["schema"]["fields"] == ["name", "age"]
+        assert parsed["sources"]["source"]["options"]["schema"]["fields"] == ["name", "age"]
 
     def test_empty_state_minimal_yaml(self) -> None:
         """Empty state produces minimal valid YAML (no source, no sinks)."""

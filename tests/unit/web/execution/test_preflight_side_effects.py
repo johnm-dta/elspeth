@@ -81,14 +81,14 @@ def _minimal_csv_pipeline_yaml(tmp_path: Path) -> str:
 sources:
   primary:
     plugin: csv
-    on_success: primary
+    on_success: output
     options:
       path: {input_path!s}
       on_validation_failure: discard
       schema:
         mode: observed
 sinks:
-  primary:
+  output:
     plugin: csv
     on_write_failure: discard
     options:

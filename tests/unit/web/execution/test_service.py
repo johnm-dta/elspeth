@@ -244,6 +244,7 @@ def mock_session_service() -> MagicMock:
     state.session_id = uuid4()
     state.version = 1
     state.source = None  # No source → path allowlist check skips
+    state.sources = None
     state.nodes = None
     state.edges = None
     state.outputs = None
@@ -667,7 +668,7 @@ sinks:
             db.close()
 
         settings_json = json.loads(run_row.settings_json)
-        assert settings_json["sources"]["source"]["plugin"] == "text"
+        assert settings_json["sources"]["primary"]["plugin"] == "text"
         assert settings_json["sinks"]["output"]["plugin"] == "json"
         assert attribution_row.initiated_by_user_id == "alice"
         assert attribution_row.auth_provider_type == "local"

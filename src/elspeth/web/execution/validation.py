@@ -530,8 +530,10 @@ def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFin
         if target not in producer_by_target:
             producer_by_target[target] = producer_id
 
-    if state.source is not None and state.source.on_success:
-        producer_by_target[state.source.on_success] = "source"
+    for source_name, source in state.sources.items():
+        if source.on_success:
+            producer_id = "source" if source_name == "source" else f"source:{source_name}"
+            producer_by_target[source.on_success] = producer_id
     for upstream in state.nodes:
         if upstream.on_success:
             _record(upstream.on_success, upstream.id)
@@ -719,7 +721,7 @@ def validate_pipeline(
     # subscription guard treats ``empty_pipeline`` as non-broadcast (no chat
     # injection, no validation feedback sent to the LLM) — see
     # ``stores/subscriptions.ts``.
-    if state.source is None and not state.nodes and not state.outputs:
+    if not state.sources and not state.nodes and not state.outputs:
         return ValidationResult(
             is_valid=False,
             checks=[

@@ -365,8 +365,15 @@ def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewS
     """Return unresolved interpretation-review sites across source and transforms."""
 
     sites: list[InterpretationReviewSite] = []
-    if state.source is not None:
-        sites.extend(_pending_source_sites(state.source))
+    # Source-level interpretation review is keyed to the default source
+    # component (SOURCE_COMPONENT_ID). _pending_source_sites and the
+    # resolution path (resolve_interpretation_event / invented_source) both
+    # hardcode that component id, so only the default named source carries a
+    # resolvable review site; named non-default sources are not reviewable
+    # through this subsystem.
+    default_source = state.sources.get(SOURCE_COMPONENT_ID)
+    if default_source is not None:
+        sites.extend(_pending_source_sites(default_source))
     web_scrape_raw_fields = _web_scrape_raw_fields(state.nodes)
     producer_by_output_stream = _producer_by_output_stream(state.nodes)
     llm_ids_consuming_untrusted = frozenset(
@@ -423,10 +430,16 @@ def materialize_state_for_execution(state: CompositionState) -> CompositionState
         return InterpretationReviewPending(sites=pending_sites)
 
     changed = False
-    materialized_source = state.source
-    if state.source is not None:
-        materialized_source = _materialize_source_for_execution(state.source)
-        changed = changed or materialized_source is not state.source
+    # Mirror interpretation_sites' scope: only the default source component
+    # carries reviewable composer-authored metadata, so materialization (which
+    # enforces the reviewed-content-hash drift check) operates on it alone.
+    materialized_sources = dict(state.sources)
+    default_source = materialized_sources.get(SOURCE_COMPONENT_ID)
+    if default_source is not None:
+        materialized_default = _materialize_source_for_execution(default_source)
+        if materialized_default is not default_source:
+            materialized_sources[SOURCE_COMPONENT_ID] = materialized_default
+            changed = True
     materialized_nodes: list[NodeSpec] = []
     for node in state.nodes:
         materialized = _materialize_node_for_execution(node, state.nodes)
@@ -434,7 +447,7 @@ def materialize_state_for_execution(state: CompositionState) -> CompositionState
         changed = changed or materialized is not node
     if not changed:
         return state
-    return replace(state, source=materialized_source, nodes=tuple(materialized_nodes))
+    return replace(state, sources=materialized_sources, nodes=tuple(materialized_nodes))
 
 
 def _materialize_node_for_authoring(node: NodeSpec) -> NodeSpec:

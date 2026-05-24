@@ -272,7 +272,7 @@ class TestPromotePatchSourceOptionsArgErrorRouting:
         state = _state_with_source({"path": "/a", "schema": {"mode": "observed"}})
         result = _execute_patch_source_options({"patch": {"path": "/b"}}, state, _ctx())
         assert result.success is True
-        assert result.updated_state.source is not None
+        assert result.updated_state.sources["source"].options["path"] == "/b"
 
     def test_manifest_entry_is_type_driven(self) -> None:
         assert "patch_source_options" in MANIFEST

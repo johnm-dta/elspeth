@@ -4,7 +4,7 @@
 //
 // This store is a caching/projection layer, NOT a source of truth. The
 // derivation that populates it lives in the ChatPanel wiring (computed from
-// compositionState.source + blob metadata). Three
+// compositionState.sources + blob metadata). Three
 // downstream consumers read from here:
 //   - InlineSourceCreatedTurn — confirmation widget after creation.
 //   - InlineSourceDisambiguationTurn — ambiguous-input picker.

@@ -18,6 +18,7 @@ import { useAuditReadinessStore } from "../../stores/auditReadinessStore";
 import { useExecutionStore } from "../../stores/executionStore";
 import { useInlineSourceStore } from "../../stores/inlineSourceStore";
 import { useInterpretationEventsStore } from "../../stores/interpretationEventsStore";
+import { hasCompositionContent } from "../../utils/compositionState";
 import { relativeTime } from "../../utils/time";
 import type {
   AuditReadinessSnapshot,
@@ -275,14 +276,10 @@ export function AuditReadinessPanel() {
     (s) => s.optedOutBySession,
   );
 
-  const hasCompositionContent =
-    !!compositionState &&
-    (compositionState.source !== null ||
-      compositionState.nodes.length > 0 ||
-      compositionState.outputs.length > 0);
+  const compositionHasContent = hasCompositionContent(compositionState);
 
   useEffect(() => {
-    if (!activeSessionId || !compositionState || !hasCompositionContent) return;
+    if (!activeSessionId || !compositionState || !compositionHasContent) return;
     let cancelled = false;
     // Fire and forget; store handles errors.
     void loadSnapshot(activeSessionId, compositionState.version).then(() => {
@@ -307,7 +304,7 @@ export function AuditReadinessPanel() {
   // Using the reference would re-run the effect on every render-cycle that re-creates the object
   // without changing the version. The linter flags `compositionState` as missing; suppress here.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId, compositionState?.version, hasCompositionContent, loadSnapshot, setValidationResult]);
+  }, [activeSessionId, compositionState?.version, compositionHasContent, loadSnapshot, setValidationResult]);
 
   const anyActionable = useMemo(
     () => snapshot?.rows.some((r) => isActionable(r.status)) ?? false,
@@ -332,7 +329,7 @@ export function AuditReadinessPanel() {
 
   const showExpanded = anyActionable || userExpanded;
 
-  if (!activeSessionId || !hasCompositionContent) {
+  if (!activeSessionId || !compositionHasContent) {
     return null;
   }
   if (!compositionState) {

@@ -377,7 +377,7 @@ class _ProgressRouteSessionService:
             id=uuid.uuid4(),
             session_id=session_id,
             version=version,
-            source=data.source,
+            source=None,
             nodes=data.nodes,
             edges=data.edges,
             outputs=data.outputs,
@@ -799,8 +799,8 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
 
     persisted = asyncio.run(service.get_current_state(session_id))
     assert persisted is not None
-    assert persisted.source is not None
-    source_authoring = persisted.source["options"][SOURCE_AUTHORING_KEY]
+    assert "source" in persisted.sources
+    source_authoring = persisted.sources["source"]["options"][SOURCE_AUTHORING_KEY]
     assert source_authoring == {
         "modality": CreationModality.LLM_GENERATED.value,
         "content_hash": row.content_hash,
@@ -850,17 +850,15 @@ def test_accept_inline_blob_proposal_without_composer_provenance_fails_closed(tm
             rationale="Legacy proposal missing composer provenance.",
             affects=("graph", "blob"),
             arguments_json={
-                "sources": {
-                    "primary": {
-                        "plugin": "csv",
-                        "on_success": "rows",
-                        "options": {"schema": {"mode": "observed"}},
-                        "inline_blob": {
-                            "filename": "ada.csv",
-                            "mime_type": "text/csv",
-                            "content": "name,score\nada,42\n",
-                        },
-                    }
+                "source": {
+                    "plugin": "csv",
+                    "on_success": "rows",
+                    "options": {"schema": {"mode": "observed"}},
+                    "inline_blob": {
+                        "filename": "ada.csv",
+                        "mime_type": "text/csv",
+                        "content": "name,score\nada,42\n",
+                    },
                 },
                 "nodes": [],
                 "edges": [],
@@ -3420,7 +3418,7 @@ class TestRecomposeConvergencePartialState:
 
         # HTTP response: path key remains contract-visible, but the internal
         # storage value must be redacted.
-        response_source_opts = detail["partial_state"]["source"]["options"]
+        response_source_opts = detail["partial_state"]["sources"]["source"]["options"]
         assert response_source_opts["path"] == REDACTED_BLOB_SOURCE_PATH
         assert response_source_opts["blob_ref"] == "abc123"
 
@@ -3432,8 +3430,7 @@ class TestRecomposeConvergencePartialState:
         loop.close()
 
         assert db_record is not None
-        assert db_record.source is not None, "composition state must carry a source"
-        db_source_opts = db_record.source["options"]
+        db_source_opts = db_record.sources["source"]["options"]
         assert db_source_opts["path"] == "/internal/blobs/data.csv"
         assert db_source_opts["blob_ref"] == "abc123"
 
@@ -3845,7 +3842,7 @@ class TestRevertEndpoint:
         body = resp.json()
         assert body["version"] == 3
         # Should match v1's source, not v2's
-        assert body["source"] == {"type": "csv"}
+        assert body["sources"] == {"source": {"type": "csv"}}
         # Lineage: new version derives from v1
         assert body["derived_from_state_id"] == str(v1.id)
 
@@ -4023,7 +4020,7 @@ class TestYamlEndpoint:
 
         assert resp.status_code == 200
         body = resp.json()
-        assert body["source_blob_id"] == blob_id
+        assert body["source_blob_ids"] == {"source": blob_id}
         assert blob_id not in body["yaml"]
 
     @pytest.mark.asyncio
@@ -4229,7 +4226,7 @@ class TestYamlEndpoint:
         assert resp.status_code == 409
         assert "runtime preflight failed for captured state" in resp.json()["detail"]
         assert len(captured_states) == 1
-        assert captured_states[0].source is not None
+        assert captured_states[0].sources["source"] is not None
 
     @pytest.mark.asyncio
     async def test_get_state_yaml_emits_yaml_export_telemetry_on_passed_preflight(self, tmp_path, monkeypatch) -> None:
@@ -4433,7 +4430,7 @@ class TestYamlEndpoint:
             assert secret_service.resolved_value == resolved_secret
             # The runtime preflight path may resolve the secret in memory; export
             # must still serialize the original state snapshot with the secret_ref marker.
-            assert state.to_dict()["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
+            assert state.to_dict()["sources"]["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
@@ -4443,7 +4440,7 @@ class TestYamlEndpoint:
         exported_yaml = resp.json()["yaml"]
         assert resolved_secret not in exported_yaml
         parsed = yaml.safe_load(exported_yaml)
-        assert parsed["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
+        assert parsed["sources"]["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
 
 
 class TestRunAlreadyActiveError:
@@ -4532,7 +4529,7 @@ class TestNewStateHasNoLineage:
         }
         await service.save_composition_state(
             session.id,
-            CompositionStateData(source=sources["orders"], sources=sources, is_valid=True),
+            CompositionStateData(sources=sources, is_valid=True),
             provenance="session_seed",
         )
 
@@ -4646,7 +4643,7 @@ class TestComposerProgressRoutes:
         await service.save_composition_state(
             service.session.id,
             CompositionStateData(
-                source=initial_state_d["source"],
+                sources=initial_state_d["sources"],
                 nodes=initial_state_d["nodes"],
                 edges=initial_state_d["edges"],
                 outputs=initial_state_d["outputs"],

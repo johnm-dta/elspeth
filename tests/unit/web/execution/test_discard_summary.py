@@ -56,6 +56,8 @@ def test_discard_summary_carries_stage_attribution_for_validation_and_transform_
         source_node_id=setup.source_node_id,
         row_index=0,
         data={"url": ""},
+        source_row_index=0,
+        ingest_sequence=0,
     )
     token = setup.data_flow.create_token(row.row_id)
     now = datetime.now(tz=UTC)

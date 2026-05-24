@@ -180,7 +180,7 @@ async def _normalise_current_tutorial_state_for_execution(
     await session_service.save_composition_state(
         session_id,
         CompositionStateData(
-            source=current_state.source,
+            sources=current_state.sources,
             nodes=normalised_nodes,
             edges=current_state.edges,
             outputs=current_state.outputs,
@@ -675,7 +675,8 @@ def _plugin_nodes_from_pipeline_dict(doc: Mapping[str, Any]) -> tuple[tuple[Node
     ``yaml_generator.generate_pipeline_dict`` and consumed by
     ``core.config`` at ``elspeth/core/config.py:1798``):
 
-    - ``source``: single dict with a ``plugin`` key.
+    - ``sources``: dict keyed by source name, values containing ``plugin``.
+    - ``source``: legacy single dict with a ``plugin`` key.
     - ``transforms``: **list[dict]** of plugin entries (each with ``plugin``).
     - ``aggregations``: **list[dict]** of plugin entries (each with ``plugin``).
     - ``sinks``: dict keyed by sink name, values containing ``plugin``.
@@ -687,9 +688,15 @@ def _plugin_nodes_from_pipeline_dict(doc: Mapping[str, Any]) -> tuple[tuple[Node
     either, raise rather than emit a half-truth audit.
     """
     roles: list[tuple[NodeType, str]] = []
-    source = doc["source"] if "source" in doc else None
-    if type(source) is dict and "plugin" in source:
-        roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
+    sources = doc["sources"] if "sources" in doc else None
+    if type(sources) is dict:
+        for source in sources.values():
+            if type(source) is dict and "plugin" in source:
+                roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
+    else:
+        source = doc["source"] if "source" in doc else None
+        if type(source) is dict and "plugin" in source:
+            roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
     _collect_list_form_plugins(doc, "transforms", NodeType.TRANSFORM, roles)
     _collect_list_form_plugins(doc, "aggregations", NodeType.AGGREGATION, roles)
     for routing_section in ("gates", "coalesce"):
@@ -736,9 +743,10 @@ def _plugin_nodes_from_composition_state(record: Any) -> tuple[tuple[NodeType, s
     # KeyError or non-subscriptable TypeError propagate here surfaces the
     # writer bug rather than masking it.
     roles: list[tuple[NodeType, str]] = []
-    source = record.source
-    if source is not None and "plugin" in source:
-        roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
+    sources = record.sources if record.sources is not None else ({"source": record.source} if record.source is not None else {})
+    for source in sources.values():
+        if "plugin" in source:
+            roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
     nodes = record.nodes if record.nodes is not None else ()
     transform_entries: list[Mapping[str, Any]] = []
     aggregation_entries: list[Mapping[str, Any]] = []

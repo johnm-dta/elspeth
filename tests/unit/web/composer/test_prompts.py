@@ -370,7 +370,7 @@ class TestBuildSystemPrompt:
         assert "Before any mutation that creates or updates an LLM prompt you wrote" in result
         assert "the LLM node options must already contain a pending" in flattened
         assert "Do not stop with prose saying the rubric is part of the reviewed prompt" in flattened
-        assert "LLM node preflight has four independent review checks" in result
+        assert "LLM node preflight has three independent review checks" in result
         assert "Every create, update, upsert, or patch of an LLM node with a `prompt_template` must repeat this preflight" in flattened
         assert "carry forward existing pending LLM interpretation requirements and add any missing ones" in flattened
         assert "These checks stack" in result

@@ -276,8 +276,8 @@ class TestWireBlobInlineRef:
 
         assert source_result.success is True
         assert output_result.success is True
-        assert source_result.updated_state.source is not None
-        source_marker = source_result.updated_state.source.options["schema"]["description"]
+        assert "source" in source_result.updated_state.sources
+        source_marker = source_result.updated_state.sources["source"].options["schema"]["description"]
         assert source_marker["encoding"] == "latin-1"
         assert output_result.updated_state.outputs[0].options["header"]["mode"] == "inline_content"
 
@@ -372,8 +372,8 @@ class TestSetSourceFromBlobMode:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        marker = {key: result.updated_state.source.options[key] for key in ("blob_ref", "mode", "path")}
+        assert "source" in result.updated_state.sources
+        marker = {key: result.updated_state.sources["source"].options[key] for key in ("blob_ref", "mode", "path")}
         assert marker["mode"] == "bind_source"
         shape = is_widened_blob_ref(marker)
         assert shape is not None
@@ -394,8 +394,8 @@ class TestSetSourceFromBlobMode:
 
         pipeline = generate_pipeline_dict(result.updated_state)
 
-        assert "blob_ref" not in pipeline["source"]["options"]
-        assert "mode" not in pipeline["source"]["options"]
+        assert "blob_ref" not in pipeline["sources"]["source"]["options"]
+        assert "mode" not in pipeline["sources"]["source"]["options"]
 
 
 def test_tool_definitions_include_inline_blob_authoring_tools() -> None:

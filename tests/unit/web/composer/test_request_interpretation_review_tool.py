@@ -403,7 +403,7 @@ async def _seed_source_session(service: SessionServiceImpl, session_id: UUID, *,
     state = await service.save_composition_state(
         session_id,
         CompositionStateData(
-            source=state_dict["source"],
+            sources=state_dict["sources"],
             nodes=state_dict["nodes"],
             metadata_=state_dict["metadata"],
             is_valid=True,

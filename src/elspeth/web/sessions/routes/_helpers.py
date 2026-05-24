@@ -1253,7 +1253,7 @@ def _hash_canonical_payload(canonical_payload: str) -> str:
     return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
 
 
-def _load_canonical_mapping(canonical_payload: str | None) -> dict[str, Any] | None:
+def _load_canonical_mapping(canonical_payload: str | None) -> dict[str, object] | None:
     if canonical_payload is None:
         return None
     try:
@@ -1262,7 +1262,7 @@ def _load_canonical_mapping(canonical_payload: str | None) -> dict[str, Any] | N
         return None
     if not isinstance(decoded, dict):
         return None
-    return decoded
+    return cast(dict[str, object], decoded)
 
 
 def _redacted_argument_canonical_for_chat_message(

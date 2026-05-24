@@ -43,7 +43,7 @@ from elspeth.web.composer.tools import (
 )
 from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationReadiness, ValidationResult
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import blobs_table, sessions_table
+from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 # Stub SHA-256 hex digest for test fixtures.  Must satisfy the
@@ -149,6 +149,47 @@ def _session_engine_with_session() -> tuple[Any, str]:
     return engine, session_id
 
 
+def _insert_user_message(engine: Any, session_id: str, content: str) -> str:
+    """Persist a user chat message for verbatim blob provenance tests."""
+    from datetime import UTC, datetime
+
+    user_message_id = str(uuid4())
+    with engine.begin() as conn:
+        latest = conn.execute(
+            select(chat_messages_table.c.sequence_no)
+            .where(chat_messages_table.c.session_id == session_id)
+            .order_by(chat_messages_table.c.sequence_no.desc())
+        ).first()
+        sequence_no = 1 if latest is None else latest.sequence_no + 1
+        conn.execute(
+            chat_messages_table.insert().values(
+                id=user_message_id,
+                session_id=session_id,
+                role="user",
+                content=content,
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=sequence_no,
+                writer_principal="route_user_message",
+                created_at=datetime.now(UTC),
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return user_message_id
+
+
+def _verbatim_blob_context(engine: Any, session_id: str, content: str) -> dict[str, str]:
+    """Return execute_tool kwargs proving ``content`` came from a user message."""
+    user_message_content = f"Use this exact content:\n{content}"
+    user_message_id = _insert_user_message(engine, session_id, user_message_content)
+    return {
+        "user_message_id": user_message_id,
+        "user_message_content": user_message_content,
+    }
+
+
 def test_execute_create_blob_honors_configured_session_quota(tmp_path: Path) -> None:
     engine, session_id = _session_engine_with_session()
     result = execute_tool(
@@ -160,6 +201,7 @@ def test_execute_create_blob_honors_configured_session_quota(tmp_path: Path) -> 
         session_engine=engine,
         session_id=session_id,
         max_blob_storage_per_session_bytes=3,
+        **_verbatim_blob_context(engine, session_id, "exceeds"),
     )
 
     assert result.success is False
@@ -3192,6 +3234,7 @@ class TestBlobTools:
                 data_dir=data_dir,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "a,b\n1,2"),
             )
 
         # Storage file must have been cleaned up
@@ -6278,6 +6321,7 @@ class TestSetPipeline:
             data_dir=str(tmp_path),
             session_engine=engine,
             session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, "name,email\n"),
         )
 
         assert result.success is False
@@ -6608,6 +6652,7 @@ class TestSetPipeline:
             data_dir=str(tmp_path),
             session_engine=engine,
             session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, "hello"),
         )
 
         assert result.success is True
@@ -8276,6 +8321,7 @@ class TestUpdateBlobTypeGuard:
             data_dir=str(self.data_dir),
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "initial"),
         )
         blob_id = create_result.data["blob_id"]
         state = create_result.updated_state
@@ -8372,6 +8418,7 @@ class TestSetSourceFromBlobTypeGuard:
             data_dir=str(self.data_dir),
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "hello"),
         )
         blob_id = create_result.data["blob_id"]
         state = create_result.updated_state

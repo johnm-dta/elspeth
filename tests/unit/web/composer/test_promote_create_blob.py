@@ -33,6 +33,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
@@ -45,6 +46,7 @@ from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_create_blob
 from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.composer.tools.blobs import _blob_creation_provenance
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -198,7 +200,8 @@ class TestPromoteCreateBlobArgErrorRouting:
 
     def test_valid_arguments_dispatch_normally(self, tmp_path: Path) -> None:
         """Functional smoke: a valid call produces a ready blob."""
-        engine, session_id = _session_engine_with_session()
+        user_message_content = "Please use this exact content:\nhello world"
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
         result = _execute_create_blob(
             {
                 "filename": "seed.txt",
@@ -211,6 +214,8 @@ class TestPromoteCreateBlobArgErrorRouting:
                 data_dir=str(tmp_path),
                 session_engine=engine,
                 session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
             ),
         )
         assert result.success is True
@@ -221,6 +226,41 @@ class TestPromoteCreateBlobArgErrorRouting:
 
 
 class TestCreateBlobComposerSourceProvenance:
+    def test_no_message_and_no_composer_provenance_fails_closed(self, tmp_path: Path) -> None:
+        """Blob writes without a message anchor or composer provenance must not persist as verbatim."""
+        engine, session_id = _session_engine_with_session()
+
+        with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):
+            _execute_create_blob(
+                {
+                    "filename": "generated.csv",
+                    "mime_type": "text/csv",
+                    "content": "priority,score\nhigh,99\n",
+                },
+                _empty_state(),
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    data_dir=str(tmp_path),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
+            )
+
+        with engine.connect() as conn:
+            rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
+        assert rows == []
+
+    def test_empty_content_without_composer_provenance_fails_closed(self) -> None:
+        """Empty content is valid locally but can never prove verbatim containment."""
+        with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):
+            _blob_creation_provenance(
+                "",
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    user_message_content="User supplied an empty file.",
+                ),
+            )
+
     def test_content_not_in_user_message_records_llm_generated_provenance(self, tmp_path: Path) -> None:
         """LLM-authored blob content must mechanically carry composer provenance."""
         engine, session_id, user_message_id = _session_engine_with_user_message("Please create a CSV of the high-priority records.")

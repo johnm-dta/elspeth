@@ -41,6 +41,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
@@ -279,7 +280,8 @@ class TestPromoteSetPipelineArgErrorRouting:
         ``_prepare_blob_create`` second-caller pathway whose dead
         isinstance guards were removed in this same commit.
         """
-        engine, session_id = _session_engine_with_session()
+        user_message_content = "Use this exact text file:\nhello"
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
         catalog = _mock_catalog()
         output_path = tmp_path / "outputs" / "out.csv"
 
@@ -323,6 +325,8 @@ class TestPromoteSetPipelineArgErrorRouting:
                 data_dir=str(tmp_path),
                 session_engine=engine,
                 session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
             ),
         )
         assert result.success is True
@@ -333,9 +337,49 @@ class TestPromoteSetPipelineArgErrorRouting:
         # Inline content must not leak into the affected/data summary.
         assert "hello" not in str(result.to_dict())
 
+    def test_inline_blob_without_message_or_composer_provenance_fails_closed(self, tmp_path: Path) -> None:
+        """Inline source blobs must not silently persist as verbatim without provenance."""
+        engine, session_id = _session_engine_with_session()
+        args = {
+            "source": {
+                "plugin": "text",
+                "on_success": "rows",
+                "options": {
+                    "column": "text",
+                    "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                },
+                "inline_blob": {
+                    "filename": "input.txt",
+                    "mime_type": "text/plain",
+                    "content": "generated row",
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [],
+        }
+
+        with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):
+            _execute_set_pipeline(
+                args,
+                _empty_state(),
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    data_dir=str(tmp_path),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
+            )
+
+        with engine.connect() as conn:
+            rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
+        assert rows == []
+
     def test_csv_fixed_schema_accepts_advertised_field_definition_shape(self, tmp_path: Path) -> None:
         """CSV prevalidation accepts the field shape exposed by plugin JSON Schema."""
-        engine, session_id = _session_engine_with_session()
+        user_message_content = "Use this exact CSV:\nurl\nhttps://example.test\n"
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
         output_path = tmp_path / "outputs" / "out.csv"
 
         args = {
@@ -380,6 +424,8 @@ class TestPromoteSetPipelineArgErrorRouting:
                 data_dir=str(tmp_path),
                 session_engine=engine,
                 session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
             ),
         )
 

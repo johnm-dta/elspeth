@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import structlog
+from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
@@ -177,6 +178,43 @@ def _session_engine_with_session() -> tuple[Any, str]:
             )
         )
     return engine, session_id
+
+
+def _insert_user_message(engine: Any, session_id: str, content: str) -> str:
+    """Persist a user chat message for tests that create verbatim blobs."""
+    user_message_id = str(uuid4())
+    with engine.begin() as conn:
+        latest = conn.execute(
+            select(chat_messages_table.c.sequence_no)
+            .where(chat_messages_table.c.session_id == session_id)
+            .order_by(chat_messages_table.c.sequence_no.desc())
+        ).first()
+        sequence_no = 1 if latest is None else latest.sequence_no + 1
+        conn.execute(
+            chat_messages_table.insert().values(
+                id=user_message_id,
+                session_id=session_id,
+                role="user",
+                content=content,
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=sequence_no,
+                writer_principal="route_user_message",
+                created_at=datetime.now(UTC),
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return user_message_id
+
+
+def _verbatim_blob_context(engine: Any, session_id: str, content: str) -> dict[str, str]:
+    user_message_content = f"Use this exact content:\n{content}"
+    return {
+        "user_message_id": _insert_user_message(engine, session_id, user_message_content),
+        "user_message_content": user_message_content,
+    }
 
 
 def _test_sessions_service(engine: Any, data_dir: Path | None = None) -> SessionServiceImpl:
@@ -4157,6 +4195,7 @@ class TestToolArgumentErrorAcrossThreadBoundary:
             data_dir=str(self.data_dir),
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "hello"),
         )
         blob_id = create_result.data["blob_id"]
 

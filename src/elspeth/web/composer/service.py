@@ -1720,6 +1720,7 @@ class ComposerServiceImpl:
                 session_id=session_id,
                 user_id=user_id,
                 progress=progress,
+                user_message_id=user_message_id,
             )
             if routed_result is not None:
                 return routed_result
@@ -1833,6 +1834,7 @@ class ComposerServiceImpl:
         session_id: str | None,
         user_id: str | None,
         progress: ComposerProgressSink | None,
+        user_message_id: str | None,
     ) -> ComposerResult | None:
         """Apply a deterministic registered recipe before invoking the cheap model.
 
@@ -1885,6 +1887,8 @@ class ComposerServiceImpl:
             session_id=session_id,
             secret_service=self._secret_service,
             user_id=user_id,
+            user_message_id=user_message_id,
+            user_message_content=message,
         )
         if not create_result.success or not isinstance(create_result.data, Mapping):
             return None

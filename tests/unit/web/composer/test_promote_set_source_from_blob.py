@@ -200,7 +200,8 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
         the post-promotion handler reaches the source-wiring path
         (versus only the validation gate).
         """
-        engine, session_id = _session_engine_with_session()
+        user_message_content = "Use this exact text:\nhello"
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
         catalog = _mock_catalog()
 
         ctx = ToolContext(
@@ -208,6 +209,8 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             data_dir=str(tmp_path),
             session_engine=engine,
             session_id=session_id,
+            user_message_id=user_message_id,
+            user_message_content=user_message_content,
         )
         create_result = _execute_create_blob(
             {"filename": "seed.txt", "mime_type": "text/plain", "content": "hello"},

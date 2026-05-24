@@ -318,21 +318,7 @@ def _verbatim_blob_creation_provenance() -> _BlobCreationProvenance:
 
 def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreationProvenance:
     """Classify composer-created blob content and return DB provenance fields."""
-    if context.user_message_content is None:
-        if any(
-            field is not None
-            for field in (
-                context.composer_model_identifier,
-                context.composer_model_version,
-                context.composer_provider,
-                context.composer_skill_hash,
-                context.tool_arguments_hash,
-            )
-        ):
-            raise AuditIntegrityError("Composer-authored blob provenance cannot be classified without user_message_content.")
-        return _verbatim_blob_creation_provenance()
-
-    if content in context.user_message_content:
+    if context.user_message_content is not None and content and content in context.user_message_content:
         return _verbatim_blob_creation_provenance()
 
     required = {

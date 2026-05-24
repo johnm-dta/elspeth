@@ -34,6 +34,7 @@ from pydantic import ValidationError
 
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
+    InterpretationKind,
     InterpretationSource,
 )
 from elspeth.web.sessions.schemas import (
@@ -60,6 +61,7 @@ def _valid_event_kwargs() -> dict[str, object]:
         "affected_node_id": "transform_rate_coolness",
         "tool_call_id": "call_abc123",
         "user_term": "cool",
+        "kind": "vague_term",
         "llm_draft": "visually appealing and well-organised",
         "accepted_value": "visually appealing and well-organised",
         "choice": "accepted_as_drafted",
@@ -72,7 +74,7 @@ def _valid_event_kwargs() -> dict[str, object]:
         "provider": "anthropic",
         "composer_skill_hash": "a" * 64,
         "arguments_hash": "b" * 64,
-        "hash_domain_version": "v1",
+        "hash_domain_version": "v2",
         "runtime_model_identifier_at_resolve": "anthropic/claude-opus-4-7",
         "runtime_model_version_at_resolve": "claude-opus-4-7-20260101",
         "resolved_prompt_template_hash": "c" * 64,
@@ -84,12 +86,14 @@ class TestInterpretationEventResponse:
         """Wire schema must not hand-duplicate the interpretation closed lists."""
         assert InterpretationEventResponse.model_fields["choice"].annotation is InterpretationChoice
         assert InterpretationEventResponse.model_fields["interpretation_source"].annotation is InterpretationSource
+        assert InterpretationEventResponse.model_fields["kind"].annotation == InterpretationKind | None
 
     def test_full_user_approved_row_constructs(self) -> None:
         event = InterpretationEventResponse(**_valid_event_kwargs())  # type: ignore[arg-type]
         assert event.choice == "accepted_as_drafted"
         assert event.interpretation_source == "user_approved"
-        assert event.hash_domain_version == "v1"
+        assert event.kind == "vague_term"
+        assert event.hash_domain_version == "v2"
 
     def test_opted_out_row_constructs_with_nullable_fields(self) -> None:
         kwargs = _valid_event_kwargs()
@@ -100,6 +104,7 @@ class TestInterpretationEventResponse:
             affected_node_id=None,
             tool_call_id=None,
             user_term=None,
+            kind=None,
             llm_draft=None,
             accepted_value=None,
             model_identifier=None,
@@ -136,6 +141,12 @@ class TestInterpretationEventResponse:
     def test_rejects_invalid_interpretation_source(self) -> None:
         kwargs = _valid_event_kwargs()
         kwargs["interpretation_source"] = "fabricated_source"
+        with pytest.raises(ValidationError):
+            InterpretationEventResponse(**kwargs)  # type: ignore[arg-type]
+
+    def test_rejects_invalid_kind(self) -> None:
+        kwargs = _valid_event_kwargs()
+        kwargs["kind"] = "fabricated_kind"
         with pytest.raises(ValidationError):
             InterpretationEventResponse(**kwargs)  # type: ignore[arg-type]
 

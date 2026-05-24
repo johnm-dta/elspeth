@@ -21,8 +21,10 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy import insert
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.enums import CreationModality
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
@@ -33,10 +35,11 @@ from elspeth.web.composer.redaction import (
 )
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
-from elspeth.web.composer.tools import _execute_create_blob, _execute_set_source_from_blob
+from elspeth.web.composer.tools import _execute_create_blob, _execute_patch_source_options, _execute_set_source_from_blob
 from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import sessions_table
+from elspeth.web.sessions.models import chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 
@@ -80,6 +83,30 @@ def _session_engine_with_session() -> tuple[Any, str]:
             )
         )
     return engine, session_id
+
+
+def _session_engine_with_user_message(content: str) -> tuple[Any, str, str]:
+    engine, session_id = _session_engine_with_session()
+    user_message_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(chat_messages_table).values(
+                id=user_message_id,
+                session_id=session_id,
+                role="user",
+                content=content,
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=1,
+                writer_principal="route_user_message",
+                created_at=now,
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return engine, session_id, user_message_id
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +200,8 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
         the post-promotion handler reaches the source-wiring path
         (versus only the validation gate).
         """
-        engine, session_id = _session_engine_with_session()
+        user_message_content = "Use this exact text:\nhello"
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
         catalog = _mock_catalog()
 
         ctx = ToolContext(
@@ -181,6 +209,8 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             data_dir=str(tmp_path),
             session_engine=engine,
             session_id=session_id,
+            user_message_id=user_message_id,
+            user_message_content=user_message_content,
         )
         create_result = _execute_create_blob(
             {"filename": "seed.txt", "mime_type": "text/plain", "content": "hello"},
@@ -230,6 +260,76 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
         # semantics (so the handler can apply the right fallback).
         assert validated.plugin is None
         assert validated.on_validation_failure is None
+
+    def test_llm_authored_blob_binding_stamps_source_authoring_without_unlocking_path(self, tmp_path: Path) -> None:
+        """Blob-backed source provenance is stamped while path/blob_ref stay locked."""
+        user_message_content = "Create generated text content for the source."
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
+        catalog = _mock_catalog()
+        ctx = ToolContext(
+            catalog=catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+            user_message_id=user_message_id,
+            user_message_content=user_message_content,
+            composer_model_identifier="openai/gpt-5-mini",
+            composer_model_version="gpt-5-mini-2026-05-01",
+            composer_provider="openai",
+            composer_skill_hash="sha256:composer-skill",
+            tool_arguments_hash="sha256:tool-arguments",
+        )
+        create_result = _execute_create_blob(
+            {"filename": "generated.txt", "mime_type": "text/plain", "content": "generated row text"},
+            _empty_state(),
+            ctx,
+        )
+        assert create_result.success is True
+
+        bind_result = _execute_set_source_from_blob(
+            {
+                "blob_id": create_result.data["blob_id"],
+                "on_success": "out",
+                "options": {"column": "text", "schema": {"mode": "observed"}},
+            },
+            _empty_state(),
+            ctx,
+        )
+
+        assert bind_result.success is True, bind_result.data
+        assert bind_result.updated_state.source is not None
+        options = bind_result.updated_state.source.options
+        assert options[SOURCE_AUTHORING_KEY] == {
+            "modality": CreationModality.LLM_GENERATED.value,
+            "content_hash": create_result.data["content_hash"],
+            "review_event_id": None,
+            "resolved_kind": None,
+        }
+
+        forged_authoring_patch = _execute_patch_source_options(
+            {
+                "patch": {
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": CreationModality.VERBATIM.value,
+                        "content_hash": "0" * 64,
+                        "review_event_id": "forged-review",
+                        "resolved_kind": "forged-kind",
+                    }
+                }
+            },
+            bind_result.updated_state,
+            ctx,
+        )
+        assert forged_authoring_patch.success is False
+        assert SOURCE_AUTHORING_KEY in forged_authoring_patch.data["error"]
+
+        patch_result = _execute_patch_source_options(
+            {"patch": {"path": str(tmp_path / "other.txt")}},
+            bind_result.updated_state,
+            ctx,
+        )
+        assert patch_result.success is False
+        assert "Cannot patch" in patch_result.data["error"]
 
 
 # ---------------------------------------------------------------------------

@@ -60,6 +60,7 @@ from elspeth.web.composer.state import (
     _serialize_branches,
 )
 from elspeth.web.execution.schemas import ValidationResult
+from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
 from elspeth.web.paths import (
     allowed_sink_directories,
     allowed_source_directories,
@@ -1137,7 +1138,7 @@ def _secret_ref_placement_error(
     )
 
 
-_WEB_ONLY_SOURCE_KEYS = frozenset({"blob_ref"})
+_WEB_ONLY_SOURCE_KEYS = frozenset({"blob_ref", SOURCE_AUTHORING_KEY})
 
 _FILE_SINKS_REQUIRING_COLLISION_POLICY = frozenset({"csv", "json"})
 
@@ -1318,6 +1319,18 @@ class ToolContext:
         user_message_id: Provenance pointer for blob writes that record
             ``created_from_message_id``. Only handlers that actually persist
             a new blob row read it.
+        user_message_content: Triggering user chat-message content. Blob
+            writers use this to distinguish byte-identical user-authored
+            content from composer-authored content.
+        composer_model_identifier: Requested composer model identifier for
+            LLM-authored blob provenance.
+        composer_model_version: Provider-returned model/version string when
+            available, falling back to the requested model.
+        composer_provider: Composer LLM provider name.
+        composer_skill_hash: SHA-256 hash of the composer skill markdown used
+            for the request.
+        tool_arguments_hash: Canonical audited hash of the tool-call
+            arguments that produced an LLM-authored blob.
     """
 
     catalog: CatalogService
@@ -1331,6 +1344,12 @@ class ToolContext:
     runtime_preflight: RuntimePreflight | None = None
     max_blob_storage_per_session_bytes: int | None = None
     user_message_id: str | None = None
+    user_message_content: str | None = None
+    composer_model_identifier: str | None = None
+    composer_model_version: str | None = None
+    composer_provider: str | None = None
+    composer_skill_hash: str | None = None
+    tool_arguments_hash: str | None = None
 
 
 ToolHandler = Callable[

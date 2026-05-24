@@ -29,8 +29,11 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy import insert, select
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.enums import CreationModality
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
@@ -43,8 +46,9 @@ from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_create_blob
 from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.composer.tools.blobs import _blob_creation_provenance
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import sessions_table
+from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 
@@ -90,6 +94,31 @@ def _session_engine_with_session() -> tuple[Any, str]:
             )
         )
     return engine, session_id
+
+
+def _session_engine_with_user_message(content: str) -> tuple[Any, str, str]:
+    """Minimal session DB seeded with the triggering user message."""
+    engine, session_id = _session_engine_with_session()
+    user_message_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(chat_messages_table).values(
+                id=user_message_id,
+                session_id=session_id,
+                role="user",
+                content=content,
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=1,
+                writer_principal="route_user_message",
+                created_at=now,
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return engine, session_id, user_message_id
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +200,8 @@ class TestPromoteCreateBlobArgErrorRouting:
 
     def test_valid_arguments_dispatch_normally(self, tmp_path: Path) -> None:
         """Functional smoke: a valid call produces a ready blob."""
-        engine, session_id = _session_engine_with_session()
+        user_message_content = "Please use this exact content:\nhello world"
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
         result = _execute_create_blob(
             {
                 "filename": "seed.txt",
@@ -184,6 +214,8 @@ class TestPromoteCreateBlobArgErrorRouting:
                 data_dir=str(tmp_path),
                 session_engine=engine,
                 session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
             ),
         )
         assert result.success is True
@@ -191,6 +223,148 @@ class TestPromoteCreateBlobArgErrorRouting:
         assert result.data["filename"] == "seed.txt"
         assert result.data["mime_type"] == "text/plain"
         assert result.data["size_bytes"] == len(b"hello world")
+
+
+class TestCreateBlobComposerSourceProvenance:
+    def test_no_message_and_no_composer_provenance_fails_closed(self, tmp_path: Path) -> None:
+        """Blob writes without a message anchor or composer provenance must not persist as verbatim."""
+        engine, session_id = _session_engine_with_session()
+
+        with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):
+            _execute_create_blob(
+                {
+                    "filename": "generated.csv",
+                    "mime_type": "text/csv",
+                    "content": "priority,score\nhigh,99\n",
+                },
+                _empty_state(),
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    data_dir=str(tmp_path),
+                    session_engine=engine,
+                    session_id=session_id,
+                ),
+            )
+
+        with engine.connect() as conn:
+            rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
+        assert rows == []
+
+    @pytest.mark.parametrize("missing_user_message_id", [None, "", "   "])
+    def test_contained_content_without_message_id_fails_closed(
+        self,
+        tmp_path: Path,
+        missing_user_message_id: str | None,
+    ) -> None:
+        """Verbatim containment still requires a persisted message anchor."""
+        engine, session_id = _session_engine_with_session()
+        user_message_content = "Use this exact CSV:\npriority,score\nhigh,99\n"
+
+        with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):
+            _execute_create_blob(
+                {
+                    "filename": "verbatim.csv",
+                    "mime_type": "text/csv",
+                    "content": "priority,score\nhigh,99\n",
+                },
+                _empty_state(),
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    data_dir=str(tmp_path),
+                    session_engine=engine,
+                    session_id=session_id,
+                    user_message_id=missing_user_message_id,
+                    user_message_content=user_message_content,
+                ),
+            )
+
+        with engine.connect() as conn:
+            rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
+        assert rows == []
+
+    def test_empty_content_without_composer_provenance_fails_closed(self) -> None:
+        """Empty content is valid locally but can never prove verbatim containment."""
+        with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):
+            _blob_creation_provenance(
+                "",
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    user_message_content="User supplied an empty file.",
+                ),
+            )
+
+    def test_content_not_in_user_message_records_llm_generated_provenance(self, tmp_path: Path) -> None:
+        """LLM-authored blob content must mechanically carry composer provenance."""
+        engine, session_id, user_message_id = _session_engine_with_user_message("Please create a CSV of the high-priority records.")
+
+        result = _execute_create_blob(
+            {
+                "filename": "generated.csv",
+                "mime_type": "text/csv",
+                "content": "priority,score\nhigh,99\n",
+            },
+            _empty_state(),
+            ToolContext(
+                catalog=_mock_catalog(),
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content="Please create a CSV of the high-priority records.",
+                composer_model_identifier="openai/gpt-5-mini",
+                composer_model_version="gpt-5-mini-2026-05-01",
+                composer_provider="openai",
+                composer_skill_hash="sha256:composer-skill",
+                tool_arguments_hash="sha256:tool-arguments",
+            ),
+        )
+
+        assert result.success is True
+        with engine.connect() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == result.data["blob_id"])).one()
+
+        assert row.creation_modality == CreationModality.LLM_GENERATED.value
+        assert row.created_from_message_id == user_message_id
+        assert row.creating_model_identifier == "openai/gpt-5-mini"
+        assert row.creating_model_version == "gpt-5-mini-2026-05-01"
+        assert row.creating_provider == "openai"
+        assert row.creating_composer_skill_hash == "sha256:composer-skill"
+        assert row.creating_arguments_hash == "sha256:tool-arguments"
+
+    def test_content_in_user_message_records_verbatim_without_model_identifier(self, tmp_path: Path) -> None:
+        """User-supplied literal content remains verbatim even when composer provenance is present."""
+        user_message_content = "Use this exact file:\nname,score\nada,42\n"
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
+
+        result = _execute_create_blob(
+            {
+                "filename": "verbatim.csv",
+                "mime_type": "text/csv",
+                "content": "name,score\nada,42\n",
+            },
+            _empty_state(),
+            ToolContext(
+                catalog=_mock_catalog(),
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
+                composer_model_identifier="openai/gpt-5-mini",
+                composer_model_version="gpt-5-mini-2026-05-01",
+                composer_provider="openai",
+                composer_skill_hash="sha256:composer-skill",
+                tool_arguments_hash="sha256:tool-arguments",
+            ),
+        )
+
+        assert result.success is True
+        with engine.connect() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == result.data["blob_id"])).one()
+
+        assert row.creation_modality == CreationModality.VERBATIM.value
+        assert row.created_from_message_id == user_message_id
+        assert row.creating_model_identifier is None
 
 
 # ---------------------------------------------------------------------------

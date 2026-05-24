@@ -11,12 +11,15 @@ Three structural row shapes exist, distinguished by :class:`InterpretationSource
   user resolved it (accepted / amended / abandoned). All interpretation-
   surface fields are populated.
 * ``auto_interpreted_opt_out`` — the user clicked "stop asking" before any
-  surfacing occurred for this term. No LLM was consulted; provenance and
-  surface fields are NULL.
+  surfacing occurred for this term. Session-level marker rows have no LLM
+  consultation; provenance, kind, and surface fields are NULL. Later
+  surface-specific opt-out rows may carry kind, surface fields, accepted
+  value, and a V2 argument hash when the LLM auto-interprets because the
+  session is opted out.
 * ``auto_interpreted_no_surfaces`` — rate cap exhausted; the LLM baked the
   interpretation into the prompt itself without surfacing it for review.
-  Interpretation-surface fields are NULL (no draft existed), but LLM
-  provenance MUST be populated — the LLM *was* consulted, and the audit
+  Interpretation-surface fields are NULL (no draft existed), but kind and
+  LLM provenance MUST be populated — the LLM *was* consulted, and the audit
   trail records which model produced the silent interpretation.
 
 Layer: L0 (contracts). Imports nothing above. Canonical-JSON serialization
@@ -68,6 +71,18 @@ class InterpretationSource(StrEnum):
     AUTO_INTERPRETED_NO_SURFACES = "auto_interpreted_no_surfaces"
 
 
+class InterpretationKind(StrEnum):
+    """Class of LLM-authored assumption surfaced for review.
+
+    CLOSED LIST - adding a value requires contract amendment, schema update,
+    closed-enum tests, and writer-path audit.
+    """
+
+    VAGUE_TERM = "vague_term"
+    INVENTED_SOURCE = "invented_source"
+    LLM_PROMPT_TEMPLATE = "llm_prompt_template"
+
+
 _INTERPRETATION_SURFACE_FIELDS: tuple[str, ...] = (
     "composition_state_id",
     "affected_node_id",
@@ -75,6 +90,7 @@ _INTERPRETATION_SURFACE_FIELDS: tuple[str, ...] = (
     "user_term",
     "llm_draft",
 )
+_INTERPRETATION_KIND_FIELD: tuple[str, ...] = ("kind",)
 _INTERPRETATION_LLM_PROVENANCE_FIELDS: tuple[str, ...] = (
     "model_identifier",
     "model_version",
@@ -83,12 +99,19 @@ _INTERPRETATION_LLM_PROVENANCE_FIELDS: tuple[str, ...] = (
 )
 _INTERPRETATION_SHAPE_FIELDS: tuple[str, ...] = (
     *_INTERPRETATION_SURFACE_FIELDS,
+    *_INTERPRETATION_KIND_FIELD,
     *_INTERPRETATION_LLM_PROVENANCE_FIELDS,
 )
 _CHOICES_WITH_ACCEPTED_VALUE: frozenset[InterpretationChoice] = frozenset(
     {
         InterpretationChoice.ACCEPTED_AS_DRAFTED,
         InterpretationChoice.AMENDED,
+    }
+)
+_AUTO_INTERPRETED_SOURCES: frozenset[InterpretationSource] = frozenset(
+    {
+        InterpretationSource.AUTO_INTERPRETED_OPT_OUT,
+        InterpretationSource.AUTO_INTERPRETED_NO_SURFACES,
     }
 )
 
@@ -132,6 +155,7 @@ class InterpretationEventRecord:
         affected_node_id     -> the LLM-transform node this binds into (NOT NULL)
         tool_call_id         -> provider tool_call_id from the LLM (NOT NULL)
         user_term            -> the original user-provided term, e.g. "cool" (NOT NULL)
+        kind                 -> class of LLM-authored assumption (NOT NULL)
         llm_draft            -> the LLM's draft interpretation (NOT NULL)
         accepted_value       -> the user-approved string (None until resolved)
         arguments_hash       -> rfc8785 hash over required fields; None until resolved
@@ -141,14 +165,23 @@ class InterpretationEventRecord:
         composer_skill_hash  -> SHA-256 of pipeline_composer.md content (NOT NULL)
 
     auto_interpreted_opt_out rows — user clicked "stop asking":
-        (all nine fields above are NULL — no LLM surfacing occurred)
+        session-level marker shape:
+        (all ten fields above are NULL — no LLM surfacing occurred)
         choice = 'opted_out'; interpretation_source = 'auto_interpreted_opt_out'
         resolved_at records the opt-out timestamp
+
+        surface-specific opt-out shape:
+        kind, surface/provenance fields, accepted_value, arguments_hash, and
+        hash_domain_version are populated because the LLM auto-interpreted
+        after the session-level opt-out. No pending human surface exists; the
+        row is born resolved with choice='opted_out'.
 
     auto_interpreted_no_surfaces rows — rate cap exhausted; LLM baked it in:
         composition_state_id, affected_node_id, tool_call_id, user_term,
         llm_draft are NULL (no surfacing occurred — the rejected request
         never produced a draft or a composition-state binding)
+        kind MUST be populated (the rejected review request still had a
+        closed interpretation class)
         model_identifier, model_version, provider, composer_skill_hash MUST be
         populated (the LLM was consulted; provenance is required — read from
         the compose-loop snapshot, same source as user_approved rows).
@@ -161,10 +194,11 @@ class InterpretationEventRecord:
         interpretation_source
 
     Per the auditability standard (design doc 06 §"Recording the
-    interpretation"), all nine of: user_term, llm_draft, accepted_value,
+    interpretation"), all ten of: user_term, kind, llm_draft, accepted_value,
     created_at, actor, composition_state_id, model_identifier, model_version,
     composer_skill_hash are required for user_approved rows. They are
-    intentionally NULL for auto_interpreted_opt_out rows (F-1: no LLM surfacing).
+    intentionally NULL for session-level auto_interpreted_opt_out marker rows
+    (F-1: no LLM surfacing).
 
     interpretation_source is the structural mechanism (closed enum) that
     produced the row: USER_APPROVED, AUTO_INTERPRETED_OPT_OUT, or
@@ -177,6 +211,7 @@ class InterpretationEventRecord:
     affected_node_id: str | None  # None for opted_out rows
     tool_call_id: str | None  # None for opted_out rows
     user_term: str | None  # None for opted_out rows
+    kind: InterpretationKind | None
     llm_draft: str | None  # None for opted_out rows
     accepted_value: str | None  # None until resolved (or for opted_out)
     choice: InterpretationChoice
@@ -190,7 +225,7 @@ class InterpretationEventRecord:
     provider: str | None  # "anthropic", "openai", etc.
     composer_skill_hash: str | None  # SHA-256 of pipeline_composer.md
     arguments_hash: str | None  # rfc8785 hash over required fields; None until resolved
-    hash_domain_version: str | None  # 'v1' once resolved; None for opt-out/pending
+    hash_domain_version: str | None  # 'v2' once resolved by current writers; None for opt-out/pending
     interpretation_source: InterpretationSource
     # F-19: runtime model snapshot at resolve time (may differ from composer model).
     runtime_model_identifier_at_resolve: str | None
@@ -199,14 +234,18 @@ class InterpretationEventRecord:
     # auto_interpreted_opt_out rows (no prompt template is patched). For
     # resolved user_approved rows, this is the SHA-256 of the resolved
     # prompt-template string, computed at resolve time using stable_hash()
-    # from contracts/hashing.py. NOT part of INTERPRETATION_HASH_DOMAIN_V1.
+    # from contracts/hashing.py. NOT part of INTERPRETATION_HASH_DOMAIN_V2.
     resolved_prompt_template_hash: str | None
 
     def __post_init__(self) -> None:
         """Validate Tier-1 row-shape invariants at construction time."""
         _validate_enum_member(self.choice, InterpretationChoice, "choice")
         _validate_enum_member(self.interpretation_source, InterpretationSource, "interpretation_source")
+        if self.kind is not None:
+            _validate_enum_member(self.kind, InterpretationKind, "kind")
         self._validate_source_shape()
+        self._validate_auto_source_choice()
+        self._validate_surface_opt_out_hash_domain_version()
         self._validate_choice_status_fields()
         self._validate_hash_domain_pair()
 
@@ -217,10 +256,29 @@ class InterpretationEventRecord:
         if self.interpretation_source is InterpretationSource.USER_APPROVED:
             missing_required_fields = [name for name in _INTERPRETATION_SHAPE_FIELDS if getattr(self, name) is None]
         elif self.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT:
-            non_null_fields = [name for name in _INTERPRETATION_SHAPE_FIELDS if getattr(self, name) is not None]
+            if self.kind is None:
+                marker_null_fields = (
+                    *_INTERPRETATION_SURFACE_FIELDS,
+                    *_INTERPRETATION_LLM_PROVENANCE_FIELDS,
+                    "accepted_value",
+                    "arguments_hash",
+                    "hash_domain_version",
+                )
+                non_null_fields = [name for name in marker_null_fields if getattr(self, name) is not None]
+            else:
+                surface_opt_out_required_fields = (
+                    *_INTERPRETATION_SURFACE_FIELDS,
+                    *_INTERPRETATION_LLM_PROVENANCE_FIELDS,
+                    "accepted_value",
+                    "arguments_hash",
+                    "hash_domain_version",
+                )
+                missing_required_fields = [name for name in surface_opt_out_required_fields if getattr(self, name) is None]
         elif self.interpretation_source is InterpretationSource.AUTO_INTERPRETED_NO_SURFACES:
             non_null_fields = [name for name in _INTERPRETATION_SURFACE_FIELDS if getattr(self, name) is not None]
-            missing_required_fields = [name for name in _INTERPRETATION_LLM_PROVENANCE_FIELDS if getattr(self, name) is None]
+            missing_required_fields = [
+                name for name in (*_INTERPRETATION_KIND_FIELD, *_INTERPRETATION_LLM_PROVENANCE_FIELDS) if getattr(self, name) is None
+            ]
 
         if missing_required_fields or non_null_fields:
             raise ValueError(
@@ -231,6 +289,18 @@ class InterpretationEventRecord:
                 )
             )
 
+    def _validate_auto_source_choice(self) -> None:
+        if self.interpretation_source in _AUTO_INTERPRETED_SOURCES and self.choice is not InterpretationChoice.OPTED_OUT:
+            raise ValueError(f"InterpretationEventRecord {self.interpretation_source.value} rows must use choice='opted_out'")
+
+    def _validate_surface_opt_out_hash_domain_version(self) -> None:
+        if (
+            self.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT
+            and self.kind is not None
+            and self.hash_domain_version != "v2"
+        ):
+            raise ValueError("InterpretationEventRecord surface-specific auto_interpreted_opt_out rows must use hash_domain_version='v2'")
+
     def _validate_choice_status_fields(self) -> None:
         if (self.choice is InterpretationChoice.PENDING) != (self.resolved_at is None):
             raise ValueError(
@@ -238,11 +308,14 @@ class InterpretationEventRecord:
                 "choice='pending' must have resolved_at=None and all other choices must have resolved_at populated"
             )
 
-        requires_accepted_value = self.choice in _CHOICES_WITH_ACCEPTED_VALUE
+        requires_accepted_value = self.choice in _CHOICES_WITH_ACCEPTED_VALUE or (
+            self.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT and self.kind is not None
+        )
         if requires_accepted_value != (self.accepted_value is not None):
             raise ValueError(
                 "InterpretationEventRecord choice/accepted_value invariant violated: "
-                "accepted_value is populated only for accepted_as_drafted and amended choices"
+                "accepted_value is populated only for accepted_as_drafted/amended choices "
+                "or surface-specific auto_interpreted_opt_out rows"
             )
 
     def _validate_hash_domain_pair(self) -> None:
@@ -253,14 +326,8 @@ class InterpretationEventRecord:
             )
 
 
-# INTERPRETATION_HASH_DOMAIN_V1: the closed set of fields used to compute
-# arguments_hash for interpretation events. This constant is the source of
-# truth for the v1 hash domain. The hashing function reads from this
-# constant ONLY — adding a field to InterpretationEventRecord without
-# adding it here leaves the new field out of the hash silently.
-#
-# To add a field: (1) add it here, (2) bump hash_domain_version to 'v2',
-# (3) add a CI test that the new field is in the hash domain.
+# INTERPRETATION_HASH_DOMAIN_V1 is retained for historical/read-side
+# compatibility only. New writer paths use INTERPRETATION_HASH_DOMAIN_V2.
 INTERPRETATION_HASH_DOMAIN_V1: frozenset[str] = frozenset(
     {
         "session_id",
@@ -268,6 +335,28 @@ INTERPRETATION_HASH_DOMAIN_V1: frozenset[str] = frozenset(
         "affected_node_id",
         "tool_call_id",
         "user_term",
+        "llm_draft",
+        "accepted_value",
+        "actor",
+        "model_identifier",
+        "model_version",
+        "provider",
+        "composer_skill_hash",
+    }
+)
+
+# INTERPRETATION_HASH_DOMAIN_V2: the closed active field set used to compute
+# arguments_hash for interpretation events. The hashing function reads from
+# this constant ONLY — adding a field to InterpretationEventRecord without
+# adding it here leaves the new field out of the hash silently.
+INTERPRETATION_HASH_DOMAIN_V2: frozenset[str] = frozenset(
+    {
+        "session_id",
+        "composition_state_id",
+        "affected_node_id",
+        "tool_call_id",
+        "user_term",
+        "kind",
         "llm_draft",
         "accepted_value",
         "actor",

@@ -37,6 +37,7 @@ from sqlalchemy import Engine, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.composer_llm_audit import (
     ComposerLLMCall,
     ComposerLLMCallStatus,
@@ -151,6 +152,11 @@ slog = structlog.get_logger()
 _LLM_API_MAX_ATTEMPTS = 3
 _LLM_API_RETRY_BASE_DELAY_SECONDS = 1.0
 _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS: Final[str] = "invalid_tool_arguments"
+
+# Rate-cap rows created for ``request_interpretation_review`` inherit that
+# tool's current vague-term-only contract. Task 4 will make this bridge
+# kind-aware; until then, keep the classification explicit at this call site.
+_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND: Final[InterpretationKind] = InterpretationKind.VAGUE_TERM
 
 # Composer LLM sampling constants. Hardcoded for deterministic tool-call
 # construction (RGR investigation 2026-05-06 §4.4 traced ~33% hard-GREEN
@@ -1714,6 +1720,7 @@ class ComposerServiceImpl:
                 session_id=session_id,
                 user_id=user_id,
                 progress=progress,
+                user_message_id=user_message_id,
             )
             if routed_result is not None:
                 return routed_result
@@ -1827,6 +1834,7 @@ class ComposerServiceImpl:
         session_id: str | None,
         user_id: str | None,
         progress: ComposerProgressSink | None,
+        user_message_id: str | None,
     ) -> ComposerResult | None:
         """Apply a deterministic registered recipe before invoking the cheap model.
 
@@ -1879,6 +1887,8 @@ class ComposerServiceImpl:
             session_id=session_id,
             secret_service=self._secret_service,
             user_id=user_id,
+            user_message_id=user_message_id,
+            user_message_content=message,
         )
         if not create_result.success or not isinstance(create_result.data, Mapping):
             return None
@@ -2175,6 +2185,7 @@ class ComposerServiceImpl:
         session_id: str | None,
         user_id: str | None,
         user_message_id: str | None,
+        user_message_content: str | None,
         current_state_id: str | None,
         actor: str,
         initial_version: int,
@@ -2622,6 +2633,11 @@ class ComposerServiceImpl:
                         base_state_id=UUID(current_state_id) if current_state_id is not None else None,
                         actor=f"composer-web:user:{user_id}" if user_id is not None else "composer-web:anonymous",
                         user_message_id=UUID(user_message_id) if user_message_id is not None else None,
+                        composer_model_identifier=self._model,
+                        composer_model_version=safe_response_model(response) or self._model,
+                        composer_provider=self._availability.provider or "unknown",
+                        composer_skill_hash=self._composer_skill_hash,
+                        tool_arguments_hash=audit.arguments_hash,
                     )
                     proposals_this_turn += 1
                     proposal_payload = {
@@ -3094,6 +3110,12 @@ class ComposerServiceImpl:
                 _last_validation: ValidationSummary | None = last_validation,
                 _runtime_preflight_callback: RuntimePreflight | None = runtime_preflight_callback,
                 _user_message_id: str | None = user_message_id,
+                _user_message_content: str | None = user_message_content,
+                _composer_model_identifier: str = self._model,
+                _composer_model_version: str = safe_response_model(response) or self._model,
+                _composer_provider: str = self._availability.provider or "unknown",
+                _composer_skill_hash: str = self._composer_skill_hash,
+                _tool_arguments_hash: str = audit.arguments_hash,
             ) -> Any:
                 return await run_sync_in_worker(
                     execute_tool,
@@ -3110,6 +3132,12 @@ class ComposerServiceImpl:
                     runtime_preflight=_runtime_preflight_callback,
                     max_blob_storage_per_session_bytes=self._settings.max_blob_storage_per_session_bytes,
                     user_message_id=_user_message_id,
+                    user_message_content=_user_message_content,
+                    composer_model_identifier=_composer_model_identifier,
+                    composer_model_version=_composer_model_version,
+                    composer_provider=_composer_provider,
+                    composer_skill_hash=_composer_skill_hash,
+                    tool_arguments_hash=_tool_arguments_hash,
                 )
 
             # ``_arg_error_payload`` is a module-level helper (F2 — testable
@@ -3896,6 +3924,7 @@ class ComposerServiceImpl:
                 session_id=session_id,
                 user_id=user_id,
                 user_message_id=user_message_id,
+                user_message_content=message,
                 current_state_id=current_state_id,
                 actor=actor,
                 initial_version=initial_version,
@@ -4450,6 +4479,7 @@ class ComposerServiceImpl:
                     # it is the truthful caller identity for this dispatch
                     # and matches the audit envelope's ``actor`` field.
                     actor=audit.actor,
+                    kind=_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND,
                     model_identifier=self._model,
                     model_version=safe_response_model(response) or self._model,
                     provider=self._availability.provider or "unknown",

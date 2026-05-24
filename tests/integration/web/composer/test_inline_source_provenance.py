@@ -53,6 +53,8 @@ from elspeth.web.sessions.schema import initialize_session_schema
 # Test fixtures
 # ─────────────────────────────────────────────────────────────────────────
 
+_USER_MESSAGE_CONTENT = "Use this CSV: name,score\nada,42\n"
+
 
 def _empty_state() -> CompositionState:
     return CompositionState(
@@ -110,7 +112,7 @@ def _session_with_user_message() -> tuple[Any, str, str]:
                 id=user_message_id,
                 session_id=session_id,
                 role="user",
-                content="Use this CSV: name,score\\nada,42\\n",
+                content=_USER_MESSAGE_CONTENT,
                 raw_content=None,
                 tool_calls=None,
                 tool_call_id=None,
@@ -171,6 +173,7 @@ def test_verbatim_blob_records_creation_modality_and_message_id(tmp_path: Path) 
         session_engine=engine,
         session_id=session_id,
         user_message_id=user_message_id,
+        user_message_content=_USER_MESSAGE_CONTENT,
     )
     assert result.success is True, result.data
 

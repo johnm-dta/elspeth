@@ -13,6 +13,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
@@ -42,8 +43,9 @@ from elspeth.web.composer.tools import (
     get_tool_definitions,
 )
 from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationReadiness, ValidationResult
+from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import blobs_table, sessions_table
+from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 # Stub SHA-256 hex digest for test fixtures.  Must satisfy the
@@ -149,6 +151,47 @@ def _session_engine_with_session() -> tuple[Any, str]:
     return engine, session_id
 
 
+def _insert_user_message(engine: Any, session_id: str, content: str) -> str:
+    """Persist a user chat message for verbatim blob provenance tests."""
+    from datetime import UTC, datetime
+
+    user_message_id = str(uuid4())
+    with engine.begin() as conn:
+        latest = conn.execute(
+            select(chat_messages_table.c.sequence_no)
+            .where(chat_messages_table.c.session_id == session_id)
+            .order_by(chat_messages_table.c.sequence_no.desc())
+        ).first()
+        sequence_no = 1 if latest is None else latest.sequence_no + 1
+        conn.execute(
+            chat_messages_table.insert().values(
+                id=user_message_id,
+                session_id=session_id,
+                role="user",
+                content=content,
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=sequence_no,
+                writer_principal="route_user_message",
+                created_at=datetime.now(UTC),
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return user_message_id
+
+
+def _verbatim_blob_context(engine: Any, session_id: str, content: str) -> dict[str, str]:
+    """Return execute_tool kwargs proving ``content`` came from a user message."""
+    user_message_content = f"Use this exact content:\n{content}"
+    user_message_id = _insert_user_message(engine, session_id, user_message_content)
+    return {
+        "user_message_id": user_message_id,
+        "user_message_content": user_message_content,
+    }
+
+
 def test_execute_create_blob_honors_configured_session_quota(tmp_path: Path) -> None:
     engine, session_id = _session_engine_with_session()
     result = execute_tool(
@@ -160,6 +203,7 @@ def test_execute_create_blob_honors_configured_session_quota(tmp_path: Path) -> 
         session_engine=engine,
         session_id=session_id,
         max_blob_storage_per_session_bytes=3,
+        **_verbatim_blob_context(engine, session_id, "exceeds"),
     )
 
     assert result.success is False
@@ -454,6 +498,35 @@ class TestSetSource:
         assert result.success is False
         assert result.updated_state.source is None
         assert "set_source_from_blob" in result.data["error"]
+
+    def test_set_source_rejects_manual_source_authoring_in_options(self) -> None:
+        """Caller-supplied source_authoring must not bypass blob provenance stamping."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "t1",
+                "options": {
+                    "path": "/data/in.csv",
+                    "schema": {"mode": "observed"},
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": CreationModality.LLM_GENERATED.value,
+                        "content_hash": "0" * 64,
+                        "review_event_id": None,
+                        "resolved_kind": None,
+                    },
+                },
+                "on_validation_failure": "quarantine",
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state.source is None
+        assert SOURCE_AUTHORING_KEY in result.data["error"]
 
 
 class TestVfDestinationAdvisory:
@@ -3192,6 +3265,7 @@ class TestBlobTools:
                 data_dir=data_dir,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "a,b\n1,2"),
             )
 
         # Storage file must have been cleaned up
@@ -6278,6 +6352,7 @@ class TestSetPipeline:
             data_dir=str(tmp_path),
             session_engine=engine,
             session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, "name,email\n"),
         )
 
         assert result.success is False
@@ -6608,6 +6683,7 @@ class TestSetPipeline:
             data_dir=str(tmp_path),
             session_engine=engine,
             session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, "hello"),
         )
 
         assert result.success is True
@@ -8276,6 +8352,7 @@ class TestUpdateBlobTypeGuard:
             data_dir=str(self.data_dir),
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "initial"),
         )
         blob_id = create_result.data["blob_id"]
         state = create_result.updated_state
@@ -8372,6 +8449,7 @@ class TestSetSourceFromBlobTypeGuard:
             data_dir=str(self.data_dir),
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "hello"),
         )
         blob_id = create_result.data["blob_id"]
         state = create_result.updated_state
@@ -8856,6 +8934,82 @@ class TestUpdateBlobActiveRunGuard:
         )
         assert result.success is True
         assert self.storage_path.read_bytes() == b"new,content\n9,9"
+
+    def test_update_rejected_when_blob_is_current_source_blob_ref(self) -> None:
+        """A blob-backed source locks the blob content hash stamped in source_authoring."""
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="output",
+                options={
+                    "blob_ref": self.blob_id,
+                    "path": str(self.storage_path),
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="quarantine",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "update_blob",
+            {"blob_id": self.blob_id, "content": "new,content\n9,9"},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is False
+        assert "source" in result.data["error"].lower()
+        assert self.storage_path.read_bytes() == self.original_content
+        with self.engine.begin() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == self.blob_id)).one()
+        assert row.content_hash == _STUB_SHA256
+
+    def test_unbound_update_recomputes_composer_provenance(self) -> None:
+        """Unbound blob updates that author new bytes refresh blob provenance."""
+        from elspeth.web.blobs.service import content_hash
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        user_message_content = "Generate a replacement CSV for the current scratch blob."
+        user_message_id = _insert_user_message(self.engine, self.session_id, user_message_content)
+        new_content = "name,score\nada,42\n"
+
+        result = execute_tool(
+            "update_blob",
+            {"blob_id": self.blob_id, "content": new_content},
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+            user_message_id=user_message_id,
+            user_message_content=user_message_content,
+            composer_model_identifier="openai/gpt-5-mini",
+            composer_model_version="gpt-5-mini-2026-05-01",
+            composer_provider="openai",
+            composer_skill_hash="sha256:composer-skill",
+            tool_arguments_hash="sha256:update-arguments",
+        )
+
+        assert result.success is True
+        assert self.storage_path.read_bytes() == new_content.encode("utf-8")
+        with self.engine.begin() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == self.blob_id)).one()
+        assert row.content_hash == content_hash(new_content.encode("utf-8"))
+        assert row.creation_modality == CreationModality.LLM_GENERATED.value
+        assert row.created_from_message_id == user_message_id
+        assert row.creating_model_identifier == "openai/gpt-5-mini"
+        assert row.creating_model_version == "gpt-5-mini-2026-05-01"
+        assert row.creating_provider == "openai"
+        assert row.creating_composer_skill_hash == "sha256:composer-skill"
+        assert row.creating_arguments_hash == "sha256:update-arguments"
 
     def test_update_rejected_when_pending_run_linked(self) -> None:
         self._insert_run_and_link("pending")

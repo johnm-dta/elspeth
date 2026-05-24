@@ -26,7 +26,8 @@ from elspeth.contracts.composer_audit import (
 )
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus, ComposerLLMCall, ComposerLLMCallStatus
 from elspeth.contracts.composer_progress import ComposerProgressEvent
-from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.enums import CreationModality, TerminalOutcome, TerminalPath
+from elspeth.contracts.hashing import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
     nodes_table,
@@ -711,6 +712,7 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
     from sqlalchemy import select
 
     from elspeth.web.catalog.schemas import PluginSchemaInfo
+    from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
     from elspeth.web.sessions.models import blobs_table
 
     app, service = _make_app(tmp_path)
@@ -735,10 +737,27 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
         service.add_message(
             session_id,
             "user",
-            "Build a CSV pipeline from: name,score\\nada,42\\n",
+            "Build a generated CSV pipeline with one Ada score row.",
             writer_principal="route_user_message",
         )
     )
+    arguments = {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "ada.csv",
+                "mime_type": "text/csv",
+                "content": "name,score\nada,42\n",
+            },
+        },
+        "nodes": [],
+        "edges": [],
+        "outputs": [],
+        "metadata": {"name": "accepted-inline-blob-proposal"},
+    }
+    arguments_hash = stable_hash(arguments)
     proposal = asyncio.run(
         service.create_composition_proposal(
             session_id=session_id,
@@ -746,6 +765,84 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
             tool_name="set_pipeline",
             summary="Replace the pipeline with inline CSV.",
             rationale="Requested by the current composer turn.",
+            affects=("graph", "blob"),
+            arguments_json=arguments,
+            arguments_redacted_json={"summary": "redacted"},
+            base_state_id=None,
+            actor="composer-web:user:alice",
+            user_message_id=user_message.id,
+            composer_model_identifier="openai/gpt-5-mini",
+            composer_model_version="gpt-5-mini-2026-05-01",
+            composer_provider="openai",
+            composer_skill_hash="sha256:composer-skill",
+            tool_arguments_hash=arguments_hash,
+        )
+    )
+
+    response = client.post(f"/api/sessions/{session['id']}/proposals/{proposal.id}/accept")
+
+    assert response.status_code == 200
+    with service._engine.begin() as conn:
+        row = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session["id"])).one()
+    assert row.created_from_message_id == str(user_message.id)
+    assert row.creation_modality == CreationModality.LLM_GENERATED.value
+    assert row.creating_model_identifier == "openai/gpt-5-mini"
+    assert row.creating_model_version == "gpt-5-mini-2026-05-01"
+    assert row.creating_provider == "openai"
+    assert row.creating_composer_skill_hash == "sha256:composer-skill"
+    assert row.creating_arguments_hash == arguments_hash
+
+    persisted = asyncio.run(service.get_current_state(session_id))
+    assert persisted is not None
+    assert persisted.source is not None
+    source_authoring = persisted.source["options"][SOURCE_AUTHORING_KEY]
+    assert source_authoring == {
+        "modality": CreationModality.LLM_GENERATED.value,
+        "content_hash": row.content_hash,
+        "review_event_id": None,
+        "resolved_kind": None,
+    }
+
+
+def test_accept_inline_blob_proposal_without_composer_provenance_fails_closed(tmp_path, monkeypatch) -> None:
+    from sqlalchemy import select
+
+    from elspeth.web.catalog.schemas import PluginSchemaInfo
+    from elspeth.web.sessions.models import blobs_table
+
+    app, service = _make_app(tmp_path)
+    app.state.session_engine = service._engine
+    catalog = MagicMock()
+    catalog.get_schema.return_value = PluginSchemaInfo(
+        name="csv",
+        plugin_type="source",
+        description="CSV source",
+        json_schema={"title": "Config", "properties": {}},
+        knob_schema={"fields": []},
+    )
+    app.state.catalog_service = catalog
+    monkeypatch.setattr(
+        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
+    )
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Legacy inline blob proposal"}).json()
+    session_id = uuid.UUID(session["id"])
+    user_message = asyncio.run(
+        service.add_message(
+            session_id,
+            "user",
+            "Build a generated CSV pipeline with one Ada score row.",
+            writer_principal="route_user_message",
+        )
+    )
+    proposal = asyncio.run(
+        service.create_composition_proposal(
+            session_id=session_id,
+            tool_call_id="call_set_pipeline_inline_blob_legacy",
+            tool_name="set_pipeline",
+            summary="Replace the pipeline with inline CSV.",
+            rationale="Legacy proposal missing composer provenance.",
             affects=("graph", "blob"),
             arguments_json={
                 "source": {
@@ -761,7 +858,7 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
                 "nodes": [],
                 "edges": [],
                 "outputs": [],
-                "metadata": {"name": "accepted-inline-blob-proposal"},
+                "metadata": {"name": "legacy-inline-blob-proposal"},
             },
             arguments_redacted_json={"summary": "redacted"},
             base_state_id=None,
@@ -772,10 +869,88 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
 
     response = client.post(f"/api/sessions/{session['id']}/proposals/{proposal.id}/accept")
 
-    assert response.status_code == 200
+    assert response.status_code == 409
+    assert "missing composer provenance" in response.json()["detail"]
+    assert asyncio.run(service.get_current_state(session_id)) is None
     with service._engine.begin() as conn:
-        row = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session["id"])).one()
-    assert row.created_from_message_id == str(user_message.id)
+        blob_count = conn.execute(select(blobs_table.c.id).where(blobs_table.c.session_id == session["id"])).fetchall()
+    assert blob_count == []
+
+
+def test_accept_empty_inline_blob_proposal_without_composer_provenance_fails_closed(tmp_path, monkeypatch) -> None:
+    from sqlalchemy import select
+
+    from elspeth.web.catalog.schemas import PluginSchemaInfo
+    from elspeth.web.sessions.models import blobs_table
+
+    app, service = _make_app(tmp_path)
+    app.state.session_engine = service._engine
+    catalog = MagicMock()
+    catalog.get_schema.return_value = PluginSchemaInfo(
+        name="text",
+        plugin_type="source",
+        description="Text source",
+        json_schema={"title": "Config", "properties": {}},
+        knob_schema={"fields": []},
+    )
+    app.state.catalog_service = catalog
+    monkeypatch.setattr(
+        "elspeth.web.sessions.routes._runtime_preflight_for_state",
+        AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[])),
+    )
+    client = TestClient(app)
+    session = client.post("/api/sessions", json={"title": "Legacy empty inline blob proposal"}).json()
+    session_id = uuid.UUID(session["id"])
+    user_message = asyncio.run(
+        service.add_message(
+            session_id,
+            "user",
+            "Create an empty text source.",
+            writer_principal="route_user_message",
+        )
+    )
+    proposal = asyncio.run(
+        service.create_composition_proposal(
+            session_id=session_id,
+            tool_call_id="call_set_pipeline_empty_inline_blob_legacy",
+            tool_name="set_pipeline",
+            summary="Replace the pipeline with an empty inline source.",
+            rationale="Legacy proposal missing composer provenance.",
+            affects=("graph", "blob"),
+            arguments_json={
+                "source": {
+                    "plugin": "text",
+                    "on_success": "rows",
+                    "options": {
+                        "column": "text",
+                        "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                    },
+                    "inline_blob": {
+                        "filename": "empty.txt",
+                        "mime_type": "text/plain",
+                        "content": "",
+                    },
+                },
+                "nodes": [],
+                "edges": [],
+                "outputs": [],
+                "metadata": {"name": "legacy-empty-inline-blob-proposal"},
+            },
+            arguments_redacted_json={"summary": "redacted"},
+            base_state_id=None,
+            actor="composer-web:user:alice",
+            user_message_id=user_message.id,
+        )
+    )
+
+    response = client.post(f"/api/sessions/{session['id']}/proposals/{proposal.id}/accept")
+
+    assert response.status_code == 409
+    assert "missing composer provenance" in response.json()["detail"]
+    assert asyncio.run(service.get_current_state(session_id)) is None
+    with service._engine.begin() as conn:
+        blob_count = conn.execute(select(blobs_table.c.id).where(blobs_table.c.session_id == session["id"])).fetchall()
+    assert blob_count == []
 
 
 def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
@@ -7087,7 +7262,14 @@ def test_recompose_uses_last_conversational_user_before_audit_tool_rows(tmp_path
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
+        user_message = loop.run_until_complete(
+            service.add_message(
+                session_id,
+                "user",
+                "Build a CSV pipeline",
+                writer_principal="route_user_message",
+            )
+        )
         # Rev-4 audit-only breadcrumb (no assistant parent).
         loop.run_until_complete(
             service.add_message(
@@ -7107,6 +7289,7 @@ def test_recompose_uses_last_conversational_user_before_audit_tool_rows(tmp_path
     composer.compose.assert_awaited_once()
     assert composer.compose.call_args.args[0] == "Build a CSV pipeline"
     assert composer.compose.call_args.args[1] == []
+    assert composer.compose.call_args.kwargs["user_message_id"] == str(user_message.id)
 
 
 # ---------------------------------------------------------------------------

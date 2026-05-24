@@ -53,7 +53,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts import NodeType
-from elspeth.contracts.composer_interpretation import InterpretationChoice
+from elspeth.contracts.composer_interpretation import InterpretationChoice, InterpretationKind
 from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
@@ -237,6 +237,7 @@ async def test_runtime_handoff_cross_db_hash_anchored() -> None:
         affected_node_id="llm_rate",
         tool_call_id="tcall_handoff_1",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="modern and clear",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -568,6 +569,7 @@ async def test_session_db_records_match_runtime_landscape_join() -> None:
         affected_node_id="llm_eval",
         tool_call_id="tcall_reverse_1",
         user_term="elegant",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="clean and minimal",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",

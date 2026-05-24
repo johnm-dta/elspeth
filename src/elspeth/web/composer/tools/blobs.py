@@ -295,6 +295,84 @@ class _PreparedBlobCreate:
     creating_arguments_hash: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _BlobCreationProvenance:
+    creation_modality: CreationModality
+    creating_model_identifier: str | None
+    creating_model_version: str | None
+    creating_provider: str | None
+    creating_composer_skill_hash: str | None
+    creating_arguments_hash: str | None
+
+
+def _verbatim_blob_creation_provenance() -> _BlobCreationProvenance:
+    return _BlobCreationProvenance(
+        creation_modality=CreationModality.VERBATIM,
+        creating_model_identifier=None,
+        creating_model_version=None,
+        creating_provider=None,
+        creating_composer_skill_hash=None,
+        creating_arguments_hash=None,
+    )
+
+
+def _blob_provenance_message_id(user_message_id: str | None) -> str | None:
+    if user_message_id is None:
+        return None
+    normalized = user_message_id.strip()
+    return normalized if normalized else None
+
+
+def _blob_authoring_context_present(context: ToolContext) -> bool:
+    return any(
+        value is not None
+        for value in (
+            context.user_message_id,
+            context.user_message_content,
+            context.composer_model_identifier,
+            context.composer_model_version,
+            context.composer_provider,
+            context.composer_skill_hash,
+            context.tool_arguments_hash,
+        )
+    )
+
+
+def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreationProvenance:
+    """Classify composer-created blob content and return DB provenance fields."""
+    user_message_id = _blob_provenance_message_id(context.user_message_id)
+    if user_message_id is not None and context.user_message_content is not None and content and content in context.user_message_content:
+        return _verbatim_blob_creation_provenance()
+
+    required = {
+        "user_message_id": user_message_id,
+        "composer_model_identifier": context.composer_model_identifier,
+        "composer_model_version": context.composer_model_version,
+        "composer_provider": context.composer_provider,
+        "composer_skill_hash": context.composer_skill_hash,
+        "tool_arguments_hash": context.tool_arguments_hash,
+    }
+    missing = tuple(name for name, value in required.items() if value is None)
+    if missing:
+        raise AuditIntegrityError(f"LLM-authored blob provenance requires complete composer context; missing: {', '.join(missing)}")
+
+    return _BlobCreationProvenance(
+        creation_modality=CreationModality.LLM_GENERATED,
+        creating_model_identifier=context.composer_model_identifier,
+        creating_model_version=context.composer_model_version,
+        creating_provider=context.composer_provider,
+        creating_composer_skill_hash=context.composer_skill_hash,
+        creating_arguments_hash=context.tool_arguments_hash,
+    )
+
+
+def _state_source_blob_ref(state: CompositionState) -> str | None:
+    if state.source is None:
+        return None
+    blob_ref = state.source.options.get("blob_ref")
+    return blob_ref if isinstance(blob_ref, str) else None
+
+
 def _blob_storage_path(data_dir: str, session_id: str, blob_id: str, filename: str) -> Path:
     """Compute blob storage path matching BlobServiceImpl layout.
 
@@ -562,22 +640,18 @@ def _execute_create_blob(
     # The Pydantic model catches type/shape violations; _prepare_blob_create
     # catches value-domain violations.  Both route via ToolArgumentError
     # to ARG_ERROR (CEC1 channel discipline).
-    # Provenance classification. The ``create_blob``
-    # tool is invoked by the LLM as a self-directed action — the content
-    # the LLM passes is, by construction, content the LLM authored as part
-    # of its tool-call response. However, in this commit we tag every
-    # create_blob payload as VERBATIM with NULL creating_* fields,
-    # matching the set_pipeline.inline_blob path, until the call-loop
-    # context (model identifier, version, provider, prompt hash) can
-    # populate LLM_GENERATED. The
-    # ``created_from_message_id`` still names the user turn that
-    # triggered the LLM's response, so the audit walk works today.
+    provenance = _blob_creation_provenance(validated.content, context)
     prepared = _prepare_blob_create(
         validated.model_dump(),
         data_dir=context.data_dir,
         session_id=session_id,
-        creation_modality=CreationModality.VERBATIM,
+        creation_modality=provenance.creation_modality,
         created_from_message_id=context.user_message_id,
+        creating_model_identifier=provenance.creating_model_identifier,
+        creating_model_version=provenance.creating_model_version,
+        creating_provider=provenance.creating_provider,
+        creating_composer_skill_hash=provenance.creating_composer_skill_hash,
+        creating_arguments_hash=provenance.creating_arguments_hash,
     )
 
     quota_error = _persist_prepared_blob_create(
@@ -823,6 +897,13 @@ def _execute_update_blob(
 
     blob_id = validated.blob_id
     content = validated.content
+    if _state_source_blob_ref(state) == blob_id:
+        return _failure_result(
+            state,
+            f"Blob '{blob_id}' is currently bound as the pipeline source; create a new blob and rebind the source instead.",
+        )
+    provenance = _blob_creation_provenance(content, context) if _blob_authoring_context_present(context) else None
+    provenance_message_id = _blob_provenance_message_id(context.user_message_id) if provenance is not None else None
 
     # Serialise the read→write→commit critical section across concurrent
     # composer-tool callers on this session.  See ``_session_blob_lock``'s
@@ -953,13 +1034,28 @@ def _execute_update_blob(
                             # and no rollback write is required.
                             raise _BlobQuotaExceededInTxn(quota_error)
 
+                    update_values = {
+                        "size_bytes": new_size,
+                        "content_hash": file_hash,
+                    }
+                    if provenance is not None:
+                        update_values.update(
+                            creation_modality=provenance.creation_modality.value,
+                            created_from_message_id=provenance_message_id,
+                            creating_model_identifier=provenance.creating_model_identifier,
+                            creating_model_version=provenance.creating_model_version,
+                            creating_provider=provenance.creating_provider,
+                            creating_composer_skill_hash=provenance.creating_composer_skill_hash,
+                            creating_arguments_hash=provenance.creating_arguments_hash,
+                        )
+
                     conn.execute(
                         update(blobs_table)
                         .where(
                             blobs_table.c.id == blob_id,
                             blobs_table.c.session_id == session_id,
                         )
-                        .values(size_bytes=new_size, content_hash=file_hash)
+                        .values(**update_values)
                     )
 
                     # Atomic file swap — the final mutation before the

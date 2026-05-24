@@ -12,8 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
-from elspeth.contracts.composer_interpretation import InterpretationEventRecord, InterpretationSource
-from elspeth.contracts.enums import CreationModality
+from elspeth.contracts.composer_interpretation import InterpretationEventRecord, InterpretationKind, InterpretationSource
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
     RecipeValidationError,
@@ -67,6 +66,7 @@ from elspeth.web.composer.tools._common import (
 )
 from elspeth.web.composer.tools.blobs import (
     _blob_create_payload,
+    _blob_creation_provenance,
     _persist_prepared_blob_create,
     _prepare_blob_create,
     _PreparedBlobCreate,
@@ -78,9 +78,11 @@ from elspeth.web.composer.tools.declarations import (
 from elspeth.web.composer.tools.sources import (
     _MIME_TO_SOURCE,
     _header_only_inline_csv_conflict,
+    _reject_manual_source_authoring,
     _reject_manual_source_blob_ref,
     _resolve_source_blob,
     _ResolvedSourceBlob,
+    _source_authoring_options,
 )
 from elspeth.web.interpretation_state import interpretation_sites
 from elspeth.web.validation import (
@@ -105,6 +107,11 @@ ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
     ADVISOR_TRIGGER_PROACTIVE_SECURITY,
     ADVISOR_TRIGGER_PROACTIVE_RED_LISTED,
 )
+
+# Current ``request_interpretation_review`` has no kind argument and remains
+# vague-term-only until Task 4 expands the tool contract. Keep that bridge
+# explicit at the call site so service writers never silently classify rows.
+_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND: Final[InterpretationKind] = InterpretationKind.VAGUE_TERM
 
 
 class _RequestInterpretationReviewArgumentsModel(BaseModel):
@@ -211,6 +218,9 @@ def _execute_set_pipeline(
     )
     if manual_blob_ref_error is not None:
         return _failure_result(state, manual_blob_ref_error)
+    manual_authoring_error = _reject_manual_source_authoring(src_options, tool_name="set_pipeline")
+    if manual_authoring_error is not None:
+        return _failure_result(state, manual_authoring_error)
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id="source",
@@ -238,6 +248,7 @@ def _execute_set_pipeline(
             catalog=catalog,
             session_engine=session_engine,
             session_id=session_id,
+            tool_name="set_pipeline",
         )
         if isinstance(resolved, ToolResult):
             return resolved
@@ -257,26 +268,18 @@ def _execute_set_pipeline(
         # (str/str/str + extra=forbid), so the isinstance guards inside
         # _prepare_blob_create are unreachable from this caller — see
         # the cleanup that removes them.
-        # Provenance classification. We always tag inline-blob
-        # set_pipeline payloads as VERBATIM with
-        # all five creating_* fields = None.  The discriminant that
-        # distinguishes LLM-authored vs verbatim content (substring match
-        # against the triggering chat message body, or a tool-call-loop
-        # tag the LLM emits explicitly) is handled at the call-loop layer:
-        # that layer owns the context (model identifier, version, provider,
-        # prompt hash) required to populate
-        # the LLM-authored variant without violating the
-        # ck_blobs_creating_llm_provenance_nullability CHECK.  Until the
-        # discriminant exists, defaulting VERBATIM keeps the CHECK
-        # satisfied trivially (no creating_* fields) AND preserves the
-        # audit guarantee that ``created_from_message_id`` always names
-        # the user message that triggered the tool call.
+        provenance = _blob_creation_provenance(inline_blob.content, context)
         prepared_inline_blob = _prepare_blob_create(
             inline_blob.model_dump(),
             data_dir=data_dir,
             session_id=session_id,
-            creation_modality=CreationModality.VERBATIM,
+            creation_modality=provenance.creation_modality,
             created_from_message_id=user_message_id,
+            creating_model_identifier=provenance.creating_model_identifier,
+            creating_model_version=provenance.creating_model_version,
+            creating_provider=provenance.creating_provider,
+            creating_composer_skill_hash=provenance.creating_composer_skill_hash,
+            creating_arguments_hash=provenance.creating_arguments_hash,
         )
         header_conflict = _header_only_inline_csv_conflict(
             prepared_inline_blob,
@@ -297,6 +300,7 @@ def _execute_set_pipeline(
             **mime_options,
             "path": str(prepared_inline_blob.storage_path),
             "blob_ref": prepared_inline_blob.blob_id,
+            **_source_authoring_options(prepared_inline_blob.creation_modality, prepared_inline_blob.content_hash),
         }
 
     # S2: Validate source path allowlist (same check as _execute_set_source)
@@ -1335,6 +1339,7 @@ async def _handle_request_interpretation_review(
         affected_node_id=parsed.affected_node_id,
         tool_call_id=tool_call_id,
         user_term=parsed.user_term,
+        kind=_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND,
         llm_draft=parsed.llm_draft,
         model_identifier=model_identifier,
         model_version=model_version,

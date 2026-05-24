@@ -22,6 +22,7 @@ from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
     InterpretationEventRecord,
+    InterpretationKind,
     InterpretationSource,
 )
 from elspeth.contracts.errors import AuditIntegrityError
@@ -244,6 +245,11 @@ class CompositionProposalRecord:
     session_id: UUID
     tool_call_id: str
     user_message_id: UUID | None
+    composer_model_identifier: str | None
+    composer_model_version: str | None
+    composer_provider: str | None
+    composer_skill_hash: str | None
+    tool_arguments_hash: str | None
     tool_name: str
     status: ProposalLifecycleStatus
     summary: str
@@ -262,6 +268,15 @@ class CompositionProposalRecord:
             raise AuditIntegrityError(
                 f"Tier 1: composition_proposals.status is {self.status!r}, expected one of {sorted(PROPOSAL_LIFECYCLE_STATUS_VALUES)}"
             )
+        composer_provenance = (
+            self.composer_model_identifier,
+            self.composer_model_version,
+            self.composer_provider,
+            self.composer_skill_hash,
+            self.tool_arguments_hash,
+        )
+        if any(value is None for value in composer_provenance) and any(value is not None for value in composer_provenance):
+            raise AuditIntegrityError("Tier 1: composition_proposals composer provenance fields must be all populated or all NULL")
         freeze_fields(self, "affects", "arguments_json", "arguments_redacted_json")
 
 
@@ -705,6 +720,11 @@ class SessionServiceProtocol(Protocol):
         base_state_id: UUID | None,
         actor: str,
         user_message_id: UUID | None = None,
+        composer_model_identifier: str | None = None,
+        composer_model_version: str | None = None,
+        composer_provider: str | None = None,
+        composer_skill_hash: str | None = None,
+        tool_arguments_hash: str | None = None,
     ) -> CompositionProposalRecord: ...
 
     async def list_composition_proposals(
@@ -744,6 +764,7 @@ class SessionServiceProtocol(Protocol):
         affected_node_id: str,
         tool_call_id: str,
         user_term: str,
+        kind: InterpretationKind,
         llm_draft: str,
         model_identifier: str,
         model_version: str,
@@ -753,10 +774,13 @@ class SessionServiceProtocol(Protocol):
     ) -> InterpretationEventRecord:
         """Insert a PENDING interpretation event.
 
-        Implementations MUST validate ``affected_node_id`` exists in
-        the parent composition state's ``nodes`` JSON before INSERT
-        (writer-boundary check per CLAUDE.md offensive programming).
-        Raises ``ValueError`` on a missing state or unknown node.
+        ``kind`` must be supplied explicitly by the caller; legacy
+        ``request_interpretation_review`` bridges pass ``vague_term`` at
+        the call site while the tool remains vague-term-only. Implementations MUST
+        validate ``affected_node_id`` exists in the parent composition
+        state's ``nodes`` JSON before INSERT (writer-boundary check per
+        CLAUDE.md offensive programming). Raises ``ValueError`` on a
+        missing state, unknown node, or non-``InterpretationKind`` kind.
         """
         ...
 
@@ -852,6 +876,7 @@ class SessionServiceProtocol(Protocol):
         *,
         session_id: UUID,
         actor: str,
+        kind: InterpretationKind,
         model_identifier: str,
         model_version: str,
         provider: str,
@@ -874,12 +899,11 @@ class SessionServiceProtocol(Protocol):
         * Interpretation-surface fields are NULL: ``composition_state_id``,
           ``affected_node_id``, ``tool_call_id``, ``user_term``,
           ``llm_draft`` (the rejected request never produced a surface).
-        * LLM provenance fields MUST be populated — the composer LLM
+        * ``kind`` and LLM provenance fields MUST be populated — the composer LLM
           that triggered the rate cap is fully identifiable from the
           compose-loop snapshot.
-        * ``arguments_hash`` is NULL because the
-          ``INTERPRETATION_HASH_DOMAIN_V1`` set requires
-          surface fields that don't exist for this row shape.
+        * ``arguments_hash`` is NULL because no user-visible surface was
+          created to resolve.
         * ``resolved_at`` equals ``created_at`` (the rate-cap event is
           itself a resolution).
         """

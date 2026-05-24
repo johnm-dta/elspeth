@@ -21,6 +21,8 @@ from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
 
 INTERPRETATION_REQUIREMENTS_KEY = "interpretation_requirements"
 PROMPT_TEMPLATE_PARTS_KEY = "prompt_template_parts"
+SOURCE_AUTHORING_KEY = "source_authoring"
+SOURCE_COMPONENT_ID = "source"
 INTERPRETATION_REVIEW_PENDING_CODE = "interpretation_review_pending"
 PENDING_INTERPRETATION_AUTHORING_TEXT = "pending interpretation"
 
@@ -28,6 +30,7 @@ AUTHORING_METADATA_OPTION_KEYS: frozenset[str] = frozenset(
     {
         INTERPRETATION_REQUIREMENTS_KEY,
         PROMPT_TEMPLATE_PARTS_KEY,
+        SOURCE_AUTHORING_KEY,
     }
 )
 
@@ -56,6 +59,13 @@ class PromptPart(TypedDict):
     kind: str
     text: NotRequired[str]
     requirement_id: NotRequired[str]
+
+
+class SourceAuthoringMetadata(TypedDict):
+    modality: str
+    content_hash: str
+    review_event_id: str | None
+    resolved_kind: str | None
 
 
 @dataclass(frozen=True, slots=True)

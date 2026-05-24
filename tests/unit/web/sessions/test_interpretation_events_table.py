@@ -23,7 +23,9 @@ from sqlalchemy.exc import IntegrityError
 
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
+    SESSION_SCHEMA_EPOCH,
     chat_messages_table,
+    composition_proposals_table,
     composition_states_table,
     interpretation_events_table,
     sessions_table,
@@ -72,6 +74,7 @@ def _user_approved_row(
     session_id: str,
     state_id: str,
     tool_call_id: str = "tool_call_1",
+    kind: str | None = "vague_term",
     choice: str = "pending",
     resolved_at: datetime | None = None,
     accepted_value: str | None = None,
@@ -88,6 +91,7 @@ def _user_approved_row(
         "affected_node_id": "llm_transform_1",
         "tool_call_id": tool_call_id,
         "user_term": "cool",
+        "kind": kind,
         "llm_draft": "A draft definition of cool",
         "accepted_value": accepted_value,
         "choice": choice,
@@ -115,6 +119,7 @@ def _opt_out_row(*, row_id: str, session_id: str, tool_call_id: str | None = Non
         "affected_node_id": None,
         "tool_call_id": tool_call_id,
         "user_term": None,
+        "kind": None,
         "llm_draft": None,
         "accepted_value": None,
         "choice": "opted_out",
@@ -140,6 +145,7 @@ def _no_surfaces_row(
     session_id: str,
     tool_call_id: str | None = None,
     user_term: str | None = None,
+    kind: str | None = "vague_term",
     model_identifier: str | None = "anthropic/claude-opus-4-7",
 ) -> dict:
     return {
@@ -149,6 +155,7 @@ def _no_surfaces_row(
         "affected_node_id": None,
         "tool_call_id": tool_call_id,
         "user_term": user_term,
+        "kind": kind,
         "llm_draft": None,
         "accepted_value": None,
         "choice": "opted_out",
@@ -168,6 +175,64 @@ def _no_surfaces_row(
     }
 
 
+def _surface_opt_out_row(*, row_id: str, session_id: str, state_id: str) -> dict:
+    return _user_approved_row(
+        row_id=row_id,
+        session_id=session_id,
+        state_id=state_id,
+        tool_call_id="call_surface_opt_out",
+        kind="invented_source",
+        choice="opted_out",
+        resolved_at=datetime.now(UTC),
+        accepted_value="https://example.gov.au",
+        hash_domain_version="v2",
+        arguments_hash="b" * 64,
+    ) | {
+        "user_term": "inline_source_url_list",
+        "llm_draft": "https://example.gov.au",
+        "actor": "composer-llm",
+        "interpretation_source": "auto_interpreted_opt_out",
+    }
+
+
+def test_proposal_provenance_schema_cohort_epoch_is_11() -> None:
+    assert SESSION_SCHEMA_EPOCH == 11
+
+
+def test_composition_proposal_composer_provenance_is_all_or_none(engine) -> None:
+    session_id = str(uuid.uuid4())
+    with (
+        pytest.raises(IntegrityError, match="ck_composition_proposals_composer_provenance_all_or_none"),
+        engine.begin() as conn,
+    ):
+        _insert_session(conn, session_id)
+        conn.execute(
+            insert(composition_proposals_table).values(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                tool_call_id="call_partial_provenance",
+                user_message_id=None,
+                composer_model_identifier="openai/gpt-5-mini",
+                composer_model_version=None,
+                composer_provider=None,
+                composer_skill_hash=None,
+                tool_arguments_hash=None,
+                tool_name="set_pipeline",
+                status="pending",
+                summary="Partial provenance should fail.",
+                rationale="Schema all-or-none guard.",
+                affects=["graph"],
+                arguments_json={},
+                arguments_redacted_json={},
+                base_state_id=None,
+                committed_state_id=None,
+                audit_event_id=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+
 # Test 1 — table exists with all expected columns -----------------------------
 class TestSchema:
     def test_interpretation_events_columns(self, engine) -> None:
@@ -181,6 +246,7 @@ class TestSchema:
             "affected_node_id",
             "tool_call_id",
             "user_term",
+            "kind",
             "llm_draft",
             "accepted_value",
             "choice",
@@ -259,7 +325,7 @@ class TestStatusConsistencyCheck:
                             choice="accepted_as_drafted",
                             resolved_at=datetime.now(UTC),
                             accepted_value=None,
-                            hash_domain_version="v1",
+                            hash_domain_version="v2",
                             arguments_hash="a" * 64,
                             resolved_prompt_template_hash="b" * 64,
                             runtime_model_identifier_at_resolve="anthropic/claude-opus-4-7",
@@ -277,6 +343,102 @@ class TestSourceNullability:
         with engine.begin() as conn:
             _insert_session(conn, session_id)
             conn.execute(insert(interpretation_events_table).values(_opt_out_row(row_id=str(uuid.uuid4()), session_id=session_id)))
+
+    def test_surface_opt_out_row_carries_kind_and_v2_hash(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            _seed_composition_state(conn, state_id=state_id, session_id=session_id)
+            conn.execute(
+                insert(interpretation_events_table).values(
+                    _surface_opt_out_row(row_id=str(uuid.uuid4()), session_id=session_id, state_id=state_id)
+                )
+            )
+
+    def test_user_approved_with_null_kind_raises(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            _seed_composition_state(conn, state_id=state_id, session_id=session_id)
+            row = _user_approved_row(
+                row_id=str(uuid.uuid4()),
+                session_id=session_id,
+                state_id=state_id,
+                kind=None,
+            )
+            with pytest.raises(IntegrityError):
+                conn.execute(insert(interpretation_events_table).values(row))
+
+    def test_surface_opt_out_with_v1_hash_raises(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            _seed_composition_state(conn, state_id=state_id, session_id=session_id)
+            row = _user_approved_row(
+                row_id=str(uuid.uuid4()),
+                session_id=session_id,
+                state_id=state_id,
+                kind="invented_source",
+                choice="opted_out",
+                resolved_at=datetime.now(UTC),
+                accepted_value="https://example.gov.au",
+                hash_domain_version="v1",
+                arguments_hash="b" * 64,
+            ) | {
+                "user_term": "inline_source_url_list",
+                "llm_draft": "https://example.gov.au",
+                "actor": "composer-llm",
+                "interpretation_source": "auto_interpreted_opt_out",
+            }
+            with pytest.raises(IntegrityError):
+                conn.execute(insert(interpretation_events_table).values(row))
+
+    def test_opt_out_marker_with_non_opted_out_choice_raises(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            row = _opt_out_row(row_id=str(uuid.uuid4()), session_id=session_id)
+            row["choice"] = "abandoned"
+            with pytest.raises(IntegrityError):
+                conn.execute(insert(interpretation_events_table).values(row))
+
+    def test_surface_opt_out_with_non_opted_out_choice_raises(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            _seed_composition_state(conn, state_id=state_id, session_id=session_id)
+            row = _surface_opt_out_row(row_id=str(uuid.uuid4()), session_id=session_id, state_id=state_id)
+            row["choice"] = "accepted_as_drafted"
+            with pytest.raises(IntegrityError):
+                conn.execute(insert(interpretation_events_table).values(row))
+
+    def test_no_surfaces_with_non_opted_out_choice_raises(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            row = _no_surfaces_row(row_id=str(uuid.uuid4()), session_id=session_id)
+            row["choice"] = "abandoned"
+            with pytest.raises(IntegrityError):
+                conn.execute(insert(interpretation_events_table).values(row))
+
+    def test_invalid_kind_raises(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            _seed_composition_state(conn, state_id=state_id, session_id=session_id)
+            row = _user_approved_row(
+                row_id=str(uuid.uuid4()),
+                session_id=session_id,
+                state_id=state_id,
+                kind="not_real",
+            )
+            with pytest.raises(IntegrityError):
+                conn.execute(insert(interpretation_events_table).values(row))
 
     # Test 4a — opted_out + composition_state_id non-NULL → IntegrityError
     def test_opted_out_with_non_null_composition_state_id_raises(self, engine) -> None:
@@ -398,7 +560,7 @@ class TestPartialUniqueOnPending:
                             choice="accepted_as_drafted",
                             resolved_at=now,
                             accepted_value="ok",
-                            hash_domain_version="v1",
+                            hash_domain_version="v2",
                             arguments_hash="a" * 64,
                         )
                     )
@@ -473,7 +635,7 @@ class TestImmutabilityTrigger:
                         choice="accepted_as_drafted",
                         resolved_at=datetime.now(UTC),
                         accepted_value=accepted_value,
-                        hash_domain_version="v1",
+                        hash_domain_version="v2",
                         arguments_hash="a" * 64,
                     )
                 )

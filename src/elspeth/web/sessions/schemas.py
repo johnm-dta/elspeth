@@ -21,7 +21,7 @@ from uuid import UUID
 import pydantic
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
-from elspeth.contracts.composer_interpretation import InterpretationChoice, InterpretationSource
+from elspeth.contracts.composer_interpretation import InterpretationChoice, InterpretationKind, InterpretationSource
 from elspeth.web.execution.schemas import DiscardSummary, RunAccounting
 from elspeth.web.sessions.protocol import (
     ComposerDensityDefault,
@@ -497,11 +497,15 @@ class InterpretationEventResponse(BaseModel):
 
     id: UUID
     session_id: UUID
-    # ``None`` for ``auto_interpreted_opt_out`` rows (no surfacing occurred).
+    # ``None`` for session-level ``auto_interpreted_opt_out`` marker rows
+    # (no surfacing occurred). Surface-specific opt-out rows carry kind,
+    # surface/provenance fields, accepted_value, arguments_hash, and
+    # hash_domain_version='v2'.
     composition_state_id: UUID | None = None
     affected_node_id: str | None = Field(default=None, max_length=256)
     tool_call_id: str | None = Field(default=None, max_length=256)
     user_term: str | None = Field(default=None, max_length=8192)
+    kind: InterpretationKind | None = None
     llm_draft: str | None = Field(default=None, max_length=8192)
     accepted_value: str | None = Field(default=None, max_length=8192)
     choice: InterpretationChoice
@@ -521,10 +525,10 @@ class InterpretationEventResponse(BaseModel):
     provider: str | None = Field(default=None, max_length=64)
     # hex SHA-256 of pipeline_composer.md content at draft time.
     composer_skill_hash: str | None = Field(default=None, max_length=64)
-    # hex rfc8785-canonical hash over INTERPRETATION_HASH_DOMAIN_V1;
+    # hex rfc8785-canonical hash over INTERPRETATION_HASH_DOMAIN_V2;
     # populated at resolve time, NULL until then and for opt-out rows.
     arguments_hash: str | None = Field(default=None, max_length=64)
-    # ``v1`` once resolved (F-12); NULL until then and for opt-out rows.
+    # ``v2`` once resolved (F-12); NULL until then and for marker opt-out rows.
     hash_domain_version: str | None = Field(default=None, max_length=16)
     # F-19: runtime model snapshot at resolve time (may differ from the
     # composer model that produced the draft if a model swap happened

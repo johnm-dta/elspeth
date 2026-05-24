@@ -75,7 +75,13 @@ from sqlalchemy.types import JSON
 #   9 → ``sessions.archived_at`` added so user-side archive can hide
 #        sessions with durable run/completion history rather than deleting
 #        audit-bearing rows. Unrun sessions may still be physically deleted.
-SESSION_SCHEMA_EPOCH = 9
+#   10 → ``interpretation_events.kind`` added; surface-specific
+#        ``auto_interpreted_opt_out`` rows now carry reviewed LLM artefacts
+#        and V2 argument hashes.
+#   11 → composition_proposals gains composer provenance fields so deferred
+#        explicit-approval accepts can replay inline-blob writes with the same
+#        model/provider/skill/arguments context as the original compose turn.
+SESSION_SCHEMA_EPOCH = 11
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -406,6 +412,16 @@ composition_proposals_table = Table(
     # same-session ownership so accept/replay cannot bind blobs to another
     # session's message.
     Column("user_message_id", String, nullable=True),
+    # Composer provenance captured at proposal creation. Nullable for
+    # legacy/imported/manual proposals, but all-or-none when present. Accept
+    # replay uses these columns for inline/blob-backed source writes so a
+    # deferred proposal cannot silently downgrade composer-authored bytes to
+    # verbatim merely because the original compose-loop context is gone.
+    Column("composer_model_identifier", String, nullable=True),
+    Column("composer_model_version", String, nullable=True),
+    Column("composer_provider", String, nullable=True),
+    Column("composer_skill_hash", String, nullable=True),
+    Column("tool_arguments_hash", String, nullable=True),
     Column("tool_name", String, nullable=False),
     Column("status", String, nullable=False),
     Column("summary", Text, nullable=False),
@@ -448,6 +464,13 @@ composition_proposals_table = Table(
     CheckConstraint(
         "(status = 'committed') = (committed_state_id IS NOT NULL)",
         name="ck_composition_proposals_committed_state",
+    ),
+    CheckConstraint(
+        "((composer_model_identifier IS NULL AND composer_model_version IS NULL AND "
+        "composer_provider IS NULL AND composer_skill_hash IS NULL AND tool_arguments_hash IS NULL) OR "
+        "(composer_model_identifier IS NOT NULL AND composer_model_version IS NOT NULL AND "
+        "composer_provider IS NOT NULL AND composer_skill_hash IS NOT NULL AND tool_arguments_hash IS NOT NULL))",
+        name="ck_composition_proposals_composer_provenance_all_or_none",
     ),
 )
 
@@ -537,27 +560,35 @@ interpretation_events_table = Table(
     # Composite FK forces same-session ownership: an interpretation event in
     # session B cannot reference a composition state owned by session A.
     # Mirrors the pattern at composition_proposals.
-    # F-1: nullable=True — NULL for auto_interpreted_opt_out rows (no
-    # composition state was involved); NOT NULL for user_approved rows.
+    # F-1/F-12: nullable=True — NULL for session-level
+    # auto_interpreted_opt_out marker rows; populated for user_approved rows
+    # and surface-specific auto_interpreted_opt_out rows.
     Column("composition_state_id", String, nullable=True),
     # The LLM transform's node_id within composition_states.nodes that this
     # interpretation binds into. Validated at the writer boundary to exist;
     # NOT a foreign key because nodes live inside a JSON column, not a
     # separate table.
-    # F-1: nullable=True — NULL for auto_interpreted_opt_out rows.
+    # F-1/F-12: nullable=True — NULL for session-level
+    # auto_interpreted_opt_out marker rows; populated for user_approved rows
+    # and surface-specific auto_interpreted_opt_out rows.
     Column("affected_node_id", String, nullable=True),
     # The provider tool_call_id from the LLM call that surfaced this
     # interpretation. NOT a foreign key to chat_messages because the tool
     # call may still be in flight when this row is inserted.
-    # F-1: nullable=True — NULL for auto_interpreted_opt_out rows.
+    # F-1/F-12: nullable=True — NULL for session-level
+    # auto_interpreted_opt_out marker rows; populated for user_approved rows
+    # and surface-specific auto_interpreted_opt_out rows.
     Column("tool_call_id", String, nullable=True),
     # Audit-mandatory fields (source-conditional: see CHECKs below):
-    # NULL for auto_interpreted_opt_out rows (no LLM surfacing occurred);
-    # NOT NULL for user_approved rows; NULL for auto_interpreted_no_surfaces
-    # rows.
+    # NULL for session-level auto_interpreted_opt_out marker rows (no LLM
+    # surfacing occurred); NOT NULL for user_approved rows and
+    # surface-specific auto_interpreted_opt_out rows; NULL for
+    # auto_interpreted_no_surfaces rows except kind, which records the
+    # rejected review class.
     # F-1: all nullable=True — the CHECKs below enforce source-conditional
     # presence.
     Column("user_term", Text, nullable=True),
+    Column("kind", String, nullable=True),
     Column("llm_draft", Text, nullable=True),
     Column("accepted_value", Text, nullable=True),  # None until resolved
     Column("choice", String, nullable=False),
@@ -566,17 +597,20 @@ interpretation_events_table = Table(
     Column("actor", String, nullable=False),
     # Audit provenance: snapshot of the composer LLM context at surfacing time.
     # F-1: nullable=True for model_identifier, model_version, provider,
-    # composer_skill_hash — NULL for auto_interpreted_opt_out rows (no LLM was
-    # consulted).
+    # composer_skill_hash — NULL for session-level auto_interpreted_opt_out
+    # marker rows (no LLM was consulted), populated for surface-specific
+    # auto_interpreted_opt_out rows.
     Column("model_identifier", String, nullable=True),
     Column("model_version", String, nullable=True),
     Column("provider", String, nullable=True),
     Column("composer_skill_hash", String, nullable=True),
-    # NULL until resolved. For auto_interpreted_opt_out rows, arguments_hash is
-    # NULL because there is no LLM-supplied content to hash.
+    # NULL until resolved. Session-level auto_interpreted_opt_out marker rows
+    # have no LLM-supplied content to hash; surface-specific opt-out rows are
+    # born resolved with accepted_value, arguments_hash, and
+    # hash_domain_version='v2'.
     # F-12 (hash domain versioning): hash_domain_version records the field set
-    # used to compute arguments_hash. The v1 field set is defined in
-    # contracts/composer_interpretation.py:INTERPRETATION_HASH_DOMAIN_V1.
+    # used to compute arguments_hash. New writes use
+    # contracts/composer_interpretation.py:INTERPRETATION_HASH_DOMAIN_V2.
     # NULL for rows without a hash (opt-out, pending). NOT NULL once resolved.
     Column("arguments_hash", String, nullable=True),
     Column("hash_domain_version", String, nullable=True),
@@ -597,7 +631,7 @@ interpretation_events_table = Table(
     # template, this is SHA-256 over the rfc8785 canonical JSON of the
     # resolved prompt-template string, using
     # ``CANONICAL_VERSION = "sha256-rfc8785-v1"`` (contracts/hashing.py).
-    # NOT part of INTERPRETATION_HASH_DOMAIN_V1 — it covers a different
+    # NOT part of INTERPRETATION_HASH_DOMAIN_V2 — it covers a different
     # input (the resolved prompt string) and serves as a cross-DB anchor
     # only. Pair to ``calls.resolved_prompt_template_hash`` in the L1
     # Landscape audit DB; equality across both DBs is the audit-tooling
@@ -627,43 +661,57 @@ interpretation_events_table = Table(
         "interpretation_source IN ('user_approved', 'auto_interpreted_opt_out', 'auto_interpreted_no_surfaces')",
         name="ck_interpretation_events_source",
     ),
-    # F-1 (source-keyed nullability CHECK): rows with
-    # interpretation_source = 'auto_interpreted_opt_out' have no LLM context;
-    # all nine interpretation fields must be NULL. Rows with
-    # interpretation_source = 'user_approved' have LLM context; all nine
-    # must be NOT NULL. Rows with interpretation_source =
-    # 'auto_interpreted_no_surfaces' had the LLM consulted (rate-cap
-    # fallback) but no surfacing; they carry LLM provenance fields but NULL
-    # for composition_state_id / affected_node_id / tool_call_id / user_term
-    # / llm_draft.
+    # Closed enum on kind. Adding a value requires the same ceremony as the
+    # InterpretationKind contract enum: contract amendment, schema update,
+    # closed-enum tests, and writer-path audit.
     CheckConstraint(
-        "(interpretation_source = 'auto_interpreted_opt_out') = "
-        "(composition_state_id IS NULL AND affected_node_id IS NULL AND "
-        " tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL AND "
-        " model_identifier IS NULL AND model_version IS NULL AND "
-        " provider IS NULL AND composer_skill_hash IS NULL)",
-        name="ck_interpretation_events_source_nullability",
+        "kind IS NULL OR kind IN ('vague_term', 'invented_source', 'llm_prompt_template')",
+        name="ck_interpretation_events_kind",
     ),
-    # user_approved rows must have all nine fields populated.
+    # Auto-interpreted rows are born resolved by definition. They never
+    # represent a user acceptance/amendment or an abandoned pending surface.
+    CheckConstraint(
+        "(interpretation_source NOT IN ('auto_interpreted_opt_out', 'auto_interpreted_no_surfaces')) OR choice = 'opted_out'",
+        name="ck_interpretation_events_auto_source_choice",
+    ),
+    # F-1/F-12 (source-keyed opt-out shapes): session-level opt-out marker
+    # rows have no LLM context and no hash; surface-specific opt-out rows
+    # are born resolved with kind, surface/provenance fields, accepted_value,
+    # and a V2 arguments_hash.
+    CheckConstraint(
+        "(interpretation_source != 'auto_interpreted_opt_out') OR "
+        "((kind IS NULL AND composition_state_id IS NULL AND affected_node_id IS NULL AND "
+        "  tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL AND "
+        "  accepted_value IS NULL AND model_identifier IS NULL AND model_version IS NULL AND "
+        "  provider IS NULL AND composer_skill_hash IS NULL AND arguments_hash IS NULL AND "
+        "  hash_domain_version IS NULL) OR "
+        " (kind IS NOT NULL AND composition_state_id IS NOT NULL AND affected_node_id IS NOT NULL AND "
+        "  tool_call_id IS NOT NULL AND user_term IS NOT NULL AND llm_draft IS NOT NULL AND "
+        "  accepted_value IS NOT NULL AND model_identifier IS NOT NULL AND model_version IS NOT NULL AND "
+        "  provider IS NOT NULL AND composer_skill_hash IS NOT NULL AND arguments_hash IS NOT NULL AND "
+        "  hash_domain_version = 'v2'))",
+        name="ck_interpretation_events_opt_out_shape",
+    ),
+    # user_approved rows must have kind and all surface/provenance fields
+    # populated.
     CheckConstraint(
         "(interpretation_source != 'user_approved') OR "
         "(composition_state_id IS NOT NULL AND affected_node_id IS NOT NULL AND "
-        " tool_call_id IS NOT NULL AND user_term IS NOT NULL AND llm_draft IS NOT NULL AND "
+        " tool_call_id IS NOT NULL AND user_term IS NOT NULL AND kind IS NOT NULL AND llm_draft IS NOT NULL AND "
         " model_identifier IS NOT NULL AND model_version IS NOT NULL AND "
         " provider IS NOT NULL AND composer_skill_hash IS NOT NULL)",
         name="ck_interpretation_events_user_approved_required",
     ),
     # auto_interpreted_no_surfaces rows: the five surface fields
     # (composition_state_id, affected_node_id, tool_call_id, user_term,
-    # llm_draft) must be NULL (no surfacing occurred); the four LLM
-    # provenance fields must be NOT NULL (the LLM was consulted for the
-    # rate-cap fallback auto-interpretation). This is the middle shape
-    # between opted_out (all nine NULL) and user_approved (all nine NOT
-    # NULL).
+    # llm_draft) must be NULL (no surfacing occurred); kind and the four
+    # LLM provenance fields must be NOT NULL (the LLM was consulted for
+    # the rate-cap fallback auto-interpretation). This is the middle shape
+    # between session opt-out marker rows and user_approved rows.
     CheckConstraint(
         "(interpretation_source != 'auto_interpreted_no_surfaces') OR "
         "(composition_state_id IS NULL AND affected_node_id IS NULL AND "
-        " tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL AND "
+        " tool_call_id IS NULL AND user_term IS NULL AND kind IS NOT NULL AND llm_draft IS NULL AND "
         " model_identifier IS NOT NULL AND model_version IS NOT NULL AND "
         " provider IS NOT NULL AND composer_skill_hash IS NOT NULL)",
         name="ck_interpretation_events_no_surfaces_shape",
@@ -675,9 +723,12 @@ interpretation_events_table = Table(
         "(choice = 'pending') = (resolved_at IS NULL)",
         name="ck_interpretation_events_resolved_at_status",
     ),
-    # accepted_value is populated only for accepted_as_drafted and amended.
+    # accepted_value is populated only for accepted_as_drafted/amended
+    # user-approved rows and surface-specific auto_interpreted_opt_out rows.
     CheckConstraint(
-        "(choice IN ('accepted_as_drafted', 'amended')) = (accepted_value IS NOT NULL)",
+        "((choice IN ('accepted_as_drafted', 'amended')) OR "
+        " (interpretation_source = 'auto_interpreted_opt_out' AND kind IS NOT NULL)) "
+        "= (accepted_value IS NOT NULL)",
         name="ck_interpretation_events_accepted_value_status",
     ),
 )

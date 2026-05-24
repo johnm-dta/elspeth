@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.enums import RunStatus
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.config import (
     CheckpointSettings,
     ConcurrencySettings,
@@ -831,7 +832,12 @@ class TestB3Construction:
 
 @pytest.mark.usefixtures("mock_pipeline_config_assembly")
 class TestInlineBlobRuntimePreflight:
-    """Inline-content blob refs resolve before plugin construction."""
+    """Inline-content blob refs resolve before plugin construction.
+
+    Bug verification: remove the ``record_blob_inline_resolutions`` call
+    from ``ExecutionServiceImpl._run_pipeline`` and this class loses the
+    audit-before-settings invariant.
+    """
 
     @patch("elspeth.web.execution.service.Orchestrator")
     @patch("elspeth.web.execution.service.build_validated_runtime_graph")
@@ -948,6 +954,65 @@ sinks:
         assert len(resolutions) == 1
         assert resolutions[0].field_path == "node:classify.options.system_prompt"
         assert resolutions[0].content_hash == sha256
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.build_validated_runtime_graph")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_audit_write_failure_prevents_settings_load(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        mock_runtime_graph: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        del mock_payload_cls, mock_landscape_cls, mock_runtime_graph
+        content = b"You are an audited prompt."
+        blob_id = uuid4()
+        run_id = uuid4()
+        sha256 = hashlib.sha256(content).hexdigest()
+
+        blob_record = MagicMock()
+        blob_record.mime_type = "text/plain"
+        blob_record.size_bytes = len(content)
+
+        blob_service = MagicMock()
+        blob_service.link_blob_to_run = AsyncMock(return_value=None)
+        blob_service.read_blob_content = AsyncMock(return_value=content)
+        blob_service.get_blob = AsyncMock(return_value=blob_record)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(errors=[]))
+        cast(Any, service)._blob_service = blob_service
+        mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=AuditIntegrityError("audit write refused"))
+
+        pipeline_yaml = f"""
+source:
+  plugin: csv
+  options:
+    path: input.csv
+transforms:
+  - name: classify
+    plugin: llm
+    options:
+      system_prompt:
+        blob_ref: {blob_id}
+        mode: inline_content
+        sha256: {sha256}
+sinks:
+  primary:
+    plugin: json
+    options:
+      path: output.jsonl
+"""
+
+        with pytest.raises(AuditIntegrityError, match="audit write refused"):
+            service._run_pipeline(str(run_id), pipeline_yaml, threading.Event())
+
+        mock_load.assert_not_called()
+        mock_orch_cls.assert_not_called()
 
 
 # ── B7: BaseException + Done Callback ─────────────────────────────────

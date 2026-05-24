@@ -125,6 +125,7 @@ def _make_processor() -> Any:
         source_node_id=NodeID("source-0"),
         source_on_success="default",
         traversal=traversal,
+        scheduler=setup.factory.scheduler,
     )
 
 

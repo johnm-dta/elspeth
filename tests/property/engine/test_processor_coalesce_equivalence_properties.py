@@ -67,6 +67,7 @@ def _make_processor(
         source_on_success="default",
         traversal=traversal,
         coalesce_executor=coalesce_executor,
+        scheduler=factory.scheduler,
     )
 
     return processor, coalesce_executor if coalesce_executor is not None else Mock()

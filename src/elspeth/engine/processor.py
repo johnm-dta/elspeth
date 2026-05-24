@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
-from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -336,7 +335,7 @@ class RowProcessor:
         clock: Clock | None = None,
         max_workers: int | None = None,
         telemetry_manager: TelemetryManagerProtocol | None = None,
-        scheduler: TokenSchedulerRepository | None = None,
+        scheduler: TokenSchedulerRepository,
         scheduler_lease_owner: str | None = None,
         scheduler_lease_seconds: int = 300,
         scheduler_heartbeat_seconds: int = 60,
@@ -371,10 +370,12 @@ class RowProcessor:
             max_workers: Maximum concurrent workers for transform execution (None = no limit)
             telemetry_manager: Optional TelemetryManager for emitting telemetry events.
                                If None, telemetry emission is disabled.
-            scheduler: Optional durable token scheduler. When present, every
-                continuation is persisted, leased, and terminally marked as it
-                advances; when absent, the legacy in-memory queue remains active.
+            scheduler: Durable token scheduler. Every continuation is persisted,
+                leased, and terminally marked as it advances.
         """
+        if scheduler is None:
+            raise TypeError("scheduler repository is required; RowProcessor no longer supports the legacy in-memory drain")
+
         self._execution = execution
         self._data_flow = data_flow
         self._spans = span_factory
@@ -487,9 +488,8 @@ class RowProcessor:
                     unique_states.append(state)
             for state in unique_states:
                 self._aggregation_executor.restore_from_checkpoint(state)
-            if self._scheduler is not None:
-                self._restore_scheduler_blocks_from_aggregation_checkpoint(unique_states)
-        if restored_coalesce_state is not None and restored_coalesce_state.has_resumable_state and self._scheduler is not None:
+            self._restore_scheduler_blocks_from_aggregation_checkpoint(unique_states)
+        if restored_coalesce_state is not None and restored_coalesce_state.has_resumable_state:
             self._restore_scheduler_blocks_from_coalesce_checkpoint(restored_coalesce_state)
 
     @property
@@ -499,9 +499,6 @@ class RowProcessor:
 
     def _restore_scheduler_blocks_from_aggregation_checkpoint(self, states: Sequence[AggregationCheckpointState]) -> None:
         """Materialize durable BLOCKED scheduler rows for restored aggregation buffers."""
-        if self._scheduler is None:
-            raise OrchestrationInvariantError("Cannot restore scheduler blocks without a scheduler repository")
-
         restored_at = self._clock.now_utc()
         for state in states:
             for node_id_str, node_checkpoint in state.nodes.items():
@@ -544,9 +541,6 @@ class RowProcessor:
 
     def _restore_scheduler_blocks_from_coalesce_checkpoint(self, state: CoalesceCheckpointState) -> None:
         """Materialize durable BLOCKED scheduler rows for restored coalesce barriers."""
-        if self._scheduler is None:
-            raise OrchestrationInvariantError("Cannot restore coalesce scheduler blocks without a scheduler repository")
-
         restored_at = self._clock.now_utc()
         for pending_entry in state.pending:
             coalesce_name = CoalesceName(pending_entry.coalesce_name)
@@ -2566,18 +2560,13 @@ class RowProcessor:
         initial_item: WorkItem,
         ctx: PluginContext,
     ) -> list[RowResult]:
-        """Drain the work queue, processing tokens until empty.
+        """Drain scheduler-backed work, processing tokens until empty.
 
-        Implements breadth-first DAG traversal. With a scheduler repository,
-        each work item is durably persisted and leased before it advances; child
-        continuations are persisted as READY work before the current lease is
-        marked TERMINAL. Without a scheduler repository, this preserves the
-        legacy in-memory queue behavior used by isolated processor unit tests.
+        Each work item is durably persisted and leased before it advances;
+        child continuations are persisted as READY work before the current
+        lease is marked terminal.
         """
-        if self._scheduler is not None:
-            return self._drain_durable_work_queue(initial_item, ctx)
-
-        return self._drain_in_memory_work_queue(initial_item, ctx)
+        return self._drain_durable_work_queue(initial_item, ctx)
 
     def drain_scheduled_work(self, ctx: PluginContext) -> list[RowResult]:
         """Advance already-persisted READY scheduler work for this run.
@@ -2598,8 +2587,6 @@ class RowProcessor:
         eventual lease expiry permits the helper to re-emit a RowResult for a
         token the peer has already produced (filigree elspeth-66be4216cd, G3).
         """
-        if self._scheduler is None:
-            raise OrchestrationInvariantError("Cannot drain scheduled work without a scheduler repository")
         peer_owners = self._scheduler.peer_active_leases(
             run_id=self._run_id,
             caller_owner=self._scheduler_lease_owner,
@@ -2619,20 +2606,14 @@ class RowProcessor:
 
     def has_scheduled_work(self) -> bool:
         """Return whether this run has non-terminal durable scheduler work."""
-        if self._scheduler is None:
-            return False
         return self._scheduler.count_active_work(run_id=self._run_id) > 0
 
     def active_scheduled_row_ids(self) -> frozenset[str]:
         """Return row IDs currently represented by active scheduler work."""
-        if self._scheduler is None:
-            return frozenset()
         return self._scheduler.active_row_ids(run_id=self._run_id)
 
     def summarize_scheduled_work(self) -> tuple[str, ...]:
         """Return grouped active scheduler work for invariant diagnostics."""
-        if self._scheduler is None:
-            return ()
         return self._scheduler.summarize_active_work(run_id=self._run_id)
 
     def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
@@ -2644,8 +2625,6 @@ class RowProcessor:
             raise AuditIntegrityError(
                 f"Scheduler barrier terminalization received duplicate live token_ids for barrier_key={barrier_key!r}: {token_ids!r}"
             )
-        if self._scheduler is None:
-            return expected_count
         terminalized_count = self._scheduler.mark_blocked_barrier_terminal(
             run_id=self._run_id,
             barrier_key=barrier_key,
@@ -2694,51 +2673,12 @@ class RowProcessor:
             blocked_token_ids,
         )
 
-    def _drain_in_memory_work_queue(
-        self,
-        initial_item: WorkItem,
-        ctx: PluginContext,
-    ) -> list[RowResult]:
-        """Drain the legacy in-memory work queue."""
-        work_queue: deque[WorkItem] = deque([initial_item])
-        results: list[RowResult] = []
-        iterations = 0
-
-        with self._spans.row_span(initial_item.token.row_id, initial_item.token.token_id):
-            while work_queue:
-                iterations += 1
-                if iterations > MAX_WORK_QUEUE_ITERATIONS:
-                    raise RuntimeError(f"Work queue exceeded {MAX_WORK_QUEUE_ITERATIONS} iterations. Possible infinite loop in pipeline.")
-
-                item = work_queue.popleft()
-                result, child_items = self._process_single_token(
-                    token=item.token,
-                    ctx=ctx,
-                    current_node_id=item.current_node_id,
-                    coalesce_node_id=item.coalesce_node_id,
-                    coalesce_name=item.coalesce_name,
-                    on_success_sink=item.on_success_sink,
-                )
-
-                if result is not None:
-                    if type(result) is tuple:
-                        results.extend(result)
-                    else:
-                        results.append(result)
-
-                work_queue.extend(child_items)
-
-        return results
-
     def _drain_durable_work_queue(
         self,
         initial_item: WorkItem,
         ctx: PluginContext,
     ) -> list[RowResult]:
         """Drain the scheduler-backed work queue for a single source token."""
-        if self._scheduler is None:
-            raise OrchestrationInvariantError("Durable work queue requested without a scheduler repository")
-
         pending_items: dict[str, WorkItem] = {}
 
         self._enqueue_scheduler_work_item(initial_item, pending_items)
@@ -2784,9 +2724,6 @@ class RowProcessor:
         Forcing recovery here would race against an in-flight sink writer
         and risk duplicate sink emission.
         """
-        if self._scheduler is None:
-            raise OrchestrationInvariantError("Cannot claim scheduler work without a scheduler repository")
-
         results: list[RowResult] = []
 
         if recover_pending_sinks:
@@ -2945,9 +2882,6 @@ class RowProcessor:
         ``mark_pending_sink`` MUST NOT be re-claimed here — see
         ``_drain_scheduler_claims`` docstring.
         """
-        if self._scheduler is None:
-            raise OrchestrationInvariantError("Cannot drain pending sinks without a scheduler repository")
-
         iterations = 0
         while True:
             iterations += 1
@@ -2975,8 +2909,6 @@ class RowProcessor:
 
     def mark_sink_bound_scheduler_terminal(self, token_id: str) -> None:
         """Terminalize scheduler work after sink outcome durability."""
-        if self._scheduler is None:
-            return
         self._scheduler.mark_pending_sink_terminal(
             run_id=self._run_id,
             token_id=token_id,
@@ -2986,8 +2918,6 @@ class RowProcessor:
 
     def _row_result_from_pending_sink(self, scheduled: TokenWorkItem) -> RowResult:
         """Rebuild a sink-bound row result without re-running its producer node."""
-        if self._scheduler is None:
-            raise OrchestrationInvariantError("Cannot rehydrate pending sink work without a scheduler repository")
         if scheduled.pending_sink_name is None or scheduled.pending_outcome is None or scheduled.pending_path is None:
             raise AuditIntegrityError(f"Scheduler pending sink work_item_id={scheduled.work_item_id!r} is missing sink outcome metadata.")
         token = TokenInfo(
@@ -3020,8 +2950,6 @@ class RowProcessor:
         barrier_key: str | None = None,
     ) -> None:
         """Persist BLOCKED state only when resume has a durable release key."""
-        if self._scheduler is None:
-            raise OrchestrationInvariantError("Cannot block scheduler work without a scheduler repository")
         queue_key = self._queue_key_for_blocked_item(item) if queue_key is None and barrier_key is None else queue_key
         barrier_key = self._barrier_key_for_blocked_item(item) if queue_key is None and barrier_key is None else barrier_key
         if queue_key is None and barrier_key is None:
@@ -3056,8 +2984,7 @@ class RowProcessor:
         DB write fires at most once per ``scheduler_heartbeat_seconds`` so
         fast plugin chains do not incur a write per node.
 
-        No-op when no scheduler is configured, no claim is active, or the
-        interval has not yet elapsed.
+        No-op when no claim is active or the interval has not yet elapsed.
 
         Raises:
             SchedulerLeaseLostError: the lease was reaped or reassigned by a
@@ -3077,8 +3004,6 @@ class RowProcessor:
         thread-based heartbeat) is a separate concern and not in scope for
         the ticket's option (a).
         """
-        if self._scheduler is None:
-            return
         if self._active_claim_work_item_id is None:
             return
         now = self._clock.now_utc()
@@ -3200,8 +3125,6 @@ class RowProcessor:
         pending_items: dict[str, WorkItem],
     ) -> TokenWorkItem:
         """Persist a READY scheduler item and retain the live token payload."""
-        if self._scheduler is None:
-            raise OrchestrationInvariantError("Cannot enqueue scheduler work without a scheduler repository")
         scheduled = self._scheduler.enqueue_ready(
             run_id=self._run_id,
             token_id=item.token.token_id,
@@ -3227,8 +3150,6 @@ class RowProcessor:
 
     def _work_item_from_scheduler(self, scheduled: TokenWorkItem) -> WorkItem:
         """Rehydrate a scheduler work item from its durable payload snapshot."""
-        if self._scheduler is None:
-            raise OrchestrationInvariantError("Cannot rehydrate scheduler work without a scheduler repository")
         current_node_id = None if scheduled.node_id is None or scheduled.node_id == "__terminal__" else NodeID(scheduled.node_id)
         token = TokenInfo(
             row_id=scheduled.row_id,
@@ -3915,11 +3836,10 @@ class RowProcessor:
                     f"{token.token_id}. Possible cycle in node_to_next map."
                 )
             # Refresh active scheduler lease (filigree elspeth-ddde8144b6).
-            # No-op when no scheduler is configured or no claim is active
-            # (legacy in-memory queue path, isolated unit tests). Raises
-            # SchedulerLeaseLostError when the lease was reaped by a peer —
-            # propagates up to ``_drain_scheduler_claims`` which catches it
-            # specifically and abandons this iteration cleanly.
+            # No-op when no claim is active. Raises SchedulerLeaseLostError
+            # when the lease was reaped by a peer — propagates up to
+            # ``_drain_scheduler_claims`` which catches it specifically and
+            # abandons this iteration cleanly.
             self._heartbeat_active_claim()
             handled, result = self._maybe_coalesce_token(
                 current_token,

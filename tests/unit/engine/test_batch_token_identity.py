@@ -90,11 +90,11 @@ def _assert_output_token_distinct_from_inputs(
     )
 
 
-def _single_node_traversal(node_id: NodeID, plugin: BaseTransform) -> DAGTraversalContext:
+def _single_node_traversal(source_node_id: NodeID, node_id: NodeID, plugin: BaseTransform) -> DAGTraversalContext:
     return DAGTraversalContext(
-        node_step_map={node_id: 1},
+        node_step_map={source_node_id: 0, node_id: 1},
         node_to_plugin={node_id: plugin},
-        node_to_next={node_id: None},
+        node_to_next={source_node_id: node_id, node_id: None},
         coalesce_node_map={},
     )
 
@@ -160,8 +160,9 @@ class TestBatchTokenIdentity:
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
             source_on_success="default",
-            traversal=_single_node_traversal(NodeID(agg_node_id), transform),
+            traversal=_single_node_traversal(NodeID(source_node_id), NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
+            scheduler=setup.factory.scheduler,
         )
         ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
@@ -245,8 +246,9 @@ class TestBatchTokenIdentity:
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
             source_on_success="default",
-            traversal=_single_node_traversal(NodeID(agg_node_id), transform),
+            traversal=_single_node_traversal(NodeID(source_node_id), NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
+            scheduler=setup.factory.scheduler,
         )
         ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
@@ -330,8 +332,9 @@ class TestBatchTokenIdentity:
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
             source_on_success="default",
-            traversal=_single_node_traversal(NodeID(agg_node_id), transform),
+            traversal=_single_node_traversal(NodeID(source_node_id), NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
+            scheduler=setup.factory.scheduler,
         )
         ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 

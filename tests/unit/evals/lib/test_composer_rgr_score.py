@@ -61,6 +61,20 @@ def _msg(role: str, content: str) -> dict[str, Any]:
     return {"role": role, "content": content}
 
 
+def _assistant_tool_call(name: str) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": f"call-{name}",
+                "type": "function",
+                "function": {"name": name, "arguments": "{}"},
+            }
+        ],
+    }
+
+
 # --------------------------------------------------------------------------
 # Baseline regression coverage (existing behavior must not change)
 # --------------------------------------------------------------------------
@@ -141,6 +155,20 @@ class TestBaselineAmberSignals:
         )
         assert result["verdict"] == "AMBER"
         assert any("outputs" in r for r in result["amber_reasons"])
+
+    @pytest.mark.parametrize("tool_call_count", [9, 12])
+    def test_amber_on_tool_call_budget_above_green_target_below_red_limit(self, tool_call_count: int) -> None:
+        result = score(
+            scenario=_scenario(
+                red={"max_persisted_tool_calls": 12},
+                green={"max_tool_calls_for_green": 8},
+            ),
+            messages=[_assistant_tool_call(f"tool_{i}") for i in range(tool_call_count)],
+            state=_state_valid(),
+        )
+
+        assert result["verdict"] == "AMBER"
+        assert any("tool calls" in reason for reason in result["amber_reasons"])
 
 
 # --------------------------------------------------------------------------

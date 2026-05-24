@@ -269,7 +269,10 @@ def build_context_string(
     # introspected and which it still needs to read before constructing a
     # config. ``schemas_loaded_this_session`` is service-tracked;
     # ``schemas_referenced_by_state`` is computed from state; ``schemas_gap``
-    # is the difference (referenced minus loaded).
+    # is the difference (referenced minus loaded). An empty pipeline has no
+    # referenced plugins yet, so ``schema_inventory_precondition`` carries the
+    # first-authoring rule that planned plugin schemas must still be discovered
+    # before the first mutation.
     #
     # When the caller did not thread the tracker (sentinel reached), the
     # ``loaded`` and ``gap`` views emit distinct marker strings rather
@@ -282,20 +285,31 @@ def build_context_string(
     def _format_pairs(pairs: set[tuple[str, str]] | frozenset[tuple[str, str]]) -> list[str]:
         return sorted(f"{kind}/{plugin}" for (kind, plugin) in pairs)
 
+    state_exists = state.source is not None or bool(state.nodes) or bool(state.outputs)
+
     if schemas_loaded is _SCHEMAS_LOADED_UNSET:
         schemas_loaded_view: list[str] = [_SCHEMAS_LOADED_UNSET_MARKER]
         schemas_gap_view: list[str] = [_SCHEMAS_GAP_UNSET_MARKER]
+        schema_inventory_precondition = "tracker missing; discover planned plugin schemas before mutation"
     else:
         schemas_loaded_view = _format_pairs(schemas_loaded)
-        schemas_gap_view = _format_pairs(referenced - schemas_loaded)
+        schemas_gap = referenced - schemas_loaded
+        schemas_gap_view = _format_pairs(schemas_gap)
+        if not state_exists:
+            schema_inventory_precondition = "discover planned plugin schemas before first mutation"
+        elif schemas_gap:
+            schema_inventory_precondition = "discover schemas_gap before mutation"
+        else:
+            schema_inventory_precondition = "satisfied for current referenced state"
 
     context = {
         "current_state": serialized,
         "composer_progress": {
-            "state_exists": state.source is not None or bool(state.nodes) or bool(state.outputs),
+            "state_exists": state_exists,
             "schemas_loaded_this_session": schemas_loaded_view,
             "schemas_referenced_by_state": _format_pairs(referenced),
             "schemas_gap": schemas_gap_view,
+            "schema_inventory_precondition": schema_inventory_precondition,
         },
         "available_plugins": {
             "sources": source_names,

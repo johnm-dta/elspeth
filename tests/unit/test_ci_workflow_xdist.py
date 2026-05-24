@@ -96,3 +96,13 @@ def test_postgres_testcontainer_ci_stays_sequential() -> None:
     run = _step_run(testcontainer_job, "Run testcontainer tests")
 
     assert "-n auto" not in run
+
+
+def test_static_analysis_runs_composer_skill_inventory_drift_gate() -> None:
+    """Generated composer skill inventory must be checked in CI, not only pre-commit."""
+    workflow = _ci_workflow()
+    static_analysis = workflow["jobs"]["static-analysis"]
+
+    run = _step_run(static_analysis, "Check composer skill tool inventory")
+
+    assert "scripts/cicd/generate_skill_inventory.py --check" in run

@@ -14,6 +14,7 @@ from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from opentelemetry.sdk.trace.export import SpanExportResult
 
 from elspeth.telemetry.errors import TELEMETRY_TRANSPORT_ERRORS, TelemetryExporterError
 from elspeth.telemetry.serialization import (
@@ -265,7 +266,14 @@ class AzureMonitorExporter:
 
         try:
             spans = [self._event_to_span(e) for e in self._buffer]
-            self._azure_exporter.export(spans)
+            result = self._azure_exporter.export(spans)
+            if result == SpanExportResult.FAILURE:
+                logger.warning(
+                    "Azure Monitor exporter reported failed status",
+                    exporter=self._name,
+                    span_count=len(spans),
+                )
+                return False
             logger.debug(
                 "Azure Monitor batch exported",
                 span_count=len(spans),

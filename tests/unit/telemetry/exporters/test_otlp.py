@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from opentelemetry.sdk.trace.export import SpanExportResult
 
 from elspeth.contracts import TokenCompleted, TokenUsage
 from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath
@@ -538,6 +539,22 @@ class TestOTLPExporterLifecycle:
         """flush() transport failures are reported without raising."""
         exporter, mock_sdk = self._create_configured_exporter()
         mock_sdk.export.side_effect = ConnectionError("Network error")
+
+        event = RunStarted(
+            timestamp=datetime.now(UTC),
+            run_id="run-123",
+            config_hash="abc",
+            source_plugin="csv",
+        )
+        exporter.export(event)
+
+        result = exporter.flush()
+        assert result is False
+
+    def test_sdk_failure_status_reports_handled_failure(self) -> None:
+        """SDK failure return values are delivery failures, not successful flushes."""
+        exporter, mock_sdk = self._create_configured_exporter()
+        mock_sdk.export.return_value = SpanExportResult.FAILURE
 
         event = RunStarted(
             timestamp=datetime.now(UTC),

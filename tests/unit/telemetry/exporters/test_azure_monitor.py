@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from opentelemetry.sdk.trace.export import SpanExportResult
 
 from elspeth.contracts.enums import RunStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.events import (
@@ -288,6 +289,16 @@ class TestAzureMonitorExporterLifecycle:
 
         configured_exporter.flush()
         mock_azure_exporter["instance"].export.assert_called_once()
+
+    def test_sdk_failure_status_reports_handled_failure(self, configured_exporter, mock_azure_exporter) -> None:
+        """Azure SDK failure statuses are reported to the telemetry manager."""
+        mock_azure_exporter["instance"].export.return_value = SpanExportResult.FAILURE
+
+        event = make_run_started()
+        configured_exporter.export(event)
+
+        result = configured_exporter.flush()
+        assert result is False
 
     def test_flush_logs_ack_when_buffer_empty(self, configured_exporter, mock_azure_exporter) -> None:
         """flush() logs acknowledgment when there are no buffered events."""

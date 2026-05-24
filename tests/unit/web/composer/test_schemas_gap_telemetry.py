@@ -116,13 +116,15 @@ class TestSchemasGapTelemetry:
     def test_schemas_loaded_starts_empty(self) -> None:
         """No get_plugin_schema calls yet — explicit empty frozenset means
         "tracked, nothing loaded" and produces empty lists (the LLM's
-        signal to discover plugins). Distinct from the
+        signal to discover plugins, not permission to mutate an empty
+        pipeline). Distinct from the
         ``_SCHEMAS_LOADED_UNSET`` sentinel reading exercised below.
         """
         progress = _composer_progress(build_context_string(_empty_state(), _stub_catalog(), schemas_loaded=frozenset()))
         assert progress["schemas_loaded_this_session"] == []
         assert progress["schemas_referenced_by_state"] == []
         assert progress["schemas_gap"] == []
+        assert progress["schema_inventory_precondition"] == "discover planned plugin schemas before first mutation"
 
     def test_schemas_loaded_reflects_passed_set(self) -> None:
         """A loaded set passed to build_context_string surfaces in the payload."""
@@ -162,6 +164,7 @@ class TestSchemasGapTelemetry:
         )
         progress = _composer_progress(build_context_string(_three_plugin_state(), _stub_catalog(), schemas_loaded=loaded))
         assert progress["schemas_gap"] == []
+        assert progress["schema_inventory_precondition"] == "satisfied for current referenced state"
 
     def test_extra_loaded_pairs_do_not_affect_referenced_or_gap(self) -> None:
         """Plugins loaded but not referenced are still surfaced under

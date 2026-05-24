@@ -1,18 +1,28 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-// Concatenate the global stylesheets that this test inspects:
-//   - tokens.css holds the :root (dark) and [data-theme="light"] token blocks
-//   - shared.css holds .btn, .btn-compact, .btn-primary, .btn-danger rules
-//   - themes.css holds the @media (forced-colors: active) overrides
-// Order matches styles/index.css barrel order so concatenation reproduces
-// the cascade view of these three files.
+// Concatenate the runtime stylesheet barrel so coverage follows App.tsx's
+// import path. Missing imports in styles/index.css must break these focused
+// CSS tests instead of being masked by ad hoc direct-file reads.
+const stylesheetBarrel = readFileSync("src/styles/index.css", "utf8");
 const appCss = [
-  readFileSync("src/styles/tokens.css", "utf8"),
-  readFileSync("src/styles/shared.css", "utf8"),
-  readFileSync("src/styles/themes.css", "utf8"),
+  ...Array.from(stylesheetBarrel.matchAll(/@import\s+"(?<path>[^"]+)";/g)).map((match) => {
+    const importPath = match.groups?.path;
+    if (importPath === undefined) {
+      throw new Error("styles/index.css import regex produced no path");
+    }
+    return readFileSync(fileURLToPath(new URL(importPath, import.meta.url)), "utf8");
+  }),
 ].join("\n");
+
+it("loads inspected CSS through the runtime stylesheet barrel", () => {
+  expect(stylesheetBarrel).toContain('@import "./tokens.css";');
+  expect(stylesheetBarrel).toContain('@import "./shared.css";');
+  expect(stylesheetBarrel).toContain('@import "./themes.css";');
+  expect(appCss).toContain(".btn-primary");
+});
 
 function extractForcedColorsBlock(): string {
   const start = appCss.indexOf("@media (forced-colors: active)");

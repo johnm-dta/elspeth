@@ -548,9 +548,10 @@ This applies on the **first authoring** of a plugin. Surgical re-edits via `patc
 
 ### The system context surfaces the gap explicitly
 
-Each turn, the system context payload includes a `composer_progress.schemas_gap` field — a list of `"kind/plugin"` references that appear in (or are planned for) the current state but have not yet been discovered this session. The rule is mechanical:
+Each turn, the system context payload includes a `composer_progress.schemas_gap` field — a list of `"kind/plugin"` references that appear in the current state but have not yet been discovered this session. The companion `composer_progress.schema_inventory_precondition` field tells you whether an empty gap is actually sufficient. The rule is mechanical:
 
-- `schemas_gap` is empty → you are clear to call mutation tools (Step 0 satisfied).
+- `schemas_gap` is empty and `schema_inventory_precondition` is `"satisfied for current referenced state"` → you are clear to call mutation tools for the current referenced state (Step 0 satisfied).
+- `schema_inventory_precondition` says `"discover planned plugin schemas before first mutation"` → the pipeline is empty/new, so `schemas_gap` cannot name plugins yet; call `get_plugin_schema` for every plugin you intend to author before the first mutation.
 - `schemas_gap` is non-empty → you must call `get_plugin_schema` for each entry before any mutation tool. Calling `set_pipeline` while `schemas_gap` is non-empty is the canonical anti-pattern this section exists to prevent.
 
 The companion field `composer_progress.schemas_loaded_this_session` lists what you have already loaded; use it to avoid re-discovering plugins you have already seen.

@@ -108,6 +108,8 @@ export function SaveForReviewDialog(): JSX.Element | null {
 
   return (
     <section
+      role="dialog"
+      aria-modal="true"
       className="save-for-review-dialog"
       aria-labelledby="save-for-review-dialog-title"
       data-testid="save-for-review-dialog"

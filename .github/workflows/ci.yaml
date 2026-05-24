@@ -93,6 +93,10 @@ jobs:
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv run python scripts/cicd/check_slot_type_cross_language.py
 
+      - name: Check composer skill tool inventory
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: uv run python scripts/cicd/generate_skill_inventory.py --check
+
       - name: Enforce contract alignment
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv run python scripts/check_contracts.py

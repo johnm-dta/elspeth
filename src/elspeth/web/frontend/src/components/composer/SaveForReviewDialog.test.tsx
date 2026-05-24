@@ -42,6 +42,15 @@ describe("SaveForReviewDialog", () => {
     expect(screen.getByTestId("save-for-review-spinner")).toBeInTheDocument();
   });
 
+  it("renders as a modal dialog with an accessible name", () => {
+    useShareableReviewStore.setState({ dialogOpen: true, inFlight: true } as never);
+    render(<SaveForReviewDialog />);
+
+    const dialog = screen.getByRole("dialog", { name: "Share for review" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveAttribute("aria-labelledby", "save-for-review-dialog-title");
+  });
+
   it("shows the error banner and retry button when error is set", () => {
     useShareableReviewStore.setState({
       dialogOpen: true,

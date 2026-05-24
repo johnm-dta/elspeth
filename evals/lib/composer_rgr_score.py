@@ -444,6 +444,14 @@ def _check_max_persisted_tool_calls(messages: list[dict[str, Any]], max_calls: i
     return None
 
 
+def _check_max_tool_calls_for_green(messages: list[dict[str, Any]], max_calls: int) -> str | None:
+    """Return an AMBER reason if the trajectory exceeds the green efficiency target."""
+    n = len(_iter_assistant_tool_calls(messages))
+    if n > max_calls:
+        return f"trajectory persisted {n} tool calls (green target: <= {max_calls})"
+    return None
+
+
 def _check_discover_before_mutation(messages: list[dict[str, Any]]) -> str | None:
     """Return an AMBER reason if no get_plugin_schema precedes the first mutation.
 
@@ -542,6 +550,12 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
         discover_reason = _check_discover_before_mutation(messages)
         if discover_reason is not None:
             amber_reasons.append(discover_reason)
+
+    max_tool_calls_for_green = green.get("max_tool_calls_for_green")
+    if isinstance(max_tool_calls_for_green, int):
+        inefficient_reason = _check_max_tool_calls_for_green(messages, max_tool_calls_for_green)
+        if inefficient_reason is not None:
+            amber_reasons.append(inefficient_reason)
 
     if isinstance(state, dict):
         node_plugins = _node_plugins(state)

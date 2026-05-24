@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -73,6 +74,13 @@ describe("ToolCallCard", () => {
     expect(
       screen.queryByRole("button", { name: /Accept proposal/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps the tool-call info button at or above the 24px target-size threshold", () => {
+    const css = readFileSync("src/components/chat/chat.css", "utf8");
+    const rule = /\.tool-call-info-trigger\s*\{(?<body>[\s\S]*?)\n\}/.exec(css);
+    expect(rule?.groups?.body).toContain("width: 24px");
+    expect(rule?.groups?.body).toContain("height: 24px");
   });
 
   it("calls accept and reject handlers", async () => {

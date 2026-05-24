@@ -57,6 +57,7 @@ function makeEvent(
     affected_node_id: "node-1",
     tool_call_id: "tool-1",
     user_term: "cool",
+    kind: "vague_term",
     llm_draft: "interesting and engaging",
     accepted_value: null,
     choice: "pending",
@@ -131,6 +132,55 @@ function makeApiError(status: number, detail = ""): ApiError {
   };
 }
 
+function mockScrollMetrics({
+  scrollHeight,
+  clientHeight,
+}: {
+  scrollHeight: number;
+  clientHeight: number;
+}): () => void {
+  const previousScrollHeight = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    "scrollHeight",
+  );
+  const previousClientHeight = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    "clientHeight",
+  );
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+    configurable: true,
+    get() {
+      return scrollHeight;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true,
+    get() {
+      return clientHeight;
+    },
+  });
+  return () => {
+    if (previousScrollHeight) {
+      Object.defineProperty(
+        HTMLElement.prototype,
+        "scrollHeight",
+        previousScrollHeight,
+      );
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, "scrollHeight");
+    }
+    if (previousClientHeight) {
+      Object.defineProperty(
+        HTMLElement.prototype,
+        "clientHeight",
+        previousClientHeight,
+      );
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, "clientHeight");
+    }
+  };
+}
+
 beforeEach(() => {
   resetStore(useInterpretationEventsStore);
   vi.mocked(api.resolveInterpretation).mockReset();
@@ -149,6 +199,87 @@ describe("InterpretationReviewInlineMessage — header", () => {
 
     expect(screen.getByText(/cool/)).toBeTruthy();
     expect(screen.getByText(/trendy/)).toBeTruthy();
+  });
+});
+
+describe("InterpretationReviewInlineMessage — kind-aware surfaces", () => {
+  it("renders invented-source copy and hides amendment", () => {
+    const event = makeEvent({
+      user_term: "inline_source_data",
+      kind: "invented_source",
+      llm_draft: "name,amount\nAda,42",
+    });
+    render(
+      <InterpretationReviewInlineMessage event={event} sessionId="sess-1" />,
+    );
+
+    expect(
+      screen.getByRole("region", { name: /invented source data/i }),
+    ).toBeTruthy();
+    const draft = screen.getByRole("group", { name: /source data draft/i });
+    expect(draft.textContent).toContain("name,amount");
+    expect(draft.textContent).toContain("Ada,42");
+    expect(draft.getAttribute("tabindex")).toBe("0");
+    expect(
+      screen.queryByRole("button", { name: /edit the interpretation/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /accept invented source data/i }),
+    ).toBeTruthy();
+  });
+
+  it("renders prompt-template copy and keeps accept disabled until the scroll surface reaches the end", async () => {
+    const restoreScrollMetrics = mockScrollMetrics({
+      scrollHeight: 300,
+      clientHeight: 100,
+    });
+    try {
+      const user = userEvent.setup();
+      const event = makeEvent({
+        kind: "llm_prompt_template",
+        affected_node_id: "summarise",
+        llm_draft: "Summarise {{ row.body }} for an auditor.",
+      });
+      vi.mocked(api.resolveInterpretation).mockResolvedValue(
+        makeResolveResponse(event),
+      );
+
+      render(
+        <InterpretationReviewInlineMessage event={event} sessionId="sess-1" />,
+      );
+
+      expect(
+        screen.getByRole("region", { name: /llm prompt template/i }),
+      ).toBeTruthy();
+      expect(
+        screen.queryByRole("button", { name: /edit the interpretation/i }),
+      ).toBeNull();
+
+      const accept = screen.getByRole("button", {
+        name: /accept llm prompt template/i,
+      }) as HTMLButtonElement;
+      expect(accept.disabled).toBe(true);
+
+      const promptSurface = screen.getByRole("region", {
+        name: /prompt template review/i,
+      });
+      Object.defineProperty(promptSurface, "scrollTop", {
+        configurable: true,
+        value: 200,
+      });
+      fireEvent.scroll(promptSurface);
+
+      await waitFor(() => {
+        expect(accept.disabled).toBe(false);
+      });
+      await user.click(accept);
+
+      await waitFor(() => {
+        expect(api.resolveInterpretation).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      restoreScrollMetrics();
+    }
   });
 });
 

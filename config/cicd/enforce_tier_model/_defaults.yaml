@@ -145,7 +145,23 @@ defaults:
     # ALLOWLIST-FRESH follow-ups for previously uncovered findings. Existing
     # headroom absorbed most of the +35 web.yaml delta; this ratchet bump is
     # the remaining +11 needed for the current corpus.
-    max_allow_hits: 547
+    #
+    # Bumped from 536 → 555 on 2026-05-24 for the
+    # tutorial-assumption-surfacing branch allowlist rotation/additions:
+    # removed 107 stale allow_hits and added 150 current findings (net +43
+    # allow_hits; existing headroom absorbed 24, requiring a +19 budget bump).
+    # The batch is a mix of same-symbol fingerprint rotations and reviewed
+    # branch additions for interpretation-review Tier-3 validation, guided-route
+    # audit unwind fallbacks, archive rollback/idempotent cleanup, and
+    # proposal/blob optional-shape probes. New branch-specific additions are
+    # bounded to 2026-08-24; same-site rotations preserve their existing
+    # owner/reason/safety/expiry metadata.
+    #
+    # Rebaselined to 580 on 2026-05-25 after replaying tutorial-assumption-
+    # surfacing onto RC5.2 and pruning stale fingerprints from the temporary
+    # PR39+tutorial allowlist union. Verified by trust_tier.tier_model on the
+    # combined tree.
+    max_allow_hits: 580
     # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
     # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
     # — W5 load-bearing telemetry-only exemption per
@@ -200,7 +216,16 @@ defaults:
     # Bumped from 628 → 639 on 2026-05-24 for the same PR39 trust-tier
     # rotation as ``max_allow_hits`` above. No permanent budget bump is
     # paired with this: fresh unmatched entries are bounded to 2026-08-24.
-    max_total_entries: 639
+    #
+    # Bumped from 628 → 647 on 2026-05-24 for the same
+    # tutorial-assumption-surfacing branch allowlist rotation/additions as
+    # ``max_allow_hits`` above (max_allow_hits +19, max_per_file_rules unchanged).
+    #
+    # Rebaselined to 672 on 2026-05-25 after replaying tutorial-assumption-
+    # surfacing onto RC5.2 and pruning stale fingerprints from the temporary
+    # PR39+tutorial allowlist union. Verified by trust_tier.tier_model on the
+    # combined tree.
+    max_total_entries: 672
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.
@@ -239,6 +264,12 @@ defaults:
     # 55 stale entries pruned, plus 5 service.py rotation entries the
     # compose-loop refactor (P1-P4 + Steps 6-7) rotated under us. Headroom
     # leaves space for one quarterly cycle of audit work without re-bumping.
-    max_permanent_allow_hits: 330
+    # Ratcheted to 318 on 2026-05-25 after stale-fingerprint pruning in the
+    # tutorial-assumption-surfacing rebase reduced the permanent exact-hit
+    # corpus below the prior ceiling.
+    max_permanent_allow_hits: 318
     max_permanent_per_file_rules: 92
-    max_permanent_total_entries: 425
+    # Ratcheted to 410 on 2026-05-25 after stale-fingerprint pruning in the
+    # tutorial-assumption-surfacing rebase reduced the permanent total corpus
+    # below the prior ceiling.
+    max_permanent_total_entries: 410

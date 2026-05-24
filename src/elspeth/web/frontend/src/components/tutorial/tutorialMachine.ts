@@ -1,7 +1,10 @@
 import type { CompositionState, NodeSpec, OutputSpec, SourceSpec } from "@/types/index";
 
 export const CANONICAL_TUTORIAL_PROMPT =
-  "create a list of 5 government web pages and use an LLM to rate how cool they are";
+  "Please go to the following web pages, use abuse contact noreply@dta.gov.au\n" +
+  "and scraping reason 'DTA technical demonstration'. Read the HTML for each\n" +
+  "page, have an LLM identify the primary colours for each government agency.\n" +
+  "Remove the HTML and save the rest to a json file.";
 
 export type TutorialStep =
   | "welcome"
@@ -10,7 +13,8 @@ export type TutorialStep =
   | "graph"
   | "run"
   | "audit"
-  | "mode";
+  | "mode"
+  | "graduation";
 
 export type RunResultRow = Record<string, unknown>;
 
@@ -62,6 +66,7 @@ export type TutorialAction =
   | { type: "runCompleted"; result: TutorialRunResult }
   | { type: "continueToMode" }
   | { type: "skipToMode" }
+  | { type: "finishMode" }
   | { type: "cancelRun" }
   | { type: "back" }
   | { type: "reset" };
@@ -106,6 +111,8 @@ export function previousStep(state: TutorialState): TutorialStep | null {
       if (state.skipped) return "welcome";
       if (state.cancelled) return "describe";
       return "audit";
+    case "graduation":
+      return "mode";
   }
 }
 
@@ -151,6 +158,11 @@ export function tutorialReducer(
         step: "mode",
         skipped: true,
       };
+    case "finishMode":
+      if (state.step !== "mode") {
+        throw new Error("tutorialReducer: finishMode requires the mode step");
+      }
+      return { ...state, step: "graduation" };
     case "cancelRun":
       // The user cancelled mid-run. Skip Turn 5 (no audit story is
       // available — the run was aborted) and land on Turn 6 with the

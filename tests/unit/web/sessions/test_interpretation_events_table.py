@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     SESSION_SCHEMA_EPOCH,
+    blobs_table,
     chat_messages_table,
     composition_proposals_table,
     composition_states_table,
@@ -195,8 +196,8 @@ def _surface_opt_out_row(*, row_id: str, session_id: str, state_id: str) -> dict
     }
 
 
-def test_proposal_provenance_schema_cohort_epoch_is_at_least_11() -> None:
-    assert SESSION_SCHEMA_EPOCH >= 11
+def test_proposal_provenance_schema_cohort_epoch_is_14() -> None:
+    assert SESSION_SCHEMA_EPOCH == 14
 
 
 def test_composition_proposal_composer_provenance_is_all_or_none(engine) -> None:
@@ -229,6 +230,116 @@ def test_composition_proposal_composer_provenance_is_all_or_none(engine) -> None
                 audit_event_id=None,
                 created_at=datetime.now(UTC),
                 updated_at=datetime.now(UTC),
+            )
+        )
+
+
+@pytest.mark.parametrize("blank_value", ["", "   ", "\t\n "])
+def test_composition_proposal_composer_provenance_rejects_blank_strings(engine, blank_value: str) -> None:
+    session_id = str(uuid.uuid4())
+    with (
+        pytest.raises(IntegrityError, match="ck_composition_proposals_composer_provenance_all_or_none"),
+        engine.begin() as conn,
+    ):
+        _insert_session(conn, session_id)
+        conn.execute(
+            insert(composition_proposals_table).values(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                tool_call_id="call_blank_provenance",
+                user_message_id=None,
+                composer_model_identifier=blank_value,
+                composer_model_version="gpt-5-mini-2026-05-01",
+                composer_provider="openai",
+                composer_skill_hash="sha256:composer-skill",
+                tool_arguments_hash="sha256:tool-arguments",
+                tool_name="set_pipeline",
+                status="pending",
+                summary="Blank provenance should fail.",
+                rationale="Schema non-blank guard.",
+                affects=["graph"],
+                arguments_json={},
+                arguments_redacted_json={},
+                base_state_id=None,
+                committed_state_id=None,
+                audit_event_id=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+
+def test_blob_llm_provenance_requires_created_from_message_anchor(engine) -> None:
+    session_id = str(uuid.uuid4())
+    with (
+        pytest.raises(IntegrityError, match="ck_blobs_creating_llm_provenance_nullability"),
+        engine.begin() as conn,
+    ):
+        _insert_session(conn, session_id)
+        conn.execute(
+            insert(blobs_table).values(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                filename="generated.csv",
+                mime_type="text/csv",
+                size_bytes=1,
+                content_hash="a" * 64,
+                storage_path="/tmp/generated.csv",
+                created_at=datetime.now(UTC),
+                created_by="assistant",
+                source_description=None,
+                status="ready",
+                creation_modality="llm_generated",
+                created_from_message_id=None,
+                creating_model_identifier="openai/gpt-5-mini",
+                creating_model_version="gpt-5-mini-2026-05-01",
+                creating_provider="openai",
+                creating_composer_skill_hash="sha256:composer-skill",
+                creating_arguments_hash="sha256:tool-arguments",
+            )
+        )
+
+
+@pytest.mark.parametrize("blank_value", ["", "   ", "\t\n "])
+def test_blob_llm_provenance_rejects_blank_strings(engine, blank_value: str) -> None:
+    session_id = str(uuid.uuid4())
+    message_id = str(uuid.uuid4())
+    with (
+        pytest.raises(IntegrityError, match="ck_blobs_creating_llm_provenance_nullability"),
+        engine.begin() as conn,
+    ):
+        _insert_session(conn, session_id)
+        conn.execute(
+            insert(chat_messages_table).values(
+                id=message_id,
+                session_id=session_id,
+                role="user",
+                content="Generate the CSV blob.",
+                sequence_no=1,
+                writer_principal="route_user_message",
+                created_at=datetime.now(UTC),
+            )
+        )
+        conn.execute(
+            insert(blobs_table).values(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                filename="generated.csv",
+                mime_type="text/csv",
+                size_bytes=1,
+                content_hash="a" * 64,
+                storage_path="/tmp/generated.csv",
+                created_at=datetime.now(UTC),
+                created_by="assistant",
+                source_description=None,
+                status="ready",
+                creation_modality="llm_generated",
+                created_from_message_id=message_id,
+                creating_model_identifier=blank_value,
+                creating_model_version="gpt-5-mini-2026-05-01",
+                creating_provider="openai",
+                creating_composer_skill_hash="sha256:composer-skill",
+                creating_arguments_hash="sha256:tool-arguments",
             )
         )
 

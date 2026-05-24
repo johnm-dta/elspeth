@@ -7,8 +7,13 @@
 
 import { describe, expect, it } from "vitest";
 
+import {
+  INTERPRETATION_KIND_VALUES,
+  isInterpretationKind,
+} from "./interpretation";
 import type {
   InterpretationChoice,
+  InterpretationKind,
   InterpretationSource,
   InterpretationEvent,
   ListInterpretationEventsResponse,
@@ -53,6 +58,27 @@ describe("interpretation protocol types", () => {
     expect(all).toHaveLength(3);
   });
 
+  it("InterpretationKind union has exactly 3 values matching the Python enum", () => {
+    const _exact: Equals<
+      InterpretationKind,
+      "vague_term" | "invented_source" | "llm_prompt_template"
+    > = true;
+    const all: InterpretationKind[] = [
+      "vague_term",
+      "invented_source",
+      "llm_prompt_template",
+    ];
+    expect(_exact).toBe(true);
+    expect(INTERPRETATION_KIND_VALUES).toEqual(all);
+    expect(all).toHaveLength(3);
+  });
+
+  it("InterpretationKind rejects unknown runtime values", () => {
+    expect(isInterpretationKind("vague_term")).toBe(true);
+    expect(isInterpretationKind("unknown_kind")).toBe(false);
+    expect(isInterpretationKind(null)).toBe(false);
+  });
+
   it("TurnType union has 7 values (Phase 5b adds interpretation_review)", () => {
     const _exact: Equals<
       TurnType,
@@ -77,9 +103,9 @@ describe("interpretation protocol types", () => {
     expect(all).toHaveLength(7);
   });
 
-  it("InterpretationEvent has the exhaustive 22-field shape (compile-time exact-keys check)", () => {
+  it("InterpretationEvent has the exhaustive 23-field shape (compile-time exact-keys check)", () => {
     // Adding/removing a field on the TS interface breaks this assignment.
-    // The 22-field count mirrors the InterpretationEventResponse pydantic
+    // The 23-field count mirrors the InterpretationEventResponse pydantic
     // schema in src/elspeth/web/sessions/schemas.py.
     const _exact: Equals<
       keyof InterpretationEvent,
@@ -89,6 +115,7 @@ describe("interpretation protocol types", () => {
       | "affected_node_id"
       | "tool_call_id"
       | "user_term"
+      | "kind"
       | "llm_draft"
       | "accepted_value"
       | "choice"
@@ -119,6 +146,7 @@ describe("interpretation protocol types", () => {
       affected_node_id: "node-1",
       tool_call_id: "tool-1",
       user_term: "cool",
+      kind: "vague_term",
       llm_draft: "interesting and engaging",
       accepted_value: null,
       choice: "pending",
@@ -150,6 +178,7 @@ describe("interpretation protocol types", () => {
       affected_node_id: null,
       tool_call_id: null,
       user_term: null,
+      kind: null,
       llm_draft: null,
       accepted_value: null,
       choice: "opted_out",
@@ -181,6 +210,7 @@ describe("interpretation protocol types", () => {
       affected_node_id: null,
       tool_call_id: null,
       user_term: null,
+      kind: "llm_prompt_template",
       llm_draft: null,
       accepted_value: null,
       choice: "opted_out",

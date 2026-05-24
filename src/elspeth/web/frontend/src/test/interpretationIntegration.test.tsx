@@ -171,6 +171,7 @@ function makePendingEvent(): InterpretationEvent {
     affected_node_id: LLM_NODE_ID,
     tool_call_id: "tool-1",
     user_term: "cool",
+    kind: "vague_term",
     llm_draft: "modern design + clear purpose + interactivity",
     accepted_value: null,
     choice: "pending",

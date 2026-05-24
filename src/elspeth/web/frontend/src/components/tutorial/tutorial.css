@@ -438,6 +438,28 @@
   margin-bottom: var(--space-xs);
 }
 
+.tutorial-graduation-list {
+  display: grid;
+  gap: var(--space-md);
+  margin: var(--space-lg) 0 0;
+  padding-left: 1.25rem;
+}
+
+.tutorial-graduation-list li {
+  max-width: 760px;
+  padding-left: var(--space-xs);
+}
+
+.tutorial-graduation-list strong {
+  display: block;
+  margin-bottom: var(--space-xs);
+  color: var(--color-text);
+}
+
+.tutorial-graduation-list span {
+  color: var(--color-text-secondary);
+}
+
 .tutorial-progress {
   display: flex;
   gap: var(--space-sm);

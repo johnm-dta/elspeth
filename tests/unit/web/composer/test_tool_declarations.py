@@ -322,6 +322,11 @@ class TestStep2RegistryAggregation:
         # strictly grows as tiers migrate.
         assert len(_REGISTERED_TOOLS) >= 5
 
+    def test_request_interpretation_review_is_not_a_normal_tool_declaration(self) -> None:
+        from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
+
+        assert "request_interpretation_review" not in {d.name for d in _REGISTERED_TOOLS}
+
 
 class TestStep3DiscoveryTierMigration:
     """All 13 discovery tools must carry declarations with byte-identical schemas.

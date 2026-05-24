@@ -3,11 +3,21 @@ import type { CompositionState } from "@/types/index";
 import {
   CANONICAL_TUTORIAL_PROMPT,
   initialTutorialState,
+  previousStep,
   summariseCompositionState,
   tutorialReducer,
 } from "./tutorialMachine";
 
 describe("tutorialMachine", () => {
+  it("pins the canonical tutorial prompt verbatim", () => {
+    expect(CANONICAL_TUTORIAL_PROMPT).toBe(
+      "Please go to the following web pages, use abuse contact noreply@dta.gov.au\n" +
+        "and scraping reason 'DTA technical demonstration'. Read the HTML for each\n" +
+        "page, have an LLM identify the primary colours for each government agency.\n" +
+        "Remove the HTML and save the rest to a json file.",
+    );
+  });
+
   it("walks the main tutorial sequence", () => {
     const described = tutorialReducer(initialTutorialState, { type: "start" });
     expect(described.step).toBe("describe");
@@ -45,6 +55,18 @@ describe("tutorialMachine", () => {
     expect(audit.step).toBe("audit");
     expect(audit.runId).toBe("run-1");
     expect(tutorialReducer(audit, { type: "continueToMode" }).step).toBe("mode");
+  });
+
+  it("moves from mode choice to graduation and back to mode", () => {
+    const modeState = {
+      ...initialTutorialState,
+      step: "mode" as const,
+    };
+    const graduation = tutorialReducer(modeState, { type: "finishMode" });
+
+    expect(graduation.step).toBe("graduation");
+    expect(previousStep(graduation)).toBe("mode");
+    expect(tutorialReducer(graduation, { type: "back" }).step).toBe("mode");
   });
 
   it("extracts URLs and plugin labels from a composition state", () => {

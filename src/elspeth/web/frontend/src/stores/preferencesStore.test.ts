@@ -104,8 +104,31 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().defaultMode).toBe("guided");
   });
 
-  it("markTutorialCompleted PATCHes default mode and completion timestamp together", async () => {
+  it("saveTutorialMode PATCHes only the default mode", async () => {
     usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "freeform",
+      banner_dismissed_at: null,
+      tutorial_completed_at: null,
+      updated_at: "2026-05-19T12:30:00Z",
+    });
+
+    await usePreferencesStore.getState().saveTutorialMode("freeform");
+
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    expect(mockUpdate.mock.calls[0][0]).toEqual({ default_mode: "freeform" });
+    expect(usePreferencesStore.getState().defaultMode).toBe("freeform");
+    expect(usePreferencesStore.getState().tutorialCompletedAt).toBeNull();
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
+  });
+
+  it("markTutorialGraduated PATCHes only the completion timestamp", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "freeform",
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
+    });
     mockUpdate.mockResolvedValueOnce({
       default_mode: "freeform",
       banner_dismissed_at: null,
@@ -113,12 +136,12 @@ describe("preferencesStore", () => {
       updated_at: "2026-05-19T12:30:00Z",
     });
 
-    await usePreferencesStore.getState().markTutorialCompleted("freeform");
+    await usePreferencesStore.getState().markTutorialGraduated();
 
     expect(mockUpdate).toHaveBeenCalledTimes(1);
-    const body = mockUpdate.mock.calls[0][0];
-    expect(body.default_mode).toBe("freeform");
-    expect(typeof body.tutorial_completed_at).toBe("string");
+    expect(mockUpdate.mock.calls[0][0]).toEqual({
+      tutorial_completed_at: expect.any(String),
+    });
     expect(usePreferencesStore.getState().defaultMode).toBe("freeform");
     expect(usePreferencesStore.getState().tutorialCompletedAt).toBe(
       "2026-05-19T12:30:00Z",
@@ -126,14 +149,61 @@ describe("preferencesStore", () => {
     expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
   });
 
-  it("markTutorialCompleted respects the writing guard", async () => {
+  it("markTutorialGraduated can defer the local completion flip until the caller publishes it", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "freeform",
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
+    });
+    mockUpdate.mockResolvedValueOnce({
+      default_mode: "freeform",
+      banner_dismissed_at: null,
+      tutorial_completed_at: "2026-05-19T12:30:00Z",
+      updated_at: "2026-05-19T12:30:00Z",
+    });
+
+    const completedAt = await usePreferencesStore
+      .getState()
+      .markTutorialGraduated({ publishLocally: false });
+
+    expect(completedAt).toBe("2026-05-19T12:30:00Z");
+    expect(mockUpdate.mock.calls[0][0]).toEqual({
+      tutorial_completed_at: expect.any(String),
+    });
+    expect(usePreferencesStore.getState().tutorialCompletedAt).toBeNull();
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
+
+    usePreferencesStore.getState().publishTutorialGraduation(completedAt);
+
+    expect(usePreferencesStore.getState().tutorialCompletedAt).toBe(
+      "2026-05-19T12:30:00Z",
+    );
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(true);
+  });
+
+  it("saveTutorialMode respects the writing guard", async () => {
     usePreferencesStore.setState({
       loaded: true,
       defaultMode: "guided",
       writing: true,
     });
 
-    await usePreferencesStore.getState().markTutorialCompleted("freeform");
+    await usePreferencesStore.getState().saveTutorialMode("freeform");
+
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(usePreferencesStore.getState().defaultMode).toBe("guided");
+    expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
+  });
+
+  it("markTutorialGraduated respects the writing guard", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      defaultMode: "guided",
+      writing: true,
+    });
+
+    await usePreferencesStore.getState().markTutorialGraduated();
 
     expect(mockUpdate).not.toHaveBeenCalled();
     expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);

@@ -69,6 +69,28 @@ export type InterpretationSource =
   | "auto_interpreted_opt_out"
   | "auto_interpreted_no_surfaces";
 
+/**
+ * Class of LLM-authored assumption surfaced for review.
+ *
+ * Mirrors the Python `InterpretationKind` StrEnum.  CLOSED LIST — adding
+ * a value requires contract amendment, schema update, closed-enum tests,
+ * and writer-path audit.
+ */
+export const INTERPRETATION_KIND_VALUES = [
+  "vague_term",
+  "invented_source",
+  "llm_prompt_template",
+] as const;
+
+export type InterpretationKind = (typeof INTERPRETATION_KIND_VALUES)[number];
+
+export function isInterpretationKind(value: unknown): value is InterpretationKind {
+  return (
+    typeof value === "string" &&
+    (INTERPRETATION_KIND_VALUES as readonly string[]).includes(value)
+  );
+}
+
 // ── Wire-domain shape ────────────────────────────────────────────────────────
 
 /**
@@ -104,6 +126,9 @@ export interface InterpretationEvent {
   affected_node_id: string | null;
   tool_call_id: string | null;
   user_term: string | null;
+  // Null only for legacy/session-marker rows that do not represent a
+  // specific surfaced assumption.
+  kind: InterpretationKind | null;
   llm_draft: string | null;
   // Null until the row is resolved; also null for opt-out rows.
   accepted_value: string | null;
@@ -122,10 +147,10 @@ export interface InterpretationEvent {
   provider: string | null;
   // hex SHA-256 of pipeline_composer.md at draft time.
   composer_skill_hash: string | null;
-  // hex rfc8785-canonical hash over INTERPRETATION_HASH_DOMAIN_V1.
+  // hex rfc8785-canonical hash over the active interpretation hash domain.
   // Populated at resolve time; null until then and for opt-out rows.
   arguments_hash: string | null;
-  // "v1" once resolved (F-12); null until then and for opt-out rows.
+  // "v2" once resolved; null until then and for legacy/session opt-out rows.
   hash_domain_version: string | null;
   // F-19: runtime model snapshot at resolve time (may differ from the
   // composer model that produced the draft if a model swap happened

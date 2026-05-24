@@ -181,6 +181,7 @@ class ComposerPreferencesResponse(_StrictResponse):
     session_id: str
     trust_mode: ComposerTrustMode
     density_default: ComposerDensityDefault
+    interpretation_review_disabled: bool
     updated_at: datetime
 
 

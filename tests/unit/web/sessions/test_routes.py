@@ -513,6 +513,7 @@ def test_get_composer_preferences_returns_defaults(test_client) -> None:
     # explicit_approve — see sessions_table.trust_mode comment in models.py).
     assert response.json()["trust_mode"] == "auto_commit"
     assert response.json()["density_default"] == "high"
+    assert response.json()["interpretation_review_disabled"] is False
 
 
 def test_patch_composer_preferences_records_event(test_client) -> None:
@@ -525,6 +526,7 @@ def test_patch_composer_preferences_records_event(test_client) -> None:
 
     assert response.status_code == 200
     assert response.json()["trust_mode"] == "auto_commit"
+    assert response.json()["interpretation_review_disabled"] is False
     events = test_client.get(f"/api/sessions/{session['id']}/proposal-events").json()
     assert events[-1]["event_type"] == "trust_mode.changed"
 

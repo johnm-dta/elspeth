@@ -42,8 +42,13 @@ def cache(cache_dir: Path) -> TutorialCache:
 
 
 def test_canonical_seed_prompt_constant_is_exact() -> None:
-    """The seed prompt must match design doc 04 verbatim."""
-    assert CANONICAL_SEED_PROMPT == ("create a list of 5 government web pages and use an LLM to rate how cool they are")
+    """The seed prompt must match the tutorial canonical prompt verbatim."""
+    assert CANONICAL_SEED_PROMPT == (
+        "Please go to the following web pages, use abuse contact noreply@dta.gov.au\n"
+        "and scraping reason 'DTA technical demonstration'. Read the HTML for each\n"
+        "page, have an LLM identify the primary colours for each government agency.\n"
+        "Remove the HTML and save the rest to a json file."
+    )
 
 
 def test_lookup_returns_none_on_miss(cache: TutorialCache) -> None:

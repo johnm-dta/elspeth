@@ -2936,6 +2936,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is True
         assert "storage_path" not in result.data
@@ -3008,6 +3009,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is False
 
@@ -3022,6 +3024,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "post,run\n1,1"),
         )
         assert result.success is True
         assert result.updated_state.source is not None
@@ -3045,6 +3048,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
 
         assert result.success is True
@@ -3068,6 +3072,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
 
         assert result.success is True
@@ -3104,6 +3109,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "should,proceed\n1,1"),
         )
 
         assert result.success is True
@@ -3140,6 +3146,7 @@ class TestBlobTools:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "would,corrupt,mid-run\n"),
         )
 
         assert result.success is True
@@ -3313,6 +3320,7 @@ class TestBlobTools:
         # Patch session_engine.begin() to raise AFTER the file is overwritten.
         # The update function reads old content, writes new content, THEN enters
         # the DB transaction.  We need the DB part to fail.
+        provenance_context = _verbatim_blob_context(self.engine, self.session_id, "new,content\n3,4")
         with (
             patch.object(
                 self.engine,
@@ -3328,6 +3336,7 @@ class TestBlobTools:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **provenance_context,
             )
 
         # File must contain the ORIGINAL content after rollback
@@ -3832,6 +3841,7 @@ class TestUpdateBlobQuota:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "slightly larger content"),
         )
         assert result.success is True
 
@@ -3849,6 +3859,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
             )
         assert result.success is False
         assert "quota" in result.data["error"].lower()
@@ -3866,6 +3877,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
             )
         assert self.storage_path.read_bytes() == self.original_content
 
@@ -3882,6 +3894,7 @@ class TestUpdateBlobQuota:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "a" * 200),
         )
         assert result.success is True
 
@@ -3894,6 +3907,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "tiny"),
             )
         assert result.success is True
 
@@ -3946,6 +3960,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 15),
             )
         assert result.success is True, f"Delta-based quota check should pass at boundary: {result.data}"
 
@@ -3964,6 +3979,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x"),
             )
         assert result.success is True
 
@@ -4012,6 +4028,7 @@ class TestUpdateBlobQuota:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 60),
             )
         assert result.success is True, f"Quota check used stale snapshot instead of current DB size: {result.data}"
 
@@ -4147,6 +4164,7 @@ class TestUpdateBlobRollbackPreservesPrimaryException:
                     catalog=catalog,
                     session_engine=self.engine,
                     session_id=self.session_id,
+                    **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
                 ),
             )
 
@@ -4199,6 +4217,7 @@ class TestUpdateBlobRollbackPreservesPrimaryException:
                     catalog=catalog,
                     session_engine=self.engine,
                     session_id=self.session_id,
+                    **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
                 ),
             )
 
@@ -4386,6 +4405,7 @@ class TestUpdateBlobSessionLockSerialisation:
                     _mock_catalog(),
                     session_engine=self.engine,
                     session_id=self.session_id,
+                    **_verbatim_blob_context(self.engine, self.session_id, "new-content-from-worker"),
                 )
                 result_holder.append(result)
             finally:
@@ -4540,6 +4560,7 @@ class TestUpdateBlobQuotaRollbackDivergence:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
             )
 
         # Clean failure result — no exception, no divergence.
@@ -4575,6 +4596,7 @@ class TestUpdateBlobQuotaRollbackDivergence:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "x" * 100),
             )
 
         assert result.success is False, "Quota-exceeded must return failure, not success"
@@ -8931,9 +8953,31 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new,content\n9,9"),
         )
         assert result.success is True
         assert self.storage_path.read_bytes() == b"new,content\n9,9"
+
+    def test_update_without_authoring_context_fails_closed(self) -> None:
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):
+            execute_tool(
+                "update_blob",
+                {"blob_id": self.blob_id, "content": "new,content\n9,9"},
+                state,
+                catalog,
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+        assert self.storage_path.read_bytes() == self.original_content
+        with self.engine.begin() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == self.blob_id)).one()
+        assert row.content_hash == _STUB_SHA256
 
     def test_update_rejected_when_blob_is_current_source_blob_ref(self) -> None:
         """A blob-backed source locks the blob content hash stamped in source_authoring."""
@@ -8963,6 +9007,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new,content\n9,9"),
         )
 
         assert result.success is False
@@ -9022,6 +9067,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is False
         assert "active run" in result.data["error"].lower()
@@ -9038,6 +9084,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is False
         assert "active run" in result.data["error"].lower()
@@ -9055,6 +9102,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "post,run\n1,1"),
         )
         assert result.success is True
         assert self.storage_path.read_bytes() == b"post,run\n1,1"
@@ -9071,6 +9119,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is False
         assert "active run" in result.data["error"].lower()
@@ -9091,6 +9140,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "new"),
         )
         assert result.success is False
         assert "active run" in result.data["error"].lower()
@@ -9111,6 +9161,7 @@ class TestUpdateBlobActiveRunGuard:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "should,proceed\n1,1"),
         )
         assert result.success is True
         assert self.storage_path.read_bytes() == b"should,proceed\n1,1"
@@ -9258,6 +9309,7 @@ class TestUpdateBlobAtomicWrite:
             catalog,
             session_engine=self.engine,
             session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "would,corrupt,mid-run\n"),
         )
         assert result.success is False
         assert self.storage_path.read_bytes() == self.original_content
@@ -9280,6 +9332,7 @@ class TestUpdateBlobAtomicWrite:
 
         state = _empty_state()
         catalog = _mock_catalog()
+        provenance_context = _verbatim_blob_context(self.engine, self.session_id, "new")
 
         # Force a DB failure by making begin() raise.  This fires
         # BEFORE any UPDATE / os.replace, so no file mutation can
@@ -9299,6 +9352,7 @@ class TestUpdateBlobAtomicWrite:
                 catalog,
                 session_engine=self.engine,
                 session_id=self.session_id,
+                **provenance_context,
             )
 
         assert self.storage_path.read_bytes() == self.original_content

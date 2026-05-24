@@ -84,7 +84,12 @@ from elspeth.web.composer.tools.sources import (
     _ResolvedSourceBlob,
     _source_authoring_options,
 )
-from elspeth.web.interpretation_state import interpretation_sites
+from elspeth.web.interpretation_state import (
+    SOURCE_AUTHORING_KEY,
+    SOURCE_COMPONENT_ID,
+    interpretation_sites,
+    transform_vague_term_site_tuples,
+)
 from elspeth.web.validation import (
     INTERPRETATION_PLACEHOLDER_RE,
     _reject_credential_shaped_content,
@@ -108,19 +113,15 @@ ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
     ADVISOR_TRIGGER_PROACTIVE_RED_LISTED,
 )
 
-# Current ``request_interpretation_review`` has no kind argument and remains
-# vague-term-only until Task 4 expands the tool contract. Keep that bridge
-# explicit at the call site so service writers never silently classify rows.
-_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND: Final[InterpretationKind] = InterpretationKind.VAGUE_TERM
-
 
 class _RequestInterpretationReviewArgumentsModel(BaseModel):
     """Tier-3 trust-boundary model for the ``request_interpretation_review`` tool.
 
-    All three fields are LLM-supplied and constrained mechanically:
+    All fields are LLM-supplied and constrained mechanically:
 
     * ``affected_node_id`` — short identifier; 256-char cap matches the wire
       cap used by ``upsert_node.id``.
+    * ``kind`` — closed interpretation class for the review row.
     * ``user_term`` and ``llm_draft`` — capped at 8192 chars to defend against
       pathological inputs that would distend the audit row beyond the
       schema's 8192-byte expectation (see ``interpretation_events_table``
@@ -134,6 +135,7 @@ class _RequestInterpretationReviewArgumentsModel(BaseModel):
     """
 
     affected_node_id: str = Field(min_length=1, max_length=256)
+    kind: InterpretationKind
     user_term: str = Field(min_length=1, max_length=8192)
     llm_draft: str = Field(min_length=1, max_length=8192)
 
@@ -1004,31 +1006,7 @@ def _authoring_validation_payload(state: CompositionState, validation: Validatio
     }
 
 
-def _assert_affected_llm_node(
-    state: CompositionState,
-    affected_node_id: str,
-    user_term: str,
-) -> None:
-    """Tier-3 boundary check on the LLM-supplied ``affected_node_id``.
-
-    Raises :class:`ToolArgumentError` with an actionable message when:
-
-    * the node does not exist in ``state.nodes``;
-    * the node's plugin kind is not ``llm``;
-    * the node has neither a structured pending interpretation requirement
-      nor a legacy ``{{interpretation:<user_term>}}`` placeholder for
-      ``user_term``.
-
-    Each branch raises ARG_ERROR (not a Tier-1 crash) because the LLM is
-    expected to recover by calling ``upsert_node`` to add the placeholder
-    and re-staging the tool call. A crash here would conflate "LLM made
-    a recoverable mistake" with "we have a bug in our own code".
-
-    During the migration window this accepts structured
-    ``interpretation_requirements`` first and falls back to legacy placeholder
-    syntax. Term matching remains strict after stripping surrounding
-    whitespace.
-    """
+def _find_node_or_raise(state: CompositionState, affected_node_id: str) -> NodeSpec:
     node = next((n for n in state.nodes if n.id == affected_node_id), None)
     if node is None:
         known = sorted(n.id for n in state.nodes)
@@ -1037,6 +1015,75 @@ def _assert_affected_llm_node(
             expected=f"id of an existing LLM transform (known ids: {known!r})",
             actual_type=f"unknown id {affected_node_id!r}",
         )
+    return node
+
+
+def _matching_interpretation_sites(
+    state: CompositionState,
+    affected_node_id: str,
+    kind: InterpretationKind,
+    user_term: str,
+) -> list[str]:
+    normalized_user_term = user_term.strip()
+    try:
+        sites = interpretation_sites(state)
+    except (TypeError, ValueError) as exc:
+        raise ToolArgumentError(
+            argument="affected_node_id",
+            expected="well-formed interpretation authoring metadata",
+            actual_type=f"invalid interpretation metadata: {exc}",
+        ) from exc
+    return [
+        site.user_term
+        for site in sites
+        if site.component_id == affected_node_id and site.kind is kind and site.user_term == normalized_user_term
+    ]
+
+
+def _assert_affected_component(
+    state: CompositionState,
+    affected_node_id: str,
+    kind: InterpretationKind,
+    user_term: str,
+) -> None:
+    """Tier-3 boundary check on the LLM-supplied review component.
+
+    Raises :class:`ToolArgumentError` with an actionable message when:
+
+    * ``invented_source`` does not target the source component, or the
+      source lacks composer-authored source metadata;
+    * transform kinds do not target an existing LLM node;
+    * vague-term and prompt-template review sites do not match the pending
+      structured authoring metadata (with legacy placeholder fallback for
+      vague terms).
+
+    Each branch raises ARG_ERROR (not a Tier-1 crash) because the LLM can
+    recover by staging the right source/node metadata and retrying the tool
+    call. Term matching remains strict after stripping surrounding whitespace.
+    """
+    if kind is InterpretationKind.INVENTED_SOURCE:
+        if affected_node_id != SOURCE_COMPONENT_ID:
+            raise ToolArgumentError(
+                argument="affected_node_id",
+                expected="'source' for invented_source",
+                actual_type="node id",
+            )
+        if state.source is None or SOURCE_AUTHORING_KEY not in state.source.options:
+            raise ToolArgumentError(
+                argument="affected_node_id",
+                expected="source with composer-authored source metadata",
+                actual_type="source without metadata",
+            )
+        matched_terms = _matching_interpretation_sites(state, affected_node_id, kind, user_term)
+        if not matched_terms:
+            raise ToolArgumentError(
+                argument="affected_node_id",
+                expected=f"source to contain a pending {kind.value} requirement for {user_term!r}",
+                actual_type=f"missing pending {kind.value} review site",
+            )
+        return
+
+    node = _find_node_or_raise(state, affected_node_id)
     plugin = node.plugin
     if plugin != "llm":
         raise ToolArgumentError(
@@ -1044,32 +1091,33 @@ def _assert_affected_llm_node(
             expected="id of a node whose plugin is 'llm'",
             actual_type=f"node {affected_node_id!r} has plugin={plugin!r}",
         )
-    # ``node.options`` is typed ``Mapping[str, Any]`` (NodeSpec deep-
-    # frozen invariant) — fall back to an empty dict when falsy so the
-    # downstream ``.get`` is always defined. The redundant ``isinstance
-    # (options, Mapping)`` guard that used to wrap this read is removed:
-    # the type system already proves it. The ``.get("prompt_template")``
-    # IS still a Tier-3 LLM-boundary read (the *value* at that key is
-    # LLM-authored ``Any``) and the ``isinstance(prompt_template, str)``
-    # narrow that follows is the actual boundary check.
+
     options = node.options if node.options else {}
     prompt_template = options.get("prompt_template")
     if not isinstance(prompt_template, str) or not prompt_template:
         raise ToolArgumentError(
             argument="affected_node_id",
-            expected=f"node {affected_node_id!r} to declare options.prompt_template (str) containing {{{{interpretation:{user_term}}}}}",
+            expected=f"node {affected_node_id!r} to declare non-empty options.prompt_template",
             actual_type=f"options.prompt_template is {type(prompt_template).__name__}",
         )
-    matched_terms = [term for node_id, term in interpretation_sites((node,)) if node_id == affected_node_id]
-    if user_term.strip() not in matched_terms:
+
+    matched_terms = _matching_interpretation_sites(state, affected_node_id, kind, user_term)
+    if not matched_terms:
+        expected_kind = kind.value
         raise ToolArgumentError(
             argument="affected_node_id",
-            expected=(
-                f"node {affected_node_id!r} to contain a pending interpretation requirement or placeholder "
-                f"for {user_term!r} (found pending terms: {matched_terms!r})"
-            ),
-            actual_type="missing interpretation requirement or placeholder",
+            expected=(f"node {affected_node_id!r} to contain a pending {expected_kind} requirement or placeholder for {user_term!r}"),
+            actual_type=f"missing pending {expected_kind} review site",
         )
+
+
+def _assert_affected_llm_node(
+    state: CompositionState,
+    affected_node_id: str,
+    user_term: str,
+) -> None:
+    """Compatibility wrapper for older tests/importers of the vague-term-only helper."""
+    _assert_affected_component(state, affected_node_id, InterpretationKind.VAGUE_TERM, user_term)
 
 
 def _detect_unresolved_interpretation_placeholders(nodes: Mapping[str, Any]) -> list[str]:
@@ -1141,7 +1189,7 @@ def _detect_unresolved_interpretation_placeholders_typed(
                 expected="a string",
                 actual_type=type(prompt_template).__name__,
             )
-    return list(interpretation_sites(tuple(nodes)))
+    return list(transform_vague_term_site_tuples(tuple(nodes)))
 
 
 RATE_CAP_PER_TERM_CODE: Final[str] = "RATE_CAP_PER_TERM"
@@ -1301,18 +1349,26 @@ async def _handle_request_interpretation_review(
                 expected="content that does not match a known credential shape",
                 actual_type="credential-shaped content rejected at the tool boundary",
             ) from exc
-    # F-2 prompt-injection guard on llm_draft. Applied BEFORE the DB write
-    # so a poisoned draft (e.g. ``{{system:override}}``) cannot enter the
-    # audit row and reach the accepted_as_drafted resolution path where it
-    # would be embedded directly into the prompt template.
-    try:
-        _validate_accepted_value_content(parsed.llm_draft)
-    except ValueError as exc:
-        raise ToolArgumentError(
-            argument="llm_draft",
-            expected="content without template metacharacters, control characters, or credential patterns",
-            actual_type="rejected by accepted-value content validator",
-        ) from exc
+    # F-2 prompt-injection guard on llm_draft. Vague-term and invented-source
+    # drafts become accepted values/artifacts; reject template metacharacters
+    # before any DB write. Prompt-template reviews deliberately carry real
+    # Jinja such as ``{{ row.html }}``, so they keep the credential prefilter
+    # above but skip the accepted-value validator.
+    if parsed.kind in (InterpretationKind.VAGUE_TERM, InterpretationKind.INVENTED_SOURCE):
+        try:
+            _validate_accepted_value_content(parsed.llm_draft)
+        except ValueError as exc:
+            raise ToolArgumentError(
+                argument="llm_draft",
+                expected="content without template metacharacters, control characters, or credential patterns",
+                actual_type="rejected by accepted-value content validator",
+            ) from exc
+    # Tier-3 boundary check on the LLM-supplied component/kind pair. Missing
+    # component, wrong component kind, and absent review metadata all raise
+    # ARG_ERROR so the LLM can retry after fixing composition state. This must
+    # happen before rate limiting so cap-exceeded audit rows are emitted only
+    # for valid pending review sites.
+    _assert_affected_component(state, parsed.affected_node_id, parsed.kind, parsed.user_term)
     # Rate-limit gate. Cap-exceeded raises ToolArgumentError; the compose
     # loop is expected to react by writing an AUTO_INTERPRETED_NO_SURFACES
     # event (handled in service.py — see ``record_auto_interpreted_no_surfaces_event``).
@@ -1325,10 +1381,6 @@ async def _handle_request_interpretation_review(
         per_session_day_cap=per_session_day_cap,
         now=now,
     )
-    # Tier-3 boundary check on the LLM-supplied affected_node_id. Three
-    # branches (missing node / wrong kind / missing placeholder) all raise
-    # ARG_ERROR so the LLM can retry after fixing the prompt template.
-    _assert_affected_llm_node(state, parsed.affected_node_id, parsed.user_term)
     # Persist the pending row. The service method re-validates affected_node_id
     # under the session write lock (defence in depth — the compose-state could
     # in principle race with another writer; the service is the authoritative
@@ -1339,7 +1391,7 @@ async def _handle_request_interpretation_review(
         affected_node_id=parsed.affected_node_id,
         tool_call_id=tool_call_id,
         user_term=parsed.user_term,
-        kind=_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND,
+        kind=parsed.kind,
         llm_draft=parsed.llm_draft,
         model_identifier=model_identifier,
         model_version=model_version,
@@ -1355,6 +1407,8 @@ async def _handle_request_interpretation_review(
             data={
                 "_kind": "interpretation_review_suppressed_by_opt_out",
                 "event_id": str(event.id),
+                "kind": parsed.kind.value,
+                "interpretation_source": event.interpretation_source.value,
                 "interpretation_review_disabled": True,
                 "message": "Interpretation review suppressed because this session has opted out.",
             },
@@ -1368,8 +1422,10 @@ async def _handle_request_interpretation_review(
             "_kind": "interpretation_review_pending",
             "event_id": str(event.id),
             "affected_node_id": parsed.affected_node_id,
+            "kind": parsed.kind.value,
             "user_term": parsed.user_term,
             "llm_draft": parsed.llm_draft,
+            "interpretation_source": event.interpretation_source.value,
             "message": (
                 f"Interpretation review staged for '{parsed.user_term}'. "
                 f"Waiting for user acceptance/amendment before the pipeline can finalise."

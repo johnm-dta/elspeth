@@ -2,8 +2,36 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 
 interface RouteState {
   sessionPostCount: number;
-  completionPatchSeen: boolean;
+  preferencePatchBodies: Array<Record<string, unknown>>;
+  interpretationEvents: InterpretationEventPayload[];
+  requestLog: string[];
   renamedSession: boolean;
+}
+
+interface InterpretationEventPayload {
+  id: string;
+  session_id: string;
+  composition_state_id: string;
+  affected_node_id: string;
+  tool_call_id: string;
+  user_term: string;
+  kind: "vague_term" | "invented_source" | "llm_prompt_template";
+  llm_draft: string;
+  accepted_value: string | null;
+  choice: "pending" | "accepted_as_drafted" | "amended";
+  created_at: string;
+  resolved_at: string | null;
+  actor: string;
+  interpretation_source: "user_approved";
+  model_identifier: string;
+  model_version: string;
+  provider: string;
+  composer_skill_hash: string;
+  arguments_hash: string | null;
+  hash_domain_version: string | null;
+  runtime_model_identifier_at_resolve: string | null;
+  runtime_model_version_at_resolve: string | null;
+  resolved_prompt_template_hash: string | null;
 }
 
 const tutorialSession = {
@@ -60,6 +88,67 @@ const compositionState = {
   metadata: { name: null, description: null },
 };
 
+function makePendingInterpretationEvents(): InterpretationEventPayload[] {
+  const base = {
+    session_id: tutorialSession.id,
+    composition_state_id: compositionState.id,
+    actor: "composer-llm",
+    interpretation_source: "user_approved" as const,
+    model_identifier: "openrouter/openai/gpt-5.4-mini",
+    model_version: "openai/gpt-5.4-mini-20260317",
+    provider: "openrouter",
+    composer_skill_hash: "a".repeat(64),
+    arguments_hash: null,
+    hash_domain_version: null,
+    runtime_model_identifier_at_resolve: null,
+    runtime_model_version_at_resolve: null,
+    resolved_prompt_template_hash: null,
+    accepted_value: null,
+    choice: "pending" as const,
+    resolved_at: null,
+  };
+  return [
+    {
+      ...base,
+      id: "interpretation-invented-source",
+      affected_node_id: "source",
+      tool_call_id: "tool-source",
+      user_term: "starter URL list",
+      kind: "invented_source",
+      llm_draft: [
+        "https://dta.gov.au",
+        "https://data.gov.au",
+        "https://ato.gov.au",
+        "https://finance.gov.au",
+        "https://australia.gov.au",
+      ].join("\n"),
+      created_at: "2026-05-19T12:00:02Z",
+    },
+    {
+      ...base,
+      id: "interpretation-vague-term",
+      affected_node_id: "rate",
+      tool_call_id: "tool-rate-vague",
+      user_term: "primary colour",
+      kind: "vague_term",
+      llm_draft:
+        "the dominant brand or visual identity colour visible on the page",
+      created_at: "2026-05-19T12:00:03Z",
+    },
+    {
+      ...base,
+      id: "interpretation-prompt-template",
+      affected_node_id: "rate",
+      tool_call_id: "tool-rate-template",
+      user_term: "rating prompt",
+      kind: "llm_prompt_template",
+      llm_draft:
+        "Rate {{ row.url }} for a civic-service audit. Include whether the page clearly states ownership, primary colour, and a concise rationale for the score.",
+      created_at: "2026-05-19T12:00:04Z",
+    },
+  ];
+}
+
 async function installTutorialRoutes(page: Page, state: RouteState): Promise<void> {
   await page.route("**/api/**", async (route: Route) => {
     const request = route.request();
@@ -94,9 +183,12 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
 
     if (path === "/api/composer-preferences" && method === "PATCH") {
       const body = request.postDataJSON() as Record<string, unknown>;
-      state.completionPatchSeen =
-        body.default_mode === "freeform" &&
-        typeof body.tutorial_completed_at === "string";
+      state.preferencePatchBodies.push(body);
+      state.requestLog.push(
+        "tutorial_completed_at" in body
+          ? "preferences-patch:tutorial-completed"
+          : "preferences-patch:default-mode",
+      );
       await route.fulfill({
         json: {
           default_mode: body.default_mode ?? "guided",
@@ -118,6 +210,7 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
 
     if (path === "/api/sessions" && method === "POST") {
       state.sessionPostCount += 1;
+      state.requestLog.push(`session-post:${state.sessionPostCount}`);
       await route.fulfill({
         json: state.sessionPostCount === 1 ? tutorialSession : emptySession,
       });
@@ -184,6 +277,7 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
           session_id: tutorialSession.id,
           trust_mode: "explicit_approve",
           density_default: "medium",
+          interpretation_review_disabled: false,
           updated_at: "2026-05-19T12:00:00Z",
         },
       });
@@ -226,7 +320,54 @@ async function installTutorialRoutes(page: Page, state: RouteState): Promise<voi
     }
 
     if (path === `/api/sessions/${tutorialSession.id}/interpretations` && method === "GET") {
-      await route.fulfill({ json: { events: [] } });
+      const status = url.searchParams.get("status");
+      const events =
+        status === "pending"
+          ? state.interpretationEvents.filter(
+              (event) => event.choice === "pending",
+            )
+          : state.interpretationEvents;
+      await route.fulfill({ json: { events } });
+      return;
+    }
+
+    const resolveInterpretationMatch = path.match(
+      new RegExp(
+        `^/api/sessions/${tutorialSession.id}/interpretations/([^/]+)/resolve$`,
+      ),
+    );
+    if (resolveInterpretationMatch !== null && method === "POST") {
+      const eventId = resolveInterpretationMatch[1];
+      const eventIndex = state.interpretationEvents.findIndex(
+        (event) => event.id === eventId,
+      );
+      if (eventIndex === -1) {
+        await route.fulfill({
+          status: 404,
+          json: { detail: "interpretation event not found" },
+        });
+        return;
+      }
+      const body = request.postDataJSON() as Record<string, unknown>;
+      const event = state.interpretationEvents[eventIndex];
+      const acceptedValue =
+        typeof body.accepted_value === "string"
+          ? body.accepted_value
+          : event.llm_draft;
+      const resolvedEvent: InterpretationEventPayload = {
+        ...event,
+        accepted_value: acceptedValue,
+        choice:
+          body.choice === "amended" ? "amended" : "accepted_as_drafted",
+        resolved_at: "2026-05-19T12:00:05Z",
+      };
+      state.interpretationEvents[eventIndex] = resolvedEvent;
+      await route.fulfill({
+        json: {
+          event: resolvedEvent,
+          new_state: compositionState,
+        },
+      });
       return;
     }
 
@@ -412,7 +553,9 @@ test.describe("first-run tutorial", () => {
   }) => {
     const state: RouteState = {
       sessionPostCount: 0,
-      completionPatchSeen: false,
+      preferencePatchBodies: [],
+      interpretationEvents: makePendingInterpretationEvents(),
+      requestLog: [],
       renamedSession: false,
     };
     await installTutorialRoutes(page, state);
@@ -423,9 +566,52 @@ test.describe("first-run tutorial", () => {
     await page.getByRole("button", { name: "Let's go" }).click();
     await page.getByRole("button", { name: "Build it" }).click();
     await expect(page.getByText(/Here is what the composer drafted/i)).toBeVisible();
-    await expect(page.getByText("dta.gov.au")).toBeVisible();
+    await expect(page.getByText("dta.gov.au", { exact: true })).toBeVisible();
+    await expect(page.getByText("3 assumptions to review")).toBeVisible();
+    const continueFromAssumptions = page.getByRole("button", {
+      name: "Looks good",
+    });
+    await expect(continueFromAssumptions).toBeDisabled();
 
-    await page.getByRole("button", { name: "Show me the graph" }).click();
+    await page
+      .getByRole("button", { name: /Accept invented source data/i })
+      .click();
+    await expect
+      .poll(
+        () =>
+          state.interpretationEvents.filter(
+            (event) => event.choice === "pending",
+          ).length,
+      )
+      .toBe(2);
+    await expect(continueFromAssumptions).toBeDisabled();
+    await page
+      .getByRole("button", {
+        name: /Accept the LLM's interpretation of primary colour/i,
+      })
+      .click();
+    await expect
+      .poll(
+        () =>
+          state.interpretationEvents.filter(
+            (event) => event.choice === "pending",
+          ).length,
+      )
+      .toBe(1);
+    await expect(continueFromAssumptions).toBeDisabled();
+    const promptTemplateReview = page.getByRole("region", {
+      name: /Prompt template review/i,
+    });
+    await promptTemplateReview.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await page
+      .getByRole("button", { name: /Accept LLM prompt template/i })
+      .click();
+    await expect(continueFromAssumptions).toBeEnabled();
+
+    await continueFromAssumptions.click();
     await page.getByRole("button", { name: "Looks good, run it" }).click();
     await expect(page.getByText("bold")).toBeVisible();
 
@@ -441,9 +627,30 @@ test.describe("first-run tutorial", () => {
     await page.getByRole("radio", { name: /Freeform/i }).click();
     await page.getByRole("button", { name: "Save and go" }).click();
 
-    await expect.poll(() => state.completionPatchSeen).toBe(true);
+    await expect.poll(() => state.preferencePatchBodies.length).toBe(1);
+    expect(state.preferencePatchBodies[0]).toEqual({ default_mode: "freeform" });
     expect(state.renamedSession).toBe(true);
-    expect(state.sessionPostCount).toBe(2);
+
+    await expect(
+      page.getByRole("heading", { name: "You're ready to use the composer." }),
+    ).toBeVisible();
+    await expect.poll(() => state.sessionPostCount).toBe(1);
+    await page.getByRole("button", { name: "Take me to the composer" }).click();
+
+    await expect.poll(() => state.preferencePatchBodies.length).toBe(2);
+    expect(Object.keys(state.preferencePatchBodies[1] ?? {})).toEqual([
+      "tutorial_completed_at",
+    ]);
+    expect(state.preferencePatchBodies[1]).toEqual({
+      tutorial_completed_at: expect.any(String),
+    });
+    await expect.poll(() => state.sessionPostCount).toBe(2);
+    expect(state.requestLog).toEqual([
+      "session-post:1",
+      "preferences-patch:default-mode",
+      "preferences-patch:tutorial-completed",
+      "session-post:2",
+    ]);
   });
 
   test("Edit prompt button on Turn 2b returns to Describe with prompt preserved", async ({
@@ -451,7 +658,9 @@ test.describe("first-run tutorial", () => {
   }) => {
     const state: RouteState = {
       sessionPostCount: 0,
-      completionPatchSeen: false,
+      preferencePatchBodies: [],
+      interpretationEvents: [],
+      requestLog: [],
       renamedSession: false,
     };
     await installTutorialRoutes(page, state);
@@ -482,7 +691,9 @@ test.describe("first-run tutorial", () => {
   }) => {
     const state: RouteState = {
       sessionPostCount: 0,
-      completionPatchSeen: false,
+      preferencePatchBodies: [],
+      interpretationEvents: [],
+      requestLog: [],
       renamedSession: false,
     };
     await installTutorialRoutes(page, state);
@@ -491,7 +702,7 @@ test.describe("first-run tutorial", () => {
     await page.goto("/");
     await page.getByRole("button", { name: "Let's go" }).click();
     await page.getByRole("button", { name: "Build it" }).click();
-    await page.getByRole("button", { name: "Show me the graph" }).click();
+    await page.getByRole("button", { name: "Looks good" }).click();
     await page.getByRole("button", { name: "Looks good, run it" }).click();
     await expect(page.getByText("bold")).toBeVisible();
     await page.getByRole("button", { name: "Continue" }).click();
@@ -520,7 +731,9 @@ test.describe("first-run tutorial", () => {
   }) => {
     const state: RouteState = {
       sessionPostCount: 0,
-      completionPatchSeen: false,
+      preferencePatchBodies: [],
+      interpretationEvents: [],
+      requestLog: [],
       renamedSession: false,
     };
     await installTutorialRoutesWithSlowRun(page, state);
@@ -528,7 +741,7 @@ test.describe("first-run tutorial", () => {
     await page.goto("/");
     await page.getByRole("button", { name: "Let's go" }).click();
     await page.getByRole("button", { name: "Build it" }).click();
-    await page.getByRole("button", { name: "Show me the graph" }).click();
+    await page.getByRole("button", { name: "Looks good" }).click();
     await page.getByRole("button", { name: "Looks good, run it" }).click();
 
     // The cancel button appears 5 seconds after the run starts (per the
@@ -552,7 +765,9 @@ test.describe("first-run tutorial", () => {
   }) => {
     const state: RouteState = {
       sessionPostCount: 0,
-      completionPatchSeen: false,
+      preferencePatchBodies: [],
+      interpretationEvents: [],
+      requestLog: [],
       renamedSession: false,
     };
     await installTutorialRoutes(page, state);

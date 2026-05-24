@@ -5,8 +5,9 @@
 // Reads via bootstrap() on auth-success (App.tsx) and via resolveDefaultMode()
 // at session-create time (sessionStore.createSession). Writes are optimistic
 // with revert-on-error, gated by a single `writing` flag that serialises
-// concurrent setDefaultMode / dismissDefaultChangedBanner calls (both go
-// through the same PATCH; an unguarded race would let the second call's
+// concurrent setDefaultMode / saveTutorialMode /
+// markTutorialGraduated / dismissDefaultChangedBanner calls (all go
+// through PATCH; an unguarded race would let the second call's
 // optimistic set + revert overwrite the first call's pending result).
 //
 // defaultMode is null before bootstrap completes. Components MUST gate on
@@ -61,7 +62,11 @@ interface PreferencesState {
   bootstrap: () => Promise<void>;
   resolveDefaultMode: () => Promise<ComposerMode>;
   setDefaultMode: (mode: ComposerMode, activeSessionId?: string | null) => Promise<void>;
-  markTutorialCompleted: (mode: ComposerMode) => Promise<void>;
+  saveTutorialMode: (mode: ComposerMode) => Promise<void>;
+  markTutorialGraduated: (options?: {
+    publishLocally?: boolean;
+  }) => Promise<string | null>;
+  publishTutorialGraduation: (completedAt: string | null) => void;
   resetTutorial: () => Promise<void>;
   dismissDefaultChangedBanner: () => Promise<void>;
   clearError: () => void;
@@ -214,13 +219,10 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     }
   },
 
-  markTutorialCompleted: async (mode) => {
+  saveTutorialMode: async (mode) => {
     if (get().writing) return;
-    const stamp = new Date().toISOString();
     const previous = {
       defaultMode: get().defaultMode,
-      tutorialCompletedAt: get().tutorialCompletedAt,
-      tutorialCompleted: get().tutorialCompleted,
       optedOutAtSessionId: get().optedOutAtSessionId,
     };
     set({
@@ -232,7 +234,6 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     try {
       const payload = await updateUserComposerPreferences({
         default_mode: mode,
-        tutorial_completed_at: stamp,
       });
       set({
         defaultMode: payload.default_mode,
@@ -244,9 +245,49 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     } catch (err) {
       set({
         defaultMode: previous.defaultMode,
+        optedOutAtSessionId: previous.optedOutAtSessionId,
+        writing: false,
+        writeError:
+          err instanceof Error
+            ? `Couldn't save your preference: ${err.message}`
+            : "Couldn't save your preference.",
+      });
+      throw err;
+    }
+  },
+
+  markTutorialGraduated: async (options = {}) => {
+    if (get().writing) return get().tutorialCompletedAt;
+    const publishLocally = options.publishLocally ?? true;
+    const stamp = new Date().toISOString();
+    const previous = {
+      tutorialCompletedAt: get().tutorialCompletedAt,
+      tutorialCompleted: get().tutorialCompleted,
+    };
+    set({
+      writing: true,
+      writeError: null,
+    });
+    try {
+      const payload = await updateUserComposerPreferences({
+        tutorial_completed_at: stamp,
+      });
+      set({
+        ...(publishLocally
+          ? {
+              tutorialCompletedAt: payload.tutorial_completed_at,
+              tutorialCompleted: tutorialCompletedFrom(
+                payload.tutorial_completed_at,
+              ),
+            }
+          : {}),
+        writing: false,
+      });
+      return payload.tutorial_completed_at;
+    } catch (err) {
+      set({
         tutorialCompletedAt: previous.tutorialCompletedAt,
         tutorialCompleted: previous.tutorialCompleted,
-        optedOutAtSessionId: previous.optedOutAtSessionId,
         writing: false,
         writeError:
           err instanceof Error
@@ -255,6 +296,13 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       });
       throw err;
     }
+  },
+
+  publishTutorialGraduation: (completedAt) => {
+    set({
+      tutorialCompletedAt: completedAt,
+      tutorialCompleted: tutorialCompletedFrom(completedAt),
+    });
   },
 
   resetTutorial: async () => {

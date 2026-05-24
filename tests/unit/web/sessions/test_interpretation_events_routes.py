@@ -30,7 +30,9 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationKind,
     InterpretationSource,
 )
-from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata
+from elspeth.contracts.enums import CreationModality
+from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata, SourceSpec
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, SOURCE_AUTHORING_KEY, SOURCE_COMPONENT_ID
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.service import SessionServiceImpl
 from tests.unit.web.conftest import _make_session
@@ -109,6 +111,90 @@ def _llm_node(
     return node
 
 
+def _prompt_template_review_node(*, node_id: str = "identify_colour") -> dict[str, Any]:
+    prompt_template = "Read {{ row.html }} and return JSON."
+    state = CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id=node_id,
+                node_type="transform",
+                plugin="llm",
+                input="rows",
+                on_success="out",
+                on_error="quarantine",
+                options={
+                    "prompt_template": prompt_template,
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "prompt_template_review",
+                            "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                            "user_term": f"llm_prompt_template:{node_id}",
+                            "status": "pending",
+                            "draft": prompt_template,
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Routes Test", description=""),
+        version=1,
+    )
+    return state.to_dict()["nodes"][0]
+
+
+def _llm_generated_source() -> dict[str, Any]:
+    state = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="rows",
+            options={
+                "path": "/tmp/generated.csv",
+                SOURCE_AUTHORING_KEY: {
+                    "modality": CreationModality.LLM_GENERATED.value,
+                    "content_hash": "0" * 64,
+                    "review_event_id": None,
+                    "resolved_kind": None,
+                },
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "source_review",
+                        "kind": InterpretationKind.INVENTED_SOURCE.value,
+                        "user_term": "inline_source_url_list",
+                        "status": "pending",
+                        "draft": "https://example.gov.au",
+                        "event_id": None,
+                        "accepted_value": None,
+                        "accepted_artifact_hash": None,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            },
+            on_validation_failure="quarantine",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Routes Test", description=""),
+        version=1,
+    )
+    source = state.to_dict()["source"]
+    assert source is not None
+    return source
+
+
 async def _seed_session_with_pending_event(
     test_client: TestClient,
     *,
@@ -116,6 +202,7 @@ async def _seed_session_with_pending_event(
     user_id: str = "alice",
     node: dict[str, Any] | None = None,
     user_term: str = "cool",
+    kind: InterpretationKind = InterpretationKind.VAGUE_TERM,
     llm_draft: str = "Innovative and creative",
 ) -> dict[str, Any]:
     """Insert a session row + composition state + pending interpretation event."""
@@ -146,8 +233,39 @@ async def _seed_session_with_pending_event(
         affected_node_id=node["id"],
         tool_call_id="call_42",
         user_term=user_term,
-        kind=InterpretationKind.VAGUE_TERM,
+        kind=kind,
         llm_draft=llm_draft,
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+    return {"session_id": sid, "state": state, "event": event}
+
+
+async def _seed_session_with_source_pending_event(test_client: TestClient) -> dict[str, Any]:
+    sid = uuid4()
+    service: SessionServiceImpl = test_client.app.state.session_service
+    with test_client.app.state.phase3_engine.begin() as conn:
+        _make_session(conn, session_id=str(sid), user_id="alice")
+    state = await service.save_composition_state(
+        sid,
+        CompositionStateData(
+            source=_llm_generated_source(),
+            nodes=[],
+            metadata_={"name": "Phase 5b Routes Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+    event = await service.create_pending_interpretation_event(
+        session_id=sid,
+        composition_state_id=state.id,
+        affected_node_id=SOURCE_COMPONENT_ID,
+        tool_call_id="call_source_review",
+        user_term="inline_source_url_list",
+        kind=InterpretationKind.INVENTED_SOURCE,
+        llm_draft="https://example.gov.au",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
         provider="anthropic",
@@ -367,6 +485,40 @@ async def test_08b_resolve_existing_event_with_consumed_placeholder_returns_422(
 
     assert response.status_code == 422, response.text
     assert response.json()["detail"]["code"] == "interpretation_placeholder_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_resolve_prompt_template_amended_returns_422(test_client: TestClient) -> None:
+    seeded = await _seed_session_with_pending_event(
+        test_client,
+        node=_prompt_template_review_node(),
+        user_term="llm_prompt_template:identify_colour",
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        llm_draft="Read {{ row.html }} and return JSON.",
+    )
+
+    response = await _post(
+        test_client,
+        f"/api/sessions/{seeded['session_id']}/interpretations/{seeded['event'].id}/resolve",
+        json={"choice": "amended", "amended_value": "Read row HTML and return CSV."},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "interpretation_resolution_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_resolve_invented_source_amended_returns_422(test_client: TestClient) -> None:
+    seeded = await _seed_session_with_source_pending_event(test_client)
+
+    response = await _post(
+        test_client,
+        f"/api/sessions/{seeded['session_id']}/interpretations/{seeded['event'].id}/resolve",
+        json={"choice": "amended", "amended_value": "https://dta.gov.au"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "interpretation_resolution_unsupported"
 
 
 # --------------------------------------------------------------------------- #

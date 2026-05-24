@@ -590,6 +590,75 @@ class TestComposerSingleToolCall:
         assert result.tool_outcomes[0].post_version == state.version
 
     @pytest.mark.asyncio
+    async def test_create_composition_proposal_normalizes_composer_provenance(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+    ) -> None:
+        """Proposal provenance is normalized before it becomes audit-bearing state."""
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+
+        proposal = await sessions_service.create_composition_proposal(
+            session_id=session_uuid,
+            tool_call_id="call_set_pipeline",
+            tool_name="set_pipeline",
+            summary="Replace the pipeline.",
+            rationale="Composer proposed a pipeline update.",
+            affects=["graph"],
+            arguments_json={"source": {"plugin": "csv", "options": {}}},
+            arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+            base_state_id=None,
+            actor="assistant",
+            composer_model_identifier=" openai/gpt-5-mini ",
+            composer_model_version=" gpt-5-mini-2026-05-01 ",
+            composer_provider=" openai ",
+            composer_skill_hash=" sha256:composer-skill ",
+            tool_arguments_hash=" sha256:tool-arguments ",
+        )
+
+        assert proposal.composer_model_identifier == "openai/gpt-5-mini"
+        assert proposal.composer_model_version == "gpt-5-mini-2026-05-01"
+        assert proposal.composer_provider == "openai"
+        assert proposal.composer_skill_hash == "sha256:composer-skill"
+        assert proposal.tool_arguments_hash == "sha256:tool-arguments"
+
+    @pytest.mark.asyncio
+    async def test_create_composition_proposal_rejects_blank_composer_provenance(
+        self,
+        composer_service_with_real_sessions: ComposerServiceImpl,
+        result_session_id: str,
+    ) -> None:
+        """Blank proposal provenance fails before a partial audit row can persist."""
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        sessions_service = composer_service_with_real_sessions._sessions_service
+        assert sessions_service is not None
+        session_uuid = UUID(result_session_id)
+
+        with pytest.raises(AuditIntegrityError, match=r"composer provenance.*composer_provider"):
+            await sessions_service.create_composition_proposal(
+                session_id=session_uuid,
+                tool_call_id="call_set_pipeline",
+                tool_name="set_pipeline",
+                summary="Replace the pipeline.",
+                rationale="Composer proposed a pipeline update.",
+                affects=["graph"],
+                arguments_json={"source": {"plugin": "csv", "options": {}}},
+                arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+                base_state_id=None,
+                actor="assistant",
+                composer_model_identifier="openai/gpt-5-mini",
+                composer_model_version="gpt-5-mini-2026-05-01",
+                composer_provider="\t ",
+                composer_skill_hash="sha256:composer-skill",
+                tool_arguments_hash="sha256:tool-arguments",
+            )
+
+        assert await sessions_service.list_composition_proposals(session_uuid) == []
+
+    @pytest.mark.asyncio
     async def test_explicit_approve_does_not_intercept_create_blob(
         self,
         composer_service_with_real_sessions: ComposerServiceImpl,

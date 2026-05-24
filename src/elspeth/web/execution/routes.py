@@ -558,8 +558,10 @@ def create_execution_router() -> APIRouter:
             ) from exc
         except UnresolvedInterpretationPlaceholderError as exc:
             # F-17 / F-21 (Phase 5b Task 5 follow-on). Structured 422 with
-            # the (node_id, term) pairs so the frontend banner can list
-            # every unresolved site without parsing the message string.
+            # the structured interpretation-review sites so the frontend
+            # banner can list every unresolved site without parsing the
+            # message string. The legacy ``placeholders`` field is preserved
+            # for transform/vague-term callers during the contract migration.
             # 422 mirrors the SemanticContractViolationError precedent
             # above — the request was syntactically valid but the
             # composition state is not yet executable until the operator
@@ -573,6 +575,15 @@ def create_execution_router() -> APIRouter:
                     "kind": "interpretation_placeholder_unresolved",
                     "message": str(exc),
                     "placeholders": [{"node_id": node_id, "term": term} for node_id, term in exc.placeholders],
+                    "interpretation_sites": [
+                        {
+                            "component_id": site.component_id,
+                            "component_type": site.component_type,
+                            "kind": site.kind.value,
+                            "user_term": site.user_term,
+                        }
+                        for site in exc.sites
+                    ],
                 },
             ) from exc
         except ExecuteRequestValidationError as exc:

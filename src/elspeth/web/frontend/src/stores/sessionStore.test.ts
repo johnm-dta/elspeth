@@ -633,6 +633,7 @@ describe("sessionStore", () => {
         session_id: "session-1",
         trust_mode: "explicit_approve",
         density_default: "high",
+        interpretation_review_disabled: false,
         updated_at: "2026-05-14T00:00:00Z",
       });
       (apiClient.getGuided as ReturnType<typeof vi.fn>).mockRejectedValue(

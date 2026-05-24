@@ -78,6 +78,14 @@ const composerProgress: ComposerProgressSnapshot = {
   updated_at: "2026-05-19T12:00:03Z",
 };
 
+const composerPreferences = {
+  session_id: tutorialSession.id,
+  trust_mode: "explicit_approve",
+  density_default: "medium",
+  interpretation_review_disabled: false,
+  updated_at: "2026-05-19T12:00:00Z",
+} as const;
+
 function primeHappyPath(): void {
   vi.mocked(api.createSession).mockResolvedValue(tutorialSession);
   vi.mocked(api.renameSession).mockResolvedValue({
@@ -98,12 +106,7 @@ function primeHappyPath(): void {
   vi.mocked(api.listInterpretationEvents).mockResolvedValue([]);
   vi.mocked(api.fetchMessages).mockResolvedValue([assistantMessage]);
   vi.mocked(api.fetchCompositionProposals).mockResolvedValue([]);
-  vi.mocked(api.fetchComposerPreferences).mockResolvedValue({
-    session_id: tutorialSession.id,
-    trust_mode: "explicit_approve",
-    density_default: "medium",
-    updated_at: "2026-05-19T12:00:00Z",
-  });
+  vi.mocked(api.fetchComposerPreferences).mockResolvedValue(composerPreferences);
   vi.mocked(api.fetchComposerProgress).mockResolvedValue({
     ...composerProgress,
     phase: "idle",
@@ -157,14 +160,48 @@ describe("buildTutorialDraft — surface backend errors, never silent-fallback",
       tutorialSession.id,
       "hello-world (pending)",
     );
-    // Rename must happen before optOut and sendMessage — if the user closes
-    // the tab between createSession and rename, the session still goes out
-    // titled "New session". Pin the ordering.
+    // Rename must happen before sendMessage — if the user closes the tab
+    // between createSession and rename, the session still goes out titled
+    // "New session". Pin the ordering.
     const renameOrder = vi.mocked(api.renameSession).mock.invocationCallOrder[0];
-    const optOutOrder = vi.mocked(api.optOutOfInterpretations).mock.invocationCallOrder[0];
     const sendOrder = vi.mocked(api.sendMessage).mock.invocationCallOrder[0];
-    expect(renameOrder).toBeLessThan(optOutOrder);
     expect(renameOrder).toBeLessThan(sendOrder);
+  });
+
+  it("keeps tutorial interpretation review enabled and does not auto-resolve pending interpretation events", async () => {
+    primeHappyPath();
+    await buildTutorialDraft("rate cool gov pages");
+
+    expect(api.optOutOfInterpretations).not.toHaveBeenCalled();
+    expect(api.resolveInterpretation).not.toHaveBeenCalled();
+  });
+
+  it("rejects when composer preferences show interpretation review disabled", async () => {
+    primeHappyPath();
+    const disabledComposerPreferences = {
+      ...composerPreferences,
+      interpretation_review_disabled: true,
+    } as const;
+    vi.mocked(api.fetchComposerPreferences).mockResolvedValueOnce(
+      disabledComposerPreferences,
+    );
+
+    await expect(buildTutorialDraft("rate cool gov pages")).rejects.toThrow(
+      "tutorial sessions must not have interpretation review disabled",
+    );
+  });
+
+  it("rejects when composer preferences omit the interpretation-review contract field", async () => {
+    primeHappyPath();
+    const { interpretation_review_disabled: _removed, ...driftedPreferences } =
+      composerPreferences;
+    vi.mocked(api.fetchComposerPreferences).mockResolvedValueOnce(
+      driftedPreferences as Awaited<ReturnType<typeof api.fetchComposerPreferences>>,
+    );
+
+    await expect(buildTutorialDraft("rate cool gov pages")).rejects.toThrow(
+      "composer preferences response missing interpretation_review_disabled",
+    );
   });
 
   it("rejects when api.fetchMessages fails — does not silently substitute the inline assistantMessage", async () => {
@@ -198,9 +235,9 @@ describe("buildTutorialDraft — surface backend errors, never silent-fallback",
   });
 
   it("rejects when interpretationEventsStore.refreshAll fails — does not silently desync the store", async () => {
-    // refreshAll calls api.listInterpretationEvents(sessionId, "all"); the
-    // first call (resolveTutorialInterpretations, with filter "pending")
-    // must succeed. Mock the "all" call to fail.
+    // refreshAll calls api.listInterpretationEvents(sessionId, "all").
+    // Mock that call to fail so the tutorial does not publish a session
+    // whose interpretation-event store is out of sync with the backend.
     primeHappyPath();
     vi.mocked(api.listInterpretationEvents).mockImplementation(
       async (_sessionId: string, status?: "pending" | "all") => {

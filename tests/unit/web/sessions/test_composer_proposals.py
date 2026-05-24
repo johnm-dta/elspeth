@@ -58,7 +58,7 @@ def _insert_session(conn, session_id: str) -> None:
 
 def test_session_preferences_columns_exist(engine) -> None:
     columns = {column["name"] for column in inspect(engine).get_columns("sessions")}
-    assert {"trust_mode", "density_default"} <= columns
+    assert {"trust_mode", "density_default", "interpretation_review_disabled"} <= columns
 
 
 def test_proposal_tables_exist(engine) -> None:
@@ -149,6 +149,7 @@ async def test_get_composer_preferences_returns_defaults(service) -> None:
     assert str(prefs.session_id) == str(session_id)
     assert prefs.trust_mode == "explicit_approve"
     assert prefs.density_default == "high"
+    assert prefs.interpretation_review_disabled is False
 
 
 @pytest.mark.asyncio
@@ -172,8 +173,10 @@ async def test_update_trust_mode_writes_audit_event_before_return(service) -> No
     # density_default='high').
     assert transition.current.trust_mode == "auto_commit"
     assert transition.current.density_default == "medium"
+    assert transition.current.interpretation_review_disabled is False
     assert transition.prior.trust_mode == "explicit_approve"
     assert transition.prior.density_default == "high"
+    assert transition.prior.interpretation_review_disabled is False
     events = await service.list_proposal_events(session_id)
     assert [event.event_type for event in events] == ["trust_mode.changed"]
     # B1 (Phase 8a-1): payload now carries ``prior_trust_mode`` alongside

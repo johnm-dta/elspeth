@@ -48,6 +48,7 @@ function makeEvent(
     affected_node_id: `node-${id}`,
     tool_call_id: `tool-${id}`,
     user_term: `term-${id}`,
+    kind: "vague_term",
     llm_draft: `draft-${id}`,
     accepted_value: null,
     choice: "pending",

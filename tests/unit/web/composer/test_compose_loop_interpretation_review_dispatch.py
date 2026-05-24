@@ -47,6 +47,7 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
+    InterpretationKind,
     InterpretationSource,
 )
 from elspeth.web.composer.protocol import ToolArgumentError
@@ -62,6 +63,7 @@ from elspeth.web.composer.tools import (
     RATE_CAP_PER_TERM_CODE,
 )
 from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     sessions_table,
@@ -234,6 +236,49 @@ def _state_with_llm_node(term: str = "cool") -> CompositionState:
     )
 
 
+def _state_with_prompt_template_review_node() -> CompositionState:
+    prompt = "Read {{ row.html }} and return JSON."
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="rate_node",
+                node_type="transform",
+                plugin="llm",
+                input="rows",
+                on_success="out",
+                on_error=None,
+                options={
+                    "prompt_template": prompt,
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "prompt_template_review",
+                            "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                            "user_term": "llm_prompt_template:rate_node",
+                            "status": "pending",
+                            "draft": prompt,
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
 def _set_pipeline_with_pending_interpretation_args(term: str = "cool") -> dict[str, Any]:
     return {
         "source": {
@@ -267,6 +312,7 @@ async def _seed_session_and_state(
     service: SessionServiceImpl,
     *,
     user_id: str = "alice",
+    state: CompositionState | None = None,
 ) -> tuple[UUID, UUID]:
     """Seed a session row + composition_states row carrying the LLM node.
 
@@ -284,21 +330,18 @@ async def _seed_session_and_state(
                 updated_at=datetime.now(UTC),
             )
         )
-    state = await service.save_composition_state(
+    state_dict = (state or _state_with_llm_node()).to_dict()
+    state_record = await service.save_composition_state(
         session_id,
         CompositionStateData(
-            nodes=[
-                {
-                    "id": "rate_node",
-                    "kind": "llm",
-                    "options": {"prompt_template": "Rate how {{interpretation:cool}} this row is."},
-                }
-            ],
+            nodes=state_dict["nodes"],
+            source=state_dict["source"],
+            metadata_=state_dict["metadata"],
             is_valid=True,
         ),
         provenance="tool_call",
     )
-    return session_id, state.id
+    return session_id, state_record.id
 
 
 @pytest.fixture(autouse=True)
@@ -378,8 +421,8 @@ async def test_compose_loop_dispatches_request_interpretation_review(
     interpretation_review_pending payload.
     """
     composer = _build_composer(tmp_path, sessions_service)
-    session_id, state_id = await _seed_session_and_state(sessions_service)
     state = _state_with_llm_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service)
 
     llm = _ScriptedLLM(
         [
@@ -388,6 +431,7 @@ async def test_compose_loop_dispatches_request_interpretation_review(
                 tool_name="request_interpretation_review",
                 arguments={
                     "affected_node_id": "rate_node",
+                    "kind": "vague_term",
                     "user_term": "cool",
                     "llm_draft": "Visually appealing and well-organized.",
                 },
@@ -476,6 +520,7 @@ async def test_fresh_session_set_pipeline_then_request_interpretation_review_per
                 tool_name="request_interpretation_review",
                 arguments={
                     "affected_node_id": "rate_node",
+                    "kind": "vague_term",
                     "user_term": "cool",
                     "llm_draft": "modern, useful, engaging, and clear for the public.",
                 },
@@ -541,6 +586,7 @@ async def test_pending_interpretation_placeholder_without_event_forces_review_to
                 tool_name="request_interpretation_review",
                 arguments={
                     "affected_node_id": "rate_node",
+                    "kind": "vague_term",
                     "user_term": "cool",
                     "llm_draft": "modern, useful, engaging, and clear for the public.",
                 },
@@ -605,6 +651,7 @@ async def test_pending_interpretation_event_with_duplicate_placeholder_forces_pr
                 tool_name="request_interpretation_review",
                 arguments={
                     "affected_node_id": "rate_node",
+                    "kind": "vague_term",
                     "user_term": "cool",
                     "llm_draft": "modern, useful, engaging, and clear for the public.",
                 },
@@ -686,6 +733,7 @@ async def test_missing_state_interpretation_review_arg_error_forces_staging_retr
                 tool_name="request_interpretation_review",
                 arguments={
                     "affected_node_id": "rate_node",
+                    "kind": "vague_term",
                     "user_term": "cool",
                     "llm_draft": "modern and useful.",
                 },
@@ -701,6 +749,7 @@ async def test_missing_state_interpretation_review_arg_error_forces_staging_retr
                 tool_name="request_interpretation_review",
                 arguments={
                     "affected_node_id": "rate_node",
+                    "kind": "vague_term",
                     "user_term": "cool",
                     "llm_draft": "modern and useful.",
                 },
@@ -766,6 +815,7 @@ async def test_request_interpretation_review_without_persisted_state_returns_arg
                 tool_name="request_interpretation_review",
                 arguments={
                     "affected_node_id": "rate_node",
+                    "kind": "vague_term",
                     "user_term": "cool",
                     "llm_draft": "modern and useful.",
                 },
@@ -943,8 +993,11 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
     telemetry = build_sessions_telemetry()
     composer._telemetry = telemetry  # type: ignore[attr-defined]
 
-    session_id, state_id = await _seed_session_and_state(sessions_service)
-    state = _state_with_llm_node()
+    state = _state_with_prompt_template_review_node()
+    session_id, state_id = await _seed_session_and_state(
+        sessions_service,
+        state=state,
+    )
 
     # Saturate the per-term cap by issuing three successful compose-loop
     # turns with the same (session_id, user_term). Each turn = one fake
@@ -959,8 +1012,9 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
                     tool_name="request_interpretation_review",
                     arguments={
                         "affected_node_id": "rate_node",
-                        "user_term": "cool",
-                        "llm_draft": f"Draft {i}",
+                        "kind": "llm_prompt_template",
+                        "user_term": "llm_prompt_template:rate_node",
+                        "llm_draft": "Read {{ row.html }} and return JSON.",
                     },
                 ),
                 _fake_text_response(f"Surfaced #{i}."),
@@ -987,8 +1041,9 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
                 tool_name="request_interpretation_review",
                 arguments={
                     "affected_node_id": "rate_node",
-                    "user_term": "cool",
-                    "llm_draft": "Draft 4",
+                    "kind": "llm_prompt_template",
+                    "user_term": "llm_prompt_template:rate_node",
+                    "llm_draft": "Read {{ row.html }} and return JSON.",
                 },
             ),
             _fake_text_response("Falling back to baked interpretation."),
@@ -1027,6 +1082,7 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
     assert auto.tool_call_id is None
     assert auto.user_term is None
     assert auto.llm_draft is None
+    assert auto.kind is InterpretationKind.LLM_PROMPT_TEMPLATE
     assert auto.choice is InterpretationChoice.OPTED_OUT
     assert auto.model_identifier == "anthropic/claude-opus-4-7"
     assert auto.provider == "anthropic"
@@ -1048,6 +1104,77 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
     # written.
     final_pending = await sessions_service.list_interpretation_events(session_id, status="pending")
     assert len(final_pending) == 3
+
+
+@pytest.mark.asyncio
+async def test_rate_capped_invalid_review_site_does_not_write_no_surfaces_row(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """Rate-cap audit rows require a valid pending review site first."""
+
+    composer = _build_composer(tmp_path, sessions_service)
+    telemetry = build_sessions_telemetry()
+    composer._telemetry = telemetry  # type: ignore[attr-defined]
+
+    session_id, state_id = await _seed_session_and_state(sessions_service)
+    state = _state_with_llm_node()
+
+    for i in range(3):
+        llm = _ScriptedLLM(
+            [
+                _fake_response_with_tool_call(
+                    tool_call_id=f"call_valid_{i}",
+                    tool_name="request_interpretation_review",
+                    arguments={
+                        "affected_node_id": "rate_node",
+                        "kind": "vague_term",
+                        "user_term": "cool",
+                        "llm_draft": f"Draft {i}",
+                    },
+                ),
+                _fake_text_response(f"Surfaced #{i}."),
+            ]
+        )
+        await composer._run_one_turn_for_test(
+            llm=llm,
+            session_id=str(session_id),
+            current_state_id=str(state_id),
+            initial_state=state,
+        )
+
+    llm = _ScriptedLLM(
+        [
+            _fake_response_with_tool_call(
+                tool_call_id="call_invalid_capped",
+                tool_name="request_interpretation_review",
+                arguments={
+                    "affected_node_id": "rate_node",
+                    "kind": "llm_prompt_template",
+                    "user_term": "cool",
+                    "llm_draft": "Draft 4",
+                },
+            ),
+            _fake_text_response("Invalid review target."),
+        ]
+    )
+
+    result = await composer._run_one_turn_for_test(
+        llm=llm,
+        session_id=str(session_id),
+        current_state_id=str(state_id),
+        initial_state=state,
+    )
+
+    assert observed_value(telemetry.interpretation_rate_cap_exceeded_total) == 0
+    all_events = await sessions_service.list_interpretation_events(session_id, status="all")
+    auto_rows = [event for event in all_events if event.interpretation_source is InterpretationSource.AUTO_INTERPRETED_NO_SURFACES]
+    assert auto_rows == []
+
+    arg_error_invocations = [inv for inv in result.tool_invocations if inv.status.value == "arg_error"]
+    assert len(arg_error_invocations) == 1
+    assert arg_error_invocations[0].tool_name == "request_interpretation_review"
+    assert arg_error_invocations[0].error_class == "ToolArgumentError"
 
 
 # ---------------------------------------------------------------------------

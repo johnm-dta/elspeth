@@ -456,9 +456,9 @@ class ExecutionServiceImpl:
         # prompt_template is still a string) and BEFORE the path allowlist /
         # YAML generation (we fail fast so the placeholder never reaches the
         # runtime engine that would substitute the literal string into the
-        # LLM call). Operational telemetry counter emitted with (node_id,
-        # term) per unresolved site — explicitly NOT the prompt_template
-        # value (may carry user-supplied content / PII).
+        # LLM call). Operational telemetry counter emitted with non-content
+        # component metadata per unresolved site — explicitly NOT the
+        # prompt_template or user-authored term value.
         #
         # Operates under the operator-acknowledged assumption that 18a Task 0
         # (empirical LLM gate ≥ 8/10 staging runs emit
@@ -466,16 +466,17 @@ class ExecutionServiceImpl:
         # runtime-safety net catching cases where the LLM under-fires.
         materialized_state = materialize_state_for_execution(composition_state)
         if isinstance(materialized_state, InterpretationReviewPending):
-            for node_id, term in materialized_state.sites:
+            for site in materialized_state.sites:
                 self._telemetry.interpretation_placeholder_unresolved_at_runtime_total.add(
                     1,
                     attributes={
-                        "node_id": node_id,
-                        "term": term,
+                        "component_id": site.component_id,
+                        "component_type": site.component_type,
+                        "kind": site.kind.value,
                     },
                 )
             raise UnresolvedInterpretationPlaceholderError(
-                placeholders=materialized_state.sites,
+                sites=tuple(materialized_state.sites),
             )
         composition_state = materialized_state
 

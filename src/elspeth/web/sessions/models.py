@@ -84,7 +84,18 @@ from sqlalchemy.types import JSON
 #        model/provider/skill/arguments context as the original compose turn.
 #   12 → blob_inline_resolutions added for runtime inline-content blob
 #        substitution audit rows.
-SESSION_SCHEMA_EPOCH = 12
+#   13 → composer provenance CHECK constraints reject blank/whitespace strings
+#        as missing for blobs and composition proposals.
+#   14 → blobs LLM-authored provenance CHECK constraint requires a non-blank
+#        created_from_message_id anchor alongside the five creating_* fields.
+SESSION_SCHEMA_EPOCH = 14
+
+_SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
+
+
+def _sql_non_blank_text(column_name: str) -> str:
+    return f"length(trim({column_name}, {_SQLITE_ASCII_WHITESPACE})) > 0"
+
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -472,7 +483,10 @@ composition_proposals_table = Table(
         "((composer_model_identifier IS NULL AND composer_model_version IS NULL AND "
         "composer_provider IS NULL AND composer_skill_hash IS NULL AND tool_arguments_hash IS NULL) OR "
         "(composer_model_identifier IS NOT NULL AND composer_model_version IS NOT NULL AND "
-        "composer_provider IS NOT NULL AND composer_skill_hash IS NOT NULL AND tool_arguments_hash IS NOT NULL))",
+        "composer_provider IS NOT NULL AND composer_skill_hash IS NOT NULL AND tool_arguments_hash IS NOT NULL AND "
+        f"{_sql_non_blank_text('composer_model_identifier')} AND {_sql_non_blank_text('composer_model_version')} AND "
+        f"{_sql_non_blank_text('composer_provider')} AND {_sql_non_blank_text('composer_skill_hash')} AND "
+        f"{_sql_non_blank_text('tool_arguments_hash')}))",
         name="ck_composition_proposals_composer_provenance_all_or_none",
     ),
 )
@@ -628,10 +642,11 @@ interpretation_events_table = Table(
     # Cross-DB hash anchor (Option A — see §"Hash-anchored cross-DB linkage"
     # in 18-phase-5b-surface-llm-interpretation.md). Populated by
     # resolve_interpretation_event at the same time as accepted_value is
-    # committed. NULL until resolved; NULL for auto_interpreted_opt_out rows
-    # (no prompt template is patched for opt-out rows). For user_approved
-    # and auto_interpreted_no_surfaces rows that have a resolved prompt
-    # template, this is SHA-256 over the rfc8785 canonical JSON of the
+    # committed. NULL until resolved; NULL for session-level
+    # auto_interpreted_opt_out marker rows and for non-prompt-template
+    # surface opt-out rows. For user_approved rows and surface-specific
+    # auto_interpreted_opt_out rows that resolve an llm_prompt_template,
+    # this is SHA-256 over the rfc8785 canonical JSON of the
     # resolved prompt-template string, using
     # ``CANONICAL_VERSION = "sha256-rfc8785-v1"`` (contracts/hashing.py).
     # NOT part of INTERPRETATION_HASH_DOMAIN_V2 — it covers a different
@@ -1122,6 +1137,9 @@ blobs_table = Table(
     # path before the route layer is wired, and (b) future programmatic
     # blob creation paths that have no originating user message
     # (e.g. pipeline-emitted blobs whose audit anchor is the run record).
+    # LLM-authored modalities narrow this column-level nullability through
+    # ck_blobs_creating_llm_provenance_nullability: they MUST carry a
+    # non-blank originating message anchor.
     Column("created_from_message_id", Text, nullable=True),
     # LLM-provenance columns: populated for the three LLM-authored
     # modalities (llm_generated, disambiguated,
@@ -1157,16 +1175,23 @@ blobs_table = Table(
         name="ck_blobs_creation_modality",
     ),
     # LLM-provenance nullability invariant: the three LLM-authored
-    # modalities MUST carry all five creating_* fields; verbatim MUST NOT
-    # carry any.  Expressed as ``LHS = RHS`` where LHS is the modality
-    # membership predicate and RHS is the "all five fields populated"
-    # predicate — the biconditional rejects both "claimed LLM but missing
-    # provenance" and "verbatim but somehow has LLM fields".
+    # modalities MUST carry a non-blank created_from_message_id plus all
+    # five creating_* fields; verbatim MUST NOT carry any creating_* fields
+    # and is allowed to omit the message anchor.  Expressed as ``LHS = RHS``
+    # where LHS is the modality membership predicate and RHS is the
+    # "message anchor plus all five fields populated" predicate — the
+    # biconditional rejects both "claimed LLM but missing provenance" and
+    # "verbatim but somehow has LLM fields".
     CheckConstraint(
         "(creation_modality IN ('llm_generated', 'disambiguated', 'llm_generated_then_amended')) = "
-        "(creating_model_identifier IS NOT NULL AND creating_model_version IS NOT NULL AND "
+        "(created_from_message_id IS NOT NULL AND "
+        f"{_sql_non_blank_text('created_from_message_id')} AND "
+        "creating_model_identifier IS NOT NULL AND creating_model_version IS NOT NULL AND "
         "creating_provider IS NOT NULL AND creating_composer_skill_hash IS NOT NULL AND "
-        "creating_arguments_hash IS NOT NULL)",
+        "creating_arguments_hash IS NOT NULL AND "
+        f"{_sql_non_blank_text('creating_model_identifier')} AND {_sql_non_blank_text('creating_model_version')} AND "
+        f"{_sql_non_blank_text('creating_provider')} AND {_sql_non_blank_text('creating_composer_skill_hash')} AND "
+        f"{_sql_non_blank_text('creating_arguments_hash')})",
         name="ck_blobs_creating_llm_provenance_nullability",
     ),
     CheckConstraint(

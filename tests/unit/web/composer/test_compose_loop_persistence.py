@@ -36,6 +36,7 @@ def _patch_auto_commit_preferences(monkeypatch: pytest.MonkeyPatch, sessions_ser
             session_id=session_id,
             trust_mode="auto_commit",
             density_default="high",
+            interpretation_review_disabled=False,
             updated_at=datetime.now(UTC),
         )
 

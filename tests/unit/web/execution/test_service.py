@@ -32,6 +32,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.hashing import stable_hash
 from elspeth.core.config import (
     CheckpointSettings,
     ConcurrencySettings,
@@ -3822,11 +3823,13 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
                     INTERPRETATION_REQUIREMENTS_KEY: [
                         {
                             "id": term,
+                            "kind": "vague_term",
                             "user_term": term,
                             "status": "pending",
                             "draft": "visually appealing",
                             "event_id": "event-1",
                             "accepted_value": None,
+                            "accepted_artifact_hash": None,
                             "resolved_prompt_template_hash": None,
                         }
                     ],
@@ -3900,11 +3903,11 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
         mock_session_service: MagicMock,
         mock_settings: MagicMock,
     ) -> None:
-        """F-21: each unresolved (node_id, term) site emits one counter increment.
+        """F-21: each unresolved interpretation site emits one counter increment.
 
-        Attributes MUST be exactly ``{"node_id": ..., "term": ...}`` and
-        MUST NOT include the prompt_template value (which may carry
-        user-supplied content — operational telemetry must be PII-clean).
+        Attributes MUST identify kind and component without including the
+        prompt_template value (which may carry user-supplied content —
+        operational telemetry must be PII-clean).
         """
         from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
         from elspeth.web.sessions.telemetry import _FakeCounter
@@ -3921,12 +3924,17 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
         assert len(counter.calls) == 1
         amount, attrs, _context = counter.calls[0]
         assert amount == 1
-        assert attrs == {"node_id": "rate_node", "term": "cool"}
-        # Explicit negative assertion: the prompt_template value must
-        # never appear in telemetry attributes (the whole point of
-        # surfacing term+node_id separately is to keep PII out).
+        assert attrs == {
+            "component_id": "rate_node",
+            "component_type": "transform",
+            "kind": "vague_term",
+        }
+        # Explicit negative assertion: prompt/user-authored text must
+        # never appear in telemetry attributes.
         assert attrs is not None
         assert "prompt_template" not in attrs
+        assert "user_term" not in attrs
+        assert "cool" not in attrs.values()
 
     @pytest.mark.asyncio
     async def test_execute_passes_when_placeholder_resolved(
@@ -3945,6 +3953,7 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
         from elspeth.web.sessions.telemetry import _FakeCounter
 
         mock_settings.data_dir = "/tmp/elspeth_data"
+        prompt = "Rate visually-appealing aspects."
         state = mock_session_service.get_current_state.return_value
         state.source = {
             "plugin": "csv",
@@ -3962,8 +3971,22 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
                 "on_error": "discard",
                 "options": {
                     # Placeholder resolved — no ``{{interpretation:…}}`` text.
-                    "prompt_template": "Rate visually-appealing aspects.",
+                    "prompt_template": prompt,
                     "model": "test-model",
+                    "resolved_prompt_template_hash": stable_hash(prompt),
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "prompt-template-review",
+                            "kind": "llm_prompt_template",
+                            "user_term": "rating prompt",
+                            "status": "resolved",
+                            "draft": prompt,
+                            "event_id": "event-2",
+                            "accepted_value": prompt,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": stable_hash(prompt),
+                        }
+                    ],
                 },
             }
         ]

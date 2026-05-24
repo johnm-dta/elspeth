@@ -421,6 +421,20 @@ class TestExecuteEndpoint:
             {"node_id": "rate_node", "term": "cool"},
             {"node_id": "summarise_node", "term": "important"},
         ]
+        assert detail["interpretation_sites"] == [
+            {
+                "component_id": "rate_node",
+                "component_type": "transform",
+                "kind": "vague_term",
+                "user_term": "cool",
+            },
+            {
+                "component_id": "summarise_node",
+                "component_type": "transform",
+                "kind": "vague_term",
+                "user_term": "important",
+            },
+        ]
 
 
 class TestRunDiagnosticsEndpoint:

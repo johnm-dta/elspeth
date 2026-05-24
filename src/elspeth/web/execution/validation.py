@@ -23,7 +23,7 @@ only to be rejected pre-token at /execute.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -86,6 +86,7 @@ from elspeth.web.execution.schemas import (
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REVIEW_PENDING_CODE,
     InterpretationReviewPending,
+    InterpretationReviewSite,
     materialize_state_for_authoring,
     materialize_state_for_execution,
 )
@@ -433,8 +434,12 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
     return result
 
 
-def _format_interpretation_sites(sites: tuple[tuple[str, str], ...]) -> str:
-    return ", ".join(f"{node_id}:{term}" for node_id, term in sites)
+def _format_interpretation_site(site: InterpretationReviewSite) -> str:
+    return f"{site.kind.value} review pending for {site.component_type} {site.component_id!r}: {site.user_term}"
+
+
+def _format_interpretation_sites(sites: Sequence[InterpretationReviewSite]) -> str:
+    return ", ".join(_format_interpretation_site(site) for site in sites)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1085,7 +1090,7 @@ def validate_pipeline(
     )
     if isinstance(materialized_state, InterpretationReviewPending):
         site_detail = _format_interpretation_sites(materialized_state.sites)
-        affected_nodes = tuple(dict.fromkeys(node_id for node_id, _term in materialized_state.sites))
+        affected_nodes = tuple(dict.fromkeys(site.component_id for site in materialized_state.sites if site.component_type == "transform"))
         checks.append(
             ValidationCheck(
                 name=_CHECK_INTERPRETATION_REVIEW,
@@ -1097,13 +1102,13 @@ def validate_pipeline(
         )
         errors.extend(
             ValidationError(
-                component_id=node_id,
-                component_type="transform",
-                message=f"Interpretation review is pending for '{term}'.",
+                component_id=site.component_id,
+                component_type=site.component_type,
+                message=_format_interpretation_site(site),
                 suggestion="Resolve the pending interpretation review before running.",
                 error_code=INTERPRETATION_REVIEW_PENDING_CODE,
             )
-            for node_id, term in materialized_state.sites
+            for site in materialized_state.sites
         )
         checks.extend(_skipped_checks(_CHECK_INTERPRETATION_REVIEW))
         single_site = materialized_state.sites[0] if len(materialized_state.sites) == 1 else None
@@ -1114,8 +1119,8 @@ def validate_pipeline(
             readiness=_blocked_readiness(
                 code=INTERPRETATION_REVIEW_PENDING_CODE,
                 detail=site_detail,
-                component_id=single_site[0] if single_site is not None else None,
-                component_type="transform" if single_site is not None else None,
+                component_id=single_site.component_id if single_site is not None else None,
+                component_type=single_site.component_type if single_site is not None else None,
                 authoring_valid=True,
                 completion_ready=True,
             ),

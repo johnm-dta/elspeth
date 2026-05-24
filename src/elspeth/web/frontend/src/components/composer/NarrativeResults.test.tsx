@@ -87,6 +87,7 @@ function makeResolvedEvent(overrides: Partial<InterpretationEvent> = {}): Interp
     affected_node_id: "node-1",
     tool_call_id: "tool-1",
     user_term: "cool",
+    kind: "vague_term",
     llm_draft: "engaging",
     accepted_value: "engaging",
     choice: "accepted_as_drafted",

@@ -102,10 +102,10 @@ export function deriveRowCount(
 //     emitted by the composer pipeline; until then the heuristic is the
 //     contract.
 //
-// The canonical demo prompt ("create a list of 5 government web pages
-// and use an LLM to rate how cool they are") MUST NOT trip this
-// heuristic — that proposal's summary describes an LLM-generated
-// list, not an interpretation of the user's input. The
+// The canonical demo prompt ("Please go to the following web pages..."
+// with explicit scrape-contact fields) MUST NOT trip this heuristic —
+// that proposal's summary describes LLM-generated source rows, not an
+// interpretation of the user's input. The
 // `isAmbiguousInlineProposal` unit tests pin this behaviour.
 //
 // Exported for the ChatPanel test seam.

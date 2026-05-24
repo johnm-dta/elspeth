@@ -226,29 +226,30 @@ class TestSecretReferenceGuidance:
 class TestInterpretationReviewGuidance:
     """Pin the prompt guidance that makes Phase 5b observable in LLM runs."""
 
-    def test_web_skill_teaches_subjective_term_interpretation_review(self) -> None:
+    def test_web_skill_teaches_kind_aware_assumption_review(self) -> None:
         """The skill must do more than list ``request_interpretation_review``.
 
-        A live local smoke run can emit a valid LLM pipeline with
-        ``prompt_template`` while silently baking "cool" into the prompt if the
-        skill only enumerates the tool. Keep the usage contract explicit so a
-        future prompt edit cannot remove the rule while leaving the tool name in
-        Step 0.
+        A live local smoke run can emit a valid LLM pipeline while silently
+        baking invented source data or prompt-template choices into the state
+        if the skill only enumerates the tool. Keep the usage contract explicit
+        so a future prompt edit cannot remove the rule while leaving the tool
+        name in Step 0.
         """
         guidance = _section_between(
             _WEB_SKILL_CONTENT,
-            "### Subjective Interpretation Review",
+            "### Assumption Review",
             "### TERMINATION GATE",
         )
 
         assert "request_interpretation_review" in guidance
-        assert "subjective or underspecified" in guidance
-        assert "{{interpretation:<term>}}" in guidance
-        assert "After the state-staging tool succeeds" in guidance
-        assert "before any final reply" in guidance
-        assert "Do not ask the user to confirm subjective terms in normal assistant prose" in guidance
-        assert "Do not silently bake" in guidance
+        assert "Every call carries `kind`" in guidance
+        assert 'kind="vague_term"' in guidance
+        assert 'kind="invented_source"' in guidance
+        assert 'kind="llm_prompt_template"' in guidance
+        assert "`llm_draft` equal to the raw" in guidance
         assert "interpretation_review_disabled" in guidance
+        assert "Opt-out skips the human, not the audit" in guidance
+        assert "Do not ask the user to confirm these assumptions in normal assistant prose" in guidance
 
 
 class TestEngineValidatorPluginDrift:

@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef } from "react";
 import { InterpretationReviewTurn } from "@/components/chat/guided/InterpretationReviewTurn";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useSessionStore } from "@/stores/sessionStore";
-import { TURN_2B_PRIMARY_BUTTON } from "./copy";
+import type { InterpretationEvent } from "@/types/interpretation";
+import {
+  TURN_2B_ASSUMPTIONS_BLOCKED_STATUS,
+  TURN_2B_ASSUMPTIONS_READY_STATUS,
+  TURN_2B_PRIMARY_BUTTON,
+} from "./copy";
 import type { TutorialBuiltSummary } from "./tutorialMachine";
 
 interface TutorialTurn2bShowBuiltProps {
@@ -26,20 +31,27 @@ export function TutorialTurn2bShowBuilt({
   useEffect(() => {
     headingRef.current?.focus();
   }, []);
-  const pendingInterpretation = useMemo(() => {
+  const pendingInterpretations = useMemo(() => {
     const events = Object.values(pendingBySession[sessionId] ?? {});
-    return events.find(
-      (event) =>
-        event.choice === "pending" &&
-        event.interpretation_source === "user_approved",
-    );
+    return events
+      .filter(
+        (event) =>
+          event.choice === "pending" &&
+          event.interpretation_source === "user_approved",
+      )
+      .sort(compareInterpretationEventsByCreatedAt);
   }, [pendingBySession, sessionId]);
+  const pendingCount = pendingInterpretations.length;
+  const hasPendingInterpretations = pendingCount > 0;
+  const assumptionStatus = hasPendingInterpretations
+    ? TURN_2B_ASSUMPTIONS_BLOCKED_STATUS
+    : TURN_2B_ASSUMPTIONS_READY_STATUS;
 
   return (
     <section className="tutorial-turn" aria-labelledby="tutorial-built-title">
       <p className="tutorial-kicker">Draft</p>
       <h2 id="tutorial-built-title" ref={headingRef} tabIndex={-1}>
-        Here is what the composer drafted.
+        Here is what the composer drafted - review its assumptions.
       </h2>
       <ol className="tutorial-summary-grid" aria-label="Pipeline layers">
         <li>
@@ -75,17 +87,31 @@ export function TutorialTurn2bShowBuilt({
         </li>
       </ol>
 
-      {pendingInterpretation ? (
+      <p role="status" className="sr-only">
+        {assumptionStatus}
+      </p>
+
+      {hasPendingInterpretations ? (
         <div className="tutorial-interpretation">
-          <InterpretationReviewTurn
-            event={pendingInterpretation}
-            sessionId={sessionId}
-            onResolved={(newState) => {
-              if (newState !== null) {
-                useSessionStore.setState({ compositionState: newState });
-              }
-            }}
-          />
+          <p className="tutorial-assumption-count">
+            {pendingCount} {pendingCount === 1 ? "assumption" : "assumptions"}{" "}
+            to review
+          </p>
+          {pendingInterpretations.map((event, index) => (
+            <InterpretationReviewTurn
+              key={event.id}
+              event={event}
+              sessionId={sessionId}
+              showOptOut={false}
+              showAmend={event.kind === "vague_term"}
+              autoFocusOnMount={index === 0}
+              onResolved={(newState) => {
+                if (newState !== null) {
+                  useSessionStore.setState({ compositionState: newState });
+                }
+              }}
+            />
+          ))}
         </div>
       ) : (
         <p className="tutorial-muted">
@@ -95,7 +121,18 @@ export function TutorialTurn2bShowBuilt({
       )}
 
       <div className="tutorial-actions">
-        <button type="button" className="btn btn-primary" onClick={onContinue}>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={onContinue}
+          disabled={hasPendingInterpretations}
+          aria-disabled={hasPendingInterpretations ? "true" : undefined}
+          title={
+            hasPendingInterpretations
+              ? TURN_2B_ASSUMPTIONS_BLOCKED_STATUS
+              : undefined
+          }
+        >
           {TURN_2B_PRIMARY_BUTTON}
         </button>
         <button
@@ -108,4 +145,13 @@ export function TutorialTurn2bShowBuilt({
       </div>
     </section>
   );
+}
+
+function compareInterpretationEventsByCreatedAt(
+  left: InterpretationEvent,
+  right: InterpretationEvent,
+): number {
+  const createdAtOrder = left.created_at.localeCompare(right.created_at);
+  if (createdAtOrder !== 0) return createdAtOrder;
+  return left.id.localeCompare(right.id);
 }

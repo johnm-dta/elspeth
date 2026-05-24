@@ -7,6 +7,7 @@ import { TutorialTurn3Graph } from "./TutorialTurn3Graph";
 import { TutorialTurn4Run } from "./TutorialTurn4Run";
 import { TutorialTurn5AuditStory } from "./TutorialTurn5AuditStory";
 import { TutorialTurn6ModeChoice } from "./TutorialTurn6ModeChoice";
+import { TutorialTurn7Graduation } from "./TutorialTurn7Graduation";
 import {
   initialTutorialState,
   tutorialReducer,
@@ -117,7 +118,11 @@ export function HelloWorldTutorial(): JSX.Element {
           skipped={state.skipped}
           cancelled={state.cancelled}
           onBack={goBack}
+          onFinished={() => dispatch({ type: "finishMode" })}
         />
+      )}
+      {state.step === "graduation" && (
+        <TutorialTurn7Graduation onBack={goBack} />
       )}
     </main>
   );
@@ -136,6 +141,7 @@ const TUTORIAL_STEP_LABELS: ReadonlyArray<{ key: string; label: string }> = [
   { key: "run", label: "Run" },
   { key: "audit", label: "Audit" },
   { key: "mode", label: "Mode" },
+  { key: "graduation", label: "Ready" },
 ];
 
 function stepIndex(step: string): number {
@@ -154,6 +160,8 @@ function stepIndex(step: string): number {
       return 5;
     case "mode":
       return 6;
+    case "graduation":
+      return 7;
     default:
       return 0;
   }

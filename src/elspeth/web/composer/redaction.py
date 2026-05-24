@@ -22,6 +22,7 @@ from typing import Annotated, Any, Union, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
@@ -993,13 +994,14 @@ class _RequestInterpretationReviewRedactionModel(BaseModel):
     is still in ``interpretation_events_table.user_term`` /
     ``interpretation_events_table.llm_draft`` — the authoritative row).
 
-    ``affected_node_id`` is structural metadata (a short identifier) and
-    is not marked :class:`Sensitive`. ``extra="forbid"`` ensures a
-    misrouted argument shape fails fast at the persistence boundary
-    rather than silently accepting an unknown key.
+    ``affected_node_id`` and ``kind`` are structural metadata and are not
+    marked :class:`Sensitive`. ``extra="forbid"`` ensures a misrouted
+    argument shape fails fast at the persistence boundary rather than
+    silently accepting an unknown key.
     """
 
     affected_node_id: str
+    kind: InterpretationKind
     user_term: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
     llm_draft: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
 

@@ -39,7 +39,15 @@
 //   * Opt-out link is a real <button> (no tabIndex=-1); keyboard-reachable.
 // ============================================================================
 
-import { useId, useRef, useEffect } from "react";
+import {
+  useCallback,
+  useId,
+  useRef,
+  useEffect,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import type { CompositionState } from "@/types/index";
 import type { InterpretationEvent } from "@/types/interpretation";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -60,6 +68,152 @@ export interface InterpretationReviewInlineMessageProps {
    * with an error banner.
    */
   onResolved?: (newState: CompositionState | null) => void;
+}
+
+const SCROLL_END_TOLERANCE_PX = 1;
+
+const REVIEW_SURFACE_STYLE: CSSProperties = {
+  maxHeight: "16rem",
+  overflow: "auto",
+  border: "1px solid var(--color-border)",
+  borderRadius: "var(--radius-md)",
+  padding: "var(--space-sm)",
+  background: "var(--color-surface)",
+};
+
+const PREFORMATTED_DRAFT_STYLE: CSSProperties = {
+  margin: 0,
+  whiteSpace: "pre-wrap",
+  overflowWrap: "anywhere",
+  fontFamily: "var(--font-mono, monospace)",
+  fontSize: "var(--font-size-sm)",
+  lineHeight: 1.5,
+};
+
+interface ReviewPresentation {
+  heading: string;
+  status: string;
+  body: ReactNode;
+  acceptLabel: string;
+  acceptAriaLabel: string;
+}
+
+function supportsAmendment(kind: InterpretationEvent["kind"]): boolean {
+  return kind === null || kind === "vague_term";
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled interpretation kind: ${String(value)}`);
+}
+
+function getReviewPresentation(event: InterpretationEvent): ReviewPresentation {
+  const userTerm = event.user_term ?? "this term";
+  const llmDraft = event.llm_draft ?? "";
+  switch (event.kind) {
+    case "invented_source":
+      return {
+        heading: "Invented source data",
+        status: "Invented source data needs review",
+        body:
+          "You did not provide this source data. Review it before the pipeline fetches anything.",
+        acceptLabel: "Use source data",
+        acceptAriaLabel: "Accept invented source data",
+      };
+    case "llm_prompt_template":
+      return {
+        heading: "LLM prompt template",
+        status: "LLM prompt template needs review",
+        body: (
+          <>
+            This is the instruction written for{" "}
+            <em>{event.affected_node_id ?? "this transform"}</em>.
+          </>
+        ),
+        acceptLabel: "Use prompt template",
+        acceptAriaLabel: "Accept LLM prompt template",
+      };
+    case "vague_term":
+    case null:
+      return {
+        heading: "Interpretation review",
+        status: "Your input needs review",
+        body: (
+          <>
+            When you said{" "}
+            <em className="interpretation-review-inline-message-user-term">
+              {userTerm}
+            </em>
+            , I read that as roughly{" "}
+            <em className="interpretation-review-inline-message-llm-draft">
+              {llmDraft}
+            </em>
+            . Want to adjust the definition, or use mine?
+          </>
+        ),
+        acceptLabel: "Use my interpretation",
+        acceptAriaLabel: `Accept the LLM's interpretation of ${userTerm}`,
+      };
+    default:
+      return assertNever(event.kind);
+  }
+}
+
+function hasScrolledToEnd(element: HTMLElement): boolean {
+  const overflows =
+    element.scrollHeight > element.clientHeight + SCROLL_END_TOLERANCE_PX;
+  if (!overflows) return true;
+  return (
+    element.scrollTop + element.clientHeight >=
+    element.scrollHeight - SCROLL_END_TOLERANCE_PX
+  );
+}
+
+function InventedSourceDraft({ value }: { value: string }) {
+  return (
+    <div
+      role="group"
+      aria-label="Source data draft"
+      tabIndex={0}
+      className="interpretation-review-inline-message-draft interpretation-review-inline-message-source-draft"
+      style={REVIEW_SURFACE_STYLE}
+    >
+      <pre style={PREFORMATTED_DRAFT_STYLE}>{value}</pre>
+    </div>
+  );
+}
+
+function PromptTemplateDraft({
+  value,
+  onReviewStateChange,
+  surfaceRef,
+}: {
+  value: string;
+  onReviewStateChange: (reviewed: boolean) => void;
+  surfaceRef: { current: HTMLDivElement | null };
+}) {
+  const reportReviewState = useCallback(() => {
+    const surface = surfaceRef.current;
+    if (surface === null) return;
+    onReviewStateChange(hasScrolledToEnd(surface));
+  }, [onReviewStateChange, surfaceRef]);
+
+  useEffect(() => {
+    reportReviewState();
+  }, [reportReviewState, value]);
+
+  return (
+    <div
+      ref={surfaceRef}
+      role="region"
+      aria-label="Prompt template review"
+      tabIndex={0}
+      className="interpretation-review-inline-message-draft interpretation-review-inline-message-prompt-template"
+      style={REVIEW_SURFACE_STYLE}
+      onScroll={reportReviewState}
+    >
+      <pre style={PREFORMATTED_DRAFT_STYLE}>{value}</pre>
+    </div>
+  );
 }
 
 export function InterpretationReviewInlineMessage({
@@ -95,6 +249,7 @@ export function InterpretationReviewInlineMessage({
   const statusId = `${reactId}-status`;
   const amendInputId = `${reactId}-amend`;
   const errorId = `${reactId}-error`;
+  const promptGateId = `${reactId}-prompt-gate`;
 
   // Focus on view toggle ONLY (not on mount, unlike the guided turn).
   // When the user opens the amend textarea, focus moves there; on Cancel,
@@ -118,6 +273,37 @@ export function InterpretationReviewInlineMessage({
 
   const userTerm = event.user_term ?? "this term";
   const llmDraft = event.llm_draft ?? "";
+  const requiresPromptTemplateScroll = event.kind === "llm_prompt_template";
+  const [promptTemplateScrolledToEnd, setPromptTemplateScrolledToEnd] =
+    useState<boolean | null>(requiresPromptTemplateScroll ? null : true);
+  const promptTemplateSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const promptTemplateReviewKey = `${event.id}:${event.kind ?? ""}:${
+    event.llm_draft ?? ""
+  }`;
+  const promptTemplateReviewKeyRef = useRef(promptTemplateReviewKey);
+
+  useEffect(() => {
+    if (promptTemplateReviewKeyRef.current === promptTemplateReviewKey) return;
+    promptTemplateReviewKeyRef.current = promptTemplateReviewKey;
+    setPromptTemplateScrolledToEnd(requiresPromptTemplateScroll ? null : true);
+  }, [promptTemplateReviewKey, requiresPromptTemplateScroll]);
+
+  const handlePromptTemplateReviewChange = useCallback((reviewed: boolean) => {
+    setPromptTemplateScrolledToEnd(reviewed);
+  }, []);
+
+  const presentation = getReviewPresentation(event);
+  const shouldShowAmend = supportsAmendment(event.kind);
+  const chooseMode = mode === "choose" || !shouldShowAmend;
+  const promptTemplateReadyForAccept =
+    !requiresPromptTemplateScroll || promptTemplateScrolledToEnd === true;
+  const acceptDisabled =
+    primaryButtonsDisabled || !promptTemplateReadyForAccept;
+
+  function handleAccept(): void {
+    if (acceptDisabled) return;
+    void handleUseMine();
+  }
 
   return (
     <section
@@ -133,26 +319,34 @@ export function InterpretationReviewInlineMessage({
         already explains the affordance for sighted users.
       */}
       <div id={statusId} role="status" className="visually-hidden">
-        Your input needs review
+        {presentation.status}
       </div>
 
       <h3
         id={headerId}
         className="interpretation-review-inline-message-heading"
       >
-        Interpretation review
+        {presentation.heading}
       </h3>
       <p className="interpretation-review-inline-message-body">
-        When you said{" "}
-        <em className="interpretation-review-inline-message-user-term">
-          {userTerm}
-        </em>
-        , I read that as roughly{" "}
-        <em className="interpretation-review-inline-message-llm-draft">
-          {llmDraft}
-        </em>
-        . Want to adjust the definition, or use mine?
+        {presentation.body}
       </p>
+
+      {event.kind === "invented_source" && (
+        <InventedSourceDraft value={llmDraft} />
+      )}
+      {event.kind === "llm_prompt_template" && (
+        <>
+          <PromptTemplateDraft
+            value={llmDraft}
+            onReviewStateChange={handlePromptTemplateReviewChange}
+            surfaceRef={promptTemplateSurfaceRef}
+          />
+          <span id={promptGateId} className="visually-hidden">
+            Review the full prompt template before accepting.
+          </span>
+        </>
+      )}
 
       {displayedError !== null && (
         <div
@@ -169,14 +363,19 @@ export function InterpretationReviewInlineMessage({
         </div>
       )}
 
-      {mode === "choose" ? (
+      {chooseMode ? (
         <div className="interpretation-review-inline-message-actions">
           <button
             type="button"
             className="btn btn-primary interpretation-review-inline-message-accept-btn"
-            aria-label={`Accept the LLM's interpretation of ${userTerm}`}
-            onClick={() => void handleUseMine()}
-            disabled={primaryButtonsDisabled}
+            aria-label={presentation.acceptAriaLabel}
+            aria-describedby={
+              requiresPromptTemplateScroll && !promptTemplateReadyForAccept
+                ? promptGateId
+                : undefined
+            }
+            onClick={handleAccept}
+            disabled={acceptDisabled}
           >
             {resolveInFlight ? (
               <>
@@ -187,19 +386,21 @@ export function InterpretationReviewInlineMessage({
                 Saving…
               </>
             ) : (
-              "Use my interpretation"
+              presentation.acceptLabel
             )}
           </button>
-          <button
-            ref={changeItButtonRef}
-            type="button"
-            className="btn interpretation-review-inline-message-amend-btn"
-            aria-label={`Edit the interpretation of ${userTerm}`}
-            onClick={handleOpenAmend}
-            disabled={primaryButtonsDisabled}
-          >
-            Change it: I meant…
-          </button>
+          {shouldShowAmend && (
+            <button
+              ref={changeItButtonRef}
+              type="button"
+              className="btn interpretation-review-inline-message-amend-btn"
+              aria-label={`Edit the interpretation of ${userTerm}`}
+              onClick={handleOpenAmend}
+              disabled={primaryButtonsDisabled}
+            >
+              Change it: I meant…
+            </button>
+          )}
         </div>
       ) : (
         <div className="interpretation-review-inline-message-amend">

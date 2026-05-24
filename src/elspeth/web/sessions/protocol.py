@@ -196,6 +196,7 @@ class ComposerSessionPreferencesRecord:
     session_id: UUID
     trust_mode: ComposerTrustMode
     density_default: ComposerDensityDefault
+    interpretation_review_disabled: bool
     updated_at: datetime
 
     def __post_init__(self) -> None:
@@ -775,13 +776,14 @@ class SessionServiceProtocol(Protocol):
     ) -> InterpretationEventRecord:
         """Insert a PENDING interpretation event.
 
-        ``kind`` must be supplied explicitly by the caller; legacy
-        ``request_interpretation_review`` bridges pass ``vague_term`` at
-        the call site while the tool remains vague-term-only. Implementations MUST
-        validate ``affected_node_id`` exists in the parent composition
-        state's ``nodes`` JSON before INSERT (writer-boundary check per
-        CLAUDE.md offensive programming). Raises ``ValueError`` on a
-        missing state, unknown node, or non-``InterpretationKind`` kind.
+        ``kind`` must be supplied explicitly by the caller. Implementations
+        MUST validate the affected component in the parent composition state
+        before INSERT (writer-boundary check per CLAUDE.md offensive
+        programming): ``invented_source`` targets the synthetic ``source``
+        component and requires persisted source-authoring metadata; transform
+        kinds target real LLM nodes in ``composition_states.nodes``. Raises
+        ``ValueError`` on a missing state, malformed target, unknown node, or
+        non-``InterpretationKind`` kind.
         """
         ...
 
@@ -797,7 +799,7 @@ class SessionServiceProtocol(Protocol):
         runtime_model_identifier: str | None = None,
         runtime_model_version: str | None = None,
     ) -> tuple[InterpretationEventRecord, CompositionStateRecord]:
-        """Commit a resolution AND patch the affected LLM transform's prompt template.
+        """Commit a resolution and update the affected interpretation surface.
 
         F-14: ``accepted_value`` is computed internally — implementations
         read ``llm_draft`` from the pending row when ``choice`` is

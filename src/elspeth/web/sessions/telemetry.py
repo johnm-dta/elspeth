@@ -176,18 +176,16 @@ class _SessionsTelemetry:
     # operator notices unusual cap-breach rates without trawling the audit DB.
     interpretation_rate_cap_exceeded_total: _Counter
     # Phase 5b Task 5 follow-on (F-17 / F-21). Counts /execute attempts that
-    # fail the runtime placeholder gate — the LLM transform's prompt_template
-    # still carries one or more ``{{interpretation:<term>}}`` placeholders at
-    # execute time, meaning the compose-loop never called
-    # ``request_interpretation_review`` to resolve them. Carries attributes
-    # ``{"node_id": str, "term": str}`` — explicitly NOT the prompt_template
-    # value (may carry user-supplied content). Operational telemetry, not
-    # audit-primary: the user-actionable RuntimeError surfaced to the
-    # frontend is the primary record (an audit-primary
-    # ``interpretation_events`` row WOULD have been the primary record had
-    # the LLM fired ``request_interpretation_review`` — its absence is what
-    # this counter catches). Purpose: catches LLM under-firing after a model
-    # upgrade without waiting for offline eval refresh.
+    # fail the runtime interpretation-review gate. Carries only non-content
+    # attributes ``{"component_id": str, "component_type": str, "kind": str}``
+    # — no raw ``user_term``, prompt_template, or source text, all of which may
+    # contain user-supplied content. Operational telemetry, not audit-primary:
+    # the user-actionable RuntimeError surfaced to the frontend is the primary
+    # record (an audit-primary ``interpretation_events`` row WOULD have been
+    # the primary record had the LLM fired ``request_interpretation_review`` —
+    # its absence is what this counter catches). Purpose: catches LLM
+    # under-firing after a model upgrade without waiting for offline eval
+    # refresh.
     interpretation_placeholder_unresolved_at_runtime_total: _Counter
     # ── Phase 8 (mode / session-switched / tutorial / B3 cohort / B5) ──
     # Counters added unconditionally to the container even when the

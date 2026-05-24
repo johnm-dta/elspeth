@@ -34,12 +34,19 @@ from sqlalchemy.pool import StaticPool
 from elspeth.contracts.composer_interpretation import (
     INTERPRETATION_HASH_DOMAIN_V2,
     InterpretationChoice,
+    InterpretationEventRecord,
     InterpretationKind,
     InterpretationSource,
 )
+from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.hashing import stable_hash
-from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata
-from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
+from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata, SourceSpec
+from elspeth.web.interpretation_state import (
+    INTERPRETATION_REQUIREMENTS_KEY,
+    PROMPT_TEMPLATE_PARTS_KEY,
+    SOURCE_AUTHORING_KEY,
+    SOURCE_COMPONENT_ID,
+)
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     composition_states_table,
@@ -186,6 +193,92 @@ def _structured_llm_node(
     return state.to_dict()["nodes"][0]
 
 
+def _prompt_template_review_node(*, node_id: str = "identify_colour") -> dict:
+    prompt_template = "Read {{ row.html }} and return JSON."
+    state = CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id=node_id,
+                node_type="transform",
+                plugin="llm",
+                input="rows",
+                on_success="out",
+                on_error="quarantine",
+                options={
+                    "prompt_template": prompt_template,
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "prompt_template_review",
+                            "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                            "user_term": f"llm_prompt_template:{node_id}",
+                            "status": "pending",
+                            "draft": prompt_template,
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Test", description=""),
+        version=1,
+    )
+    return state.to_dict()["nodes"][0]
+
+
+def _llm_generated_source(*, content_hash: str = "0" * 64, with_authoring: bool = True) -> dict:
+    options = {
+        "path": "/tmp/generated.csv",
+        INTERPRETATION_REQUIREMENTS_KEY: [
+            {
+                "id": "source_review",
+                "kind": InterpretationKind.INVENTED_SOURCE.value,
+                "user_term": "inline_source_url_list",
+                "status": "pending",
+                "draft": "https://example.gov.au",
+                "event_id": None,
+                "accepted_value": None,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": None,
+            }
+        ],
+    }
+    if with_authoring:
+        options[SOURCE_AUTHORING_KEY] = {
+            "modality": CreationModality.LLM_GENERATED.value,
+            "content_hash": content_hash,
+            "review_event_id": None,
+            "resolved_kind": None,
+        }
+    state = CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="rows",
+            options=options,
+            on_validation_failure="quarantine",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Test", description=""),
+        version=1,
+    )
+    source = state.to_dict()["source"]
+    assert source is not None
+    return source
+
+
 async def _seed_state_with_llm_node(
     service: SessionServiceImpl,
     *,
@@ -206,6 +299,54 @@ async def _seed_state_with_llm_node(
         provenance="tool_call",
     )
     return state
+
+
+async def _seed_state_with_source(
+    service: SessionServiceImpl,
+    *,
+    session_id: UUID,
+    source: dict | None = None,
+) -> CompositionStateRecord:
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    source = source if source is not None else _llm_generated_source()
+    return await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            source=source,
+            nodes=[],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+
+
+async def _create_prompt_template_interpretation_event(
+    service: SessionServiceImpl,
+    *,
+    session_id: UUID | None = None,
+) -> tuple[UUID, CompositionStateRecord, InterpretationEventRecord]:
+    sid = session_id or uuid4()
+    state = await _seed_state_with_llm_node(
+        service,
+        session_id=sid,
+        node=_prompt_template_review_node(),
+    )
+    event = await service.create_pending_interpretation_event(
+        session_id=sid,
+        composition_state_id=state.id,
+        affected_node_id="identify_colour",
+        tool_call_id="call_prompt_template",
+        user_term="llm_prompt_template:identify_colour",
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        llm_draft="Read {{ row.html }} and return JSON.",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+    return sid, state, event
 
 
 # --------------------------------------------------------------------------- #
@@ -339,6 +480,94 @@ async def test_create_pending_interpretation_event_rejects_raw_kind_string(servi
             user_term="cool",
             kind="invented_source",  # type: ignore[arg-type]
             llm_draft="A draft of cool",
+            model_identifier="anthropic/claude-opus-4-7",
+            model_version="2026-05-01",
+            provider="anthropic",
+            composer_skill_hash="a" * 64,
+        )
+
+    rows = await service.list_interpretation_events(session_id, status="all")
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_create_pending_interpretation_event_accepts_invented_source_component(service) -> None:
+    """Invented-source surfaces bind to the source component, not an LLM node."""
+    session_id = uuid4()
+    state = await _seed_state_with_source(service, session_id=session_id)
+
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id=SOURCE_COMPONENT_ID,
+        tool_call_id="call_source_review",
+        user_term="inline_source_url_list",
+        kind=InterpretationKind.INVENTED_SOURCE,
+        llm_draft="https://example.gov.au",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    assert event.choice is InterpretationChoice.PENDING
+    assert event.interpretation_source is InterpretationSource.USER_APPROVED
+    assert event.kind is InterpretationKind.INVENTED_SOURCE
+    assert event.affected_node_id == SOURCE_COMPONENT_ID
+
+
+@pytest.mark.asyncio
+async def test_create_pending_interpretation_event_rejects_invented_source_without_authoring(service) -> None:
+    """The service is authoritative for the persisted source_authoring contract."""
+    session_id = uuid4()
+    state = await _seed_state_with_source(
+        service,
+        session_id=session_id,
+        source=_llm_generated_source(with_authoring=False),
+    )
+
+    with pytest.raises(ValueError, match=SOURCE_AUTHORING_KEY):
+        await service.create_pending_interpretation_event(
+            session_id=session_id,
+            composition_state_id=state.id,
+            affected_node_id=SOURCE_COMPONENT_ID,
+            tool_call_id="call_source_review",
+            user_term="inline_source_url_list",
+            kind=InterpretationKind.INVENTED_SOURCE,
+            llm_draft="https://example.gov.au",
+            model_identifier="anthropic/claude-opus-4-7",
+            model_version="2026-05-01",
+            provider="anthropic",
+            composer_skill_hash="a" * 64,
+        )
+
+    rows = await service.list_interpretation_events(session_id, status="all")
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_create_pending_interpretation_event_rejects_invented_source_without_pending_requirement(service) -> None:
+    """The writer boundary requires the review site that resolution will consume."""
+    session_id = uuid4()
+    source = _llm_generated_source()
+    options = dict(source["options"])
+    del options[INTERPRETATION_REQUIREMENTS_KEY]
+    source["options"] = options
+    state = await _seed_state_with_source(
+        service,
+        session_id=session_id,
+        source=source,
+    )
+
+    with pytest.raises(ValueError, match=r"pending 'invented_source' requirement"):
+        await service.create_pending_interpretation_event(
+            session_id=session_id,
+            composition_state_id=state.id,
+            affected_node_id=SOURCE_COMPONENT_ID,
+            tool_call_id="call_source_review",
+            user_term="inline_source_url_list",
+            kind=InterpretationKind.INVENTED_SOURCE,
+            llm_draft="https://example.gov.au",
             model_identifier="anthropic/claude-opus-4-7",
             model_version="2026-05-01",
             provider="anthropic",
@@ -498,6 +727,130 @@ async def test_04_resolve_amended_uses_amended_value(service) -> None:
     patched_template = patched["options"]["prompt_template"]
     assert "Strikingly original" in patched_template
     assert "{{interpretation:cool}}" not in patched_template
+
+
+@pytest.mark.asyncio
+async def test_resolve_prompt_template_review_records_hash_without_rewriting_template(service) -> None:
+    """Prompt-template review stamps the explicit requirement and hash only."""
+    session_id, _state, event = await _create_prompt_template_interpretation_event(service)
+
+    resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+
+    assert resolved.kind is InterpretationKind.LLM_PROMPT_TEMPLATE
+    assert resolved.hash_domain_version == "v2"
+    assert resolved.accepted_value == event.llm_draft
+    assert resolved.resolved_prompt_template_hash == stable_hash(event.llm_draft)
+    node = next(node for node in new_state.nodes if node["id"] == "identify_colour")
+    assert node["options"]["prompt_template"] == event.llm_draft
+    assert node["options"]["resolved_prompt_template_hash"] == stable_hash(event.llm_draft)
+    requirement = node["options"][INTERPRETATION_REQUIREMENTS_KEY][0]
+    assert requirement["kind"] == InterpretationKind.LLM_PROMPT_TEMPLATE.value
+    assert requirement["status"] == "resolved"
+    assert requirement["event_id"] == str(event.id)
+    assert requirement["accepted_value"] == event.llm_draft
+    assert requirement["resolved_prompt_template_hash"] == stable_hash(event.llm_draft)
+
+
+@pytest.mark.asyncio
+async def test_resolve_prompt_template_review_rejects_amended(service) -> None:
+    """Prompt-template amendments are deferred until a dedicated safe editor exists."""
+    session_id, _state, event = await _create_prompt_template_interpretation_event(service)
+
+    with pytest.raises(ValueError, match=r"llm_prompt_template.*amendment|amended"):
+        await service.resolve_interpretation_event(
+            session_id=session_id,
+            event_id=event.id,
+            choice=InterpretationChoice.AMENDED,
+            amended_value="Read {{ row.html }} and return CSV.",
+            actor="user:alice",
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_invented_source_updates_authoring_metadata_without_mutating_payload(service) -> None:
+    """Invented-source resolution stamps review metadata while preserving source payload."""
+    session_id = uuid4()
+    content_hash = stable_hash({"urls": ["https://example.gov.au"]})
+    state = await _seed_state_with_source(
+        service,
+        session_id=session_id,
+        source=_llm_generated_source(content_hash=content_hash),
+    )
+    original_source = state.source
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id=SOURCE_COMPONENT_ID,
+        tool_call_id="call_source_review",
+        user_term="inline_source_url_list",
+        kind=InterpretationKind.INVENTED_SOURCE,
+        llm_draft="https://example.gov.au",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+
+    assert resolved.kind is InterpretationKind.INVENTED_SOURCE
+    assert resolved.accepted_value == event.llm_draft
+    assert new_state.source is not None
+    assert original_source is not None
+    assert new_state.source["plugin"] == original_source["plugin"]
+    assert new_state.source["on_success"] == original_source["on_success"]
+    assert new_state.source["on_validation_failure"] == original_source["on_validation_failure"]
+    assert new_state.source["options"]["path"] == original_source["options"]["path"]
+    authoring = new_state.source["options"][SOURCE_AUTHORING_KEY]
+    assert authoring["content_hash"] == content_hash
+    assert authoring["review_event_id"] == str(event.id)
+    assert authoring["resolved_kind"] == InterpretationKind.INVENTED_SOURCE.value
+    requirement = new_state.source["options"][INTERPRETATION_REQUIREMENTS_KEY][0]
+    assert requirement["status"] == "resolved"
+    assert requirement["event_id"] == str(event.id)
+    assert requirement["accepted_value"] == event.llm_draft
+    assert requirement["accepted_artifact_hash"] == content_hash
+
+
+@pytest.mark.asyncio
+async def test_resolve_invented_source_rejects_amended(service) -> None:
+    """Invented-source amendments are deferred until source payload editing exists."""
+    session_id = uuid4()
+    state = await _seed_state_with_source(service, session_id=session_id)
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id=SOURCE_COMPONENT_ID,
+        tool_call_id="call_source_review",
+        user_term="inline_source_url_list",
+        kind=InterpretationKind.INVENTED_SOURCE,
+        llm_draft="https://example.gov.au",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    with pytest.raises(ValueError, match=r"invented_source.*amendment|amended"):
+        await service.resolve_interpretation_event(
+            session_id=session_id,
+            event_id=event.id,
+            choice=InterpretationChoice.AMENDED,
+            amended_value="https://example.gov.au\nhttps://dta.gov.au",
+            actor="user:alice",
+        )
 
 
 @pytest.mark.asyncio
@@ -799,37 +1152,75 @@ async def test_10b_opt_out_is_idempotent(service) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_pending_after_session_opt_out_returns_opt_out_row(service) -> None:
-    """Opt-out is enforced at the pending-event writer boundary."""
+async def test_create_pending_after_session_opt_out_writes_surface_specific_audit_rows(service) -> None:
+    """Opt-out suppresses human review but still records each reviewed surface."""
     session_id = uuid4()
-    state = await _seed_state_with_llm_node(service, session_id=session_id)
-    opt_out = await service.record_session_interpretation_opt_out(
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            source=_llm_generated_source(),
+            nodes=[
+                _llm_node(node_id="rate_node", user_term="cool"),
+                _prompt_template_review_node(node_id="identify_colour"),
+            ],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+    marker = await service.record_session_interpretation_opt_out(
         session_id=session_id,
         actor="user:alice",
     )
 
-    event = await service.create_pending_interpretation_event(
-        session_id=session_id,
-        composition_state_id=state.id,
-        affected_node_id="llm_transform_1",
-        tool_call_id="call_after_opt_out",
-        user_term="cool",
-        kind=InterpretationKind.VAGUE_TERM,
-        llm_draft="A draft definition",
-        model_identifier="anthropic/claude-opus-4-7",
-        model_version="2026-05-01",
-        provider="anthropic",
-        composer_skill_hash="a" * 64,
-    )
-
-    assert event.id == opt_out.id
-    assert event.choice is InterpretationChoice.OPTED_OUT
-    assert event.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT
+    requests = [
+        (InterpretationKind.INVENTED_SOURCE, SOURCE_COMPONENT_ID, "inline_source_url_list", "https://example.gov.au"),
+        (InterpretationKind.VAGUE_TERM, "rate_node", "cool", "A draft definition"),
+        (
+            InterpretationKind.LLM_PROMPT_TEMPLATE,
+            "identify_colour",
+            "llm_prompt_template:identify_colour",
+            "Read {{ row.html }} and return JSON.",
+        ),
+    ]
+    for index, (kind, affected_node_id, user_term, llm_draft) in enumerate(requests):
+        event = await service.create_pending_interpretation_event(
+            session_id=session_id,
+            composition_state_id=state.id,
+            affected_node_id=affected_node_id,
+            tool_call_id=f"call_after_opt_out_{index}",
+            user_term=user_term,
+            kind=kind,
+            llm_draft=llm_draft,
+            model_identifier="anthropic/claude-opus-4-7",
+            model_version="2026-05-01",
+            provider="anthropic",
+            composer_skill_hash="a" * 64,
+        )
+        assert event.id != marker.id
+        assert event.choice is InterpretationChoice.OPTED_OUT
+        assert event.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT
+        assert event.kind is kind
+        assert event.accepted_value == llm_draft
+        assert event.arguments_hash is not None
+        assert event.hash_domain_version == "v2"
+        if kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
+            assert event.resolved_prompt_template_hash == stable_hash(llm_draft)
+        else:
+            assert event.resolved_prompt_template_hash is None
 
     pending_rows = await service.list_interpretation_events(session_id, status="pending")
     all_rows = await service.list_interpretation_events(session_id, status="all")
     assert pending_rows == []
-    assert [row.id for row in all_rows] == [opt_out.id]
+    assert all_rows[0].id == marker.id
+    surface_rows = [row for row in all_rows if row.kind is not None]
+    assert [row.kind for row in surface_rows] == [
+        InterpretationKind.INVENTED_SOURCE,
+        InterpretationKind.VAGUE_TERM,
+        InterpretationKind.LLM_PROMPT_TEMPLATE,
+    ]
 
 
 @pytest.mark.asyncio

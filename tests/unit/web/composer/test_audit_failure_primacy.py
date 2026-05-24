@@ -330,6 +330,7 @@ async def test_compose_loop_rejects_unwind_audit_failure_without_plugin_crash(
                 session_id=session_id,
                 trust_mode="auto_commit",
                 density_default="high",
+                interpretation_review_disabled=False,
                 updated_at=datetime.now(UTC),
             )
 

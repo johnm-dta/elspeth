@@ -331,6 +331,57 @@ class TestCreateBlobComposerSourceProvenance:
         assert row.creating_composer_skill_hash == "sha256:composer-skill"
         assert row.creating_arguments_hash == "sha256:tool-arguments"
 
+    @pytest.mark.parametrize(
+        "blank_field",
+        [
+            "composer_model_identifier",
+            "composer_model_version",
+            "composer_provider",
+            "composer_skill_hash",
+            "tool_arguments_hash",
+        ],
+    )
+    @pytest.mark.parametrize("blank_value", ["", "   ", "\t\n "])
+    def test_blank_composer_provenance_fails_closed(
+        self,
+        tmp_path: Path,
+        blank_field: str,
+        blank_value: str,
+    ) -> None:
+        """LLM provenance fields must be non-blank, not merely non-null."""
+        engine, session_id, user_message_id = _session_engine_with_user_message("Please create a CSV of the high-priority records.")
+        context_kwargs = {
+            "composer_model_identifier": "openai/gpt-5-mini",
+            "composer_model_version": "gpt-5-mini-2026-05-01",
+            "composer_provider": "openai",
+            "composer_skill_hash": "sha256:composer-skill",
+            "tool_arguments_hash": "sha256:tool-arguments",
+        }
+        context_kwargs[blank_field] = blank_value
+
+        with pytest.raises(AuditIntegrityError, match=f"missing: {blank_field}"):
+            _execute_create_blob(
+                {
+                    "filename": "generated.csv",
+                    "mime_type": "text/csv",
+                    "content": "priority,score\nhigh,99\n",
+                },
+                _empty_state(),
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    data_dir=str(tmp_path),
+                    session_engine=engine,
+                    session_id=session_id,
+                    user_message_id=user_message_id,
+                    user_message_content="Please create a CSV of the high-priority records.",
+                    **context_kwargs,
+                ),
+            )
+
+        with engine.connect() as conn:
+            rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
+        assert rows == []
+
     def test_content_in_user_message_records_verbatim_without_model_identifier(self, tmp_path: Path) -> None:
         """User-supplied literal content remains verbatim even when composer provenance is present."""
         user_message_content = "Use this exact file:\nname,score\nada,42\n"

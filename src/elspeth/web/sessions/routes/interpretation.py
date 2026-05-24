@@ -18,6 +18,7 @@ from ._helpers import (
     InterpretationResolveRequest,
     InterpretationResolveResponse,
     InterpretationSource,
+    InterpretationUnsupportedChoiceError,
     ListInterpretationEventsResponse,
     OptOutSummaryResponse,
     Request,
@@ -166,6 +167,14 @@ def register_interpretation_routes(router: APIRouter) -> None:
                 detail={
                     "code": "interpretation_placeholder_unavailable",
                     "message": "The affected LLM prompt no longer contains the expected interpretation placeholder.",
+                },
+            ) from exc
+        except InterpretationUnsupportedChoiceError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "interpretation_resolution_unsupported",
+                    "message": "This interpretation kind does not support inline amendment in this release.",
                 },
             ) from exc
         except AuditIntegrityError as exc:

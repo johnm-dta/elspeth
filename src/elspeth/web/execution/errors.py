@@ -12,8 +12,10 @@ to access entries and contracts.
 
 from __future__ import annotations
 
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.plugin_semantics import SemanticEdgeContract
 from elspeth.web.composer.state import ValidationEntry
+from elspeth.web.interpretation_state import InterpretationReviewSite
 
 
 class SemanticContractViolationError(ValueError):
@@ -86,33 +88,69 @@ class UnresolvedInterpretationPlaceholderError(Exception):
     def __init__(
         self,
         *,
-        placeholders: tuple[tuple[str, str], ...],
+        placeholders: tuple[tuple[str, str], ...] | None = None,
+        sites: tuple[InterpretationReviewSite, ...] | None = None,
     ) -> None:
-        if not placeholders:
+        if sites is None:
+            if not placeholders:
+                # Offensive guard: callers must not raise this exception with
+                # an empty placeholders tuple.  An empty list means the gate
+                # passed and execution should proceed; constructing the
+                # exception in that case is a control-flow bug worth crashing
+                # for rather than silently producing an actionable error with
+                # an empty body.
+                raise ValueError(
+                    "UnresolvedInterpretationPlaceholderError requires at "
+                    "least one (node_id, term) tuple — caller must check the "
+                    "detector's return value before raising."
+                )
+            sites = tuple(
+                InterpretationReviewSite(
+                    component_id=node_id,
+                    component_type="transform",
+                    user_term=term,
+                    kind=InterpretationKind.VAGUE_TERM,
+                )
+                for node_id, term in placeholders
+            )
+        elif not sites:
             # Offensive guard: callers must not raise this exception with
-            # an empty placeholders tuple.  An empty list means the gate
+            # an empty sites tuple.  An empty list means the gate
             # passed and execution should proceed; constructing the
             # exception in that case is a control-flow bug worth crashing
             # for rather than silently producing an actionable error with
             # an empty body.
             raise ValueError(
                 "UnresolvedInterpretationPlaceholderError requires at "
-                "least one (node_id, term) tuple — caller must check the "
+                "least one interpretation-review site — caller must check the "
                 "detector's return value before raising."
             )
-        self.placeholders = placeholders
+        self.sites = sites
+        self.placeholders = tuple(
+            (site.component_id, site.user_term)
+            for site in sites
+            if site.component_type == "transform" and site.kind is InterpretationKind.VAGUE_TERM
+        )
+        if placeholders is not None and self.placeholders != placeholders:
+            raise ValueError("placeholders must match transform/vague_term interpretation-review sites")
         # User-actionable message: list every unresolved (node, term) so
         # the operator sees all sites at once.  Single-site messages read
         # naturally; multi-site messages join with "; " to stay on one
         # line for the frontend banner.
-        rendered_sites = "; ".join(f"{{{{interpretation:{term}}}}} in LLM transform '{node_id}'" for node_id, term in placeholders)
+        rendered_sites = "; ".join(_render_interpretation_site(site) for site in sites)
         message = (
-            f"Unresolved interpretation placeholder(s) — {rendered_sites}. "
+            f"Unresolved interpretation review(s) — {rendered_sites}. "
             f"Resolve via request_interpretation_review (compose loop) and "
             f"the /interpretations/<event_id>/resolve endpoint before "
             f"running the pipeline."
         )
         super().__init__(message)
+
+
+def _render_interpretation_site(site: InterpretationReviewSite) -> str:
+    if site.component_type == "transform" and site.kind is InterpretationKind.VAGUE_TERM:
+        return f"{{{{interpretation:{site.user_term}}}}} in LLM transform '{site.component_id}'"
+    return f"{site.kind.value} review for {site.component_type} '{site.component_id}': {site.user_term}"
 
 
 class BlobSourcePathMismatchError(Exception):

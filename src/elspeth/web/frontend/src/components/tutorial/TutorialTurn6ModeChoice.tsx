@@ -49,8 +49,7 @@ export function TutorialTurn6ModeChoice({
           .getState()
           .renameSession(sessionId, HELLO_WORLD_SESSION_TITLE);
       }
-      await usePreferencesStore.getState().markTutorialCompleted(mode);
-      await useSessionStore.getState().createSession();
+      await usePreferencesStore.getState().saveTutorialMode(mode);
       onFinished?.();
     } catch (err) {
       setError(formatError(err));

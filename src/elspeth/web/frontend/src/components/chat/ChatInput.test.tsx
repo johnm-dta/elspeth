@@ -336,6 +336,7 @@ describe("ChatInput pending-interpretation placeholder cue", () => {
       affected_node_id: "node-1",
       tool_call_id: "tool-1",
       user_term: "cool",
+      kind: "vague_term",
       llm_draft: "interesting and engaging",
       accepted_value: null,
       choice: "pending",
@@ -384,6 +385,7 @@ describe("ChatInput pending-interpretation placeholder cue", () => {
     useSessionStore.setState({ activeSessionId: ACTIVE_SESSION_ID });
     const event = makePendingEvent({
       user_term: null,
+      kind: null,
       interpretation_source: "auto_interpreted_opt_out",
       model_identifier: null,
       model_version: null,

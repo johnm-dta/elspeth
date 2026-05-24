@@ -187,6 +187,7 @@ export interface ComposerPreferences {
   session_id: string;
   trust_mode: ComposerTrustMode;
   density_default: ComposerDensityDefault;
+  interpretation_review_disabled: boolean;
   updated_at: string;
 }
 

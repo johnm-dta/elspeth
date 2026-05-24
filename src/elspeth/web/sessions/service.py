@@ -52,6 +52,8 @@ from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     PENDING_INTERPRETATION_AUTHORING_TEXT,
     PROMPT_TEMPLATE_PARTS_KEY,
+    SOURCE_AUTHORING_KEY,
+    SOURCE_COMPONENT_ID,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
@@ -137,6 +139,46 @@ _SESSION_WRITE_LOCK_HELD: ContextVar[frozenset[tuple[int, str]]] = ContextVar(
     "_SESSION_WRITE_LOCK_HELD",
     default=frozenset(),
 )
+_PROPOSAL_COMPOSER_PROVENANCE_FIELDS = (
+    "composer_model_identifier",
+    "composer_model_version",
+    "composer_provider",
+    "composer_skill_hash",
+    "tool_arguments_hash",
+)
+
+
+def _normalize_optional_provenance_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized if normalized else None
+
+
+def _normalize_proposal_composer_provenance(
+    *,
+    composer_model_identifier: str | None,
+    composer_model_version: str | None,
+    composer_provider: str | None,
+    composer_skill_hash: str | None,
+    tool_arguments_hash: str | None,
+) -> dict[str, str | None]:
+    raw = {
+        "composer_model_identifier": composer_model_identifier,
+        "composer_model_version": composer_model_version,
+        "composer_provider": composer_provider,
+        "composer_skill_hash": composer_skill_hash,
+        "tool_arguments_hash": tool_arguments_hash,
+    }
+    normalized = {name: _normalize_optional_provenance_text(value) for name, value in raw.items()}
+    if any(value is not None for value in raw.values()):
+        missing = tuple(name for name in _PROPOSAL_COMPOSER_PROVENANCE_FIELDS if normalized[name] is None)
+        if missing:
+            raise AuditIntegrityError(
+                "composer provenance for composition proposals requires all fields to be non-blank "
+                f"when any are supplied; missing: {', '.join(missing)}"
+            )
+    return normalized
 
 
 def _assert_state_in_session(
@@ -466,6 +508,119 @@ class InterpretationPlaceholderConsumedError(InterpretationResolveError):
     """The affected LLM node no longer carries the expected placeholder."""
 
 
+class InterpretationUnsupportedChoiceError(InterpretationResolveError):
+    """The requested choice is valid generally but unsupported for this kind."""
+
+
+def _interpretation_hash_domain_v2(
+    *,
+    session_id: str,
+    composition_state_id: str | None,
+    affected_node_id: str,
+    tool_call_id: str,
+    user_term: str,
+    kind: InterpretationKind | str,
+    llm_draft: str,
+    accepted_value: str,
+    actor: str,
+    model_identifier: str,
+    model_version: str,
+    provider: str,
+    composer_skill_hash: str,
+    context: str,
+) -> dict[str, Any]:
+    domain_dict = {
+        "session_id": session_id,
+        "composition_state_id": composition_state_id,
+        "affected_node_id": affected_node_id,
+        "tool_call_id": tool_call_id,
+        "user_term": user_term,
+        "kind": kind.value if isinstance(kind, InterpretationKind) else kind,
+        "llm_draft": llm_draft,
+        "accepted_value": accepted_value,
+        "actor": actor,
+        "model_identifier": model_identifier,
+        "model_version": model_version,
+        "provider": provider,
+        "composer_skill_hash": composer_skill_hash,
+    }
+    if set(domain_dict.keys()) != INTERPRETATION_HASH_DOMAIN_V2:
+        raise AssertionError(
+            f"{context}: domain dict keys {set(domain_dict.keys())!r} drifted from "
+            f"INTERPRETATION_HASH_DOMAIN_V2 {INTERPRETATION_HASH_DOMAIN_V2!r}"
+        )
+    return domain_dict
+
+
+def _require_mapping(value: object, *, message: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise InterpretationPlaceholderConsumedError(message)
+    return value
+
+
+def _find_llm_transform_node(
+    state: CompositionStateRecord,
+    *,
+    affected_node_id: str,
+    context: str,
+) -> Mapping[str, Any]:
+    if state.nodes is None:
+        raise InterpretationNodeMissingError(f"{context}: composition state has no nodes; node {affected_node_id!r} is not present")
+    for node in state.nodes:
+        if node["id"] != affected_node_id:
+            continue
+        if node.get("node_type") != "transform" or "plugin" not in node:
+            raise InterpretationNodePluginMutatedError(
+                f"{context}: node {affected_node_id!r} has no LLM discriminator; expected node_type='transform' with plugin='llm'"
+            )
+        node_plugin = node["plugin"]
+        if node_plugin != "llm":
+            raise InterpretationNodePluginMutatedError(
+                f"{context}: node {affected_node_id!r} has plugin {node_plugin!r}; only llm nodes carry interpretation review state"
+            )
+        options = _require_mapping(
+            node["options"] if "options" in node else None,
+            message=f"{context}: node {affected_node_id!r} has no options mapping",
+        )
+        prompt_template = options["prompt_template"] if "prompt_template" in options else None
+        if not isinstance(prompt_template, str) or not prompt_template:
+            raise InterpretationPlaceholderConsumedError(
+                f"{context}: node {affected_node_id!r} must declare non-empty options.prompt_template"
+            )
+        return node
+    raise InterpretationNodeMissingError(f"{context}: node {affected_node_id!r} is not present in the composition state's nodes")
+
+
+def _matching_pending_requirement_index(
+    requirements_value: object,
+    *,
+    kind: InterpretationKind,
+    user_term: str,
+    context: str,
+) -> tuple[list[dict[str, Any]], int]:
+    if not isinstance(requirements_value, (list, tuple)):
+        raise InterpretationPlaceholderConsumedError(f"{context}: options.interpretation_requirements is not a list")
+    normalized_user_term = user_term.strip()
+    requirements: list[dict[str, Any]] = []
+    matching_indexes: list[int] = []
+    for index, requirement_value in enumerate(requirements_value):
+        if not isinstance(requirement_value, Mapping):
+            raise InterpretationPlaceholderConsumedError(f"{context}: interpretation requirement entry is not a mapping")
+        requirement = dict(requirement_value)
+        requirement_kind = requirement["kind"] if "kind" in requirement else InterpretationKind.VAGUE_TERM.value
+        requirement_term = requirement["user_term"]
+        if not isinstance(requirement_term, str):
+            raise InterpretationPlaceholderConsumedError(f"{context}: interpretation requirement user_term is invalid")
+        if requirement_term.strip() == normalized_user_term and requirement.get("status") == "pending" and requirement_kind == kind.value:
+            matching_indexes.append(index)
+        requirements.append(requirement)
+    if len(matching_indexes) != 1:
+        raise InterpretationPlaceholderConsumedError(
+            f"{context}: does not contain exactly one pending {kind.value!r} requirement for {user_term!r}; found {len(matching_indexes)}"
+        )
+    return requirements, matching_indexes[0]
+
+
 # Prefixes (case-insensitive) that, when they appear immediately before the
 # placeholder, indicate the LLM placed the placeholder inside a structural
 # directive rather than in the prompt body. Substituting the user's
@@ -533,7 +688,12 @@ def _patch_structured_interpretation_prompt(
                 f"_patch_llm_transform_prompt: duplicate interpretation requirement id {requirement_id!r}"
             )
         requirements_by_id[requirement_id] = requirement
-        if requirement_term.strip() == normalized_user_term and requirement.get("status") == "pending":
+        requirement_kind = requirement.get("kind", InterpretationKind.VAGUE_TERM.value)
+        if (
+            requirement_term.strip() == normalized_user_term
+            and requirement.get("status") == "pending"
+            and requirement_kind == InterpretationKind.VAGUE_TERM.value
+        ):
             matching_indexes.append(index)
         requirements.append(requirement)
 
@@ -775,6 +935,149 @@ def _patch_llm_transform_prompt(
         )
 
     return patched_nodes
+
+
+def _resolve_vague_term(
+    state_record: CompositionStateRecord,
+    *,
+    affected_node_id: str,
+    user_term: str,
+    accepted_value: str,
+) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], str]:
+    patched_nodes = _patch_llm_transform_prompt(
+        state_record,
+        affected_node_id=affected_node_id,
+        user_term=user_term,
+        accepted_value=accepted_value,
+    )
+    patched_node = next(n for n in patched_nodes if n["id"] == affected_node_id)
+    resolved_template: str = patched_node["options"]["prompt_template"]
+    resolved_prompt_template_hash = stable_hash(resolved_template)
+
+    final_nodes: list[Mapping[str, Any]] = []
+    for n in patched_nodes:
+        if n["id"] == affected_node_id:
+            node_with_hash = dict(n)
+            options_with_hash = dict(n["options"])
+            options_with_hash["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+            node_with_hash["options"] = options_with_hash
+            final_nodes.append(node_with_hash)
+        else:
+            final_nodes.append(n)
+    return state_record.source, final_nodes, resolved_prompt_template_hash
+
+
+def _resolve_prompt_template_review(
+    state_record: CompositionStateRecord,
+    *,
+    event_id: str,
+    affected_node_id: str,
+    user_term: str,
+    accepted_value: str,
+) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], str]:
+    node = _find_llm_transform_node(
+        state_record,
+        affected_node_id=affected_node_id,
+        context="resolve_interpretation_event",
+    )
+    options = _require_mapping(
+        node["options"],
+        message=f"resolve_interpretation_event: node {affected_node_id!r} options is not a mapping",
+    )
+    prompt_template = options["prompt_template"]
+    if not isinstance(prompt_template, str):
+        raise InterpretationPlaceholderConsumedError(
+            f"resolve_interpretation_event: node {affected_node_id!r} options.prompt_template is not a string"
+        )
+    if accepted_value != prompt_template:
+        raise InterpretationPlaceholderConsumedError(
+            "resolve_interpretation_event: llm_prompt_template accepted value must equal current options.prompt_template"
+        )
+    requirements, matching_index = _matching_pending_requirement_index(
+        options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None,
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        user_term=user_term,
+        context="resolve_interpretation_event",
+    )
+    resolved_prompt_template_hash = stable_hash(prompt_template)
+    requirement = dict(requirements[matching_index])
+    requirement["status"] = "resolved"
+    requirement["event_id"] = event_id
+    requirement["accepted_value"] = accepted_value
+    requirement["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+    requirements[matching_index] = requirement
+
+    final_nodes: list[Mapping[str, Any]] = []
+    for current_node in state_record.nodes or ():
+        if current_node["id"] == affected_node_id:
+            patched_node = dict(current_node)
+            patched_options = dict(options)
+            patched_options["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+            patched_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
+            patched_node["options"] = patched_options
+            final_nodes.append(patched_node)
+        else:
+            final_nodes.append(current_node)
+    return state_record.source, final_nodes, resolved_prompt_template_hash
+
+
+def _resolve_invented_source(
+    state_record: CompositionStateRecord,
+    *,
+    event_id: str,
+    affected_node_id: str,
+    user_term: str,
+    llm_draft: str,
+    accepted_value: str,
+) -> tuple[Mapping[str, Any], list[Mapping[str, Any]], None]:
+    if affected_node_id != SOURCE_COMPONENT_ID:
+        raise InterpretationNodeMissingError(
+            f"resolve_interpretation_event: invented_source must target affected_node_id {SOURCE_COMPONENT_ID!r}"
+        )
+    source = _require_mapping(
+        state_record.source,
+        message="resolve_interpretation_event: invented_source requires a persisted source mapping",
+    )
+    options = _require_mapping(
+        source["options"] if "options" in source else None,
+        message="resolve_interpretation_event: invented_source requires source.options",
+    )
+    source_authoring = _require_mapping(
+        options[SOURCE_AUTHORING_KEY] if SOURCE_AUTHORING_KEY in options else None,
+        message=f"resolve_interpretation_event: invented_source requires source.options.{SOURCE_AUTHORING_KEY}",
+    )
+    content_hash = source_authoring["content_hash"] if "content_hash" in source_authoring else None
+    if not isinstance(content_hash, str) or not content_hash:
+        raise InterpretationPlaceholderConsumedError(
+            f"resolve_interpretation_event: source.options.{SOURCE_AUTHORING_KEY}.content_hash must be populated"
+        )
+    requirements, matching_index = _matching_pending_requirement_index(
+        options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None,
+        kind=InterpretationKind.INVENTED_SOURCE,
+        user_term=user_term,
+        context="resolve_interpretation_event",
+    )
+    requirement = dict(requirements[matching_index])
+    draft = requirement["draft"] if "draft" in requirement else None
+    if isinstance(draft, str) and draft != llm_draft:
+        raise InterpretationPlaceholderConsumedError(
+            "resolve_interpretation_event: invented_source event draft does not match the source review requirement draft"
+        )
+    requirement["status"] = "resolved"
+    requirement["event_id"] = event_id
+    requirement["accepted_value"] = accepted_value
+    requirement["accepted_artifact_hash"] = content_hash
+    requirements[matching_index] = requirement
+
+    patched_authoring = dict(source_authoring)
+    patched_authoring["review_event_id"] = event_id
+    patched_authoring["resolved_kind"] = InterpretationKind.INVENTED_SOURCE.value
+    patched_options = dict(options)
+    patched_options[SOURCE_AUTHORING_KEY] = patched_authoring
+    patched_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
+    patched_source = dict(source)
+    patched_source["options"] = patched_options
+    return patched_source, list(state_record.nodes or ()), None
 
 
 class SessionServiceImpl:
@@ -1723,6 +2026,7 @@ class SessionServiceImpl:
                     session_id=UUID(row.id),
                     trust_mode=row.trust_mode,
                     density_default=row.density_default,
+                    interpretation_review_disabled=bool(row.interpretation_review_disabled),
                     updated_at=self._ensure_utc(row.updated_at),
                 )
 
@@ -1771,6 +2075,7 @@ class SessionServiceImpl:
                     session_id=UUID(prior_row.id),
                     trust_mode=prior_row.trust_mode,
                     density_default=prior_row.density_default,
+                    interpretation_review_disabled=bool(prior_row.interpretation_review_disabled),
                     updated_at=self._ensure_utc(prior_row.updated_at),
                 )
                 # Audit fires before state mutation per CLAUDE.md
@@ -1808,6 +2113,7 @@ class SessionServiceImpl:
                     session_id=UUID(row.id),
                     trust_mode=row.trust_mode,
                     density_default=row.density_default,
+                    interpretation_review_disabled=bool(row.interpretation_review_disabled),
                     updated_at=self._ensure_utc(row.updated_at),
                 )
                 return ComposerSessionPreferencesTransition(prior=prior_record, current=current_record)
@@ -1835,6 +2141,13 @@ class SessionServiceImpl:
         tool_arguments_hash: str | None = None,
     ) -> CompositionProposalRecord:
         """Create a pending composer proposal and its forward audit event."""
+        composer_provenance = _normalize_proposal_composer_provenance(
+            composer_model_identifier=composer_model_identifier,
+            composer_model_version=composer_model_version,
+            composer_provider=composer_provider,
+            composer_skill_hash=composer_skill_hash,
+            tool_arguments_hash=tool_arguments_hash,
+        )
         now = self._now()
         sid = str(session_id)
         umid = str(user_message_id) if user_message_id is not None else None
@@ -1864,11 +2177,11 @@ class SessionServiceImpl:
                         session_id=sid,
                         tool_call_id=tool_call_id,
                         user_message_id=umid,
-                        composer_model_identifier=composer_model_identifier,
-                        composer_model_version=composer_model_version,
-                        composer_provider=composer_provider,
-                        composer_skill_hash=composer_skill_hash,
-                        tool_arguments_hash=tool_arguments_hash,
+                        composer_model_identifier=composer_provenance["composer_model_identifier"],
+                        composer_model_version=composer_provenance["composer_model_version"],
+                        composer_provider=composer_provenance["composer_provider"],
+                        composer_skill_hash=composer_provenance["composer_skill_hash"],
+                        tool_arguments_hash=composer_provenance["tool_arguments_hash"],
                         tool_name=tool_name,
                         status="pending",
                         summary=summary,
@@ -2091,20 +2404,89 @@ class SessionServiceImpl:
 
         def _sync() -> InterpretationEventRecord:
             with self._engine.begin() as conn, self._session_write_lock(conn, sid):
+                # Writer-boundary validation: resolve the parent state and
+                # validate the affected component before any interpretation
+                # row is written. ``invented_source`` binds to the synthetic
+                # source component; transform kinds bind to real LLM nodes.
+                state_row = conn.execute(
+                    select(composition_states_table)
+                    .where(composition_states_table.c.id == state_id_str)
+                    .where(composition_states_table.c.session_id == sid)
+                ).one_or_none()
+                if state_row is None:
+                    raise ValueError(
+                        f"create_pending_interpretation_event: composition state {state_id_str!r} not found in session {sid!r}"
+                    )
+                nodes = self._unwrap_envelope(state_row.nodes)
+                source = self._unwrap_envelope(state_row.source)
+                if kind is InterpretationKind.INVENTED_SOURCE:
+                    if affected_node_id != SOURCE_COMPONENT_ID:
+                        raise ValueError(
+                            f"create_pending_interpretation_event: invented_source must target affected_node_id "
+                            f"{SOURCE_COMPONENT_ID!r}, got {affected_node_id!r}"
+                        )
+                    if not isinstance(source, Mapping):
+                        raise ValueError("create_pending_interpretation_event: invented_source requires a persisted source mapping")
+                    source_options = source["options"] if "options" in source else None
+                    if not isinstance(source_options, Mapping) or SOURCE_AUTHORING_KEY not in source_options:
+                        raise ValueError(
+                            f"create_pending_interpretation_event: invented_source requires source.options.{SOURCE_AUTHORING_KEY}"
+                        )
+                    source_authoring = source_options[SOURCE_AUTHORING_KEY]
+                    if not isinstance(source_authoring, Mapping):
+                        raise ValueError(f"create_pending_interpretation_event: source.options.{SOURCE_AUTHORING_KEY} must be a mapping")
+                    content_hash = source_authoring["content_hash"] if "content_hash" in source_authoring else None
+                    if not isinstance(content_hash, str) or not content_hash:
+                        raise ValueError(
+                            f"create_pending_interpretation_event: source.options.{SOURCE_AUTHORING_KEY}.content_hash must be populated"
+                        )
+                    try:
+                        requirements, matching_index = _matching_pending_requirement_index(
+                            source_options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in source_options else None,
+                            kind=kind,
+                            user_term=user_term,
+                            context="create_pending_interpretation_event",
+                        )
+                    except InterpretationPlaceholderConsumedError as exc:
+                        raise ValueError(
+                            "create_pending_interpretation_event: source.options.interpretation_requirements "
+                            f"must contain exactly one pending {kind.value!r} requirement for {user_term!r}"
+                        ) from exc
+                    requirement = requirements[matching_index]
+                    draft = requirement["draft"] if "draft" in requirement else None
+                    if isinstance(draft, str) and draft != llm_draft:
+                        raise ValueError(
+                            "create_pending_interpretation_event: invented_source event draft does not match the source review requirement draft"
+                        )
+                else:
+                    if nodes is None:
+                        raise ValueError(
+                            f"create_pending_interpretation_event: composition state "
+                            f"{state_id_str!r} has no nodes; affected_node_id "
+                            f"{affected_node_id!r} is not present"
+                        )
+                    state_record = self._row_to_state_record(state_row)
+                    _find_llm_transform_node(
+                        state_record,
+                        affected_node_id=affected_node_id,
+                        context="create_pending_interpretation_event",
+                    )
+
                 session_row = conn.execute(
                     select(sessions_table.c.interpretation_review_disabled).where(sessions_table.c.id == sid)
                 ).one_or_none()
                 if session_row is not None and bool(session_row.interpretation_review_disabled):
-                    opt_out_row = conn.execute(
+                    marker_row = conn.execute(
                         select(interpretation_events_table)
                         .where(interpretation_events_table.c.session_id == sid)
                         .where(interpretation_events_table.c.interpretation_source == InterpretationSource.AUTO_INTERPRETED_OPT_OUT.value)
+                        .where(interpretation_events_table.c.kind.is_(None))
                         .order_by(desc(interpretation_events_table.c.created_at))
                     ).first()
-                    if opt_out_row is None:
+                    if marker_row is None:
                         conn.execute(
                             insert(interpretation_events_table).values(
-                                id=event_id,
+                                id=str(uuid.uuid4()),
                                 session_id=sid,
                                 composition_state_id=None,
                                 affected_node_id=None,
@@ -2129,41 +2511,53 @@ class SessionServiceImpl:
                                 resolved_prompt_template_hash=None,
                             )
                         )
-                        opt_out_row = conn.execute(
-                            select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)
-                        ).one()
-                    return _interpretation_event_record_from_row(opt_out_row)
-
-                # Writer-boundary validation: the affected_node_id must
-                # exist in the parent composition state's nodes JSON. This
-                # is the L1-style invariant ``InterpretationEvent.affected_node_id``
-                # exists in composition_states[id=composition_state_id].nodes —
-                # not a schema CHECK because nodes lives in a JSON column.
-                # Read state, raise BEFORE any INSERT so the table is empty
-                # on rollback.
-                state_row = conn.execute(
-                    select(composition_states_table)
-                    .where(composition_states_table.c.id == state_id_str)
-                    .where(composition_states_table.c.session_id == sid)
-                ).one_or_none()
-                if state_row is None:
-                    raise ValueError(
-                        f"create_pending_interpretation_event: composition state {state_id_str!r} not found in session {sid!r}"
+                    domain_dict = _interpretation_hash_domain_v2(
+                        session_id=sid,
+                        composition_state_id=state_id_str,
+                        affected_node_id=affected_node_id,
+                        tool_call_id=tool_call_id,
+                        user_term=user_term,
+                        kind=kind,
+                        llm_draft=llm_draft,
+                        accepted_value=llm_draft,
+                        actor="composer-llm",
+                        model_identifier=model_identifier,
+                        model_version=model_version,
+                        provider=provider,
+                        composer_skill_hash=composer_skill_hash,
+                        context="create_pending_interpretation_event",
                     )
-                nodes = self._unwrap_envelope(state_row.nodes)
-                if nodes is None:
-                    raise ValueError(
-                        f"create_pending_interpretation_event: composition state "
-                        f"{state_id_str!r} has no nodes; affected_node_id "
-                        f"{affected_node_id!r} is not present"
+                    conn.execute(
+                        insert(interpretation_events_table).values(
+                            id=event_id,
+                            session_id=sid,
+                            composition_state_id=state_id_str,
+                            affected_node_id=affected_node_id,
+                            tool_call_id=tool_call_id,
+                            user_term=user_term,
+                            kind=kind_value,
+                            llm_draft=llm_draft,
+                            accepted_value=llm_draft,
+                            choice=InterpretationChoice.OPTED_OUT.value,
+                            created_at=now,
+                            resolved_at=now,
+                            actor="composer-llm",
+                            model_identifier=model_identifier,
+                            model_version=model_version,
+                            provider=provider,
+                            composer_skill_hash=composer_skill_hash,
+                            arguments_hash=stable_hash(domain_dict),
+                            hash_domain_version="v2",
+                            interpretation_source=InterpretationSource.AUTO_INTERPRETED_OPT_OUT.value,
+                            runtime_model_identifier_at_resolve=None,
+                            runtime_model_version_at_resolve=None,
+                            resolved_prompt_template_hash=(
+                                stable_hash(llm_draft) if kind is InterpretationKind.LLM_PROMPT_TEMPLATE else None
+                            ),
+                        )
                     )
-                node_ids = {n["id"] for n in nodes}
-                if affected_node_id not in node_ids:
-                    raise ValueError(
-                        f"create_pending_interpretation_event: affected_node_id "
-                        f"{affected_node_id!r} is not present in composition state "
-                        f"{state_id_str!r} (known node ids: {sorted(node_ids)!r})"
-                    )
+                    row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)).one()
+                    return _interpretation_event_record_from_row(row)
 
                 conn.execute(
                     insert(interpretation_events_table).values(
@@ -2303,27 +2697,30 @@ class SessionServiceImpl:
                         f"are valid here"
                     )
 
-                # Step 3: defence-in-depth validation of the user/LLM-supplied
-                # content. The HTTP route also validates at the schema layer
-                # (F-2); this is the writer-side mirror.
-                _validate_accepted_value_content(accepted_value)
+                kind = InterpretationKind(event_row.kind)
+                if choice is InterpretationChoice.AMENDED and kind in {
+                    InterpretationKind.INVENTED_SOURCE,
+                    InterpretationKind.LLM_PROMPT_TEMPLATE,
+                }:
+                    raise InterpretationUnsupportedChoiceError(
+                        f"resolve_interpretation_event: {kind.value} does not support inline amendment in this release"
+                    )
+                if kind in {InterpretationKind.VAGUE_TERM, InterpretationKind.INVENTED_SOURCE}:
+                    # Step 3: defence-in-depth validation of user/LLM-supplied
+                    # content. Prompt-template review carries real Jinja and
+                    # deliberately skips this accepted-value validator.
+                    _validate_accepted_value_content(accepted_value)
 
-                # Step 4: produce the patched nodes sequence. The helper
-                # raises ValueError on any structural anomaly; the raise
-                # short-circuits the transaction before any UPDATE/INSERT.
+                # Step 4: produce kind-specific patched state. Helpers raise
+                # typed interpretation errors on structural anomalies; the
+                # raise short-circuits the transaction before any UPDATE/INSERT.
                 #
-                # The patch lands on the CURRENT composition state (highest
-                # version for the session), not on the state row recorded on
-                # the pending interpretation event. Rationale: between
-                # surfacing and resolution, the LLM may have advanced the
-                # state for other reasons; the resolved-prompt-template must
-                # land on the live state so the runtime executes the
-                # patched node. If the affected node has disappeared from
-                # the live state since surfacing, the helper raises ValueError
-                # — the resolution cannot land and must be surfaced to the
-                # user. The pending row's composition_state_id remains the
-                # surfacing anchor for audit; the new state row's
-                # derived_from_state_id is the live state we patched.
+                # Vague-term patches still land on the CURRENT composition
+                # state (highest version for the session), not the surfacing
+                # state. Prompt-template and invented-source reviews follow
+                # the same current-state rule but update only review metadata:
+                # prompt-template review stamps the existing LLM prompt hash,
+                # and invented-source review stamps source authoring metadata.
                 live_state_row = conn.execute(
                     select(composition_states_table)
                     .where(composition_states_table.c.session_id == sid)
@@ -2333,40 +2730,35 @@ class SessionServiceImpl:
                 if live_state_row is None:
                     raise AuditIntegrityError(f"resolve_interpretation_event: session {sid!r} has no composition state to patch")
                 state_record = self._row_to_state_record(live_state_row)
-                patched_nodes = _patch_llm_transform_prompt(
-                    state_record,
-                    affected_node_id=event_row.affected_node_id,
-                    user_term=event_row.user_term,
-                    accepted_value=accepted_value,
-                )
-
-                # Step 4a: compute resolved_prompt_template_hash. Hash over
-                # the resolved prompt-template string only (not the node).
-                # ``_patch_llm_transform_prompt`` writes the resolved template
-                # into ``options.prompt_template`` (the NodeSpec-compatible
-                # shape that survives ``state_from_record`` and lands in the
-                # runtime YAML); read it back from the same field.
-                patched_node = next(n for n in patched_nodes if n["id"] == event_row.affected_node_id)
-                resolved_template: str = patched_node["options"]["prompt_template"]
-                resolved_prompt_template_hash = stable_hash(resolved_template)
-
-                # Attach the hash inside the node's options mapping so the
-                # runtime plugin can read it via ``NodeSpec.options`` (the
-                # same path that surfaces the resolved prompt template). The
-                # hash is the cross-DB anchor written into the L1 Landscape
-                # ``calls.resolved_prompt_template_hash`` column at execution
-                # time. ``patched_node["options"]`` is
-                # a fresh dict produced by the patch helper; mutate locally.
-                final_nodes: list[Mapping[str, Any]] = []
-                for n in patched_nodes:
-                    if n["id"] == event_row.affected_node_id:
-                        node_with_hash = dict(n)
-                        options_with_hash = dict(n["options"])
-                        options_with_hash["resolved_prompt_template_hash"] = resolved_prompt_template_hash
-                        node_with_hash["options"] = options_with_hash
-                        final_nodes.append(node_with_hash)
-                    else:
-                        final_nodes.append(n)
+                final_source: Mapping[str, Any] | None
+                final_nodes: list[Mapping[str, Any]]
+                resolved_prompt_template_hash: str | None
+                if kind is InterpretationKind.VAGUE_TERM:
+                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_vague_term(
+                        state_record,
+                        affected_node_id=event_row.affected_node_id,
+                        user_term=event_row.user_term,
+                        accepted_value=accepted_value,
+                    )
+                elif kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
+                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
+                        state_record,
+                        event_id=eid,
+                        affected_node_id=event_row.affected_node_id,
+                        user_term=event_row.user_term,
+                        accepted_value=accepted_value,
+                    )
+                elif kind is InterpretationKind.INVENTED_SOURCE:
+                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
+                        state_record,
+                        event_id=eid,
+                        affected_node_id=event_row.affected_node_id,
+                        user_term=event_row.user_term,
+                        llm_draft=event_row.llm_draft,
+                        accepted_value=accepted_value,
+                    )
+                else:
+                    raise AssertionError(f"unhandled InterpretationKind {kind!r}")
 
                 # The live state can be invalid solely because an earlier
                 # finalisation/runtime-preflight pass saw the unresolved
@@ -2378,6 +2770,7 @@ class SessionServiceImpl:
 
                 patched_state_record = replace(
                     state_record,
+                    source=final_source,
                     nodes=final_nodes,
                     is_valid=False,
                     validation_errors=None,
@@ -2394,30 +2787,22 @@ class SessionServiceImpl:
                 # surface-and-decide event, not the state mutation it
                 # produced.
                 surfacing_state_id_str = event_row.composition_state_id
-                domain_dict = {
-                    "session_id": sid,
-                    "composition_state_id": surfacing_state_id_str,
-                    "affected_node_id": event_row.affected_node_id,
-                    "tool_call_id": event_row.tool_call_id,
-                    "user_term": event_row.user_term,
-                    "kind": event_row.kind,
-                    "llm_draft": event_row.llm_draft,
-                    "accepted_value": accepted_value,
-                    "actor": actor,
-                    "model_identifier": event_row.model_identifier,
-                    "model_version": event_row.model_version,
-                    "provider": event_row.provider,
-                    "composer_skill_hash": event_row.composer_skill_hash,
-                }
-                # Mechanical guard: if a field is added to the contract dataclass
-                # but not to this domain dict, the hash silently drifts. Crash
-                # rather than fabricate.
-                if set(domain_dict.keys()) != INTERPRETATION_HASH_DOMAIN_V2:
-                    raise AssertionError(
-                        f"resolve_interpretation_event: domain dict keys "
-                        f"{set(domain_dict.keys())!r} drifted from "
-                        f"INTERPRETATION_HASH_DOMAIN_V2 {INTERPRETATION_HASH_DOMAIN_V2!r}"
-                    )
+                domain_dict = _interpretation_hash_domain_v2(
+                    session_id=sid,
+                    composition_state_id=surfacing_state_id_str,
+                    affected_node_id=event_row.affected_node_id,
+                    tool_call_id=event_row.tool_call_id,
+                    user_term=event_row.user_term,
+                    kind=event_row.kind,
+                    llm_draft=event_row.llm_draft,
+                    accepted_value=accepted_value,
+                    actor=actor,
+                    model_identifier=event_row.model_identifier,
+                    model_version=event_row.model_version,
+                    provider=event_row.provider,
+                    composer_skill_hash=event_row.composer_skill_hash,
+                    context="resolve_interpretation_event",
+                )
                 arguments_hash = stable_hash(domain_dict)
 
                 # Step 5: UPDATE the interpretation event. The trigger
@@ -2463,7 +2848,7 @@ class SessionServiceImpl:
                     session_id=sid,
                     payload=StatePayload(
                         data=CompositionStateData(
-                            source=state_record.source,
+                            source=final_source,
                             nodes=final_nodes,
                             edges=state_record.edges,
                             outputs=state_record.outputs,

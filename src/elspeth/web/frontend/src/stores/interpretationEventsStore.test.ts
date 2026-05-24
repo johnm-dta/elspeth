@@ -38,6 +38,7 @@ function makePendingEvent(overrides: Partial<InterpretationEvent> = {}): Interpr
     affected_node_id: "node-1",
     tool_call_id: "tool-1",
     user_term: "cool",
+    kind: "vague_term",
     llm_draft: "interesting and engaging",
     accepted_value: null,
     choice: "pending",
@@ -178,6 +179,7 @@ describe("interpretationEventsStore", () => {
         choice: "opted_out",
         resolved_at: "2026-05-18T00:04:00Z",
         interpretation_source: "auto_interpreted_opt_out",
+        kind: null,
       });
       vi.mocked(api.listInterpretationEvents).mockResolvedValue([optedOutEvt]);
 
@@ -194,6 +196,7 @@ describe("interpretationEventsStore", () => {
         choice: "opted_out",
         resolved_at: "2026-05-18T00:04:00Z",
         interpretation_source: "auto_interpreted_opt_out",
+        kind: null,
       });
       vi.mocked(api.listInterpretationEvents).mockResolvedValue([
         stalePendingEvt,

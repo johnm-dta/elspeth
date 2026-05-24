@@ -542,25 +542,14 @@ def _verbatim_blob_creation_provenance() -> _BlobCreationProvenance:
 
 
 def _blob_provenance_message_id(user_message_id: str | None) -> str | None:
-    if user_message_id is None:
+    return _blob_provenance_string(user_message_id)
+
+
+def _blob_provenance_string(value: str | None) -> str | None:
+    if value is None:
         return None
-    normalized = user_message_id.strip()
+    normalized = value.strip()
     return normalized if normalized else None
-
-
-def _blob_authoring_context_present(context: ToolContext) -> bool:
-    return any(
-        value is not None
-        for value in (
-            context.user_message_id,
-            context.user_message_content,
-            context.composer_model_identifier,
-            context.composer_model_version,
-            context.composer_provider,
-            context.composer_skill_hash,
-            context.tool_arguments_hash,
-        )
-    )
 
 
 def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreationProvenance:
@@ -571,11 +560,11 @@ def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreati
 
     required = {
         "user_message_id": user_message_id,
-        "composer_model_identifier": context.composer_model_identifier,
-        "composer_model_version": context.composer_model_version,
-        "composer_provider": context.composer_provider,
-        "composer_skill_hash": context.composer_skill_hash,
-        "tool_arguments_hash": context.tool_arguments_hash,
+        "composer_model_identifier": _blob_provenance_string(context.composer_model_identifier),
+        "composer_model_version": _blob_provenance_string(context.composer_model_version),
+        "composer_provider": _blob_provenance_string(context.composer_provider),
+        "composer_skill_hash": _blob_provenance_string(context.composer_skill_hash),
+        "tool_arguments_hash": _blob_provenance_string(context.tool_arguments_hash),
     }
     missing = tuple(name for name, value in required.items() if value is None)
     if missing:
@@ -583,11 +572,11 @@ def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreati
 
     return _BlobCreationProvenance(
         creation_modality=CreationModality.LLM_GENERATED,
-        creating_model_identifier=context.composer_model_identifier,
-        creating_model_version=context.composer_model_version,
-        creating_provider=context.composer_provider,
-        creating_composer_skill_hash=context.composer_skill_hash,
-        creating_arguments_hash=context.tool_arguments_hash,
+        creating_model_identifier=required["composer_model_identifier"],
+        creating_model_version=required["composer_model_version"],
+        creating_provider=required["composer_provider"],
+        creating_composer_skill_hash=required["composer_skill_hash"],
+        creating_arguments_hash=required["tool_arguments_hash"],
     )
 
 
@@ -1127,8 +1116,8 @@ def _execute_update_blob(
             state,
             f"Blob '{blob_id}' is currently bound as the pipeline source; create a new blob and rebind the source instead.",
         )
-    provenance = _blob_creation_provenance(content, context) if _blob_authoring_context_present(context) else None
-    provenance_message_id = _blob_provenance_message_id(context.user_message_id) if provenance is not None else None
+    provenance = _blob_creation_provenance(content, context)
+    provenance_message_id = _blob_provenance_message_id(context.user_message_id)
 
     # Serialise the read→write→commit critical section across concurrent
     # composer-tool callers on this session.  See ``_session_blob_lock``'s

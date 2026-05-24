@@ -200,6 +200,7 @@ from elspeth.web.sessions.service import (
     InterpretationNodeMissingError,
     InterpretationNodePluginMutatedError,
     InterpretationPlaceholderConsumedError,
+    InterpretationUnsupportedChoiceError,
 )
 
 slog = structlog.get_logger()
@@ -344,6 +345,7 @@ def _composer_preferences_response(record: ComposerSessionPreferencesRecord) -> 
         session_id=str(record.session_id),
         trust_mode=record.trust_mode,
         density_default=record.density_default,
+        interpretation_review_disabled=record.interpretation_review_disabled,
         updated_at=record.updated_at,
     )
 
@@ -3914,6 +3916,7 @@ __all__ = [
     "InterpretationResolveRequest",
     "InterpretationResolveResponse",
     "InterpretationSource",
+    "InterpretationUnsupportedChoiceError",
     "InvalidForkTargetError",
     "InvariantError",
     "KnobField",

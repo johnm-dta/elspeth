@@ -30,6 +30,7 @@ import type {
   TurnRecord,
 } from "@/types/guided";
 import type { InterpretationEvent } from "@/types/interpretation";
+import { CANONICAL_TUTORIAL_PROMPT } from "@/components/tutorial/copy";
 
 vi.mock("@/hooks/useComposer", () => ({
   useComposer: vi.fn(),
@@ -125,6 +126,15 @@ vi.mock("@/components/execution/InlineRunResults", () => ({
 }));
 
 describe("ChatPanel", () => {
+  it("uses the current tutorial prompt in frontend prompt-facing tests", () => {
+    expect(CANONICAL_TUTORIAL_PROMPT).toBe(
+      "Please go to the following web pages, use abuse contact noreply@dta.gov.au\n" +
+        "and scraping reason 'DTA technical demonstration'. Read the HTML for each\n" +
+        "page, have an LLM identify the primary colours for each government agency.\n" +
+        "Remove the HTML and save the rest to a json file.",
+    );
+  });
+
   beforeEach(() => {
     vi.resetAllMocks();
     Element.prototype.scrollIntoView = vi.fn();
@@ -2138,6 +2148,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
       affected_node_id: "node-1",
       tool_call_id: "tool-1",
       user_term: "cool",
+      kind: "vague_term",
       llm_draft: "trendy",
       accepted_value: null,
       choice: "pending",

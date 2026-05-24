@@ -882,6 +882,7 @@ describe("AuditReadinessPanel", () => {
       affected_node_id: "llm_classify",
       tool_call_id: "tc-1",
       user_term: "cool",
+      kind: "vague_term",
       llm_draft: "engaging",
       accepted_value: null,
       choice: "pending",

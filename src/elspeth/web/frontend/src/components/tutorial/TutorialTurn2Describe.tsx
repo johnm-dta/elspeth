@@ -171,7 +171,6 @@ export async function buildTutorialDraft(
   // would leave a "New session" titled session that cleanup never matches.
   await api.renameSession(session.id, HELLO_WORLD_PENDING_SESSION_TITLE);
   options.onSessionReady?.(session.id);
-  await api.optOutOfInterpretations(session.id);
   const response = await api.sendMessage(session.id, effectivePrompt);
   const pendingProposals = (response.proposals ?? []).filter(
     (proposal) => proposal.status === "pending",
@@ -188,10 +187,6 @@ export async function buildTutorialDraft(
   if (compositionState === null) {
     throw new Error("The composer did not return a pipeline draft.");
   }
-  compositionState = await resolveTutorialInterpretations(
-    session.id,
-    compositionState,
-  );
 
   // The three post-build fetches and the interpretation-events store refresh
   // form a *single* atomic state-publish step: every consumer (chat history,
@@ -207,6 +202,16 @@ export async function buildTutorialDraft(
     api.fetchCompositionProposals(session.id),
     api.fetchComposerPreferences(session.id),
   ]);
+  if (typeof composerPreferences.interpretation_review_disabled !== "boolean") {
+    throw new Error(
+      "composer preferences response missing interpretation_review_disabled",
+    );
+  }
+  if (composerPreferences.interpretation_review_disabled) {
+    throw new Error(
+      "tutorial sessions must not have interpretation review disabled",
+    );
+  }
 
   publishTutorialSession(session, {
     messages,
@@ -221,21 +226,6 @@ export async function buildTutorialDraft(
     prompt: effectivePrompt,
     summary: summariseCompositionState(compositionState),
   };
-}
-
-async function resolveTutorialInterpretations(
-  sessionId: string,
-  compositionState: CompositionState,
-): Promise<CompositionState> {
-  let currentState = compositionState;
-  const pendingEvents = await api.listInterpretationEvents(sessionId, "pending");
-  for (const event of pendingEvents) {
-    const resolved = await api.resolveInterpretation(sessionId, event.id, {
-      choice: "accepted_as_drafted",
-    });
-    currentState = resolved.new_state;
-  }
-  return currentState;
 }
 
 function publishTutorialSession(

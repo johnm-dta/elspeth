@@ -92,6 +92,7 @@ const pendingInterpretation: InterpretationEvent = {
   affected_node_id: "rate",
   tool_call_id: "call-1",
   user_term: "cool",
+  kind: "vague_term",
   llm_draft: "modern, useful, and interesting",
   accepted_value: null,
   choice: "pending",
@@ -135,6 +136,7 @@ describe("HelloWorldTutorial", () => {
       session_id: "session-1",
       trust_mode: "explicit_approve",
       density_default: "medium",
+      interpretation_review_disabled: false,
       updated_at: "2026-05-19T12:00:00Z",
     });
     vi.mocked(api.listInterpretationEvents).mockResolvedValue([]);
@@ -181,15 +183,21 @@ describe("HelloWorldTutorial", () => {
       ...tutorialSession,
       title: "hello-world (cool government pages)",
     });
-    vi.mocked(api.updateUserComposerPreferences).mockResolvedValue({
-      default_mode: "freeform",
-      banner_dismissed_at: null,
-      tutorial_completed_at: "2026-05-19T12:10:00Z",
-      updated_at: "2026-05-19T12:10:00Z",
+    vi.mocked(api.updateUserComposerPreferences).mockImplementation(async (body) => {
+      const updatedAt = "2026-05-19T12:10:00Z";
+      return {
+        default_mode: body.default_mode ?? usePreferencesStore.getState().defaultMode ?? "guided",
+        banner_dismissed_at: null,
+        tutorial_completed_at:
+          body.tutorial_completed_at === undefined
+            ? null
+            : body.tutorial_completed_at,
+        updated_at: updatedAt,
+      };
     });
   });
 
-  it("walks the tutorial through final mode selection", async () => {
+  it("walks the tutorial through mode selection and graduation", async () => {
     const user = userEvent.setup();
     render(<HelloWorldTutorial />);
 
@@ -200,12 +208,10 @@ describe("HelloWorldTutorial", () => {
 
     expect(await screen.findByText(/Here is what the composer drafted/i)).toBeInTheDocument();
     expect(screen.getByText("dta.gov.au")).toBeInTheDocument();
-    expect(api.optOutOfInterpretations).toHaveBeenCalledWith("session-1");
-    expect(
-      vi.mocked(api.optOutOfInterpretations).mock.invocationCallOrder[0],
-    ).toBeLessThan(vi.mocked(api.sendMessage).mock.invocationCallOrder[0]);
+    expect(api.optOutOfInterpretations).not.toHaveBeenCalled();
+    expect(api.resolveInterpretation).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Show me the graph" }));
+    await user.click(screen.getByRole("button", { name: "Looks good" }));
     await user.click(screen.getByRole("button", { name: "Looks good, run it" }));
 
     expect(await screen.findByText("bold")).toBeInTheDocument();
@@ -220,42 +226,43 @@ describe("HelloWorldTutorial", () => {
 
     await waitFor(() => {
       expect(api.updateUserComposerPreferences).toHaveBeenCalledWith(
-        expect.objectContaining({
-          default_mode: "freeform",
-          tutorial_completed_at: expect.any(String),
-        }),
+        { default_mode: "freeform" },
       );
+    });
+    expect(vi.mocked(api.updateUserComposerPreferences).mock.calls[0]?.[0]).toEqual({
+      default_mode: "freeform",
     });
     expect(api.renameSession).toHaveBeenCalledWith(
       "session-1",
       "hello-world (cool government pages)",
     );
+    expect(usePreferencesStore.getState().tutorialCompleted).toBe(false);
+    expect(useSessionStore.getState().activeSessionId).toBe("session-1");
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "You're ready to use the composer.",
+      }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Take me to the composer" }),
+    );
+
+    await waitFor(() => {
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledTimes(2);
+    });
+    expect(vi.mocked(api.updateUserComposerPreferences).mock.calls[1]?.[0]).toEqual({
+      tutorial_completed_at: expect.any(String),
+    });
     expect(usePreferencesStore.getState().tutorialCompleted).toBe(true);
     expect(useSessionStore.getState().activeSessionId).toBe("session-empty");
   });
 
-  it("accepts pending interpretation drafts before publishing the tutorial state", async () => {
+  it("surfaces pending interpretation drafts for explicit review before continuing", async () => {
     const user = userEvent.setup();
-    const resolvedState = {
-      ...compositionState,
-      id: "state-2",
-      version: 2,
-    };
-    vi.mocked(api.listInterpretationEvents).mockResolvedValueOnce([
+    vi.mocked(api.listInterpretationEvents).mockResolvedValue([
       pendingInterpretation,
     ]);
-    vi.mocked(api.resolveInterpretation).mockResolvedValueOnce({
-      event: {
-        ...pendingInterpretation,
-        choice: "accepted_as_drafted",
-        accepted_value: pendingInterpretation.llm_draft,
-        resolved_at: "2026-05-19T12:00:03Z",
-        arguments_hash: "b".repeat(64),
-        hash_domain_version: "v1",
-        resolved_prompt_template_hash: "c".repeat(64),
-      },
-      new_state: resolvedState,
-    });
 
     render(<HelloWorldTutorial />);
 
@@ -263,14 +270,15 @@ describe("HelloWorldTutorial", () => {
     await user.click(screen.getByRole("button", { name: "Build it" }));
 
     expect(await screen.findByText(/Here is what the composer drafted/i)).toBeInTheDocument();
+    expect(screen.getByText("1 assumption to review")).toBeInTheDocument();
+    expect(screen.getByText("cool")).toBeInTheDocument();
     expect(api.listInterpretationEvents).toHaveBeenCalledWith(
       "session-1",
-      "pending",
+      "all",
     );
-    expect(api.resolveInterpretation).toHaveBeenCalledWith("session-1", "event-1", {
-      choice: "accepted_as_drafted",
-    });
-    expect(useSessionStore.getState().compositionState?.id).toBe("state-2");
+    expect(api.optOutOfInterpretations).not.toHaveBeenCalled();
+    expect(api.resolveInterpretation).not.toHaveBeenCalled();
+    expect(useSessionStore.getState().compositionState?.id).toBe("state-1");
   });
 
   it("settles the run turn under React StrictMode without duplicating the run request", async () => {

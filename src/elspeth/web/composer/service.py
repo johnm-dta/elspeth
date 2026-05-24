@@ -141,7 +141,7 @@ from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     INTERPRETATION_REVIEW_PENDING_CODE,
-    interpretation_sites,
+    transform_vague_term_site_tuples,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, _ToolOutcome
 from elspeth.web.sessions.models import sessions_table
@@ -152,11 +152,6 @@ slog = structlog.get_logger()
 _LLM_API_MAX_ATTEMPTS = 3
 _LLM_API_RETRY_BASE_DELAY_SECONDS = 1.0
 _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS: Final[str] = "invalid_tool_arguments"
-
-# Rate-cap rows created for ``request_interpretation_review`` inherit that
-# tool's current vague-term-only contract. Task 4 will make this bridge
-# kind-aware; until then, keep the classification explicit at this call site.
-_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND: Final[InterpretationKind] = InterpretationKind.VAGUE_TERM
 
 # Composer LLM sampling constants. Hardcoded for deterministic tool-call
 # construction (RGR investigation 2026-05-06 §4.4 traced ~33% hard-GREEN
@@ -187,6 +182,17 @@ _KNOWN_PREFLIGHT_EXCEPTION_CLASSES: frozenset[str] = frozenset(
         "ValidationError",  # pydantic.ValidationError
     }
 )
+
+
+def _request_interpretation_review_kind_from_arguments(arguments: Mapping[str, Any]) -> InterpretationKind:
+    raw_kind = arguments["kind"] if "kind" in arguments else None
+    if not isinstance(raw_kind, str):
+        raise AuditIntegrityError("request_interpretation_review rate-cap row requires string kind")
+    try:
+        return InterpretationKind(raw_kind)
+    except ValueError as exc:
+        raise AuditIntegrityError(f"request_interpretation_review rate-cap row has unknown kind {raw_kind!r}") from exc
+
 
 # Module-level OTel counter for runtime preflight outcomes.
 # Attributes: outcome (success | failure), exception_class (bounded closed-list | other)
@@ -659,7 +665,10 @@ def _matching_interpretation_placeholder_count(
             return sum(
                 1
                 for requirement in requirements
-                if isinstance(requirement, Mapping) and requirement.get("status") == "pending" and requirement.get("user_term") == term
+                if isinstance(requirement, Mapping)
+                and requirement.get("status") == "pending"
+                and requirement.get("user_term") == term
+                and requirement.get("kind", InterpretationKind.VAGUE_TERM.value) == InterpretationKind.VAGUE_TERM.value
             )
         prompt_template = node.options.get("prompt_template")
         if isinstance(prompt_template, str):
@@ -1145,7 +1154,7 @@ class ComposerServiceImpl:
     ) -> tuple[tuple[str, str], ...]:
         """Return pending interpretation handoffs that cannot be resolved."""
 
-        sites = interpretation_sites(state.nodes)
+        sites = transform_vague_term_site_tuples(state.nodes)
         if session_id is None:
             return ()
         sessions_service = self._require_sessions_service()
@@ -4533,7 +4542,7 @@ class ComposerServiceImpl:
                     # it is the truthful caller identity for this dispatch
                     # and matches the audit envelope's ``actor`` field.
                     actor=audit.actor,
-                    kind=_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND,
+                    kind=_request_interpretation_review_kind_from_arguments(arguments),
                     model_identifier=self._model,
                     model_version=safe_response_model(response) or self._model,
                     provider=self._availability.provider or "unknown",

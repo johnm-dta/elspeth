@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import get_args
+from typing import Any, cast, get_args
 from uuid import uuid4
 
 import pytest
@@ -157,16 +157,17 @@ class TestCompositionStateData:
         )
         # Original dicts should not affect the frozen copy
         source["type"] = "json"
-        assert data.source["type"] == "csv"  # type: ignore[index]
+        assert data.sources is not None
+        assert data.sources["source"]["type"] == "csv"
         # Frozen containers should reject mutation
         with pytest.raises(TypeError):
-            data.source["new_key"] = "value"  # type: ignore[index]
+            cast(Any, data.sources["source"])["new_key"] = "value"
         with pytest.raises((TypeError, AttributeError)):
             data.nodes.append({"id": "n2"})  # type: ignore[union-attr]
 
     def test_none_fields_not_frozen(self) -> None:
         data = CompositionStateData(is_valid=False)
-        assert data.source is None
+        assert data.sources is None
         assert data.nodes is None
 
     def test_frozen_immutability(self) -> None:

@@ -7,7 +7,7 @@ function makeState(overrides: Partial<CompositionState> = {}): CompositionState 
   return {
     id: "state-1",
     version: 1,
-    source: null,
+    sources: {},
     nodes: [],
     edges: [],
     outputs: [],
@@ -68,11 +68,13 @@ describe("ComposingIndicator", () => {
       <ComposingIndicator
         latestRequest="Add an output file"
         compositionState={makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "extract",
-            on_validation_failure: "discard",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "extract",
+              on_validation_failure: "discard",
+            },
           },
           nodes: [
             {

@@ -1239,7 +1239,7 @@ class TestPluginCatalogHelpers:
             name = "stub_src_for_shared_snapshot_test"
 
         fake_snapshot: dict[str, dict[str, type]] = {
-            "sources": {"primary": {"stub_src_for_shared_snapshot_test": _StubSource}},
+            "source": {"stub_src_for_shared_snapshot_test": _StubSource},
             "transform": {},
             "sink": {},
         }

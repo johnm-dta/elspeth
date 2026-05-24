@@ -74,7 +74,7 @@ class TestCompositionStateNamedSources:
             on_validation_failure="discard",
         )
 
-    def test_sources_mapping_is_primary_and_legacy_source_is_compatibility_view(self) -> None:
+    def test_sources_mapping_preserves_named_source_order_without_singular_facade(self) -> None:
         state = CompositionState(
             source=None,
             sources={
@@ -89,8 +89,8 @@ class TestCompositionStateNamedSources:
         )
 
         assert tuple(state.sources) == ("customers", "orders")
-        assert state.source == state.sources["customers"]
         assert state.to_dict()["sources"]["orders"]["on_success"] == "order_rows"
+        assert not hasattr(state, "source")
 
     def test_named_source_mutations_add_update_and_remove_one_source(self) -> None:
         state = CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
@@ -103,7 +103,7 @@ class TestCompositionStateNamedSources:
         assert tuple(updated.sources) == ("customers", "orders")
         assert updated.sources["customers"].on_success == "updated_customer_rows"
         assert tuple(removed.sources) == ("customers",)
-        assert removed.source == removed.sources["customers"]
+        assert removed.sources["customers"].on_success == "updated_customer_rows"
 
     def test_from_dict_restores_sources_mapping(self) -> None:
         original = CompositionState(
@@ -144,6 +144,27 @@ class TestCompositionStateNamedSources:
 
         assert any(w.component == "source:orders" and "on_validation_failure" in w.message for w in result.warnings)
         assert any(s.component == "source:orders" and "no explicit schema" in s.message for s in result.suggestions)
+
+    def test_sources_mapping_is_the_only_domain_and_serialized_source_shape(self) -> None:
+        """CompositionState must not expose a singular first-source facade."""
+        state = CompositionState(
+            sources={
+                "customers": self._source("csv", "customer_rows"),
+                "orders": self._source("json", "order_rows"),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        serialized = state.to_dict()
+        restored = CompositionState.from_dict(serialized)
+
+        assert not hasattr(state, "source")
+        assert "source" not in serialized
+        assert tuple(restored.sources) == ("customers", "orders")
 
 
 class TestNodeSpec:
@@ -514,8 +535,8 @@ class TestCompositionState:
         src = self._make_source()
         new_state = state.with_source(src)
         assert new_state is not state
-        assert new_state.source is src
-        assert state.source is None  # original unchanged
+        assert new_state.sources["source"] is src
+        assert state.sources == {}  # original unchanged
 
     def test_with_source_increments_version(self) -> None:
         state = self._empty_state()
@@ -685,8 +706,8 @@ class TestCompositionState:
         d = state.to_dict()
         assert isinstance(d, dict)
         assert isinstance(d["nodes"], list)
-        assert isinstance(d["source"]["options"], dict)
-        assert isinstance(d["source"]["options"]["nested"], dict)
+        assert isinstance(d["sources"]["source"]["options"], dict)
+        assert isinstance(d["sources"]["source"]["options"]["nested"], dict)
         assert isinstance(d["outputs"], list)
 
     def test_to_dict_roundtrip_yaml(self) -> None:
@@ -717,7 +738,7 @@ class TestCompositionState:
         new_state = state.with_source(src)
         assert isinstance(new_state.nodes, tuple)
         with pytest.raises(TypeError):
-            new_state.source.options["new"] = "x"  # type: ignore[union-attr, index]
+            new_state.sources["source"].options["new"] = "x"  # type: ignore[index]
 
     # --- from_dict round-trip ---
 
@@ -805,12 +826,11 @@ class TestCompositionState:
         )
         state = state.with_source(src)
         restored = CompositionState.from_dict(state.to_dict())
-        assert restored.source is not None
-        assert restored.source.options is not None
+        assert restored.sources["source"].options is not None
         with pytest.raises(TypeError):
-            restored.source.options["new"] = "x"  # type: ignore[index]
+            restored.sources["source"].options["new"] = "x"  # type: ignore[index]
         with pytest.raises(TypeError):
-            restored.source.options["nested"]["mutate"] = "y"
+            restored.sources["source"].options["nested"]["mutate"] = "y"
 
 
 class TestStage1Validation:

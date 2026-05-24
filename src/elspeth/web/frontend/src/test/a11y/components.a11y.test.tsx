@@ -165,7 +165,7 @@ function resetAllStores() {
     ],
     compositionState: {
       version: 1,
-      source: null,
+      sources: {},
       nodes: [{ id: "select_columns" }],
       edges: [],
       outputs: [],

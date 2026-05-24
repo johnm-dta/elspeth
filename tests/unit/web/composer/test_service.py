@@ -336,7 +336,7 @@ class TestComposerTextOnlyResponse:
                     "id": "call_bad_pipeline",
                     "name": "set_pipeline",
                     "arguments": {
-                        "sources": {"primary": {"on_success": "rows", "options": {}}},
+                        "source": {"on_success": "rows", "options": {}},
                         "nodes": [],
                         "edges": [],
                         "outputs": [],
@@ -822,8 +822,8 @@ class TestComposerSingleToolCall:
             result = await service.compose("Use CSV as source", [], state)
 
         assert result.message == "I've set up a CSV source."
-        assert result.state.source is not None
-        assert result.state.source.plugin == "csv"
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].plugin == "csv"
         assert result.state.version == 2
 
     @pytest.mark.asyncio
@@ -893,21 +893,19 @@ class TestComposerSingleToolCall:
         user_message_id = _insert_user_message(engine, session_id, user_message_content)
         output_path = tmp_path / "outputs" / "append.csv"
         pipeline_args = {
-            "sources": {
-                "primary": {
-                    "plugin": "text",
-                    "on_success": "source_out",
-                    "options": {
-                        "column": "text",
-                        "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
-                    },
-                    "inline_blob": {
-                        "filename": "input.txt",
-                        "mime_type": "text/plain",
-                        "content": "hello",
-                    },
-                    "on_validation_failure": "discard",
-                }
+            "source": {
+                "plugin": "text",
+                "on_success": "source_out",
+                "options": {
+                    "column": "text",
+                    "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                },
+                "inline_blob": {
+                    "filename": "input.txt",
+                    "mime_type": "text/plain",
+                    "content": "hello",
+                },
+                "on_validation_failure": "discard",
             },
             "nodes": [
                 {
@@ -985,8 +983,8 @@ class TestComposerSingleToolCall:
         assert "upsert_node" not in tool_names
         assert "set_output" not in tool_names
         assert len(result.llm_calls) == 3
-        assert result.state.source is not None
-        assert "blob_ref" in result.state.source.options
+        assert result.state.sources["source"] is not None
+        assert "blob_ref" in result.state.sources["source"].options
 
 
 class TestComposerMultiTurnToolCalls:
@@ -1030,7 +1028,7 @@ class TestComposerMultiTurnToolCalls:
             mock_llm.side_effect = [turn1, turn2, turn3]
             result = await service.compose("Build a pipeline", [], state)
 
-        assert result.state.source is not None
+        assert result.state.sources["source"] is not None
         assert result.state.metadata.name == "My Pipeline"
         assert result.state.version == 3  # two mutations
 
@@ -1420,11 +1418,9 @@ class TestComposerErrorHandling:
                     "id": "call_bad",
                     "name": "set_pipeline",
                     "arguments": {
-                        "sources": {
-                            "primary": {
-                                "on_success": "source_out",
-                                "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
-                            }
+                        "source": {
+                            "on_success": "source_out",
+                            "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
                         },
                         "nodes": [
                             {
@@ -1580,13 +1576,11 @@ class TestComposerErrorHandling:
                     "id": "call_partial",
                     "name": "set_pipeline",
                     "arguments": {
-                        "sources": {
-                            "primary": {
-                                "plugin": "csv",
-                                "on_success": "t1",
-                                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
-                                "inline_blob": {"filename": "data.csv"},
-                            }
+                        "source": {
+                            "plugin": "csv",
+                            "on_success": "t1",
+                            "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                            "inline_blob": {"filename": "data.csv"},
                         },
                         "nodes": [
                             {
@@ -2119,7 +2113,7 @@ class TestComposerMultipleToolCallsPerTurn:
             mock_llm.side_effect = [multi_call, text]
             result = await service.compose("Setup", [], state)
 
-        assert result.state.source is not None
+        assert result.state.sources["source"] is not None
         assert result.state.metadata.name == "Dual Call Pipeline"
         assert result.state.version == 3  # two mutations
 
@@ -2389,8 +2383,8 @@ class TestComposeTimeout:
             "This is the cancel-safety regression: side effects committed but "
             "state was not published."
         )
-        assert exc_info.value.partial_state.source is not None
-        assert exc_info.value.partial_state.source.plugin == "csv"
+        assert exc_info.value.partial_state.sources["source"] is not None
+        assert exc_info.value.partial_state.sources["source"].plugin == "csv"
 
 
 class TestConvergenceProgressDispatch:
@@ -2604,8 +2598,8 @@ class TestPartialStatePreservation:
                 await service.compose("Build pipeline", [], state)
 
             assert exc_info.value.partial_state is not None
-            assert exc_info.value.partial_state.source is not None
-            assert exc_info.value.partial_state.source.plugin == "csv"
+            assert exc_info.value.partial_state.sources["source"] is not None
+            assert exc_info.value.partial_state.sources["source"].plugin == "csv"
             assert exc_info.value.partial_state.version == 2
 
     @pytest.mark.asyncio
@@ -6190,9 +6184,9 @@ class TestComposeLoopForcedRepair:
 
         assert mock_llm.call_count == 3
         assert result.repair_turns_used == 1
-        assert result.state.source is not None
-        assert result.state.source.options["blob_ref"] == self.blob_id
-        assert result.state.source.options["schema"] == {"mode": "observed"}
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].options["blob_ref"] == self.blob_id
+        assert result.state.sources["source"].options["schema"] == {"mode": "observed"}
         assert result.state.outputs[0].name == "out"
         assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True
 
@@ -6273,8 +6267,8 @@ class TestComposeLoopForcedRepair:
         # repair turn to clear the diagnostic.
         assert result.repair_turns_used == 1
         # Final state has observed schema (the repair landed) and is_valid.
-        assert result.state.source is not None
-        assert result.state.source.options["schema"] == {"mode": "observed"}
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].options["schema"] == {"mode": "observed"}
         assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True
         # The synthesised repair message reaches the LLM history before
         # turn 3 — inspect the messages of turn 3 (index 2).
@@ -6351,8 +6345,8 @@ class TestComposeLoopForcedRepair:
         assert result.repair_turns_used == _MAX_REPAIR_TURNS
         # Source still has the original fixed-mode blocking schema; the
         # futile mutations never touched the source.
-        assert result.state.source is not None
-        assert result.state.source.options["schema"]["mode"] == "fixed"
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].options["schema"]["mode"] == "fixed"
         # Metadata reflects the most recent (futile) repair attempt.
         assert result.state.metadata.name == "attempt-2"
         # Final message is the third claim-complete; finalisation
@@ -6409,8 +6403,8 @@ class TestComposeLoopForcedRepair:
         # original blocker config; runtime_preflight may still be valid
         # (it was patched to return is_valid=True), but the runtime gate
         # is not the proof gate. Verify the source state is unchanged.
-        assert result.state.source is not None
-        assert result.state.source.options["schema"]["mode"] == "fixed"
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].options["schema"]["mode"] == "fixed"
 
     @pytest.mark.asyncio
     async def test_repair_gate_fires_on_first_turn_of_resumed_session(self) -> None:
@@ -6506,8 +6500,8 @@ class TestComposeLoopForcedRepair:
         ]
         assert len(repair_msgs) == 1, f"expected one synthesised repair message in turn-2 history, found: {turn2_messages}"
         # Final state is repaired — the schema mode is now observed.
-        assert result.state.source is not None
-        assert result.state.source.options["schema"] == {"mode": "observed"}
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].options["schema"] == {"mode": "observed"}
 
     @pytest.mark.asyncio
     async def test_repair_gate_skipped_when_source_is_not_blob_backed(self) -> None:
@@ -6611,9 +6605,9 @@ class TestComposeLoopFreeformRecipeIntentRouting:
 
         assert mock_llm.call_count == 0
         assert result.state.validate().is_valid is True
-        assert result.state.source is not None
-        assert result.state.source.plugin == "csv"
-        assert result.state.source.options["blob_ref"]
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].plugin == "csv"
+        assert result.state.sources["source"].options["blob_ref"]
         assert {node.node_type for node in result.state.nodes} >= {"gate", "coalesce"}
         assert any(node.plugin == "truncate" for node in result.state.nodes)
         assert result.state.outputs[0].name == "merged_rows"

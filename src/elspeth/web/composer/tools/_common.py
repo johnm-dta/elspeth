@@ -303,7 +303,6 @@ class _FullPipelineStateInspectionPayload(TypedDict):
 class _FullPipelineStatePayload(TypedDict):
     """Full-state payload returned by get_pipeline_state."""
 
-    source: dict[str, Any] | None
     sources: dict[str, dict[str, Any]]
     nodes: list[dict[str, Any]]
     outputs: list[dict[str, Any]]
@@ -416,10 +415,10 @@ def _unique_name(candidate: str, reserved: set[str]) -> str:
 def _reserved_connection_names(state: CompositionState) -> set[str]:
     """Collect existing route/connection/sink names a repair branch must avoid."""
     names: set[str] = {output.name for output in state.outputs}
-    if state.source is not None:
-        names.add(state.source.on_success)
-        if state.source.on_validation_failure != "discard":
-            names.add(state.source.on_validation_failure)
+    for source in state.sources.values():
+        names.add(source.on_success)
+        if source.on_validation_failure != "discard":
+            names.add(source.on_validation_failure)
 
     for node in state.nodes:
         names.add(node.input)
@@ -638,7 +637,7 @@ def diff_states(
 ) -> dict[str, Any]:
     """Compare two composition states and return a structured change summary.
 
-    Reports added, removed, and modified nodes/edges/outputs, plus source
+    Reports added, removed, and modified sources/nodes/edges/outputs, plus
     and metadata changes. Used by the diff_pipeline MCP tool (B5).
 
     Args:
@@ -648,22 +647,22 @@ def diff_states(
     changes: dict[str, Any] = {
         "from_version": baseline.version,
         "to_version": current.version,
-        "source_changed": False,
+        "sources_changed": False,
         "metadata_changed": False,
         "nodes": {"added": [], "removed": [], "modified": []},
         "edges": {"added": [], "removed": [], "modified": []},
         "outputs": {"added": [], "removed": [], "modified": []},
     }
 
-    # Source
-    if baseline.source != current.source:
-        changes["source_changed"] = True
-        if baseline.source is None:
-            changes["source_detail"] = "added"
-        elif current.source is None:
-            changes["source_detail"] = "removed"
-        else:
-            changes["source_detail"] = "modified"
+    if baseline.sources != current.sources:
+        changes["sources_changed"] = True
+        baseline_names = set(baseline.sources)
+        current_names = set(current.sources)
+        changes["sources"] = {
+            "added": sorted(current_names - baseline_names),
+            "removed": sorted(baseline_names - current_names),
+            "modified": sorted(name for name in baseline_names & current_names if baseline.sources[name] != current.sources[name]),
+        }
 
     # Metadata
     if baseline.metadata != current.metadata:
@@ -717,7 +716,7 @@ def diff_states(
 
     # Summary stats
     total = sum(len(changes[k][action]) for k in ("nodes", "edges", "outputs") for action in ("added", "removed", "modified"))
-    total += int(changes["source_changed"]) + int(changes["metadata_changed"])
+    total += int(changes["sources_changed"]) + int(changes["metadata_changed"])
     changes["total_changes"] = total
 
     return changes

@@ -190,7 +190,7 @@ def _llm_generated_source() -> dict[str, Any]:
         metadata=PipelineMetadata(name="Phase 5b Routes Test", description=""),
         version=1,
     )
-    source = state.to_dict()["source"]
+    source = state.to_dict()["sources"][SOURCE_COMPONENT_ID]
     assert source is not None
     return source
 

@@ -911,8 +911,7 @@ class TestApplyRecipeEndToEnd:
 
         # 2. Source is now blob-bound.
         new_state = result.updated_state
-        assert new_state.source is not None
-        assert new_state.source.options["blob_ref"] == blob_id
+        assert new_state.sources["source"].options["blob_ref"] == blob_id
 
         # 3. proof_diagnostics walks the state without raising and
         #    reaches the blob read (observable via the diagnostics list
@@ -978,8 +977,7 @@ class TestApplyRecipeEndToEnd:
         assert result.success, getattr(result, "data", result)
 
         new_state = result.updated_state
-        assert new_state.source is not None
-        assert new_state.source.options["blob_ref"] == blob_id
+        assert new_state.sources["source"].options["blob_ref"] == blob_id
 
         diagnostics = compute_proof_diagnostics(
             new_state,
@@ -1215,8 +1213,7 @@ class TestApplyRecipeEndToEnd:
 
         # 2. Source is now blob-bound.
         new_state = result.updated_state
-        assert new_state.source is not None
-        assert new_state.source.options["blob_ref"] == blob_id
+        assert new_state.sources["source"].options["blob_ref"] == blob_id
 
         # 3. Both gate AND coalesce are present (scenario green criterion
         #    is must_have_node_kinds_substring_any_of=[["gate", "coalesce"]]).

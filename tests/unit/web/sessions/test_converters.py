@@ -4,7 +4,7 @@ Verifies:
 - Round-trip: record → CompositionState preserves all fields
 - Tier 1 crash: None metadata_ raises ValueError (database corruption)
 - None nodes/edges/outputs → empty sequences (legitimate initial state)
-- Source None → source is None (no source configured yet)
+- Missing sources/source → empty sources mapping (no source configured yet)
 """
 
 from __future__ import annotations
@@ -62,17 +62,16 @@ class TestStateFromRecord:
         record = _make_record()
         state = state_from_record(record)
 
-        assert state.source is not None
-        assert state.source.plugin == "csv"
-        assert state.source.on_success == "output"
+        assert state.sources["primary"].plugin == "csv"
+        assert state.sources["primary"].on_success == "output"
         assert state.version == 1
         assert state.metadata.name == "Test Pipeline"
 
-    def test_source_none_preserved(self) -> None:
-        """None source → CompositionState.source is None."""
-        record = _make_record(source=None)
+    def test_missing_sources_becomes_empty_mapping(self) -> None:
+        """Missing plural and legacy source columns → empty sources mapping."""
+        record = _make_record(sources=None, source=None)
         state = state_from_record(record)
-        assert state.source is None
+        assert state.sources == {}
 
     def test_none_nodes_becomes_empty_tuple(self) -> None:
         """None nodes → empty tuple (legitimate initial state)."""
@@ -94,9 +93,9 @@ class TestStateFromRecord:
 
     def test_all_collections_none(self) -> None:
         """All optional collections None → valid empty state."""
-        record = _make_record(source=None, nodes=None, edges=None, outputs=None)
+        record = _make_record(sources=None, source=None, nodes=None, edges=None, outputs=None)
         state = state_from_record(record)
-        assert state.source is None
+        assert state.sources == {}
         assert state.nodes == ()
         assert state.edges == ()
         assert state.outputs == ()

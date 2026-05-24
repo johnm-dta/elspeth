@@ -78,7 +78,7 @@ const sampleCompositionState = {
   version: 1,
   nodes: [],
   edges: [],
-  source: null,
+  sources: {},
   outputs: [],
   metadata: { name: null, description: null },
 };
@@ -132,11 +132,13 @@ const sampleSourceResolvingChatResponse: GuidedChatResponse = {
   composition_state: {
     ...sampleCompositionState,
     version: 2,
-    source: {
-      plugin: "csv",
-      options: {
-        path: "/tmp/teal_colours.csv",
-        schema: { mode: "observed" },
+    sources: {
+      source: {
+        plugin: "csv",
+        options: {
+          path: "/tmp/teal_colours.csv",
+          schema: { mode: "observed" },
+        },
       },
     },
   },

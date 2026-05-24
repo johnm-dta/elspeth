@@ -336,10 +336,11 @@ def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: 
     keys = rest.split(".")
 
     if prefix == "source":
-        if state.source is None:
+        source = state.sources.get("source")
+        if source is None:
             raise ValueError("Cannot wire source ref: no source has been set")
-        patched_options = _set_nested_option(dict(deep_thaw(state.source.options)), keys, marker)
-        return state.with_source(replace(state.source, options=patched_options))
+        patched_options = _set_nested_option(dict(deep_thaw(source.options)), keys, marker)
+        return state.with_named_source("source", replace(source, options=patched_options))
 
     if prefix.startswith("node:"):
         node_id = prefix.removeprefix("node:")
@@ -595,20 +596,14 @@ def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreati
     )
 
 
-def _state_source_blob_ref(state: CompositionState) -> str | None:
-    if state.source is None:
-        return None
-    # Tier-3: state.source.options is composer/user-authored pipeline config
-    # read back from our store. ``blob_ref`` may be absent (no source blob
-    # binding) or — since the composer-LLM authors arbitrary JSON here —
-    # present with a non-string value. Both cases honestly mean "no usable
-    # string blob_ref", recorded as None; the str type-narrowing enforces
-    # this function's ``str | None`` contract against malformed external
-    # config rather than propagating a wrong-typed value downstream.
-    if "blob_ref" not in state.source.options:
-        return None
-    blob_ref = state.source.options["blob_ref"]
-    return blob_ref if isinstance(blob_ref, str) else None
+def _state_source_blob_refs(state: CompositionState) -> frozenset[str]:
+    """Blob refs bound to any pipeline source root."""
+    refs: set[str] = set()
+    for source in state.sources.values():
+        blob_ref = source.options.get("blob_ref")
+        if isinstance(blob_ref, str):
+            refs.add(blob_ref)
+    return frozenset(refs)
 
 
 def _blob_storage_path(data_dir: str, session_id: str, blob_id: str, filename: str) -> Path:
@@ -1141,10 +1136,10 @@ def _execute_update_blob(
 
     blob_id = validated.blob_id
     content = validated.content
-    if _state_source_blob_ref(state) == blob_id:
+    if blob_id in _state_source_blob_refs(state):
         return _failure_result(
             state,
-            f"Blob '{blob_id}' is currently bound as the pipeline source; create a new blob and rebind the source instead.",
+            f"Blob '{blob_id}' is currently bound as a pipeline source; create a new blob and rebind the source instead.",
         )
     provenance = _blob_creation_provenance(content, context)
     provenance_message_id = _blob_provenance_message_id(context.user_message_id)

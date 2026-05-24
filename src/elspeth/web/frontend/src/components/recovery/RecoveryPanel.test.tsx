@@ -13,7 +13,7 @@ function makeState(version = 2): CompositionState {
   return {
     id: `state-${version}`,
     version,
-    source: null,
+    sources: {},
     nodes: [],
     edges: [],
     outputs: [],

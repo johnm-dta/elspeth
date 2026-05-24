@@ -230,8 +230,7 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             ctx,
         )
         assert bind_result.success is True
-        assert bind_result.updated_state.source is not None
-        assert bind_result.updated_state.source.on_success == "out"
+        assert bind_result.updated_state.sources["source"].on_success == "out"
 
     def test_omitted_options_validates_at_model_layer(self) -> None:
         """``options`` is optional at the model layer (default ``{}``).
@@ -297,8 +296,8 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
         )
 
         assert bind_result.success is True, bind_result.data
-        assert bind_result.updated_state.source is not None
-        options = bind_result.updated_state.source.options
+        assert "source" in bind_result.updated_state.sources
+        options = bind_result.updated_state.sources["source"].options
         assert options[SOURCE_AUTHORING_KEY] == {
             "modality": CreationModality.LLM_GENERATED.value,
             "content_hash": create_result.data["content_hash"],

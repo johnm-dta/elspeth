@@ -47,9 +47,11 @@ const assistantMessage: ChatMessage = {
 const compositionState: CompositionState = {
   id: "state-1",
   version: 1,
-  source: {
-    plugin: "inline_blob",
-    options: { rows: [{ url: "dta.gov.au" }] },
+  sources: {
+    source: {
+      plugin: "inline_blob",
+      options: { rows: [{ url: "dta.gov.au" }] },
+    },
   },
   nodes: [
     {

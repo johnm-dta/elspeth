@@ -13,8 +13,9 @@ const SESSION_B = "00000000-0000-0000-0000-000000000002";
 function compositionWithSource(version: number) {
   return {
     version,
-    source: { plugin: "text", options: { content: "hello" } },
+    sources: { source: { plugin: "text", options: { content: "hello" } } },
     nodes: [],
+    edges: [],
     outputs: [],
   };
 }
@@ -457,8 +458,9 @@ describe("auto-validate on composition-state version change", () => {
       activeSessionId: "sess-1",
       compositionState: {
         version: 1,
-        source: null,
+        sources: {},
         nodes: [],
+        edges: [],
         outputs: [],
       } as never,
     } as never);
@@ -944,7 +946,7 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
     useExecutionStore.setState({ validate } as never);
 
     useSessionStore.setState({
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] } as never,
+      compositionState: { version: 1, sources: {}, nodes: [], edges: [], outputs: [] } as never,
     } as never);
 
     // Manually invoke as if from CommandPalette / Ctrl+Shift+V / CompletionSummary.

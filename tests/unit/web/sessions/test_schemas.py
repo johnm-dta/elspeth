@@ -237,7 +237,7 @@ def _valid_composition_state_kwargs() -> dict[str, object]:
         "id": "state-1",
         "session_id": "sess-1",
         "version": 1,
-        "source": None,
+        "sources": None,
         "nodes": None,
         "edges": None,
         "outputs": None,
@@ -320,9 +320,9 @@ class TestSessionStrictCoercionRejected:
         with pytest.raises(ValidationError):
             CompositionStateResponse(**kwargs)  # type: ignore[arg-type]
 
-    def test_composition_state_response_rejects_non_mapping_source(self) -> None:
+    def test_composition_state_response_rejects_non_mapping_sources(self) -> None:
         kwargs = _valid_composition_state_kwargs()
-        kwargs["source"] = "csv"
+        kwargs["sources"] = "csv"
         with pytest.raises(ValidationError):
             CompositionStateResponse(**kwargs)  # type: ignore[arg-type]
 
@@ -334,7 +334,7 @@ class TestSessionStrictCoercionRejected:
 
     def test_composition_state_response_rejects_nested_non_json_source_value(self) -> None:
         kwargs = _valid_composition_state_kwargs()
-        kwargs["source"] = {"type": "csv", "bad": object()}
+        kwargs["sources"] = {"source": {"type": "csv", "bad": object()}}
         with pytest.raises(ValidationError):
             CompositionStateResponse(**kwargs)  # type: ignore[arg-type]
 
@@ -436,7 +436,6 @@ class TestSessionResponseHappyPath:
 
     def test_composition_state_response_with_populated_containers(self) -> None:
         kwargs = _valid_composition_state_kwargs()
-        kwargs["source"] = {"kind": "csv"}
         kwargs["sources"] = {"orders": {"kind": "csv"}, "refunds": {"kind": "json"}}
         kwargs["nodes"] = [{"id": "n1"}]
         kwargs["validation_errors"] = ["boom"]
@@ -444,7 +443,6 @@ class TestSessionResponseHappyPath:
             ValidationEntryResponse(component="c", message="m", severity="warning"),
         ]
         resp = CompositionStateResponse(**kwargs)  # type: ignore[arg-type]
-        assert resp.source == {"kind": "csv"}
         assert resp.sources == {"orders": {"kind": "csv"}, "refunds": {"kind": "json"}}
         assert resp.validation_errors == ["boom"]
         assert resp.validation_warnings is not None

@@ -1,6 +1,7 @@
 import { useSessionStore } from "@/stores/sessionStore";
 import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import type { CompositionState } from "@/types/index";
+import { hasCompositionContent, hasSources } from "@/utils/compositionState";
 
 interface MiniLane {
   label: string;
@@ -38,12 +39,7 @@ export function GraphMiniView({
       ? compositionStateOverride
       : storeCompositionState;
 
-  if (
-    !compositionState ||
-    (!compositionState.source &&
-      compositionState.nodes.length === 0 &&
-      compositionState.outputs.length === 0)
-  ) {
+  if (!hasCompositionContent(compositionState)) {
     return (
       <div className="graph-mini graph-mini--empty" data-testid="graph-mini-empty">
         <span>No pipeline yet</span>
@@ -67,8 +63,12 @@ export function GraphMiniView({
 
 function buildLanes(state: CompositionState): MiniLane[] {
   const lanes: MiniLane[] = [];
-  if (state.source) {
-    lanes.push({ label: "src", colorVar: "--color-accent" });
+  if (hasSources(state)) {
+    const count = Object.keys(state.sources).length;
+    lanes.push({
+      label: count === 1 ? "src" : `${count} src`,
+      colorVar: "--color-accent",
+    });
   }
   if (state.nodes.length > 0) {
     lanes.push({

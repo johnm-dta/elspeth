@@ -330,12 +330,12 @@ def _state_is_structurally_empty(state: CompositionState) -> bool:
     the synthesizer's Pydantic-noise replacement, and we surface the prose
     instead.
 
-    "Structurally empty" means no source, no nodes, no outputs — the three
+    "Structurally empty" means no sources, no nodes, no outputs — the three
     user-meaningful state fields. ``edges`` is implied (edges only exist
     between declared nodes) and ``metadata`` is not load-bearing for this
     check.
     """
-    return state.source is None and not state.nodes and not state.outputs
+    return not state.sources and not state.nodes and not state.outputs
 
 
 def _tool_result_mutated_composition_state(
@@ -867,7 +867,7 @@ def _proof_repair_is_applicable(state: CompositionState) -> bool:
     The forced-repair gate must fire whenever ``compute_proof_diagnostics``
     might find blocking diagnostics. The proof step is a no-op for sources
     that aren't blob-backed (no bytes to read), so the gate's predicate is
-    "source is present AND options carries a ``blob_ref``" — *not* "state
+    "at least one source is present AND options carries a ``blob_ref``" — *not* "state
     changed this turn", because a blocker can survive session resume into
     a turn where the LLM does no mutations.
 
@@ -877,9 +877,7 @@ def _proof_repair_is_applicable(state: CompositionState) -> bool:
     is a documented part of the contract (path-based sources don't have
     one), so containment checking is the appropriate primitive here.
     """
-    if state.source is None:
-        return False
-    return "blob_ref" in state.source.options
+    return any("blob_ref" in source.options for source in state.sources.values())
 
 
 def _empty_state_uploaded_blob_repair_message(ready_blobs: tuple[Mapping[str, Any], ...], *, next_turn: int) -> str:
@@ -1124,7 +1122,6 @@ class ComposerServiceImpl:
         state_d = result.updated_state.to_dict()
         return StatePayload(
             data=CompositionStateData(
-                source=state_d["source"],
                 sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],

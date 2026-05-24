@@ -5,6 +5,7 @@ import type {
   NodeSpec,
 } from "@/types/api";
 import type { OutputSpec, SourceSpec } from "@/types/index";
+import { sortedSourceEntries } from "@/utils/compositionState";
 
 type DiffKind = "added" | "removed" | "changed";
 type DiffSection = "source" | "node" | "edge" | "output";
@@ -50,11 +51,9 @@ function sortJson(value: unknown): unknown {
   );
 }
 
-function sourceSummary(source: SourceSpec | null | undefined): string {
-  if (source == null) {
-    return "No source";
-  }
-  return source.plugin;
+function sourceEntrySummary(entry: [string, SourceSpec]): string {
+  const [sourceName, source] = entry;
+  return sourceName === "source" ? source.plugin : `${sourceName} (${source.plugin})`;
 }
 
 function nodeSummary(node: NodeSpec): string {
@@ -89,54 +88,6 @@ function labelForEntry(entry: DiffEntry): string {
 
 function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
-
-function addSingularDiff<T>(
-  entries: DiffEntry[],
-  section: DiffSection,
-  identity: string,
-  before: T | null | undefined,
-  after: T | null | undefined,
-  summarize: (value: T | null | undefined) => string,
-): void {
-  if (before == null && after == null) {
-    return;
-  }
-  if (before == null) {
-    entries.push({
-      kind: "added",
-      section,
-      identity,
-      before,
-      after,
-      beforeSummary: summarize(before),
-      afterSummary: summarize(after),
-    });
-    return;
-  }
-  if (after == null) {
-    entries.push({
-      kind: "removed",
-      section,
-      identity,
-      before,
-      after,
-      beforeSummary: summarize(before),
-      afterSummary: summarize(after),
-    });
-    return;
-  }
-  if (stableStringify(before) !== stableStringify(after)) {
-    entries.push({
-      kind: "changed",
-      section,
-      identity,
-      before,
-      after,
-      beforeSummary: summarize(before),
-      afterSummary: summarize(after),
-    });
-  }
 }
 
 function addCollectionDiff<T>(
@@ -205,13 +156,13 @@ function buildDiff(
   recoveredState: CompositionState,
 ): DiffGroup[] {
   const entries: DiffEntry[] = [];
-  addSingularDiff(
+  addCollectionDiff(
     entries,
     "source",
-    "source",
-    currentState?.source,
-    recoveredState.source,
-    sourceSummary,
+    sortedSourceEntries(currentState),
+    sortedSourceEntries(recoveredState),
+    ([sourceName]) => sourceName,
+    sourceEntrySummary,
   );
   addCollectionDiff(
     entries,

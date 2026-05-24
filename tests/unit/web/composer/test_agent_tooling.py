@@ -490,23 +490,23 @@ class TestDiffStates:
         s = _empty_state()
         diff = diff_states(s, s)
         assert diff["total_changes"] == 0
-        assert diff["source_changed"] is False
+        assert diff["sources_changed"] is False
 
     def test_source_added(self) -> None:
         s1 = _empty_state()
         source = SourceSpec(plugin="csv", on_success="t1", options={}, on_validation_failure="quarantine")
         s2 = s1.with_source(source)
         diff = diff_states(s1, s2)
-        assert diff["source_changed"] is True
-        assert diff["source_detail"] == "added"
+        assert diff["sources_changed"] is True
+        assert diff["sources"]["added"] == ["source"]
 
     def test_source_removed(self) -> None:
         source = SourceSpec(plugin="csv", on_success="t1", options={}, on_validation_failure="quarantine")
         s1 = _empty_state().with_source(source)
         s2 = s1.without_source()
         diff = diff_states(s1, s2)
-        assert diff["source_changed"] is True
-        assert diff["source_detail"] == "removed"
+        assert diff["sources_changed"] is True
+        assert diff["sources"]["removed"] == ["source"]
 
     def test_node_added(self) -> None:
         s1 = _empty_state()
@@ -632,7 +632,7 @@ class TestDiffPipelineTool:
         catalog = _mock_catalog()
         result = execute_tool("diff_pipeline", {}, s2, catalog, baseline=s1)
         assert result.success is True
-        assert result.data["source_changed"] is True
+        assert result.data["sources_changed"] is True
         assert result.data["total_changes"] >= 1
 
 
@@ -964,9 +964,9 @@ class TestSetSourceFromBlob:
             session_id=blob_env["session_id"],
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "csv"
-        assert result.updated_state.source.options["blob_ref"] == blob_id
+        source = result.updated_state.sources["source"]
+        assert source.plugin == "csv"
+        assert source.options["blob_ref"] == blob_id
 
     def test_blob_not_found(self, blob_env: dict[str, Any]) -> None:
         state = _empty_state()
@@ -1052,13 +1052,13 @@ class TestCreateBlobToSetSourceEndToEnd:
 
         # Step 3: Verify the resulting CompositionState
         new_state = source_result.updated_state
-        assert new_state.source is not None
-        assert new_state.source.plugin == "csv"
-        assert new_state.source.options["blob_ref"] == blob_id
-        assert new_state.source.on_success == "transform1"
+        source = new_state.sources["source"]
+        assert source.plugin == "csv"
+        assert source.options["blob_ref"] == blob_id
+        assert source.on_success == "transform1"
 
         # The storage path should point to the actual file on disk
-        storage_path = Path(new_state.source.options["path"])
+        storage_path = Path(source.options["path"])
         assert storage_path.exists()
         assert storage_path.read_text() == csv_content
 

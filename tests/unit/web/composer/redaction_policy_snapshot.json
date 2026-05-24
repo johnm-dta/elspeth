@@ -5,7 +5,7 @@
     "shape": "type_driven"
   },
   "clear_source": {
-    "hash": "532534b6bb708a7ab2fbcfe0ad68bdd15380d744852cf863af44810206313daf",
+    "hash": "432ac73878823857758fd11a011f9ba4ef0f3258db763a31b8429c579cca7457",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
@@ -175,7 +175,7 @@
     "shape": "type_driven"
   },
   "set_source_from_blob": {
-    "hash": "aefd3830cd86e58c16654a8344e19acbd56206ba9bf73ab3420324a2225f0ed3",
+    "hash": "bd2df326445b3bf70ef6a68fcc53fe822c98023b1836beb43d21f72e9b5aa064",
     "sensitive_path_count": 1,
     "shape": "type_driven"
   },

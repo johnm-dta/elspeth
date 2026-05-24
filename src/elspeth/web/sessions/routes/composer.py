@@ -945,7 +945,6 @@ def register_composer_routes(router: APIRouter) -> None:
                     _transition_state = result.state
                     _transition_state_d = _transition_state.to_dict()
                     _transition_state_data = CompositionStateData(
-                        source=_transition_state_d["source"],
                         sources=_transition_state_d["sources"],
                         nodes=_transition_state_d["nodes"],
                         edges=_transition_state_d["edges"],
@@ -1144,7 +1143,7 @@ def register_composer_routes(router: APIRouter) -> None:
         session_id: UUID,
         request: Request,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Get YAML representation of the current composition state (M1).
 
         Runs runtime preflight on the exact CompositionState reconstructed
@@ -1257,9 +1256,12 @@ def register_composer_routes(router: APIRouter) -> None:
             completion_verb="export_yaml",
         )
 
-        response = {"yaml": yaml_str}
-        if state.source is not None and "blob_ref" in state.source.options:
-            response["source_blob_id"] = str(state.source.options["blob_ref"])
+        response: dict[str, Any] = {"yaml": yaml_str}
+        source_blob_ids = {
+            source_name: str(source.options["blob_ref"]) for source_name, source in state.sources.items() if "blob_ref" in source.options
+        }
+        if source_blob_ids:
+            response["source_blob_ids"] = source_blob_ids
         return response
 
     def _build_get_guided_turn(
@@ -1510,7 +1512,6 @@ def register_composer_routes(router: APIRouter) -> None:
 
                     state_d = new_state.to_dict()
                     state_data = CompositionStateData(
-                        source=state_d["source"],
                         sources=state_d["sources"],
                         nodes=state_d["nodes"],
                         edges=state_d["edges"],
@@ -1574,7 +1575,6 @@ def register_composer_routes(router: APIRouter) -> None:
                         repair_meta = {**existing_meta_repair, "guided_session": repaired_guided.to_dict()}
                         repaired_state_d = repaired_state.to_dict()
                         repair_data = CompositionStateData(
-                            source=repaired_state_d["source"],
                             sources=repaired_state_d["sources"],
                             nodes=repaired_state_d["nodes"],
                             edges=repaired_state_d["edges"],
@@ -1820,7 +1820,6 @@ def register_composer_routes(router: APIRouter) -> None:
             new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
             state_d = new_state.to_dict()
             state_data = CompositionStateData(
-                source=state_d["source"],
                 sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
@@ -2023,7 +2022,6 @@ def register_composer_routes(router: APIRouter) -> None:
 
                     state_d = new_state.to_dict()
                     state_data = CompositionStateData(
-                        source=state_d["source"],
                         sources=state_d["sources"],
                         nodes=state_d["nodes"],
                         edges=state_d["edges"],
@@ -2343,7 +2341,6 @@ def register_composer_routes(router: APIRouter) -> None:
 
                 state_d = new_state.to_dict()
                 state_data = CompositionStateData(
-                    source=state_d["source"],
                     sources=state_d["sources"],
                     nodes=state_d["nodes"],
                     edges=state_d["edges"],
@@ -2807,7 +2804,6 @@ def register_composer_routes(router: APIRouter) -> None:
 
                         state_d = new_state.to_dict()
                         state_data = CompositionStateData(
-                            source=state_d["source"],
                             sources=state_d["sources"],
                             nodes=state_d["nodes"],
                             edges=state_d["edges"],
@@ -2982,7 +2978,6 @@ def register_composer_routes(router: APIRouter) -> None:
 
                 state_d = new_state.to_dict()
                 state_data = CompositionStateData(
-                    source=state_d["source"],
                     sources=state_d["sources"],
                     nodes=state_d["nodes"],
                     edges=state_d["edges"],

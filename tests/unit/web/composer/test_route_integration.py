@@ -112,7 +112,7 @@ def _make_state_record(
         id=state_id or uuid4(),
         session_id=session_id or uuid4(),
         version=state.version,
-        source=d["source"],
+        sources=d["sources"],
         nodes=d["nodes"],
         edges=d["edges"],
         outputs=d["outputs"],
@@ -139,7 +139,7 @@ class TestStateFromRecord:
         reconstructed = _state_from_record(record)
 
         assert reconstructed.version == original.version
-        assert reconstructed.source is None
+        assert reconstructed.sources == {}
         assert reconstructed.nodes == ()
         assert reconstructed.edges == ()
         assert reconstructed.outputs == ()
@@ -153,9 +153,9 @@ class TestStateFromRecord:
         reconstructed = _state_from_record(record)
 
         assert reconstructed.version == original.version
-        assert reconstructed.source is not None
-        assert reconstructed.source.plugin == "csv"
-        assert reconstructed.source.on_success == "transform_1"
+        source = reconstructed.sources["source"]
+        assert source.plugin == "csv"
+        assert source.on_success == "transform_1"
         assert len(reconstructed.nodes) == 1
         assert reconstructed.nodes[0].id == "transform_1"
         assert len(reconstructed.edges) == 1
@@ -218,8 +218,7 @@ class TestStateFromRecord:
 
         # Reconstruction should work despite frozen fields
         reconstructed = _state_from_record(record)
-        assert reconstructed.source is not None
-        assert reconstructed.source.plugin == "csv"
+        assert reconstructed.sources["source"].plugin == "csv"
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +238,7 @@ class TestStateToStateData:
         state_d = state.to_dict()
         validation = state.validate()
         data = CompositionStateData(
-            source=state_d["source"],
+            sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],
             outputs=state_d["outputs"],
@@ -247,7 +246,7 @@ class TestStateToStateData:
             is_valid=validation.is_valid,
             validation_errors=[e.message for e in validation.errors] if validation.errors else None,
         )
-        assert data.source is None
+        assert data.sources == {}
         assert not data.is_valid  # No source, no sinks
         assert data.validation_errors is not None
 
@@ -257,7 +256,7 @@ class TestStateToStateData:
         state_d = state.to_dict()
         validation = state.validate()
         data = CompositionStateData(
-            source=state_d["source"],
+            sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],
             outputs=state_d["outputs"],
@@ -265,7 +264,7 @@ class TestStateToStateData:
             is_valid=validation.is_valid,
             validation_errors=[e.message for e in validation.errors] if validation.errors else None,
         )
-        assert data.source is not None
+        assert data.sources is not None
         assert data.metadata_ is not None
 
 
@@ -570,7 +569,7 @@ class TestYamlGeneration:
         assert "csv" in yaml_str
         assert "source:" in yaml_str
 
-    def test_single_default_source_uses_legacy_yaml_shape(self) -> None:
+    def test_single_default_source_uses_sources_yaml_shape(self) -> None:
         source = SourceSpec(
             plugin="csv",
             on_success="main",
@@ -589,8 +588,8 @@ class TestYamlGeneration:
 
         yaml_str = generate_yaml(state)
 
+        assert "sources:" in yaml_str
         assert "source:" in yaml_str
-        assert "sources:" not in yaml_str
 
     def test_single_named_source_uses_sources_yaml_shape(self) -> None:
         source = SourceSpec(

@@ -29,6 +29,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { listSinks, listSources, listTransforms } from "@/api/client";
 import { useSessionStore } from "@/stores/sessionStore";
+import { sortedSourceEntries } from "@/utils/compositionState";
 import type { PluginSummary } from "@/types/api";
 
 const NARRATIVE_SUMMARY_TAG = "narrative-summary";
@@ -111,8 +112,8 @@ export function useNarrativeMode(): UseNarrativeModeResult {
   const narrativeMode = useMemo(() => {
     if (catalog === null || compositionState === null) return false;
     const plugins: string[] = [];
-    if (compositionState.source !== null && compositionState.source !== undefined) {
-      plugins.push(compositionState.source.plugin);
+    for (const [, source] of sortedSourceEntries(compositionState)) {
+      plugins.push(source.plugin);
     }
     for (const node of compositionState.nodes) {
       if (node.plugin !== null) plugins.push(node.plugin);

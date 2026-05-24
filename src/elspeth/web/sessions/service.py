@@ -1037,7 +1037,7 @@ def _resolve_vague_term(
     affected_node_id: str,
     user_term: str,
     accepted_value: str,
-) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], str]:
+) -> tuple[Mapping[str, Mapping[str, Any]] | None, list[Mapping[str, Any]], str]:
     patched_nodes = _patch_llm_transform_prompt(
         state_record,
         affected_node_id=affected_node_id,
@@ -1058,7 +1058,9 @@ def _resolve_vague_term(
             final_nodes.append(node_with_hash)
         else:
             final_nodes.append(n)
-    return state_record.source, final_nodes, resolved_prompt_template_hash
+    # Vague-term review patches only nodes; the sources map is carried forward
+    # unchanged. The legacy singular ``source`` column is dead.
+    return state_record.sources, final_nodes, resolved_prompt_template_hash
 
 
 def _resolve_prompt_template_review(
@@ -1068,7 +1070,7 @@ def _resolve_prompt_template_review(
     affected_node_id: str,
     user_term: str,
     accepted_value: str,
-) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], str]:
+) -> tuple[Mapping[str, Mapping[str, Any]] | None, list[Mapping[str, Any]], str]:
     node = _find_llm_transform_node(
         state_record,
         affected_node_id=affected_node_id,
@@ -1122,7 +1124,9 @@ def _resolve_prompt_template_review(
             final_nodes.append(patched_node)
         else:
             final_nodes.append(current_node)
-    return state_record.source, final_nodes, resolved_prompt_template_hash
+    # Prompt-template review patches only node review metadata; the sources map
+    # is carried forward unchanged. The legacy singular ``source`` column is dead.
+    return state_record.sources, final_nodes, resolved_prompt_template_hash
 
 
 def _resolve_invented_source(
@@ -1133,14 +1137,21 @@ def _resolve_invented_source(
     user_term: str,
     llm_draft: str,
     accepted_value: str,
-) -> tuple[Mapping[str, Any], list[Mapping[str, Any]], None]:
+) -> tuple[Mapping[str, Mapping[str, Any]], list[Mapping[str, Any]], None]:
     if affected_node_id != SOURCE_COMPONENT_ID:
         raise InterpretationNodeMissingError(
             f"resolve_interpretation_event: invented_source must target affected_node_id {SOURCE_COMPONENT_ID!r}"
         )
+    # Multi-source: the default source under review lives in the ``sources`` map
+    # keyed by ``SOURCE_COMPONENT_ID`` (interpretation review is scoped to the
+    # default component). The legacy singular ``source`` column is dead.
+    sources_map = _require_mapping(
+        state_record.sources,
+        message="resolve_interpretation_event: invented_source requires a persisted sources mapping",
+    )
     source = _require_mapping(
-        state_record.source,
-        message="resolve_interpretation_event: invented_source requires a persisted source mapping",
+        sources_map[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in sources_map else None,
+        message=f"resolve_interpretation_event: invented_source requires a persisted {SOURCE_COMPONENT_ID!r} source mapping",
     )
     options = _require_mapping(
         source["options"] if "options" in source else None,
@@ -1181,7 +1192,12 @@ def _resolve_invented_source(
     patched_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
     patched_source = dict(source)
     patched_source["options"] = patched_options
-    return patched_source, list(state_record.nodes or ()), None
+    # Splice the patched default source back into the sources map so the patch
+    # is persisted (the caller writes the returned map to ``sources``). Other
+    # named sources, if any, are carried forward untouched.
+    patched_sources = dict(sources_map)
+    patched_sources[SOURCE_COMPONENT_ID] = patched_source
+    return patched_sources, list(state_record.nodes or ()), None
 
 
 def _resolve_pipeline_decision_review(
@@ -1192,7 +1208,7 @@ def _resolve_pipeline_decision_review(
     user_term: str,
     llm_draft: str,
     accepted_value: str,
-) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], None]:
+) -> tuple[Mapping[str, Mapping[str, Any]] | None, list[Mapping[str, Any]], None]:
     node = _find_interpretation_review_node(
         state_record,
         affected_node_id=affected_node_id,
@@ -1243,7 +1259,9 @@ def _resolve_pipeline_decision_review(
             final_nodes.append(patched_node)
         else:
             final_nodes.append(current_node)
-    return state_record.source, final_nodes, None
+    # Pipeline-decision review patches only node review metadata; the sources map
+    # is carried forward unchanged. The legacy singular ``source`` column is dead.
+    return state_record.sources, final_nodes, None
 
 
 def _resolve_model_choice_review(
@@ -1755,7 +1773,7 @@ class SessionServiceImpl:
                 id=allocated_state_id,
                 session_id=session_id,
                 version=int(next_version),
-                source=_enveloped_state_column(state.source),
+                source=None,
                 sources=_enveloped_state_column(state.sources),
                 nodes=_enveloped_state_column(state.nodes),
                 edges=_enveloped_state_column(state.edges),
@@ -2697,7 +2715,16 @@ class SessionServiceImpl:
                         f"create_pending_interpretation_event: composition state {state_id_str!r} not found in session {sid!r}"
                     )
                 nodes = self._unwrap_envelope(state_row.nodes)
-                source = self._unwrap_envelope(state_row.source)
+                # Multi-source: the legacy singular ``source`` column is dead
+                # (``_insert_composition_state`` always writes it NULL). The
+                # default source under review lives in the ``sources`` map keyed
+                # by ``SOURCE_COMPONENT_ID``. Interpretation review is scoped to
+                # that default component, so the invented-source writer-boundary
+                # validation below reads it from the map. A missing/malformed
+                # default source leaves ``source`` None and the existing
+                # ``isinstance`` guard raises the same clear error as before.
+                sources = self._unwrap_envelope(state_row.sources)
+                source = sources[SOURCE_COMPONENT_ID] if isinstance(sources, Mapping) and SOURCE_COMPONENT_ID in sources else None
                 if kind is InterpretationKind.INVENTED_SOURCE:
                     if affected_node_id != SOURCE_COMPONENT_ID:
                         raise ValueError(
@@ -2880,18 +2907,18 @@ class SessionServiceImpl:
                     if live_state_row is None:
                         raise AuditIntegrityError(f"create_pending_interpretation_event: session {sid!r} has no composition state to patch")
                     live_state_record = self._row_to_state_record(live_state_row)
-                    final_source: Mapping[str, Any] | None
+                    final_sources: Mapping[str, Mapping[str, Any]] | None
                     final_nodes: list[Mapping[str, Any]]
                     resolved_prompt_template_hash: str | None
                     if kind is InterpretationKind.VAGUE_TERM:
-                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_vague_term(
+                        final_sources, final_nodes, resolved_prompt_template_hash = _resolve_vague_term(
                             live_state_record,
                             affected_node_id=affected_node_id,
                             user_term=user_term,
                             accepted_value=llm_draft,
                         )
                     elif kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
-                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
+                        final_sources, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
                             live_state_record,
                             event_id=event_id,
                             affected_node_id=affected_node_id,
@@ -2899,7 +2926,7 @@ class SessionServiceImpl:
                             accepted_value=llm_draft,
                         )
                     elif kind is InterpretationKind.INVENTED_SOURCE:
-                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
+                        final_sources, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
                             live_state_record,
                             event_id=event_id,
                             affected_node_id=affected_node_id,
@@ -2908,7 +2935,7 @@ class SessionServiceImpl:
                             accepted_value=llm_draft,
                         )
                     elif kind is InterpretationKind.PIPELINE_DECISION:
-                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
+                        final_sources, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
                             live_state_record,
                             event_id=event_id,
                             affected_node_id=affected_node_id,
@@ -2932,7 +2959,8 @@ class SessionServiceImpl:
 
                     patched_state_record = replace(
                         live_state_record,
-                        source=final_source,
+                        source=None,
+                        sources=final_sources,
                         nodes=final_nodes,
                         is_valid=False,
                         validation_errors=None,
@@ -2973,8 +3001,7 @@ class SessionServiceImpl:
                         session_id=sid,
                         payload=StatePayload(
                             data=CompositionStateData(
-                                source=final_source,
-                                sources=live_state_record.sources,
+                                sources=final_sources,
                                 nodes=final_nodes,
                                 edges=live_state_record.edges,
                                 outputs=live_state_record.outputs,
@@ -3183,18 +3210,18 @@ class SessionServiceImpl:
                 if live_state_row is None:
                     raise AuditIntegrityError(f"resolve_interpretation_event: session {sid!r} has no composition state to patch")
                 state_record = self._row_to_state_record(live_state_row)
-                final_source: Mapping[str, Any] | None
+                final_sources: Mapping[str, Mapping[str, Any]] | None
                 final_nodes: list[Mapping[str, Any]]
                 resolved_prompt_template_hash: str | None
                 if kind is InterpretationKind.VAGUE_TERM:
-                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_vague_term(
+                    final_sources, final_nodes, resolved_prompt_template_hash = _resolve_vague_term(
                         state_record,
                         affected_node_id=event_row.affected_node_id,
                         user_term=event_row.user_term,
                         accepted_value=accepted_value,
                     )
                 elif kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
-                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
+                    final_sources, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,
@@ -3202,7 +3229,7 @@ class SessionServiceImpl:
                         accepted_value=accepted_value,
                     )
                 elif kind is InterpretationKind.INVENTED_SOURCE:
-                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
+                    final_sources, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,
@@ -3211,7 +3238,7 @@ class SessionServiceImpl:
                         accepted_value=accepted_value,
                     )
                 elif kind is InterpretationKind.PIPELINE_DECISION:
-                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
+                    final_sources, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,
@@ -3241,7 +3268,8 @@ class SessionServiceImpl:
 
                 patched_state_record = replace(
                     state_record,
-                    source=final_source,
+                    source=None,
+                    sources=final_sources,
                     nodes=final_nodes,
                     is_valid=False,
                     validation_errors=None,
@@ -3319,8 +3347,7 @@ class SessionServiceImpl:
                     session_id=sid,
                     payload=StatePayload(
                         data=CompositionStateData(
-                            source=final_source,
-                            sources=state_record.sources,
+                            sources=final_sources,
                             nodes=final_nodes,
                             edges=state_record.edges,
                             outputs=state_record.outputs,
@@ -3950,7 +3977,7 @@ class SessionServiceImpl:
                             id=str(state_id),
                             session_id=sid,
                             version=version,
-                            source=_enveloped_state_column(state.source),
+                            source=None,
                             sources=_enveloped_state_column(state.sources),
                             nodes=_enveloped_state_column(state.nodes),
                             edges=_enveloped_state_column(state.edges),
@@ -3972,7 +3999,7 @@ class SessionServiceImpl:
             id=state_id,
             session_id=session_id,
             version=version,
-            source=state.source,
+            source=None,
             sources=state.sources,
             nodes=state.nodes,
             edges=state.edges,
@@ -4440,7 +4467,7 @@ class SessionServiceImpl:
                             session_id=sid,
                             version=new_version,
                             # prior_row.* values are already enveloped — copy as-is
-                            source=prior_row.source,
+                            source=None,
                             sources=prior_row.sources,
                             nodes=prior_row.nodes,
                             edges=prior_row.edges,
@@ -4462,7 +4489,7 @@ class SessionServiceImpl:
             id=new_state_id,
             session_id=session_id,
             version=new_version,
-            source=self._unwrap_envelope(prior_row.source),
+            source=None,
             sources=self._unwrap_envelope(prior_row.sources),
             nodes=self._unwrap_envelope(prior_row.nodes),
             edges=self._unwrap_envelope(prior_row.edges),
@@ -4869,7 +4896,6 @@ class SessionServiceImpl:
                             # docstring for rationale).
                             payload=StatePayload(
                                 data=CompositionStateData(
-                                    source=source_state_record.source,
                                     sources=source_state_record.sources,
                                     nodes=source_state_record.nodes,
                                     edges=source_state_record.edges,
@@ -4944,7 +4970,7 @@ class SessionServiceImpl:
                 id=copied_state_id,
                 session_id=new_session_id,
                 version=state_version,
-                source=source_state_record.source,
+                source=None,
                 sources=source_state_record.sources,
                 nodes=source_state_record.nodes,
                 edges=source_state_record.edges,

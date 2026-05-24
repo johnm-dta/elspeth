@@ -75,13 +75,15 @@ describe("tutorialMachine", () => {
     const state: CompositionState = {
       id: "state-1",
       version: 1,
-      source: {
-        plugin: "inline_blob",
-        options: {
-          rows: [
-            { url: "https://www.australia.gov.au" },
-            { url: "dta.gov.au" },
-          ],
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: {
+            rows: [
+              { url: "https://www.australia.gov.au" },
+              { url: "dta.gov.au" },
+            ],
+          },
         },
       },
       nodes: [

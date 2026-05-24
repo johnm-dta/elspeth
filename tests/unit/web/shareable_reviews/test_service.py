@@ -68,7 +68,7 @@ def _blocked_readiness() -> ValidationReadiness:
     return ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[])
 
 
-def test_composition_snapshot_accepts_legacy_single_source_payload() -> None:
+def test_composition_snapshot_accepts_named_sources_payload() -> None:
     snapshot = CompositionStateResponse.model_validate(
         {
             "version": 1,
@@ -94,8 +94,8 @@ def test_composition_snapshot_accepts_legacy_single_source_payload() -> None:
         }
     )
 
-    assert tuple(snapshot.sources) == ("source",)
-    assert snapshot.sources["source"].plugin == "csv"
+    assert tuple(snapshot.sources) == ("primary",)
+    assert snapshot.sources["primary"].plugin == "csv"
 
 
 # ── Minimal record shims ─────────────────────────────────────────────────

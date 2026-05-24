@@ -1,4 +1,5 @@
 import type { CompositionState, NodeSpec, OutputSpec, SourceSpec } from "@/types/index";
+import { sortedSourceEntries } from "@/utils/compositionState";
 
 export const CANONICAL_TUTORIAL_PROMPT =
   "Create a data source with URLs for five public government agency web pages " +
@@ -202,19 +203,23 @@ export function tutorialReducer(
 export function summariseCompositionState(
   state: CompositionState,
 ): TutorialBuiltSummary {
+  const sources = sortedSourceEntries(state);
   return {
-    sourceLabel: summariseSource(state.source),
-    urls: collectUrls(state.source?.options ?? {}).slice(0, 10),
+    sourceLabel: summariseSources(sources),
+    urls: sources.flatMap(([, source]) => collectUrls(source.options)).slice(0, 10),
     transforms: state.nodes.map(summariseNode),
     sinkLabel: summariseOutputs(state.outputs),
   };
 }
 
-function summariseSource(source: SourceSpec | null): string {
-  if (source === null) {
+function summariseSources(sources: Array<[string, SourceSpec]>): string {
+  if (sources.length === 0) {
     return "No source was returned";
   }
-  return source.plugin;
+  if (sources.length === 1) {
+    return sources[0][1].plugin;
+  }
+  return sources.map(([name, source]) => `${name}: ${source.plugin}`).join(", ");
 }
 
 function summariseNode(node: NodeSpec): string {

@@ -13,7 +13,7 @@ function makePartialState(): CompositionState {
   return {
     id: "state-1",
     version: 7,
-    source: null,
+    sources: {},
     nodes: [],
     edges: [],
     outputs: [],

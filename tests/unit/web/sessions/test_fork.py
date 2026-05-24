@@ -152,7 +152,7 @@ class TestForkSession:
         )
 
         assert copied_state is not None
-        assert copied_state.source == state_v1.source
+        assert copied_state.sources == state_v1.sources
         # v2 had nodes; v1 did not
         assert copied_state.nodes is None
 
@@ -170,7 +170,7 @@ class TestForkSession:
         }
         state = await service.save_composition_state(
             session.id,
-            CompositionStateData(source=sources["orders"], sources=sources, is_valid=True),
+            CompositionStateData(sources=sources, is_valid=True),
             provenance="session_seed",
         )
         fork_msg = await service.add_message(
@@ -190,7 +190,6 @@ class TestForkSession:
         )
 
         assert copied_state is not None
-        assert copied_state.source == sources["orders"]
         assert copied_state.sources == sources
 
     @pytest.mark.asyncio
@@ -944,8 +943,7 @@ class TestForkEndpoint:
 
         copied_state = await service.get_current_state(new_session_id)
         assert copied_state is not None
-        assert copied_state.source is not None
-        options = copied_state.source["options"]
+        options = copied_state.sources["source"]["options"]
         assert options["blob_ref"] == str(copied_blob.id)
         assert options[source_key] == copied_blob.storage_path
         assert options[source_key] != original_blob.storage_path

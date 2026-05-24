@@ -170,16 +170,27 @@ def _execute_wire_secret_ref(
     marker = {"secret_ref": name}
 
     if target == "source":
-        if state.source is None:
+        if not state.sources:
             return _failure_result(state, "No source configured — set a source first.")
-        patched_options = dict(deep_thaw(state.source.options))
+        if target_id is None:
+            if len(state.sources) == 1:
+                source_name = next(iter(state.sources))
+            else:
+                return _failure_result(state, "target_id is required for source targets when multiple sources are configured.")
+        else:
+            source_name = str(target_id)
+        source = state.sources.get(source_name)
+        if source is None:
+            return _failure_result(state, f"Source '{source_name}' not found.")
+        patched_options = dict(deep_thaw(source.options))
         patched_options[option_key] = marker
-        placement_error = _secret_ref_placement_error("source", state.source.plugin, patched_options)
+        placement_error = _secret_ref_placement_error("source", source.plugin, patched_options)
         if placement_error is not None:
             return _failure_result(state, placement_error)
-        new_source = replace(state.source, options=patched_options)
-        new_state = state.with_source(new_source)
-        return _mutation_result(new_state, ("source",))
+        new_source = replace(source, options=patched_options)
+        new_state = state.with_named_source(source_name, new_source)
+        affected = "source" if source_name == "source" else f"source:{source_name}"
+        return _mutation_result(new_state, (affected,))
 
     elif target == "node":
         if target_id is None:

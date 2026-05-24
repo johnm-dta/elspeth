@@ -330,10 +330,10 @@ class TestPromoteSetPipelineArgErrorRouting:
             ),
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "text"
+        source = result.updated_state.sources["source"]
+        assert source.plugin == "text"
         # The handler resolves blob_ref into source.options authoritatively.
-        assert "blob_ref" in result.updated_state.source.options
+        assert "blob_ref" in source.options
         # Inline content must not leak into the affected/data summary.
         assert "hello" not in str(result.to_dict())
 
@@ -453,7 +453,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         )
 
         assert result.success is False
-        assert result.updated_state.source is None
+        assert "source" not in result.updated_state.sources
         assert SOURCE_AUTHORING_KEY in result.data["error"]
 
     def test_csv_fixed_schema_accepts_advertised_field_definition_shape(self, tmp_path: Path) -> None:
@@ -511,9 +511,9 @@ class TestPromoteSetPipelineArgErrorRouting:
 
         assert result.success is True, result.data
         assert result.validation.is_valid is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "csv"
-        assert result.updated_state.source.options["schema"]["fields"] == ({"name": "url", "field_type": "str"},)
+        source = result.updated_state.sources["source"]
+        assert source.plugin == "csv"
+        assert source.options["schema"]["fields"] == ({"name": "url", "field_type": "str"},)
 
     def test_inline_blob_llm_authored_source_records_authoring_metadata(self, tmp_path: Path) -> None:
         """LLM-authored inline source blobs must stamp source-level provenance."""
@@ -555,8 +555,8 @@ class TestPromoteSetPipelineArgErrorRouting:
         )
 
         assert result.success is True, result.data
-        assert result.updated_state.source is not None
-        options = result.updated_state.source.options
+        assert "source" in result.updated_state.sources
+        options = result.updated_state.sources["source"].options
         assert options["blob_ref"] == result.data["inline_blob"]["blob_id"]
         assert SOURCE_AUTHORING_KEY in options
         assert options[SOURCE_AUTHORING_KEY] == {
@@ -623,8 +623,8 @@ class TestPromoteSetPipelineArgErrorRouting:
         )
 
         assert result.success is True, result.data
-        assert result.updated_state.source is not None
-        requirement = result.updated_state.source.options[INTERPRETATION_REQUIREMENTS_KEY][0]
+        assert "source" in result.updated_state.sources
+        requirement = result.updated_state.sources["source"].options[INTERPRETATION_REQUIREMENTS_KEY][0]
         assert requirement["kind"] == "invented_source"
         assert requirement["user_term"] == "inline_source_url_list"
         assert requirement["draft"] == url_csv
@@ -918,8 +918,8 @@ class TestPromoteSetPipelineArgErrorRouting:
         result = _execute_set_pipeline(args, _empty_state(), context)
 
         assert result.success is True, result.data
-        assert result.updated_state.source is not None
-        options = result.updated_state.source.options
+        assert "source" in result.updated_state.sources
+        options = result.updated_state.sources["source"].options
         assert options[SOURCE_AUTHORING_KEY] == {
             "modality": CreationModality.LLM_GENERATED.value,
             "content_hash": create_result.data["content_hash"],
@@ -986,8 +986,8 @@ class TestPromoteSetPipelineArgErrorRouting:
         )
 
         assert result.success is True, result.data
-        assert result.updated_state.source is not None
-        options = result.updated_state.source.options
+        assert "source" in result.updated_state.sources
+        options = result.updated_state.sources["source"].options
         assert INTERPRETATION_REQUIREMENTS_KEY in options
         assert SOURCE_AUTHORING_KEY in options
         assert len(options[INTERPRETATION_REQUIREMENTS_KEY]) == 1

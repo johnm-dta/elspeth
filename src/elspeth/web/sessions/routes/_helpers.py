@@ -496,18 +496,12 @@ def _state_response(
     Historical loads pass None, producing null for these fields.
     """
     # B4: Redact internal storage paths from blob-backed sources.
-    # ``redact_source_storage_path`` guarantees the ``"source"`` key is
-    # preserved in the returned mapping (either by returning the input dict
-    # unchanged when no blob_ref is present, or by building a shallow copy
-    # with ``redacted["source"] = redacted_source``). Index directly so any
+    # ``redact_source_storage_path`` guarantees the ``"sources"`` key is
+    # preserved in the returned mapping. Index directly so any
     # future contract violation surfaces as ``KeyError`` rather than being
     # masked by a silent fallback — silent-failure-hunter I6 review finding,
     # 2026-05-24.
-    source_data = deep_thaw(state.source)
     sources_data = deep_thaw(state.sources)
-    if source_data is not None:
-        redacted = redact_source_storage_path({"source": source_data})
-        source_data = redacted["source"]
     if sources_data is not None:
         redacted = redact_source_storage_path({"sources": sources_data})
         sources_data = redacted["sources"]
@@ -516,7 +510,6 @@ def _state_response(
         id=str(state.id),
         session_id=str(state.session_id),
         version=state.version,
-        source=source_data,
         sources=sources_data,
         nodes=deep_thaw(state.nodes),
         edges=deep_thaw(state.edges),
@@ -1602,7 +1595,6 @@ async def _state_data_from_composer_state(
     persisted_composer_meta = merge_implicit_decisions_meta(composer_meta, state)
     return (
         CompositionStateData(
-            source=state_d["source"],
             sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],

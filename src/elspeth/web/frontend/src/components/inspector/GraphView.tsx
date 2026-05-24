@@ -28,6 +28,11 @@ import "@xyflow/react/dist/style.css";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useTheme } from "@/hooks/useTheme";
+import {
+  hasCompositionContent,
+  sortedSourceEntries,
+  sourceComponentId,
+} from "@/utils/compositionState";
 import { BADGE_COLORS, BADGE_BACKGROUNDS, EDGE_COLORS, EDGE_LABEL_COLOR, VALIDATION_COLORS } from "@/styles/tokens";
 import type { CompositionState } from "@/types/index";
 
@@ -75,8 +80,8 @@ function buildMiniMapNodeKindById(
     return kindById;
   }
 
-  if (compositionState.source) {
-    kindById.set("source", "source");
+  for (const [sourceName] of sortedSourceEntries(compositionState)) {
+    kindById.set(sourceComponentId(sourceName), "source");
   }
   for (const node of compositionState.nodes) {
     kindById.set(node.id, node.node_type);
@@ -104,16 +109,21 @@ function selectedComponentConfig(
     return null;
   }
 
-  if (selectedNodeId === "source" && compositionState.source) {
+  const selectedSource = sortedSourceEntries(compositionState).find(
+    ([sourceName]) => sourceComponentId(sourceName) === selectedNodeId,
+  );
+  if (selectedSource) {
+    const [sourceName, source] = selectedSource;
+    const componentId = sourceComponentId(sourceName);
     return {
-      id: "source",
+      id: componentId,
       typeLabel: "source",
-      plugin: compositionState.source.plugin,
+      plugin: source.plugin,
       connections: withoutNullishFields({
-        on_success: compositionState.source.on_success,
-        on_validation_failure: compositionState.source.on_validation_failure,
+        on_success: source.on_success,
+        on_validation_failure: source.on_validation_failure,
       }),
-      options: compositionState.source.options,
+      options: source.options,
     };
   }
 
@@ -447,12 +457,7 @@ export function GraphView() {
   }, [validationResult]);
 
   const { nodes, edges } = useMemo(() => {
-    const hasContent =
-      compositionState &&
-      (compositionState.source !== null ||
-        compositionState.nodes.length > 0 ||
-        compositionState.outputs.length > 0);
-    if (!hasContent) {
+    if (!hasCompositionContent(compositionState)) {
       return { nodes: [] as Node[], edges: [] as Edge[] };
     }
 
@@ -543,18 +548,19 @@ export function GraphView() {
 
     const rfNodes: Node[] = [];
 
-    // Source node (synthetic — "source" is used as from_node in edges)
-    if (compositionState.source) {
+    // Source nodes (synthetic — source names are producer roots in edges)
+    for (const [sourceName, source] of sortedSourceEntries(compositionState)) {
+      const componentId = sourceComponentId(sourceName);
       rfNodes.push(
         makeRfNode(
+          componentId,
           "source",
-          "source",
-          compositionState.source.plugin,
+          source.plugin,
           BADGE_BACKGROUNDS.source,
           BADGE_COLORS.source,
-          nodeValidationMap["source"],
-          nodeMessageMap["source"],
-          selectedNodeId === "source",
+          nodeValidationMap[componentId],
+          nodeMessageMap[componentId],
+          selectedNodeId === componentId,
         ),
       );
     }
@@ -592,10 +598,14 @@ export function GraphView() {
     }
 
     // Build edges: start with explicit edges from compositionState
+    const sourceIds = new Set(Object.keys(compositionState.sources));
+    const toGraphNodeId = (id: string): string =>
+      sourceIds.has(id) ? sourceComponentId(id) : id;
+
     const rfEdges: Edge[] = compositionState.edges.map((edge, i) => ({
       id: `e-${edge.from_node}-${edge.to_node}-${i}`,
-      source: edge.from_node,
-      target: edge.to_node,
+      source: toGraphNodeId(edge.from_node),
+      target: toGraphNodeId(edge.to_node),
       label: EDGE_LABEL_MAP[edge.edge_type] ?? edge.edge_type,
       animated: edge.edge_type === "on_error",
       style: {
@@ -628,13 +638,15 @@ export function GraphView() {
     type ProducerInfo = { nodeId: string; edgeType: "success" | "error"; label: string };
     const connectionProducers: Record<string, ProducerInfo> = {};
 
-    // Source produces on its on_success connection
-    if (compositionState.source?.on_success) {
-      connectionProducers[compositionState.source.on_success] = {
-        nodeId: "source",
-        edgeType: "success",
-        label: "success",
-      };
+    // Each source produces on its on_success connection
+    for (const [sourceName, source] of sortedSourceEntries(compositionState)) {
+      if (source.on_success) {
+        connectionProducers[source.on_success] = {
+          nodeId: sourceComponentId(sourceName),
+          edgeType: "success",
+          label: "success",
+        };
+      }
     }
 
     // Each node can produce on on_success, on_error, or routes
@@ -687,21 +699,24 @@ export function GraphView() {
       }
     }
 
-    // Handle source → sink direct edge (no transforms in between)
-    if (
-      compositionState.source?.on_success &&
-      nodeIds.has(compositionState.source.on_success) &&
-      !existingConnections.has(`source->${compositionState.source.on_success}`)
-    ) {
-      rfEdges.push({
-        id: `inferred-sink-source-${compositionState.source.on_success}`,
-        source: "source",
-        target: compositionState.source.on_success,
-        label: "success",
-        style: { stroke: EDGE_COLORS.normal, strokeWidth: 1.5 },
-        labelStyle: { fontSize: 10, fill: EDGE_LABEL_COLOR },
-      });
-      existingConnections.add(`source->${compositionState.source.on_success}`);
+    // Handle source → sink direct edges (no transforms in between)
+    for (const [sourceName, source] of sortedSourceEntries(compositionState)) {
+      const sourceId = sourceComponentId(sourceName);
+      if (
+        source.on_success &&
+        nodeIds.has(source.on_success) &&
+        !existingConnections.has(`${sourceId}->${source.on_success}`)
+      ) {
+        rfEdges.push({
+          id: `inferred-sink-${sourceId}-${source.on_success}`,
+          source: sourceId,
+          target: source.on_success,
+          label: "success",
+          style: { stroke: EDGE_COLORS.normal, strokeWidth: 1.5 },
+          labelStyle: { fontSize: 10, fill: EDGE_LABEL_COLOR },
+        });
+        existingConnections.add(`${sourceId}->${source.on_success}`);
+      }
     }
 
     // Handle direct sink references (on_success/on_error/routes pointing to sink names)

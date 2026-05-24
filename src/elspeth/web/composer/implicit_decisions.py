@@ -63,8 +63,8 @@ def build_implicit_decisions_report(state: CompositionState) -> ImplicitDecision
     """
 
     entries: list[ImplicitDecisionEntry] = []
-    if state.source is not None:
-        entries.extend(_source_entries(state.source))
+    for source in state.sources.values():
+        entries.extend(_source_entries(source))
     for node in state.nodes:
         entries.extend(_node_entries(node))
     for output in state.outputs:

@@ -518,8 +518,7 @@ def _execute_set_source_from_blob(
     source_name = validated.source_name
     new_state = state.with_named_source(source_name, source)
     data = _vf_destination_note(new_state, on_vf) or {}
-    affected = "source" if source_name == "source" else f"sources.{source_name}"
-    return _mutation_result(new_state, (affected,), data={**data, "source_blob": resolved.payload})
+    return _mutation_result(new_state, (_source_component_id(source_name),), data={**data, "source_blob": resolved.payload})
 
 
 _SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
@@ -870,10 +869,18 @@ def _execute_clear_source(
     del context  # unused; signature uniformity with the other handlers.
     extra_keys = set(args) - {"source_name"}
     if extra_keys:
-        raise ToolArgumentError(f"clear_source arguments contain unexpected keys: {sorted(extra_keys)}")
+        raise ToolArgumentError(
+            argument="clear_source arguments",
+            expected="only the optional 'source_name' key",
+            actual_type="unexpected extra keys",
+        )
     source_name = args["source_name"] if "source_name" in args else "source"
     if type(source_name) is not str or not source_name:
-        raise ToolArgumentError(f"clear_source source_name must be a non-empty string, got {type(source_name).__name__}")
+        raise ToolArgumentError(
+            argument="source_name",
+            expected="a non-empty string",
+            actual_type=type(source_name).__name__,
+        )
     new_state = state.without_named_source(source_name)
     if new_state is None:
         return _failure_result(state, f"No source named '{source_name}' configured to clear.")

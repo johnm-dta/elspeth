@@ -15,14 +15,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from elspeth.contracts import Checkpoint, NodeID, ResumePoint, RunStatus
+from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenOutcome
 from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import prepare_for_run
 from elspeth.engine.orchestrator.core import Orchestrator
-from elspeth.engine.orchestrator.types import ResumeState
+from elspeth.engine.orchestrator.types import ExecutionCounters, ResumeState
 from tests.fixtures.landscape import make_landscape_db
 from tests.fixtures.stores import MockPayloadStore
 
@@ -32,6 +34,37 @@ def _make_orchestrator(db: LandscapeDB | None = None) -> Orchestrator:
     if db is None:
         db = make_landscape_db()
     return Orchestrator(db)
+
+
+def _make_token_outcome(
+    *,
+    run_id: str,
+    token_id: str,
+    outcome: TerminalOutcome | None,
+    path: TerminalPath,
+    completed: bool = True,
+    sink_name: str | None = None,
+    batch_id: str | None = None,
+    fork_group_id: str | None = None,
+    join_group_id: str | None = None,
+    expand_group_id: str | None = None,
+    error_hash: str | None = None,
+) -> TokenOutcome:
+    return TokenOutcome(
+        outcome_id=f"outcome-{token_id}-{path.value}",
+        run_id=run_id,
+        token_id=token_id,
+        outcome=outcome,
+        path=path,
+        completed=completed,
+        recorded_at=datetime.now(UTC),
+        sink_name=sink_name,
+        batch_id=batch_id,
+        fork_group_id=fork_group_id,
+        join_group_id=join_group_id,
+        expand_group_id=expand_group_id,
+        error_hash=error_hash,
+    )
 
 
 class TestResumeFinalizesAsFailed:
@@ -152,7 +185,7 @@ class TestResumeFinalizesAsFailed:
             patch.object(
                 orch,
                 "_derive_resume_terminal_status_from_audit",
-                return_value=(RunStatus.COMPLETED, 3, 3, 0, 0, 0, 0),
+                return_value=(RunStatus.COMPLETED, ExecutionCounters(rows_processed=3, rows_succeeded=3)),
             ),
             patch.object(orch, "_emit_telemetry"),
             patch.object(orch, "_delete_checkpoints"),
@@ -167,6 +200,118 @@ class TestResumeFinalizesAsFailed:
         assert result.status == RunStatus.COMPLETED
         assert result.rows_processed == 3
         mock_factory.run_lifecycle.finalize_run.assert_called_once_with(run_id, status=RunStatus.COMPLETED)
+
+    def test_all_rows_processed_resume_replays_structural_counters_from_audit(self) -> None:
+        """All-terminal resume must not fabricate structural counters as zero."""
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        run_id = "run-structural-counter-resume"
+        mock_factory = MagicMock(spec=RecorderFactory)
+        mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock()
+        mock_factory.run_lifecycle.finalize_run = MagicMock()
+        mock_factory.query.get_all_token_outcomes_for_run.return_value = [
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-buffered",
+                outcome=None,
+                path=TerminalPath.BUFFERED,
+                completed=False,
+                batch_id="batch-1",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-buffered",
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.BATCH_CONSUMED,
+                batch_id="batch-1",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-fork-parent",
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.FORK_PARENT,
+                fork_group_id="fork-1",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-expand-parent",
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.EXPAND_PARENT,
+                expand_group_id="expand-1",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-success",
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="default",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-coalesced",
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.COALESCED,
+                sink_name="default",
+                join_group_id="join-1",
+            ),
+            _make_token_outcome(
+                run_id=run_id,
+                token_id="tok-discarded",
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.SINK_DISCARDED,
+                sink_name=DISCARD_SINK_NAME,
+                error_hash="sinkdiscard0001",
+            ),
+        ]
+
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-structural-counter-resume",
+            run_id=run_id,
+            token_id="tok-structural-counter-resume",
+            node_id="node-structural-counter-resume",
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            checkpoint_node_config_hash="b" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(
+            checkpoint=checkpoint,
+            token_id=checkpoint.token_id,
+            node_id=checkpoint.node_id,
+            sequence_number=checkpoint.sequence_number,
+        )
+        resume_state = ResumeState(
+            factory=mock_factory,
+            run_id=run_id,
+            restored_aggregation_state={},
+            restored_coalesce_state=None,
+            unprocessed_rows=(),
+            schema_contract=MagicMock(),
+        )
+
+        with (
+            patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
+            patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("all-terminal resume should early-exit")),
+            patch.object(orch, "_emit_telemetry"),
+            patch.object(orch, "_delete_checkpoints"),
+        ):
+            result = orch.resume(
+                resume_point,
+                MagicMock(),
+                MagicMock(),
+                payload_store=MockPayloadStore(),
+            )
+
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+        assert result.rows_processed == 3
+        assert result.rows_succeeded == 2
+        assert result.rows_failed == 1
+        assert result.rows_forked == 1
+        assert result.rows_expanded == 1
+        assert result.rows_buffered == 1
+        assert result.rows_coalesced == 1
+        assert result.rows_diverted == 1
 
 
 class TestBuildProcessorCallsCleanupOnFailure:

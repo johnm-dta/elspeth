@@ -422,9 +422,7 @@ class Orchestrator:
             if pending_exc is None:
                 raise
 
-    def _derive_resume_terminal_status_from_audit(
-        self, factory: RecorderFactory, run_id: str
-    ) -> tuple[RunStatus, int, int, int, int, int, int]:
+    def _derive_resume_terminal_status_from_audit(self, factory: RecorderFactory, run_id: str) -> tuple[RunStatus, ExecutionCounters]:
         """Phase 2.2 (elspeth-0de989c56d) — recover the truthful terminal
         status of a run from the Landscape audit DB when the resume found
         no unprocessed rows.
@@ -440,64 +438,68 @@ class Orchestrator:
         reflects what really happened.
 
         Returns:
-            ``(terminal_status, rows_processed, rows_succeeded, rows_failed,
-            rows_routed_success, rows_routed_failure, rows_quarantined)`` —
-            the second through seventh elements feed the local RunResult so
-            its row counts match the chosen status (otherwise the
-            biconditional in
-            :class:`elspeth.contracts.run_result.RunResult` would crash).
+            ``(terminal_status, counters)``.  ``counters`` feeds the local
+            RunResult so its row counts match the chosen status (otherwise
+            the biconditional in :class:`elspeth.contracts.run_result.RunResult`
+            would crash) and so structural counters are not fabricated as 0.
         """
         outcomes = factory.query.get_all_token_outcomes_for_run(run_id)
-        rows_succeeded = 0
-        rows_failed = 0
-        rows_quarantined = 0
-        rows_coalesce_failed = 0
-        rows_processed = 0
-        rows_routed_success = 0
-        rows_routed_failure = 0
+        counters = ExecutionCounters()
         for outcome_record in outcomes:
             if not outcome_record.completed:
+                if (outcome_record.outcome, outcome_record.path) == (None, TerminalPath.BUFFERED):
+                    counters.rows_buffered += 1
                 continue
             pair = (outcome_record.outcome, outcome_record.path)
             match pair:
                 case (
                     (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
-                    | (TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
                     | (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED)
                     | (TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED)
                 ):
-                    rows_succeeded += 1
-                    rows_processed += 1
+                    counters.rows_succeeded += 1
+                    counters.rows_processed += 1
+                case (TerminalOutcome.SUCCESS, TerminalPath.COALESCED):
+                    counters.rows_coalesced += 1
+                    counters.rows_succeeded += 1
+                    counters.rows_processed += 1
                 case (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED):
-                    rows_routed_success += 1
-                    rows_succeeded += 1
-                    rows_processed += 1
+                    counters.rows_routed_success += 1
+                    counters.rows_succeeded += 1
+                    counters.rows_processed += 1
+                    if outcome_record.sink_name is not None:
+                        counters.routed_destinations[outcome_record.sink_name] += 1
                 case (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
-                    rows_failed += 1
-                    rows_routed_failure += 1
-                    rows_processed += 1
+                    counters.rows_failed += 1
+                    counters.rows_routed_failure += 1
+                    counters.rows_processed += 1
+                    if outcome_record.sink_name is not None:
+                        counters.routed_destinations[outcome_record.sink_name] += 1
                 case (TerminalOutcome.FAILURE, TerminalPath.UNROUTED):
-                    rows_failed += 1
-                    rows_processed += 1
+                    counters.rows_failed += 1
+                    counters.rows_processed += 1
                 case (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE):
-                    rows_quarantined += 1
-                    rows_failed += 1
-                    rows_processed += 1
+                    counters.rows_quarantined += 1
+                    counters.rows_failed += 1
+                    counters.rows_processed += 1
                 case (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED):
-                    rows_failed += 1
-                    rows_processed += 1
+                    counters.rows_diverted += 1
+                    counters.rows_failed += 1
+                    counters.rows_processed += 1
                 case (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
-                    rows_processed += 1
-                case (
-                    (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT)
-                    | (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT)
-                    | (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)
-                ):
-                    # Parent-token / aggregation accounting outcomes do not
-                    # contribute to the success/failure tally — the child
-                    # tokens (FORKED/EXPANDED) and the batch-result token
-                    # (CONSUMED_IN_BATCH) carry the row-level counters via
-                    # their own terminal outcomes.
+                    counters.rows_diverted += 1
+                    counters.rows_processed += 1
+                case (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT):
+                    # Parent tokens delegate predicate counters to their
+                    # children, but the structural fork count belongs here.
+                    counters.rows_forked += 1
+                case (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT):
+                    # Deaggregation parents behave like fork parents for the
+                    # success/failure tally, with their own structural count.
+                    counters.rows_expanded += 1
+                case (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED):
+                    # Batch-consumed tokens do not have a dedicated RunResult
+                    # counter; the BUFFERED record captures the structural row.
                     pass
                 case _:
                     raise AssertionError(
@@ -505,23 +507,15 @@ class Orchestrator:
                         "Add a case here; see ADR-019 mapping table and the live accumulator."
                     )
         terminal_status = derive_terminal_run_status(
-            rows_processed=rows_processed,
-            rows_succeeded=rows_succeeded,
-            rows_failed=rows_failed,
-            rows_routed_success=rows_routed_success,
-            rows_routed_failure=rows_routed_failure,
-            rows_quarantined=rows_quarantined,
-            rows_coalesce_failed=rows_coalesce_failed,
+            rows_processed=counters.rows_processed,
+            rows_succeeded=counters.rows_succeeded,
+            rows_failed=counters.rows_failed,
+            rows_routed_success=counters.rows_routed_success,
+            rows_routed_failure=counters.rows_routed_failure,
+            rows_quarantined=counters.rows_quarantined,
+            rows_coalesce_failed=counters.rows_coalesce_failed,
         )
-        return (
-            terminal_status,
-            rows_processed,
-            rows_succeeded,
-            rows_failed,
-            rows_routed_success,
-            rows_routed_failure,
-            rows_quarantined,
-        )
+        return terminal_status, counters
 
     def _cli_completion_for(self, status: RunStatus) -> tuple[RunCompletionStatus, int]:
         """Phase 2.2 (elspeth-0de989c56d) — map terminal RunStatus to the
@@ -3295,15 +3289,7 @@ class Orchestrator:
                 # carries the truth.  Aggregate token_outcomes to derive the
                 # correct four-value terminal status and feed it to both the
                 # Landscape finalize and the local RunResult.
-                (
-                    terminal_status,
-                    audit_rows_processed,
-                    audit_rows_succeeded,
-                    audit_rows_failed,
-                    audit_rows_routed_success,
-                    audit_rows_routed_failure,
-                    audit_rows_quarantined,
-                ) = self._derive_resume_terminal_status_from_audit(factory, run_id)
+                terminal_status, audit_counters = self._derive_resume_terminal_status_from_audit(factory, run_id)
                 factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
 
                 # Emit RunFinished telemetry (matching the normal completion path)
@@ -3312,7 +3298,7 @@ class Orchestrator:
                         timestamp=datetime.now(UTC),
                         run_id=run_id,
                         status=terminal_status,
-                        row_count=audit_rows_processed,
+                        row_count=audit_counters.rows_processed,
                         duration_ms=0.0,
                     )
                 )
@@ -3323,32 +3309,22 @@ class Orchestrator:
                     RunSummary(
                         run_id=run_id,
                         status=cli_status,
-                        total_rows=audit_rows_processed,
-                        succeeded=audit_rows_succeeded,
-                        failed=audit_rows_failed,
-                        quarantined=audit_rows_quarantined,
+                        total_rows=audit_counters.rows_processed,
+                        succeeded=audit_counters.rows_succeeded,
+                        failed=audit_counters.rows_failed,
+                        quarantined=audit_counters.rows_quarantined,
                         duration_seconds=0.0,
                         exit_code=exit_code,
-                        routed_success=audit_rows_routed_success,
-                        routed_failure=audit_rows_routed_failure,
-                        routed_destinations=(),
+                        routed_success=audit_counters.rows_routed_success,
+                        routed_failure=audit_counters.rows_routed_failure,
+                        routed_destinations=tuple(audit_counters.routed_destinations.items()),
                     )
                 )
 
                 # Delete checkpoints on successful completion
                 self._delete_checkpoints(run_id)
 
-                return RunResult(
-                    run_id=run_id,
-                    status=terminal_status,
-                    rows_processed=audit_rows_processed,
-                    rows_succeeded=audit_rows_succeeded,
-                    rows_failed=audit_rows_failed,
-                    rows_routed_success=audit_rows_routed_success,
-                    rows_routed_failure=audit_rows_routed_failure,
-                    rows_quarantined=audit_rows_quarantined,
-                    routed_destinations={},
-                )
+                return audit_counters.to_run_result(run_id, terminal_status)
 
             with shutdown_ctx as active_event:
                 result = self._process_resumed_rows(

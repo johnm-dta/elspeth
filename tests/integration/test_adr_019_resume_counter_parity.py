@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.run_result import RunResult
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
@@ -29,31 +28,51 @@ class ScenarioResult:
     run_id: str
 
 
-def _predicate_counter_tuple(result: RunResult) -> tuple[RunStatus, int, int, int, int, int, int]:
-    return (
-        result.status,
-        result.rows_processed,
-        result.rows_succeeded,
-        result.rows_failed,
-        result.rows_routed_success,
-        result.rows_routed_failure,
-        result.rows_quarantined,
-    )
+def _counter_snapshot(result: RunResult) -> dict[str, object]:
+    return {
+        "status": result.status,
+        "rows_processed": result.rows_processed,
+        "rows_succeeded": result.rows_succeeded,
+        "rows_failed": result.rows_failed,
+        "rows_routed_success": result.rows_routed_success,
+        "rows_routed_failure": result.rows_routed_failure,
+        "rows_quarantined": result.rows_quarantined,
+        "rows_forked": result.rows_forked,
+        "rows_coalesced": result.rows_coalesced,
+        "rows_expanded": result.rows_expanded,
+        "rows_buffered": result.rows_buffered,
+        "rows_diverted": result.rows_diverted,
+        "rows_coalesce_failed": result.rows_coalesce_failed,
+        "routed_destinations": dict(result.routed_destinations),
+    }
 
 
-def _resume_counter_tuple_from_audit(
+def _resume_counter_snapshot_from_audit(
     db: LandscapeDB,
     run_id: str,
-) -> tuple[RunStatus, int, int, int, int, int, int]:
+) -> dict[str, object]:
     factory = RecorderFactory(db)
-    status, processed, succeeded, failed, routed_success, routed_failure, quarantined = (
-        Orchestrator._derive_resume_terminal_status_from_audit(  # pyright: ignore[reportPrivateUsage]
-            Orchestrator(db),
-            factory,
-            run_id,
-        )
+    status, counters = Orchestrator._derive_resume_terminal_status_from_audit(  # pyright: ignore[reportPrivateUsage]
+        Orchestrator(db),
+        factory,
+        run_id,
     )
-    return (status, processed, succeeded, failed, routed_success, routed_failure, quarantined)
+    return {
+        "status": status,
+        "rows_processed": counters.rows_processed,
+        "rows_succeeded": counters.rows_succeeded,
+        "rows_failed": counters.rows_failed,
+        "rows_routed_success": counters.rows_routed_success,
+        "rows_routed_failure": counters.rows_routed_failure,
+        "rows_quarantined": counters.rows_quarantined,
+        "rows_forked": counters.rows_forked,
+        "rows_coalesced": counters.rows_coalesced,
+        "rows_expanded": counters.rows_expanded,
+        "rows_buffered": counters.rows_buffered,
+        "rows_diverted": counters.rows_diverted,
+        "rows_coalesce_failed": counters.rows_coalesce_failed,
+        "routed_destinations": dict(counters.routed_destinations),
+    }
 
 
 def run_live_scenario(
@@ -117,26 +136,26 @@ def test_resume_counter_shape_matches_live_predicate_counters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Audit-derived resume counters match live predicate/status counters."""
+    """Audit-derived resume counters match live status and RunResult counters."""
     live = run_live_scenario(tmp_path / scenario, monkeypatch, scenario)
 
-    assert _resume_counter_tuple_from_audit(live.db, live.run_id) == _predicate_counter_tuple(live.result)
+    assert _resume_counter_snapshot_from_audit(live.db, live.run_id) == _counter_snapshot(live.result)
 
 
 @pytest.mark.parametrize("scenario", ["failsink_mode_diversion", "discard_mode_diversion"])
-def test_resume_counter_derivation_stays_scoped_to_predicate_tuple(
+def test_resume_counter_derivation_replays_diversion_structural_count(
     scenario: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Structural ``rows_diverted`` is intentionally not replayed from audit here."""
+    """Structural ``rows_diverted`` is replayed from audit in the all-terminal branch."""
     live = run_live_scenario(tmp_path / scenario, monkeypatch, scenario)
     factory = RecorderFactory(live.db)
 
-    derived = Orchestrator._derive_resume_terminal_status_from_audit(  # pyright: ignore[reportPrivateUsage]
+    _status, counters = Orchestrator._derive_resume_terminal_status_from_audit(  # pyright: ignore[reportPrivateUsage]
         Orchestrator(live.db),
         factory,
         live.run_id,
     )
 
-    assert len(derived) == 7
+    assert counters.rows_diverted == live.result.rows_diverted

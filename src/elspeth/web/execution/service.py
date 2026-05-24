@@ -24,6 +24,7 @@ from typing import Any, Literal, TypeVar, cast
 from uuid import UUID
 
 import structlog
+from opentelemetry import metrics
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -42,7 +43,14 @@ from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
-from elspeth.web.blobs.protocol import AllowedMimeType, BlobNotFoundError, BlobQuotaExceededError, BlobServiceProtocol, BlobStateError
+from elspeth.web.blobs.protocol import (
+    AllowedMimeType,
+    BlobIntegrityError,
+    BlobNotFoundError,
+    BlobQuotaExceededError,
+    BlobServiceProtocol,
+    BlobStateError,
+)
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.config import WebSettings
@@ -90,6 +98,15 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.telemetry import _SessionsTelemetry
 
 slog = structlog.get_logger()
+_meter = metrics.get_meter(__name__)
+_BLOB_INLINE_HASH_MISMATCH_TOTAL = _meter.create_counter(
+    name="composer.blob_inline.hash_mismatch_total",
+    description="composer-pinned hash did not match runtime-fetched blob content; SLO threshold = 0",
+)
+_BLOB_INLINE_AUDIT_ROW_TIER1_VIOLATION_TOTAL = _meter.create_counter(
+    name="composer.blob_inline.audit_row_tier1_violation_total",
+    description="resolved inline blob ref produced no audit row; SLO threshold = 0",
+)
 
 T = TypeVar("T")
 
@@ -954,22 +971,26 @@ class ExecutionServiceImpl:
                         )
 
                     self._call_async(_link_inline_blobs_to_run())
-                    fetched = self._call_async(_fetch_blob_contents(blob_service, inline_refs))
+                    try:
+                        fetched = self._call_async(_fetch_blob_contents(blob_service, inline_refs))
 
-                    async def _gather_inline_blob_metadata() -> list[Any]:
-                        return await asyncio.gather(*(blob_service.get_blob(blob_id) for blob_id in unique_blob_ids))
+                        async def _gather_inline_blob_metadata() -> list[Any]:
+                            return await asyncio.gather(*(blob_service.get_blob(blob_id) for blob_id in unique_blob_ids))
 
-                    metadata_records = self._call_async(_gather_inline_blob_metadata())
-                    blob_metadata: dict[UUID, tuple[AllowedMimeType, int]] = {
-                        blob_id: (cast(AllowedMimeType, record.mime_type), record.size_bytes)
-                        for blob_id, record in zip(unique_blob_ids, metadata_records, strict=True)
-                    }
-                    resolved_dict, blob_resolutions = _substitute_blob_content_refs(
-                        resolved_dict,
-                        fetched,
-                        refs=inline_refs,
-                        blob_metadata=blob_metadata,
-                    )
+                        metadata_records = self._call_async(_gather_inline_blob_metadata())
+                        blob_metadata: dict[UUID, tuple[AllowedMimeType, int]] = {
+                            blob_id: (cast(AllowedMimeType, record.mime_type), record.size_bytes)
+                            for blob_id, record in zip(unique_blob_ids, metadata_records, strict=True)
+                        }
+                        resolved_dict, blob_resolutions = _substitute_blob_content_refs(
+                            resolved_dict,
+                            fetched,
+                            refs=inline_refs,
+                            blob_metadata=blob_metadata,
+                        )
+                    except BlobIntegrityError:
+                        _BLOB_INLINE_HASH_MISMATCH_TOTAL.add(1, {"run_id": run_id})
+                        raise
                     self._call_async(
                         self._session_service.record_blob_inline_resolutions(
                             run_id=run_uuid,

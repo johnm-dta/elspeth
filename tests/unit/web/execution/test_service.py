@@ -1014,6 +1014,69 @@ sinks:
         mock_load.assert_not_called()
         mock_orch_cls.assert_not_called()
 
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.build_validated_runtime_graph")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_hash_mismatch_increments_zero_threshold_counter(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        mock_runtime_graph: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from elspeth.web.blobs.protocol import BlobIntegrityError
+        from elspeth.web.execution import service as service_module
+
+        del mock_payload_cls, mock_landscape_cls, mock_runtime_graph
+        content = b"actual prompt bytes"
+        blob_id = uuid4()
+        run_id = uuid4()
+        hash_counter = MagicMock()
+        monkeypatch.setattr(service_module, "_BLOB_INLINE_HASH_MISMATCH_TOTAL", hash_counter)
+
+        blob_record = MagicMock()
+        blob_record.mime_type = "text/plain"
+        blob_record.size_bytes = len(content)
+
+        blob_service = MagicMock()
+        blob_service.link_blob_to_run = AsyncMock(return_value=None)
+        blob_service.read_blob_content = AsyncMock(return_value=content)
+        blob_service.get_blob = AsyncMock(return_value=blob_record)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(errors=[]))
+        cast(Any, service)._blob_service = blob_service
+
+        pipeline_yaml = f"""
+source:
+  plugin: csv
+  options:
+    path: input.csv
+transforms:
+  - name: classify
+    plugin: llm
+    options:
+      system_prompt:
+        blob_ref: {blob_id}
+        mode: inline_content
+        sha256: {"b" * 64}
+sinks:
+  primary:
+    plugin: json
+    options:
+      path: output.jsonl
+"""
+
+        with pytest.raises(BlobIntegrityError):
+            service._run_pipeline(str(run_id), pipeline_yaml, threading.Event())
+
+        hash_counter.add.assert_called_once_with(1, {"run_id": str(run_id)})
+        mock_load.assert_not_called()
+        mock_orch_cls.assert_not_called()
+
 
 # ── B7: BaseException + Done Callback ─────────────────────────────────
 

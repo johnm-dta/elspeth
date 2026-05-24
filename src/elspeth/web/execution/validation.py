@@ -23,14 +23,17 @@ only to be rejected pre-token at /execute.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 import yaml
 from pydantic import ValidationError as PydanticValidationError
 
+from elspeth.contracts.blobs import BlobRecord
 from elspeth.contracts.secrets import SecretRefPlacementViolation, WebSecretResolver
+from elspeth.core.blobs_inline import BlobInlineValidationViolation, _validate_blob_content_refs_sync
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.dag.models import EdgeContractError, GraphValidationError
 from elspeth.core.secrets import (
@@ -90,6 +93,7 @@ from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_se
 # ── Check names (ordered) ─────────────────────────────────────────────
 _CHECK_PATH_ALLOWLIST = "path_allowlist"
 _CHECK_SECRET_REFS = "secret_refs"
+_CHECK_BLOB_INLINE_REFS = "blob_inline_refs"
 _CHECK_SEMANTIC_CONTRACTS = "semantic_contracts"
 _CHECK_BATCH_TRANSFORM_OPTIONS = "batch_transform_options"
 _CHECK_INTERPRETATION_REVIEW = "interpretation_review"
@@ -150,6 +154,7 @@ _CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
 _ALL_CHECKS = [
     _CHECK_PATH_ALLOWLIST,
     _CHECK_SECRET_REFS,
+    _CHECK_BLOB_INLINE_REFS,
     _CHECK_SEMANTIC_CONTRACTS,
     _CHECK_BATCH_TRANSFORM_OPTIONS,
     _CHECK_INTERPRETATION_REVIEW,
@@ -160,6 +165,9 @@ _ALL_CHECKS = [
     _CHECK_ROUTE_TARGETS,
     _CHECK_SCHEMA,
 ]
+
+_BLOB_INLINE_PER_REF_BYTE_CAP = 256 * 1024
+_BLOB_INLINE_AGGREGATE_BYTE_CAP = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -577,6 +585,46 @@ def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> lis
     return refs
 
 
+def _blob_inline_component_id(field_path: str) -> str | None:
+    if field_path == "(aggregate)":
+        return None
+    if field_path.startswith("source."):
+        return "source"
+    if field_path.startswith("node:"):
+        component, _separator, _rest = field_path.partition(".")
+        return component[len("node:") :]
+    if field_path.startswith("output:"):
+        component, _separator, _rest = field_path.partition(".")
+        return component[len("output:") :]
+    return field_path
+
+
+def _blob_inline_component_type(field_path: str) -> str | None:
+    if field_path == "(aggregate)":
+        return None
+    if field_path.startswith("source."):
+        return "source"
+    if field_path.startswith("node:"):
+        return "transform"
+    if field_path.startswith("output:"):
+        return "sink"
+    return None
+
+
+def _blob_inline_validation_detail(violations: list[BlobInlineValidationViolation]) -> str:
+    return "; ".join(f"{violation.field_path}: {violation.category}" for violation in violations)
+
+
+def _blob_inline_validation_error(violation: BlobInlineValidationViolation) -> ValidationError:
+    return ValidationError(
+        component_id=_blob_inline_component_id(violation.field_path),
+        component_type=_blob_inline_component_type(violation.field_path),
+        message=f"Inline content blob reference at {violation.field_path} is {violation.category}: {violation.detail}",
+        suggestion="Verify the blob exists, is ready, is under the configured size caps, and matches the pinned sha256.",
+        error_code=f"{violation.category}_inline_blob_content",
+    )
+
+
 def validate_pipeline(
     state: CompositionState,
     settings: ValidationSettings,
@@ -584,6 +632,7 @@ def validate_pipeline(
     *,
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
+    blob_get_metadata: Callable[[UUID], BlobRecord | None] | None = None,
     allow_pending_interpretation_placeholders: bool = False,
 ) -> ValidationResult:
     """Dry-run validation through the real engine code path.
@@ -614,6 +663,9 @@ def validate_pipeline(
         yaml_generator: YamlGenerator module/object with generate_yaml() method.
         secret_service: Optional secret resolver for validating secret refs.
         user_id: User ID for scoped secret resolution (required if secret_service is set).
+        blob_get_metadata: Optional sync metadata lookup for validate-time
+            inline-content blob checks. Runtime content reads stay in the
+            execution preflight; validate checks metadata only.
         allow_pending_interpretation_placeholders: When true, composer
             authoring preflight masks unresolved ``{{interpretation:<term>}}``
             tokens before YAML generation. Runtime execution leaves this false.
@@ -1081,6 +1133,71 @@ def validate_pipeline(
     # Step 2: Generate YAML
     pipeline_yaml = yaml_generator.generate_yaml(materialized_state)
     pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(settings.data_dir))
+
+    if blob_get_metadata is not None and "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml:
+        config_dict = yaml.safe_load(pipeline_yaml)
+        if type(config_dict) is not dict:
+            raise TypeError(
+                f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
+            )
+        blob_violations = _validate_blob_content_refs_sync(
+            blob_get_metadata,
+            config_dict,
+            per_ref_byte_cap=_BLOB_INLINE_PER_REF_BYTE_CAP,
+            aggregate_byte_cap=_BLOB_INLINE_AGGREGATE_BYTE_CAP,
+        )
+        if blob_violations:
+            detail = _blob_inline_validation_detail(blob_violations)
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_BLOB_INLINE_REFS,
+                    passed=False,
+                    detail=detail,
+                    affected_nodes=(),
+                    outcome_code=None,
+                )
+            )
+            errors.extend(_blob_inline_validation_error(violation) for violation in blob_violations)
+            checks.extend(_skipped_checks(_CHECK_BLOB_INLINE_REFS))
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=errors,
+                readiness=_blocked_readiness(
+                    code="blob_inline_refs",
+                    detail=detail,
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_BLOB_INLINE_REFS,
+                passed=True,
+                detail="All inline-content blob references are valid",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+        )
+    elif blob_get_metadata is None:
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_BLOB_INLINE_REFS,
+                passed=True,
+                detail="No blob metadata service — check skipped",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+        )
+    else:
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_BLOB_INLINE_REFS,
+                passed=True,
+                detail="No inline-content blob references found",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+        )
 
     # Step 3: Settings loading
     #

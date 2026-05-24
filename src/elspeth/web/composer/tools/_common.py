@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine
 
+from elspeth.contracts.blobs_inline import is_widened_blob_ref
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.config import TriggerConfig
@@ -1067,11 +1068,22 @@ def _prevalidate_plugin_options(
             secret_ref_keys.add(key)
             del merged[key]
 
+    # Strip widened blob_ref(inline_content) markers before validation.  Like
+    # secret_ref, these fields are provisioned but deferred to runtime
+    # resolution; bind_source remains source-only and is deliberately not
+    # stripped here.
+    blob_inline_ref_keys: set[str] = set()
+    for key, value in list(merged.items()):
+        shape = is_widened_blob_ref(value)
+        if shape is not None and shape.mode == "inline_content":
+            blob_inline_ref_keys.add(key)
+            del merged[key]
+
     try:
         config_cls.from_dict(merged, plugin_name=plugin_name)
         return None
     except PluginConfigError as exc:
-        if not secret_ref_keys:
+        if not secret_ref_keys and not blob_inline_ref_keys:
             # No secret refs were stripped — report the error as-is.
             msg = exc.cause if exc.cause is not None else str(exc)
             return f"Invalid options for {plugin_type} '{plugin_name}': {msg}"
@@ -1083,7 +1095,8 @@ def _prevalidate_plugin_options(
             msg = exc.cause if exc.cause is not None else str(exc)
             return f"Invalid options for {plugin_type} '{plugin_name}': {msg}"
 
-        remaining = [e for e in cause.errors() if not (e["loc"] and e["loc"][0] in secret_ref_keys)]
+        stripped_keys = secret_ref_keys | blob_inline_ref_keys
+        remaining = [e for e in cause.errors() if not (e["loc"] and e["loc"][0] in stripped_keys)]
         if not remaining:
             return None
 

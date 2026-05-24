@@ -48,6 +48,7 @@ from elspeth.web.blobs.protocol import (
     BlobIntegrityError,
     BlobNotFoundError,
     BlobQuotaExceededError,
+    BlobRecord,
     BlobServiceProtocol,
     BlobStateError,
 )
@@ -751,6 +752,14 @@ class ExecutionServiceImpl:
 
         from elspeth.web.execution.validation import validate_pipeline
 
+        def _blob_get_metadata(blob_id: UUID) -> BlobRecord | None:
+            if self._blob_service is None:
+                return None
+            try:
+                return self._call_async(self._blob_service.get_blob(blob_id))
+            except BlobNotFoundError:
+                return None
+
         return cast(
             ValidationResult,
             await run_sync_in_worker(
@@ -761,6 +770,7 @@ class ExecutionServiceImpl:
                     self._yaml_generator,
                     secret_service=self._secret_service,
                     user_id=user_id,
+                    blob_get_metadata=_blob_get_metadata,
                 ),
             ),
         )

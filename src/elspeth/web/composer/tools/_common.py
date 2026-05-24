@@ -1153,6 +1153,15 @@ def _secret_ref_placement_error(
 
 _WEB_ONLY_SOURCE_KEYS = frozenset({"blob_ref", SOURCE_AUTHORING_KEY})
 
+
+def _source_options_for_prevalidation(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Strip source blob-binding metadata before plugin config validation."""
+    filtered = {k: v for k, v in options.items() if k not in _WEB_ONLY_SOURCE_KEYS}
+    if options.get("blob_ref") is not None and options.get("mode") == "bind_source":
+        filtered.pop("mode", None)
+    return filtered
+
+
 _FILE_SINKS_REQUIRING_COLLISION_POLICY = frozenset({"csv", "json"})
 
 _FILE_SINK_REPAIR_EXTENSIONS: Final[dict[str, str]] = {"csv": "csv", "json": "json"}
@@ -1260,7 +1269,7 @@ def _prevalidate_source(
     on_validation_failure: str = _DEFAULT_SOURCE_VALIDATION_FAILURE,
 ) -> str | None:
     """Pre-validate source options, injecting on_validation_failure and filtering web-only keys."""
-    filtered = {k: v for k, v in options.items() if k not in _WEB_ONLY_SOURCE_KEYS}
+    filtered = _source_options_for_prevalidation(options)
     return _prevalidate_plugin_options(
         "source",
         plugin_name,

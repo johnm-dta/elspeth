@@ -49,7 +49,7 @@ The web composer sends the JSON Schema for every LiteLLM function tool with each
 - **State / preview:** `get_pipeline_state` (for full state, omit the component argument or use full, all, pipeline, or the empty string), `preview_pipeline`, `diff_pipeline`
 - **Build / edit:** `set_source`, `patch_source_options`, `clear_source`, `set_source_from_blob`, `set_pipeline`, `apply_pipeline_recipe`, `upsert_node`, `upsert_edge`, `remove_node`, `remove_edge`, `set_metadata`, `patch_node_options`, `set_output`, `remove_output`, `patch_output_options`
 - **Diagnostics:** `explain_validation_error`, `request_advisor_hint`, `request_interpretation_review`
-- **Blobs:** `list_blobs`, `get_blob_metadata`, `get_blob_content`, `create_blob`, `update_blob`, `delete_blob`, `inspect_source`
+- **Blobs:** `list_blobs`, `list_composer_blobs`, `get_blob_metadata`, `get_blob_content`, `create_blob`, `update_blob`, `delete_blob`, `wire_blob_inline_ref`, `inspect_source`
 - **Secrets:** `list_secret_refs`, `validate_secret_ref`, `wire_secret_ref`
 <!-- END AUTOGEN: tool-inventory -->
 
@@ -1529,6 +1529,8 @@ When a user uploads a file, bind that exact blob. For complete new pipelines, pr
 - `application/x-jsonlines` → `json` source (JSONL mode)
 
 For non-standard MIME types, pass the `plugin` parameter explicitly.
+
+For long-form plugin config content (system prompts, SQL text, regex libraries, allowlists), do not read or paste the bytes into the tool call. Call `list_composer_blobs` to see ready blobs using the safe visibility shape (`blob_id`, `mime_type`, `size_bytes`, `content_hash`, `filename`), then call `wire_blob_inline_ref` with a canonical field path such as `node:classify.options.prompt_template`. The tool writes `{blob_ref, mode: "inline_content", sha256}` from authoritative blob metadata; never hand-type content bytes or invent the hash.
 
 **Plugin-specific required options:** Some source plugins require configuration beyond just the file path. Pass these via the `options` parameter:
 

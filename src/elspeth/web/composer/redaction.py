@@ -2139,16 +2139,17 @@ _CLEAR_SOURCE_REASON = HandlesNoSensitiveDataReason(
 
 
 # ---------------------------------------------------------------------------
-# Declarative manifest entries — _BLOB_DISCOVERY_TOOLS, 4 tools.
+# Declarative manifest entries — _BLOB_DISCOVERY_TOOLS, 5 tools.
 #
-# ``list_blobs``, ``get_blob_metadata``, and ``inspect_source`` return only
-# structural blob facts (id, filename, mime_type, size, observed headers,
-# inferred types) and never return raw blob content.  ``get_blob_content`` IS
-# the content-returning tool and is the singular type-driven entry in this
-# group with a response_model: declarative entries have no response_summarizers
-# field, so the per-key byte-count summary required by
-# the spec §4.7 disposition can only be applied via the schema walker on a
-# response_model with ``Annotated[str, Sensitive(summarizer=...)]``.
+# ``list_blobs``, ``list_composer_blobs``, ``get_blob_metadata``, and
+# ``inspect_source`` return only structural blob facts (id, filename,
+# mime_type, size, observed headers, inferred types) and never return raw blob
+# content.  ``get_blob_content`` IS the content-returning tool and is the
+# singular type-driven entry in this group with a response_model: declarative
+# entries have no response_summarizers field, so the per-key byte-count
+# summary required by the spec §4.7 disposition can only be applied via the
+# schema walker on a response_model with ``Annotated[str,
+# Sensitive(summarizer=...)]``.
 # ---------------------------------------------------------------------------
 
 
@@ -2163,6 +2164,23 @@ _LIST_BLOBS_REASON = HandlesNoSensitiveDataReason(
         "Response is the blob-inventory list — operator-uploaded filenames, mime_types, "
         "and structural metadata per blob — but never the raw blob content; payload bytes "
         "are exposed only via get_blob_content whose policy applies a length-only summary."
+    ),
+)
+
+
+_LIST_COMPOSER_BLOBS_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=("session blob inventory — id/filename/mime_type/size_bytes/content_hash per ready blob, no raw content",),
+    why_arguments_safe=(
+        "list_composer_blobs accepts no arguments — its JSON schema declares an "
+        "empty properties object with empty required, so the LLM cannot place any "
+        "payload on this surface; the handler enumerates ready blobs from the "
+        "session-scoped inventory."
+    ),
+    why_responses_safe=(
+        "Response is the ADR-025 H4 visibility shape — blob_id, mime_type, "
+        "size_bytes, content_hash, and filename. It deliberately excludes "
+        "source_description, preview, content bytes, and storage_path so the LLM "
+        "can author a pinned ref without seeing the referenced text."
     ),
 )
 
@@ -2281,11 +2299,12 @@ _INSPECT_SOURCE_REASON = HandlesNoSensitiveDataReason(
 
 # ---------------------------------------------------------------------------
 # Declarative manifest entries — _BLOB_MUTATION_TOOLS
-# remaining, 1 tool).
+# remaining, 2 tools).
 #
 # Excluding create_blob / update_blob / set_source_from_blob / apply_pipeline_recipe,
-# only ``delete_blob`` remains in ``_BLOB_MUTATION_TOOLS``. It
-# takes a single blob_id scalar and returns the structural ToolResult.
+# ``delete_blob`` and ``wire_blob_inline_ref`` remain in
+# ``_BLOB_MUTATION_TOOLS``. They take scalar identifiers / field paths and
+# return structural ToolResult payloads.
 # ---------------------------------------------------------------------------
 
 
@@ -2300,6 +2319,25 @@ _DELETE_BLOB_REASON = HandlesNoSensitiveDataReason(
         "Response is the structural ToolResult after deletion — validation summary plus "
         "the affected node id list reflecting any pipeline references to the now-removed "
         "blob; the deleted blob's content and metadata are not echoed back in the response."
+    ),
+)
+
+
+_WIRE_BLOB_INLINE_REF_REASON = HandlesNoSensitiveDataReason(
+    sensitive_data_locations=(
+        "session blob inventory — blob_id selector and authoritative content_hash only",
+        "pipeline plugin option dict — the widened blob_ref marker is wired, not the referenced content",
+    ),
+    why_arguments_safe=(
+        "wire_blob_inline_ref arguments are scalar metadata: field_path, blob_id, "
+        "optional encoding, and an optional sha256_override used only as a guardrail. "
+        "The tool never accepts content bytes; it reads the authoritative hash from "
+        "the blobs table and rejects disagreement."
+    ),
+    why_responses_safe=(
+        "Response is the structural ToolResult after the state mutation. Subsequent "
+        "state inspection can show the marker {blob_ref, mode, sha256, encoding}, but "
+        "the referenced blob content remains opaque and is resolved only at runtime."
     ),
 )
 
@@ -2628,11 +2666,17 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 ),
             )
         ),
-        # _BLOB_DISCOVERY_TOOLS, 4 entries (3 declarative + 1 type-driven).
+        # _BLOB_DISCOVERY_TOOLS, 5 entries (4 declarative + 1 type-driven).
         "list_blobs": ToolRedaction(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_LIST_BLOBS_REASON,
+            )
+        ),
+        "list_composer_blobs": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_LIST_COMPOSER_BLOBS_REASON,
             )
         ),
         "get_blob_metadata": ToolRedaction(
@@ -2651,11 +2695,17 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 handles_no_sensitive_data_reason_struct=_INSPECT_SOURCE_REASON,
             )
         ),
-        # _BLOB_MUTATION_TOOLS remaining, 1 entry.
+        # _BLOB_MUTATION_TOOLS remaining, 2 entries.
         "delete_blob": ToolRedaction(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_DELETE_BLOB_REASON,
+            )
+        ),
+        "wire_blob_inline_ref": ToolRedaction(
+            policy=ToolRedactionPolicy(
+                handles_no_sensitive_data=True,
+                handles_no_sensitive_data_reason_struct=_WIRE_BLOB_INLINE_REF_REASON,
             )
         ),
         # _SECRET_DISCOVERY_TOOLS, 2 entries.

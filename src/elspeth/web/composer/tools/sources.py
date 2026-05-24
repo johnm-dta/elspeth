@@ -267,6 +267,7 @@ def _resolve_source_blob(
         **mime_extra,
         "path": blob["storage_path"],
         "blob_ref": blob["id"],
+        "mode": "bind_source",
         **_source_authoring_options(creation_modality, blob["content_hash"]),
     }
     prevalidation_error = _prevalidate_source(plugin, merged_options, on_validation_failure)

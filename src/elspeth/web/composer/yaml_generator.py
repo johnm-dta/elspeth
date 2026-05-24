@@ -37,7 +37,10 @@ def _strip_web_metadata(options: dict[str, Any]) -> dict[str, Any]:
 
     Returns a shallow copy with web-only keys removed.
     """
-    return {k: v for k, v in options.items() if k not in _WEB_ONLY_OPTION_KEYS}
+    stripped = {k: v for k, v in options.items() if k not in _WEB_ONLY_OPTION_KEYS}
+    if options.get("blob_ref") is not None and options.get("mode") == "bind_source":
+        stripped.pop("mode", None)
+    return stripped
 
 
 def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:

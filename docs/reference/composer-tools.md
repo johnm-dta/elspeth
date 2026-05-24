@@ -383,6 +383,16 @@ List uploaded/created files (blobs) in this session with metadata.
 
 ---
 
+### `list_composer_blobs`
+
+List ready blobs using the inline-content authoring visibility shape.
+
+**Parameters:** None
+
+**Returns:** `{blobs: [...]}` descriptors with `blob_id`, `mime_type`, `size_bytes`, `content_hash`, and `filename`. Content bytes, previews, storage paths, and source descriptions are not returned.
+
+---
+
 ### `get_blob_metadata`
 
 Get metadata for a specific blob by ID.
@@ -405,6 +415,20 @@ Wire a blob as the pipeline source. Resolves the blob's storage path internally 
 | `on_validation_failure` | string | No | `"quarantine"` (default) or `"discard"` |
 
 **When to use:** When the user has uploaded a file through the web UI and wants to use it as the pipeline input. Prefer this over `set_source` for uploaded files — it handles path resolution and plugin inference.
+
+---
+
+### `wire_blob_inline_ref`
+
+Wire a ready blob into a plugin option as audited inline content.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `field_path` | string | **Yes** | Canonical target path such as `source.options.<field>`, `node:<node_id>.options.<field>`, or `output:<name>.options.<field>` |
+| `blob_id` | string | **Yes** | Ready blob ID to wire |
+| `encoding` | string | No | One of `utf-8`, `utf-8-sig`, `utf-16`, or `latin-1`; defaults to `utf-8` |
+
+**When to use:** When a long-form config field, such as an LLM prompt template or SQL query, should be supplied from a blob without exposing the bytes to the composer LLM. The tool pins `sha256` from blob metadata.
 
 ---
 

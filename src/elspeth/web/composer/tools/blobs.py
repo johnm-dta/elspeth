@@ -28,17 +28,23 @@ import os
 import tempfile
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypedDict
-from uuid import uuid4
+from typing import Any, TypedDict, cast
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine, delete, func, select, update
 
+from elspeth.contracts.blobs_inline import (
+    ALLOWED_CONTENT_ENCODINGS,
+    BlobInlineRef,
+    ContentEncoding,
+)
 from elspeth.contracts.enums import CreationModality, is_llm_authored_creation_modality
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.blobs.protocol import BlobIntegrityError
 from elspeth.web.blobs.service import (
     _ACTIVE_RUN_COMPOSITION_COLUMNS,
@@ -61,6 +67,7 @@ from elspeth.web.composer.tools._common import (
     ToolResult,
     _discovery_result,
     _failure_result,
+    _mutation_result,
 )
 from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
@@ -190,6 +197,34 @@ def _sync_list_blobs(engine: Engine, session_id: str) -> list[dict[str, Any]]:
         ]
 
 
+def _sync_list_ready_blob_inline_descriptors(engine: Engine, session_id: str) -> list[dict[str, Any]]:
+    """Return H4 visibility descriptors for ready session blobs."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(blobs_table)
+            .where(blobs_table.c.session_id == session_id)
+            .where(blobs_table.c.status == "ready")
+            .order_by(blobs_table.c.created_at.desc())
+            .limit(50)
+        ).fetchall()
+
+    descriptors: list[dict[str, Any]] = []
+    for row in rows:
+        blob = _blob_row_to_tool_dict(row)
+        if blob["content_hash"] is None:
+            raise AuditIntegrityError(f"Ready blob '{blob['id']}' has null content_hash; cannot list for inline_content authoring")
+        descriptors.append(
+            {
+                "blob_id": blob["id"],
+                "mime_type": blob["mime_type"],
+                "size_bytes": blob["size_bytes"],
+                "content_hash": blob["content_hash"],
+                "filename": blob["filename"],
+            }
+        )
+    return descriptors
+
+
 def _handle_list_blobs(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -208,6 +243,37 @@ _LIST_BLOBS_DECLARATION = ToolDeclaration(
     handler=_handle_list_blobs,
     kind=ToolKind.BLOB_DISCOVERY,
     description="List uploaded/created files (blobs) in this session with metadata.",
+    json_schema={"type": "object", "properties": {}, "required": []},
+)
+
+
+def _handle_list_composer_blobs(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    context: ToolContext,
+) -> ToolResult:
+    """List blobs using the ADR-025 composer-LLM visibility shape.
+
+    The LLM sees only metadata needed to author a pinned inline-content
+    marker. Bytes, previews, storage paths, and free-text descriptions stay
+    out of the response surface.
+    """
+    del arguments
+    session_engine = context.session_engine
+    session_id = context.session_id
+    if session_engine is None or session_id is None:
+        return _failure_result(state, "Blob tools require session context.")
+    return _discovery_result(state, {"blobs": _sync_list_ready_blob_inline_descriptors(session_engine, session_id)})
+
+
+_LIST_COMPOSER_BLOBS_DECLARATION = ToolDeclaration(
+    name="list_composer_blobs",
+    handler=_handle_list_composer_blobs,
+    kind=ToolKind.BLOB_DISCOVERY,
+    description=(
+        "List ready blobs available for audited inline-content authoring. "
+        "Returns only blob_id, mime_type, size_bytes, content_hash, and filename; never content bytes."
+    ),
     json_schema={"type": "object", "properties": {}, "required": []},
 )
 
@@ -240,6 +306,165 @@ _GET_BLOB_METADATA_DECLARATION = ToolDeclaration(
             "blob_id": {"type": "string", "description": "Blob ID."},
         },
         "required": ["blob_id"],
+    },
+)
+
+
+def _set_nested_option(container: dict[str, Any], keys: list[str], value: Any) -> dict[str, Any]:
+    if not keys:
+        raise ValueError("field_path must include at least one .options.<field> segment")
+    if len(keys) == 1:
+        container[keys[0]] = value
+        return container
+    head = keys[0]
+    child = container.get(head)
+    if child is not None and not isinstance(child, Mapping):
+        raise ValueError(f"field_path segment {head!r} already exists and is not an object")
+    nested = dict(deep_thaw(child)) if child is not None else {}
+    container[head] = _set_nested_option(nested, keys[1:], value)
+    return container
+
+
+def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: dict[str, Any]) -> CompositionState:
+    prefix, separator, rest = field_path.partition(".options.")
+    if separator == "":
+        raise ValueError("field_path must include '.options.'")
+    keys = rest.split(".")
+
+    if prefix == "source":
+        if state.source is None:
+            raise ValueError("Cannot wire source ref: no source has been set")
+        patched_options = _set_nested_option(dict(deep_thaw(state.source.options)), keys, marker)
+        return state.with_source(replace(state.source, options=patched_options))
+
+    if prefix.startswith("node:"):
+        node_id = prefix.removeprefix("node:")
+        new_nodes = []
+        found = False
+        for node in state.nodes:
+            if node.id == node_id:
+                patched_options = _set_nested_option(dict(deep_thaw(node.options)), keys, marker)
+                new_nodes.append(replace(node, options=patched_options))
+                found = True
+            else:
+                new_nodes.append(node)
+        if not found:
+            raise ValueError(f"Node {node_id!r} not found in composition state")
+        return replace(state, nodes=tuple(new_nodes), version=state.version + 1)
+
+    if prefix.startswith("output:"):
+        output_name = prefix.removeprefix("output:")
+        new_outputs = []
+        found = False
+        for output in state.outputs:
+            if output.name == output_name:
+                patched_options = _set_nested_option(dict(deep_thaw(output.options)), keys, marker)
+                new_outputs.append(replace(output, options=patched_options))
+                found = True
+            else:
+                new_outputs.append(output)
+        if not found:
+            raise ValueError(f"Output {output_name!r} not found in composition state")
+        return replace(state, outputs=tuple(new_outputs), version=state.version + 1)
+
+    raise ValueError("field_path must start with source.options, node:<id>.options, or output:<name>.options")
+
+
+def _affected_component_for_inline_field_path(field_path: str) -> tuple[str, ...]:
+    prefix, _, _rest = field_path.partition(".options.")
+    if prefix == "source":
+        return ("source",)
+    if prefix.startswith("node:"):
+        return (prefix.removeprefix("node:"),)
+    if prefix.startswith("output:"):
+        return (prefix.removeprefix("output:"),)
+    return ()
+
+
+def _execute_wire_blob_inline_ref(
+    arguments: dict[str, Any],
+    state: CompositionState,
+    context: ToolContext,
+) -> ToolResult:
+    """Author a widened blob_ref inline-content marker into composition state."""
+    session_engine = context.session_engine
+    session_id = context.session_id
+    if session_engine is None or session_id is None:
+        return _failure_result(state, "Blob tools require session context.")
+
+    field_path = arguments["field_path"]
+    try:
+        blob_id = UUID(arguments["blob_id"])
+    except ValueError:
+        return _failure_result(state, f"blob_id {arguments['blob_id']!r} is not a valid UUID")
+
+    encoding_value = arguments.get("encoding", "utf-8")
+    if not isinstance(encoding_value, str) or encoding_value not in ALLOWED_CONTENT_ENCODINGS:
+        return _failure_result(state, f"encoding must be one of {sorted(ALLOWED_CONTENT_ENCODINGS)}, got {encoding_value!r}")
+    encoding = cast(ContentEncoding, encoding_value)
+
+    blob = _sync_get_blob(session_engine, str(blob_id), session_id)
+    if blob is None:
+        return _failure_result(state, f"Blob '{blob_id}' not found.")
+    if blob["status"] != "ready":
+        return _failure_result(state, f"Blob '{blob_id}' is not ready (status: {blob['status']}).")
+    pinned_hash = blob["content_hash"]
+    if pinned_hash is None:
+        raise AuditIntegrityError(f"Ready blob '{blob_id}' has null content_hash; cannot author inline_content ref")
+
+    sha256_override = arguments.get("sha256_override")
+    if sha256_override is not None and sha256_override != pinned_hash:
+        return _failure_result(state, "sha256 override disagrees with authoritative blob content_hash; composer pins from blob metadata")
+
+    try:
+        ref = BlobInlineRef(
+            field_path=field_path,
+            blob_id=blob_id,
+            sha256=pinned_hash,
+            encoding=encoding,
+        )
+    except ValueError as exc:
+        return _failure_result(state, f"Invalid field_path for inline blob ref: {exc}")
+
+    marker: dict[str, Any] = {
+        "blob_ref": str(blob_id),
+        "mode": "inline_content",
+        "sha256": pinned_hash,
+    }
+    if encoding != "utf-8":
+        marker["encoding"] = encoding
+
+    try:
+        new_state = _apply_inline_blob_marker(state, ref.field_path, marker)
+    except ValueError as exc:
+        return _failure_result(state, str(exc))
+    return _mutation_result(new_state, _affected_component_for_inline_field_path(ref.field_path), data={"field_path": ref.field_path})
+
+
+_WIRE_BLOB_INLINE_REF_DECLARATION = ToolDeclaration(
+    name="wire_blob_inline_ref",
+    handler=_execute_wire_blob_inline_ref,
+    kind=ToolKind.BLOB_MUTATION,
+    description=(
+        "Author a widened blob_ref inline_content marker at a canonical field_path. "
+        "Composer pins sha256 from blob metadata; callers must not pass content bytes."
+    ),
+    json_schema={
+        "type": "object",
+        "properties": {
+            "field_path": {
+                "type": "string",
+                "description": "Canonical path: source.options.<field>, node:<node_id>.options.<field>, or output:<name>.options.<field>.",
+            },
+            "blob_id": {"type": "string", "format": "uuid", "description": "Ready blob ID to wire as inline content."},
+            "encoding": {
+                "type": "string",
+                "enum": sorted(ALLOWED_CONTENT_ENCODINGS),
+                "default": "utf-8",
+                "description": "Text decoder used at runtime. Defaults to utf-8.",
+            },
+        },
+        "required": ["field_path", "blob_id"],
     },
 )
 
@@ -1452,11 +1677,13 @@ _GET_BLOB_CONTENT_DECLARATION = ToolDeclaration(
 
 TOOLS_IN_MODULE: tuple[ToolDeclaration, ...] = (
     _LIST_BLOBS_DECLARATION,
+    _LIST_COMPOSER_BLOBS_DECLARATION,
     _GET_BLOB_METADATA_DECLARATION,
     _GET_BLOB_CONTENT_DECLARATION,
     _CREATE_BLOB_DECLARATION,
     _UPDATE_BLOB_DECLARATION,
     _DELETE_BLOB_DECLARATION,
+    _WIRE_BLOB_INLINE_REF_DECLARATION,
 )
 """Every tool declared in this module, in stable order.
 

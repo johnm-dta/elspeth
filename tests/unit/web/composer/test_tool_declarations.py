@@ -21,7 +21,9 @@ from elspeth.web.composer.tools._dispatch import get_tool_definitions
 from elspeth.web.composer.tools.blobs import (
     _CREATE_BLOB_DECLARATION,
     _DELETE_BLOB_DECLARATION,
+    _LIST_COMPOSER_BLOBS_DECLARATION,
     _UPDATE_BLOB_DECLARATION,
+    _WIRE_BLOB_INLINE_REF_DECLARATION,
     _execute_create_blob,
     _execute_delete_blob,
     _execute_update_blob,
@@ -297,7 +299,7 @@ class TestApplyPipelineRecipeMigration:
 
 
 class TestStep2RegistryAggregation:
-    """The four blob-mutation declarations are aggregated into _REGISTERED_TOOLS at import time."""
+    """The blob-mutation declarations are aggregated into _REGISTERED_TOOLS at import time."""
 
     def test_all_blob_mutation_tools_are_declared(self) -> None:
         from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
@@ -308,13 +310,14 @@ class TestStep2RegistryAggregation:
             "update_blob",
             "delete_blob",
             "set_source_from_blob",
+            "wire_blob_inline_ref",
         }
         assert declared == expected
 
     def test_registered_tools_count_at_least_five(self) -> None:
         from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
 
-        # Step 2 registered four blob-mutation tools plus apply_pipeline_recipe
+        # Step 2 registered blob-mutation tools plus apply_pipeline_recipe
         # (MUTATION kind). Step 3 adds more tiers (discovery first); the count
         # strictly grows as tiers migrate.
         assert len(_REGISTERED_TOOLS) >= 5
@@ -685,9 +688,9 @@ class TestStep3MutationTierMigration:
         defn = self._get("set_pipeline")
         params = defn["parameters"]
         assert isinstance(params, dict)
-        source = params["properties"]["source"]  # type: ignore[index]
+        source = params["properties"]["source"]
         assert isinstance(source, dict)
-        on_vf = source["properties"]["on_validation_failure"]  # type: ignore[index]
+        on_vf = source["properties"]["on_validation_failure"]
         assert isinstance(on_vf, dict)
         assert on_vf["description"] == _SOURCE_VALIDATION_FAILURE_DESCRIPTION
 
@@ -738,7 +741,7 @@ class TestStep3MutationTierMigration:
 
 
 class TestStep3BlobDiscoveryTierMigration:
-    """All 4 blob-discovery tools must carry declarations with byte-identical schemas."""
+    """All blob-discovery tools must carry declarations with byte-identical schemas."""
 
     def _get(self, name: str) -> dict[str, object]:
         return next(d for d in get_tool_definitions() if d["name"] == name)
@@ -749,6 +752,19 @@ class TestStep3BlobDiscoveryTierMigration:
             "description": "List uploaded/created files (blobs) in this session with metadata.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         }
+
+    def test_list_composer_blobs(self) -> None:
+        assert self._get("list_composer_blobs") == {
+            "name": "list_composer_blobs",
+            "description": (
+                "List ready blobs available for audited inline-content authoring. "
+                "Returns only blob_id, mime_type, size_bytes, content_hash, and filename; never content bytes."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+
+    def test_list_composer_blobs_declaration_kind(self) -> None:
+        assert _LIST_COMPOSER_BLOBS_DECLARATION.kind is ToolKind.BLOB_DISCOVERY
 
     def test_get_blob_metadata(self) -> None:
         assert self._get("get_blob_metadata") == {
@@ -803,11 +819,47 @@ class TestStep3BlobDiscoveryTierMigration:
             },
         }
 
-    def test_all_four_blob_discovery_tools_registered(self) -> None:
+    def test_all_blob_discovery_tools_registered(self) -> None:
         from elspeth.web.composer.tools._registry import _REGISTERED_TOOLS
 
         names = {d.name for d in _REGISTERED_TOOLS if d.kind is ToolKind.BLOB_DISCOVERY}
-        assert names == {"list_blobs", "get_blob_metadata", "get_blob_content", "inspect_source"}
+        assert names == {"list_blobs", "list_composer_blobs", "get_blob_metadata", "get_blob_content", "inspect_source"}
+
+    def test_wire_blob_inline_ref(self) -> None:
+        assert self._get("wire_blob_inline_ref") == {
+            "name": "wire_blob_inline_ref",
+            "description": (
+                "Author a widened blob_ref inline_content marker at a canonical field_path. "
+                "Composer pins sha256 from blob metadata; callers must not pass content bytes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "field_path": {
+                        "type": "string",
+                        "description": (
+                            "Canonical path: source.options.<field>, node:<node_id>.options.<field>, or output:<name>.options.<field>."
+                        ),
+                    },
+                    "blob_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Ready blob ID to wire as inline content.",
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "enum": ["latin-1", "utf-16", "utf-8", "utf-8-sig"],
+                        "default": "utf-8",
+                        "description": "Text decoder used at runtime. Defaults to utf-8.",
+                    },
+                },
+                "required": ["field_path", "blob_id"],
+            },
+        }
+
+    def test_wire_blob_inline_ref_declaration_kind(self) -> None:
+        assert _WIRE_BLOB_INLINE_REF_DECLARATION.kind is ToolKind.BLOB_MUTATION
+        assert _WIRE_BLOB_INLINE_REF_DECLARATION.blob_store_only is False
 
 
 class TestStep3SecretTierMigration:
@@ -901,7 +953,7 @@ class TestToolDeclarationInvariants:
 
     def test_non_toolkind_kind_raises(self) -> None:
         with pytest.raises(TypeError, match="must be a ToolKind member"):
-            self._make(kind="discovery")  # type: ignore[arg-type]
+            self._make(kind="discovery")
 
     def test_cacheable_mutation_raises(self) -> None:
         with pytest.raises(ValueError, match="cacheable=True is forbidden"):
@@ -981,7 +1033,7 @@ class TestToolDeclarationInvariants:
         # Mutate source post-construction; the declaration must be unaffected.
         source["required"] = ["y"]
         # deep_freeze converts the inner list to a tuple.
-        assert decl.json_schema["required"] == ("x",)  # type: ignore[index]
+        assert decl.json_schema["required"] == ("x",)
 
     def test_derivation_freezes_so_registry_cannot_be_aliased(self) -> None:
         """derive_tool_definitions_by_name returns a deeply-immutable mapping.

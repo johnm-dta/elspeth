@@ -74,6 +74,11 @@
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
+  "list_composer_blobs": {
+    "hash": "bb080f67d70ae3e37cb7b2fc1ec8c490a94eb476b81c1eb3d34acfbc78714ea5",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
   "list_models": {
     "hash": "38b0221d701f20df921941354c8947ddbe0ec98ddc0febe9a7b0830e140be9ac",
     "sensitive_path_count": 0,
@@ -191,6 +196,11 @@
   },
   "validate_secret_ref": {
     "hash": "2d863c05bea8111f5bbabcf8e78cd03936843e9ee83af01173344b356ea45191",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "wire_blob_inline_ref": {
+    "hash": "8eebedf2cdfff2202f6f9f16db56c3c9215530d8be593302cc5eaa7531fcd5ad",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },

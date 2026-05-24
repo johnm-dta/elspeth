@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.protocol import ComposerPluginCrashError
 from elspeth.web.composer.redaction import redact_tool_call_arguments, redact_tool_call_response
 from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.sessions.models import chat_messages_table
 from elspeth.web.sessions.protocol import ComposerSessionPreferencesRecord, CompositionStateData
 
 
@@ -38,6 +40,52 @@ def _patch_auto_commit_preferences(monkeypatch: pytest.MonkeyPatch, sessions_ser
         )
 
     monkeypatch.setattr(sessions_service, "get_composer_preferences", _get_composer_preferences)
+
+
+def _advisor_tool_call_response(call_id: str) -> Any:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id=call_id,
+                            function=SimpleNamespace(
+                                name="request_advisor_hint",
+                                arguments=json.dumps(
+                                    {
+                                        "trigger": "reactive_validation_loop",
+                                        "problem_summary": "stuck on llm config with private schema",
+                                        "recent_errors": [
+                                            "validator rejected the private column",
+                                            "validator rejected the private column",
+                                        ],
+                                        "attempted_actions": [
+                                            "set_pipeline with sensitive options",
+                                            "checked the relevant schema",
+                                        ],
+                                    }
+                                ),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ],
+    )
+
+
+def _text_response(content: str) -> Any:
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=None))])
+
+
+def _advisor_model_response(content: str = "Try setting `provider: azure` with the deployment name.") -> Any:
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=None))],
+        model="anthropic/claude-sonnet-4-6",
+        usage=SimpleNamespace(prompt_tokens=120, completion_tokens=45, total_tokens=165),
+    )
 
 
 @pytest.mark.asyncio
@@ -175,6 +223,76 @@ async def test_step2_redacts_response_with_summarizer(
         telemetry=composer_service_with_real_sessions._redaction_telemetry,  # type: ignore[attr-defined]
     )
     assert json.loads(result.persisted_tool_row_content[0]) == expected_content
+
+
+@pytest.mark.asyncio
+async def test_step2_persists_intercepted_advisor_tool_call_rows(
+    composer_service_with_real_sessions: ComposerServiceImpl,
+    result_session_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Intercepted advisor calls still persist assistant tool_calls and tool rows."""
+
+    service = composer_service_with_real_sessions
+    service._settings = service._settings.model_copy(  # type: ignore[attr-defined]
+        update={
+            "composer_advisor_enabled": True,
+            "composer_advisor_max_calls_per_compose": 3,
+        }
+    )
+    responses = [
+        _advisor_tool_call_response("call_advisor_phase3"),
+        _text_response("Done."),
+    ]
+
+    async def _fake_llm(_messages: Any, _tools: Any) -> Any:
+        return responses.pop(0)
+
+    async def _fake_advisor(**_kwargs: Any) -> Any:
+        return _advisor_model_response()
+
+    monkeypatch.setattr("elspeth.web.composer.service._litellm_acompletion", _fake_advisor)
+
+    result = await _run_one_turn(
+        service,
+        llm=_fake_llm,
+        session_id=result_session_id,
+    )
+
+    advisor_invocations = [inv for inv in result.tool_invocations if inv.tool_name == "request_advisor_hint"]
+    assert len(advisor_invocations) == 1
+    assert len(result.persisted_assistant_tool_calls) == 1
+    assert len(result.persisted_tool_row_content) == 1
+    persisted_call = result.persisted_assistant_tool_calls[0]
+    assert persisted_call["id"] == "call_advisor_phase3"
+    assert persisted_call["function"]["name"] == "request_advisor_hint"
+    persisted_args = json.loads(persisted_call["function"]["arguments"])
+    assert persisted_args["problem_summary"].startswith("<advisor-problem-summary:")
+    persisted_content = json.loads(result.persisted_tool_row_content[0])
+    assert persisted_content["status"] == "SUCCESS"
+    assert persisted_content["guidance"] == "<redacted>"
+    assert persisted_content["model"] == "anthropic/claude-sonnet-4-6"
+
+    sessions_service = service._sessions_service  # type: ignore[attr-defined]
+    with sessions_service._engine.connect() as conn:  # type: ignore[attr-defined]
+        rows = conn.execute(
+            select(
+                chat_messages_table.c.role,
+                chat_messages_table.c.tool_calls,
+                chat_messages_table.c.tool_call_id,
+                chat_messages_table.c.content,
+            )
+            .where(chat_messages_table.c.session_id == result_session_id)
+            .where(chat_messages_table.c.role.in_(("assistant", "tool")))
+            .order_by(chat_messages_table.c.sequence_no)
+        ).mappings()
+        persisted_rows = list(rows)
+
+    assert [row["role"] for row in persisted_rows] == ["assistant", "tool"]
+    assert persisted_rows[0]["tool_calls"][0]["id"] == "call_advisor_phase3"
+    assert persisted_rows[0]["tool_calls"][0]["function"]["name"] == "request_advisor_hint"
+    assert persisted_rows[1]["tool_call_id"] == "call_advisor_phase3"
+    assert json.loads(persisted_rows[1]["content"])["guidance"] == "<redacted>"
 
 
 @pytest.mark.asyncio

@@ -1008,16 +1008,22 @@ class ComposerServiceImpl:
 
         # Keep redaction imports local to the redaction paths; service.py is
         # already load-order sensitive and these walkers are cold-path helpers.
+        from elspeth.contracts.freeze import deep_thaw
         from elspeth.core.canonical import canonical_json
         from elspeth.web.composer.redaction import MANIFEST, redact_tool_call_response
 
         if outcome.error_class is None:
-            result = cast(ToolResult, outcome.response)
+            response = outcome.response
+            if isinstance(response, Mapping):
+                response_payload = deep_thaw(response)
+            else:
+                result = cast(ToolResult, response)
+                response_payload = result.to_dict()
             if outcome.call.function.name not in MANIFEST:
-                return canonical_json(result.to_dict())
+                return canonical_json(response_payload)
             redacted = redact_tool_call_response(
                 tool_name=outcome.call.function.name,
-                response=result.to_dict(),
+                response=response_payload,
                 telemetry=telemetry,
             )
             return canonical_json(redacted)
@@ -2719,6 +2725,12 @@ class ComposerServiceImpl:
                             version_after=state.version,
                         )
                     )
+                    _append_tool_outcome(
+                        response=error_payload,
+                        error_class=None,
+                        error_message=None,
+                        post_version=state.version,
+                    )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
@@ -2749,6 +2761,12 @@ class ComposerServiceImpl:
                             result_payload=budget_payload,
                             version_after=state.version,
                         )
+                    )
+                    _append_tool_outcome(
+                        response=budget_payload,
+                        error_class=None,
+                        error_message=None,
+                        post_version=state.version,
                     )
                     # Budget exhaustion is a structural signal back to
                     # the LLM, not a tool-failure pattern — do NOT count
@@ -2784,6 +2802,12 @@ class ComposerServiceImpl:
                             error_payload=advisor_arg_error,
                         )
                     )
+                    _append_tool_outcome(
+                        response=None,
+                        error_class=str(advisor_arg_error["error_class"]),
+                        error_message=str(advisor_arg_error["error"]),
+                        post_version=state.version,
+                    )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
                         {
@@ -2810,6 +2834,12 @@ class ComposerServiceImpl:
                             result_payload=timeout_payload,
                             version_after=state.version,
                         )
+                    )
+                    _append_tool_outcome(
+                        response=timeout_payload,
+                        error_class=None,
+                        error_message=None,
+                        post_version=state.version,
                     )
                     raise ComposerConvergenceError.capture(
                         max_turns=0,
@@ -2863,6 +2893,12 @@ class ComposerServiceImpl:
                                 version_after=state.version,
                             )
                         )
+                        _append_tool_outcome(
+                            response=timeout_payload,
+                            error_class=None,
+                            error_message=None,
+                            post_version=state.version,
+                        )
                         raise ComposerConvergenceError.capture(
                             max_turns=0,
                             budget_exhausted="timeout",
@@ -2887,6 +2923,12 @@ class ComposerServiceImpl:
                             result_payload=advisor_error_payload,
                             version_after=state.version,
                         )
+                    )
+                    _append_tool_outcome(
+                        response=advisor_error_payload,
+                        error_class=None,
+                        error_message=None,
+                        post_version=state.version,
                     )
                     anti_anchor.record_failure(tool_name, audit.arguments_hash)
                     llm_messages.append(
@@ -2921,6 +2963,12 @@ class ComposerServiceImpl:
                             result_payload=advisor_error_payload,
                             version_after=state.version,
                         )
+                    )
+                    _append_tool_outcome(
+                        response=advisor_error_payload,
+                        error_class=None,
+                        error_message=None,
+                        post_version=state.version,
                     )
                     # Advisor failure IS counted for §7.7 anchor
                     # tracking — repeated identical failed advisor
@@ -2960,6 +3008,12 @@ class ComposerServiceImpl:
                         result_payload=success_payload,
                         version_after=state.version,
                     )
+                )
+                _append_tool_outcome(
+                    response=success_payload,
+                    error_class=None,
+                    error_message=None,
+                    post_version=state.version,
                 )
                 # Successful advisor call is progress, not a failure —
                 # the §7.7 tracker is reset for this tool name so a

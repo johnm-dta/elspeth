@@ -27,6 +27,7 @@ from httpx import ASGITransport, AsyncClient, Response
 
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
+    InterpretationKind,
     InterpretationSource,
 )
 from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata
@@ -145,6 +146,7 @@ async def _seed_session_with_pending_event(
         affected_node_id=node["id"],
         tool_call_id="call_42",
         user_term=user_term,
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft=llm_draft,
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -178,6 +180,7 @@ async def test_01_resolve_accepted_as_drafted_returns_resolved_event_and_advance
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["event"]["choice"] == "accepted_as_drafted"
+    assert body["event"]["kind"] == "vague_term"
     assert body["event"]["accepted_value"] == "Innovative and creative"
     assert body["event"]["resolved_at"] is not None
     # Composition state version advances by 1 (interpretation_resolve provenance).
@@ -405,6 +408,7 @@ async def test_09_list_status_pending_returns_only_pending_events(
     assert len(events) == 1
     assert events[0]["id"] == str(second.id)
     assert events[0]["choice"] == "pending"
+    assert events[0]["kind"] == "vague_term"
 
 
 @pytest.mark.asyncio
@@ -501,7 +505,7 @@ def _insert_auto_event(
 
     Mirrors the row shapes that ``record_session_interpretation_opt_out`` and
     ``record_auto_interpreted_no_surfaces_event`` produce, so the inserts
-    satisfy ``ck_interpretation_events_source_nullability``,
+    satisfy ``ck_interpretation_events_opt_out_shape``,
     ``ck_interpretation_events_no_surfaces_shape``, and
     ``ck_interpretation_events_resolved_at_status``.
 
@@ -518,9 +522,10 @@ def _insert_auto_event(
     now = created_at or datetime.now(UTC)
     if source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT:
         # All nine surface/provenance fields NULL per
-        # ck_interpretation_events_source_nullability; choice=opted_out;
+        # ck_interpretation_events_opt_out_shape; choice=opted_out;
         # resolved_at == created_at (row born resolved).
         provenance: dict[str, Any] = {
+            "kind": None,
             "model_identifier": None,
             "model_version": None,
             "provider": None,
@@ -531,6 +536,7 @@ def _insert_auto_event(
         # ck_interpretation_events_no_surfaces_shape; choice=opted_out
         # (rate cap is the resolution); resolved_at == created_at.
         provenance = {
+            "kind": InterpretationKind.VAGUE_TERM.value,
             "model_identifier": "anthropic/claude-opus-4-7",
             "model_version": "2026-05-01",
             "provider": "anthropic",

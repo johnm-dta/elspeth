@@ -32,8 +32,9 @@ from sqlalchemy import insert, select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_interpretation import (
-    INTERPRETATION_HASH_DOMAIN_V1,
+    INTERPRETATION_HASH_DOMAIN_V2,
     InterpretationChoice,
+    InterpretationKind,
     InterpretationSource,
 )
 from elspeth.contracts.hashing import stable_hash
@@ -224,6 +225,7 @@ async def test_01_create_pending_interpretation_event_inserts_row(service) -> No
         affected_node_id="llm_transform_1",
         tool_call_id="call_42",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="A draft definition of cool",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -243,6 +245,7 @@ async def test_01_create_pending_interpretation_event_inserts_row(service) -> No
     assert event.composition_state_id == state.id
     assert event.affected_node_id == "llm_transform_1"
     assert event.tool_call_id == "call_42"
+    assert event.kind is InterpretationKind.VAGUE_TERM
     assert event.model_identifier == "anthropic/claude-opus-4-7"
     assert event.model_version == "2026-05-01"
     assert event.provider == "anthropic"
@@ -254,6 +257,7 @@ async def test_01_create_pending_interpretation_event_inserts_row(service) -> No
     assert row.choice == "pending"
     assert row.interpretation_source == "user_approved"
     assert row.user_term == "cool"
+    assert row.kind == "vague_term"
     assert row.accepted_value is None
     assert row.resolved_at is None
 
@@ -334,7 +338,8 @@ async def test_03_resolve_accepted_as_drafted_uses_llm_draft(service) -> None:
     assert resolved.actor == "user:alice"
     assert resolved.runtime_model_identifier_at_resolve == "anthropic/claude-sonnet-4-7"
     assert resolved.runtime_model_version_at_resolve == "2026-05-02"
-    assert resolved.hash_domain_version == "v1"
+    assert resolved.kind is InterpretationKind.VAGUE_TERM
+    assert resolved.hash_domain_version == "v2"
     assert resolved.arguments_hash is not None
     assert len(resolved.arguments_hash) == 64
     assert resolved.resolved_prompt_template_hash is not None
@@ -690,6 +695,7 @@ async def test_10_opt_out_writes_event_and_sets_session_boolean_no_proposal_even
     assert event.affected_node_id is None
     assert event.tool_call_id is None
     assert event.user_term is None
+    assert event.kind is None
     assert event.llm_draft is None
     assert event.accepted_value is None
     assert event.model_identifier is None
@@ -765,6 +771,30 @@ async def test_create_pending_after_session_opt_out_returns_opt_out_row(service)
     assert [row.id for row in all_rows] == [opt_out.id]
 
 
+@pytest.mark.asyncio
+async def test_record_auto_interpreted_no_surfaces_carries_kind(service) -> None:
+    """Rate-cap no-surface rows still record the closed interpretation kind."""
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+
+    event = await service.record_auto_interpreted_no_surfaces_event(
+        session_id=session_id,
+        actor="composer-llm",
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    assert event.choice is InterpretationChoice.OPTED_OUT
+    assert event.interpretation_source is InterpretationSource.AUTO_INTERPRETED_NO_SURFACES
+    assert event.kind is InterpretationKind.LLM_PROMPT_TEMPLATE
+    assert event.arguments_hash is None
+    assert event.hash_domain_version is None
+
+
 # --------------------------------------------------------------------------- #
 # _patch_llm_transform_prompt — direct-helper unit tests
 # --------------------------------------------------------------------------- #
@@ -797,6 +827,7 @@ def _interpretation_row(**overrides: object) -> SimpleNamespace:
         "affected_node_id": "llm_transform_1",
         "tool_call_id": "tool-call-abc",
         "user_term": "cool",
+        "kind": "vague_term",
         "llm_draft": "A draft definition of cool",
         "accepted_value": "A draft definition of cool",
         "choice": "accepted_as_drafted",
@@ -808,7 +839,7 @@ def _interpretation_row(**overrides: object) -> SimpleNamespace:
         "provider": "anthropic",
         "composer_skill_hash": "a" * 64,
         "arguments_hash": "b" * 64,
-        "hash_domain_version": "v1",
+        "hash_domain_version": "v2",
         "interpretation_source": "user_approved",
         "runtime_model_identifier_at_resolve": "anthropic/claude-opus-4-7",
         "runtime_model_version_at_resolve": "2026-05-01",
@@ -1027,11 +1058,11 @@ def test_patch_helper_rejects_missing_options() -> None:
         )
 
 
-def test_arguments_hash_matches_domain_v1() -> None:
+def test_arguments_hash_matches_domain_v2() -> None:
     """Cross-check: the arguments_hash a service writes is consistent with
-    INTERPRETATION_HASH_DOMAIN_V1 over the recorded field set.
+    INTERPRETATION_HASH_DOMAIN_V2 over the recorded field set.
 
-    Computes the expected hash from the 12-field domain and confirms it
+    Computes the expected hash from the 13-field domain and confirms it
     matches the stored row's arguments_hash after resolve. This guards
     against silent drift between the writer and the closed hash domain.
     """
@@ -1039,8 +1070,8 @@ def test_arguments_hash_matches_domain_v1() -> None:
 
 
 @pytest.mark.asyncio
-async def test_15_arguments_hash_matches_domain_v1(service) -> None:
-    """The service's arguments_hash matches stable_hash() over INTERPRETATION_HASH_DOMAIN_V1."""
+async def test_15_arguments_hash_matches_domain_v2(service) -> None:
+    """The service's arguments_hash matches stable_hash() over INTERPRETATION_HASH_DOMAIN_V2."""
     session_id = uuid4()
     state = await _seed_state_with_llm_node(service, session_id=session_id)
     event = await service.create_pending_interpretation_event(
@@ -1071,6 +1102,7 @@ async def test_15_arguments_hash_matches_domain_v1(service) -> None:
         "affected_node_id": "llm_transform_1",
         "tool_call_id": "call_42",
         "user_term": "cool",
+        "kind": "vague_term",
         "llm_draft": "A draft of cool",
         "accepted_value": "A draft of cool",
         "actor": "user:alice",
@@ -1079,10 +1111,10 @@ async def test_15_arguments_hash_matches_domain_v1(service) -> None:
         "provider": "anthropic",
         "composer_skill_hash": "a" * 64,
     }
-    # Sanity: domain dict keys exactly match INTERPRETATION_HASH_DOMAIN_V1.
-    assert set(expected_domain.keys()) == INTERPRETATION_HASH_DOMAIN_V1
+    # Sanity: domain dict keys exactly match INTERPRETATION_HASH_DOMAIN_V2.
+    assert set(expected_domain.keys()) == INTERPRETATION_HASH_DOMAIN_V2
     assert resolved.arguments_hash == stable_hash(expected_domain)
-    assert resolved.hash_domain_version == "v1"
+    assert resolved.hash_domain_version == "v2"
 
 
 # --------------------------------------------------------------------------- #
@@ -1366,6 +1398,7 @@ async def test_16_refresh_pending_rehydrates_orphan_event_without_in_band_notifi
     assert record.affected_node_id == "llm_transform_1"
     assert record.tool_call_id == "call_orphan"
     assert record.user_term == "cool"
+    assert record.kind is InterpretationKind.VAGUE_TERM
     assert record.llm_draft == "An orphan-scenario draft"
     # PENDING invariants: no resolution metadata yet.
     assert record.accepted_value is None

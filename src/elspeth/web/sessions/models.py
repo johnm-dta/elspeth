@@ -75,7 +75,10 @@ from sqlalchemy.types import JSON
 #   9 → ``sessions.archived_at`` added so user-side archive can hide
 #        sessions with durable run/completion history rather than deleting
 #        audit-bearing rows. Unrun sessions may still be physically deleted.
-SESSION_SCHEMA_EPOCH = 9
+#   10 → ``interpretation_events.kind`` added; surface-specific
+#        ``auto_interpreted_opt_out`` rows now carry reviewed LLM artefacts
+#        and V2 argument hashes.
+SESSION_SCHEMA_EPOCH = 10
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -558,6 +561,7 @@ interpretation_events_table = Table(
     # F-1: all nullable=True — the CHECKs below enforce source-conditional
     # presence.
     Column("user_term", Text, nullable=True),
+    Column("kind", String, nullable=True),
     Column("llm_draft", Text, nullable=True),
     Column("accepted_value", Text, nullable=True),  # None until resolved
     Column("choice", String, nullable=False),
@@ -575,8 +579,8 @@ interpretation_events_table = Table(
     # NULL until resolved. For auto_interpreted_opt_out rows, arguments_hash is
     # NULL because there is no LLM-supplied content to hash.
     # F-12 (hash domain versioning): hash_domain_version records the field set
-    # used to compute arguments_hash. The v1 field set is defined in
-    # contracts/composer_interpretation.py:INTERPRETATION_HASH_DOMAIN_V1.
+    # used to compute arguments_hash. New writes use
+    # contracts/composer_interpretation.py:INTERPRETATION_HASH_DOMAIN_V2.
     # NULL for rows without a hash (opt-out, pending). NOT NULL once resolved.
     Column("arguments_hash", String, nullable=True),
     Column("hash_domain_version", String, nullable=True),
@@ -597,7 +601,7 @@ interpretation_events_table = Table(
     # template, this is SHA-256 over the rfc8785 canonical JSON of the
     # resolved prompt-template string, using
     # ``CANONICAL_VERSION = "sha256-rfc8785-v1"`` (contracts/hashing.py).
-    # NOT part of INTERPRETATION_HASH_DOMAIN_V1 — it covers a different
+    # NOT part of INTERPRETATION_HASH_DOMAIN_V2 — it covers a different
     # input (the resolved prompt string) and serves as a cross-DB anchor
     # only. Pair to ``calls.resolved_prompt_template_hash`` in the L1
     # Landscape audit DB; equality across both DBs is the audit-tooling
@@ -627,43 +631,51 @@ interpretation_events_table = Table(
         "interpretation_source IN ('user_approved', 'auto_interpreted_opt_out', 'auto_interpreted_no_surfaces')",
         name="ck_interpretation_events_source",
     ),
-    # F-1 (source-keyed nullability CHECK): rows with
-    # interpretation_source = 'auto_interpreted_opt_out' have no LLM context;
-    # all nine interpretation fields must be NULL. Rows with
-    # interpretation_source = 'user_approved' have LLM context; all nine
-    # must be NOT NULL. Rows with interpretation_source =
-    # 'auto_interpreted_no_surfaces' had the LLM consulted (rate-cap
-    # fallback) but no surfacing; they carry LLM provenance fields but NULL
-    # for composition_state_id / affected_node_id / tool_call_id / user_term
-    # / llm_draft.
+    # Closed enum on kind. Adding a value requires the same ceremony as the
+    # InterpretationKind contract enum: contract amendment, schema update,
+    # closed-enum tests, and writer-path audit.
     CheckConstraint(
-        "(interpretation_source = 'auto_interpreted_opt_out') = "
-        "(composition_state_id IS NULL AND affected_node_id IS NULL AND "
-        " tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL AND "
-        " model_identifier IS NULL AND model_version IS NULL AND "
-        " provider IS NULL AND composer_skill_hash IS NULL)",
-        name="ck_interpretation_events_source_nullability",
+        "kind IS NULL OR kind IN ('vague_term', 'invented_source', 'llm_prompt_template')",
+        name="ck_interpretation_events_kind",
     ),
-    # user_approved rows must have all nine fields populated.
+    # F-1/F-12 (source-keyed opt-out shapes): session-level opt-out marker
+    # rows have no LLM context and no hash; surface-specific opt-out rows
+    # are born resolved with kind, surface/provenance fields, accepted_value,
+    # and a V2 arguments_hash.
+    CheckConstraint(
+        "(interpretation_source != 'auto_interpreted_opt_out') OR "
+        "((kind IS NULL AND composition_state_id IS NULL AND affected_node_id IS NULL AND "
+        "  tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL AND "
+        "  accepted_value IS NULL AND model_identifier IS NULL AND model_version IS NULL AND "
+        "  provider IS NULL AND composer_skill_hash IS NULL AND arguments_hash IS NULL AND "
+        "  hash_domain_version IS NULL) OR "
+        " (kind IS NOT NULL AND composition_state_id IS NOT NULL AND affected_node_id IS NOT NULL AND "
+        "  tool_call_id IS NOT NULL AND user_term IS NOT NULL AND llm_draft IS NOT NULL AND "
+        "  accepted_value IS NOT NULL AND model_identifier IS NOT NULL AND model_version IS NOT NULL AND "
+        "  provider IS NOT NULL AND composer_skill_hash IS NOT NULL AND arguments_hash IS NOT NULL AND "
+        "  hash_domain_version = 'v2'))",
+        name="ck_interpretation_events_opt_out_shape",
+    ),
+    # user_approved rows must have kind and all surface/provenance fields
+    # populated.
     CheckConstraint(
         "(interpretation_source != 'user_approved') OR "
         "(composition_state_id IS NOT NULL AND affected_node_id IS NOT NULL AND "
-        " tool_call_id IS NOT NULL AND user_term IS NOT NULL AND llm_draft IS NOT NULL AND "
+        " tool_call_id IS NOT NULL AND user_term IS NOT NULL AND kind IS NOT NULL AND llm_draft IS NOT NULL AND "
         " model_identifier IS NOT NULL AND model_version IS NOT NULL AND "
         " provider IS NOT NULL AND composer_skill_hash IS NOT NULL)",
         name="ck_interpretation_events_user_approved_required",
     ),
     # auto_interpreted_no_surfaces rows: the five surface fields
     # (composition_state_id, affected_node_id, tool_call_id, user_term,
-    # llm_draft) must be NULL (no surfacing occurred); the four LLM
-    # provenance fields must be NOT NULL (the LLM was consulted for the
-    # rate-cap fallback auto-interpretation). This is the middle shape
-    # between opted_out (all nine NULL) and user_approved (all nine NOT
-    # NULL).
+    # llm_draft) must be NULL (no surfacing occurred); kind and the four
+    # LLM provenance fields must be NOT NULL (the LLM was consulted for
+    # the rate-cap fallback auto-interpretation). This is the middle shape
+    # between session opt-out marker rows and user_approved rows.
     CheckConstraint(
         "(interpretation_source != 'auto_interpreted_no_surfaces') OR "
         "(composition_state_id IS NULL AND affected_node_id IS NULL AND "
-        " tool_call_id IS NULL AND user_term IS NULL AND llm_draft IS NULL AND "
+        " tool_call_id IS NULL AND user_term IS NULL AND kind IS NOT NULL AND llm_draft IS NULL AND "
         " model_identifier IS NOT NULL AND model_version IS NOT NULL AND "
         " provider IS NOT NULL AND composer_skill_hash IS NOT NULL)",
         name="ck_interpretation_events_no_surfaces_shape",
@@ -675,9 +687,12 @@ interpretation_events_table = Table(
         "(choice = 'pending') = (resolved_at IS NULL)",
         name="ck_interpretation_events_resolved_at_status",
     ),
-    # accepted_value is populated only for accepted_as_drafted and amended.
+    # accepted_value is populated only for accepted_as_drafted/amended
+    # user-approved rows and surface-specific auto_interpreted_opt_out rows.
     CheckConstraint(
-        "(choice IN ('accepted_as_drafted', 'amended')) = (accepted_value IS NOT NULL)",
+        "((choice IN ('accepted_as_drafted', 'amended')) OR "
+        " (interpretation_source = 'auto_interpreted_opt_out' AND kind IS NOT NULL)) "
+        "= (accepted_value IS NOT NULL)",
         name="ck_interpretation_events_accepted_value_status",
     ),
 )

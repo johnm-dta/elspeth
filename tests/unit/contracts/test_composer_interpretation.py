@@ -1,7 +1,7 @@
 """Unit tests for the composer-interpretation contract (Phase 5b Task 1).
 
 These tests pin the closed enums, the frozen-dataclass record shape, and the
-v1 hash-domain frozenset. The record is a Tier-1 read-side audit type — the
+active hash-domain frozenset. The record is a Tier-1 read-side audit type — the
 suite enforces required-field discipline (TypeError on missing kwargs) and
 frozen-attribute discipline (FrozenInstanceError on assignment).
 """
@@ -16,8 +16,10 @@ import pytest
 
 from elspeth.contracts.composer_interpretation import (
     INTERPRETATION_HASH_DOMAIN_V1,
+    INTERPRETATION_HASH_DOMAIN_V2,
     InterpretationChoice,
     InterpretationEventRecord,
+    InterpretationKind,
     InterpretationSource,
 )
 
@@ -31,6 +33,7 @@ def _resolved_record_kwargs() -> dict[str, object]:
         "affected_node_id": "node-1",
         "tool_call_id": "tool-call-abc",
         "user_term": "cool",
+        "kind": InterpretationKind.VAGUE_TERM,
         "llm_draft": "subjectively interesting or impressive",
         "accepted_value": "subjectively interesting or impressive",
         "choice": InterpretationChoice.ACCEPTED_AS_DRAFTED,
@@ -42,7 +45,7 @@ def _resolved_record_kwargs() -> dict[str, object]:
         "provider": "anthropic",
         "composer_skill_hash": "a" * 64,
         "arguments_hash": "b" * 64,
-        "hash_domain_version": "v1",
+        "hash_domain_version": "v2",
         "interpretation_source": InterpretationSource.USER_APPROVED,
         "runtime_model_identifier_at_resolve": "anthropic/claude-opus-4-7",
         "runtime_model_version_at_resolve": "2026-01-15",
@@ -59,6 +62,7 @@ def _opted_out_record_kwargs() -> dict[str, object]:
         "affected_node_id": None,
         "tool_call_id": None,
         "user_term": None,
+        "kind": None,
         "llm_draft": None,
         "accepted_value": None,
         "choice": InterpretationChoice.OPTED_OUT,
@@ -87,6 +91,7 @@ def _no_surfaces_record_kwargs() -> dict[str, object]:
         "affected_node_id": None,
         "tool_call_id": None,
         "user_term": None,
+        "kind": InterpretationKind.VAGUE_TERM,
         "llm_draft": None,
         "accepted_value": None,
         "choice": InterpretationChoice.OPTED_OUT,
@@ -128,6 +133,38 @@ def test_interpretation_source_has_exactly_three_values() -> None:
         "auto_interpreted_no_surfaces",
     }
     assert len(InterpretationSource) == 3
+
+
+def test_interpretation_kind_closed_set() -> None:
+    assert [member.value for member in InterpretationKind] == [
+        "vague_term",
+        "invented_source",
+        "llm_prompt_template",
+    ]
+
+
+def test_v2_hash_domain_includes_kind_and_retires_v1_writes() -> None:
+    assert "kind" in INTERPRETATION_HASH_DOMAIN_V2
+    assert (
+        frozenset(
+            {
+                "session_id",
+                "composition_state_id",
+                "affected_node_id",
+                "tool_call_id",
+                "user_term",
+                "kind",
+                "llm_draft",
+                "accepted_value",
+                "actor",
+                "model_identifier",
+                "model_version",
+                "provider",
+                "composer_skill_hash",
+            }
+        )
+        == INTERPRETATION_HASH_DOMAIN_V2
+    )
 
 
 def test_record_is_frozen() -> None:
@@ -184,6 +221,7 @@ def test_opted_out_record_constructs_successfully() -> None:
     assert record.affected_node_id is None
     assert record.tool_call_id is None
     assert record.user_term is None
+    assert record.kind is None
     assert record.llm_draft is None
     assert record.accepted_value is None
     assert record.model_identifier is None
@@ -212,6 +250,7 @@ def test_opted_out_record_roundtrips_through_asdict() -> None:
         "affected_node_id",
         "tool_call_id",
         "user_term",
+        "kind",
         "llm_draft",
         "accepted_value",
         "model_identifier",
@@ -236,6 +275,7 @@ def test_no_surfaces_record_constructs_successfully() -> None:
     assert record.affected_node_id is None
     assert record.tool_call_id is None
     assert record.user_term is None
+    assert record.kind is InterpretationKind.VAGUE_TERM
     assert record.llm_draft is None
     assert record.model_identifier == "anthropic/claude-opus-4-7"
     assert record.provider == "anthropic"
@@ -342,3 +382,10 @@ def test_hash_domain_v1_names_are_valid_record_fields() -> None:
     field_names = {f.name for f in dataclasses.fields(InterpretationEventRecord)}
     missing = INTERPRETATION_HASH_DOMAIN_V1 - field_names
     assert missing == frozenset(), f"INTERPRETATION_HASH_DOMAIN_V1 references unknown fields: {missing}"
+
+
+def test_hash_domain_v2_names_are_valid_record_fields() -> None:
+    """F-12 CI guard: every name in INTERPRETATION_HASH_DOMAIN_V2 is a real field."""
+    field_names = {f.name for f in dataclasses.fields(InterpretationEventRecord)}
+    missing = INTERPRETATION_HASH_DOMAIN_V2 - field_names
+    assert missing == frozenset(), f"INTERPRETATION_HASH_DOMAIN_V2 references unknown fields: {missing}"

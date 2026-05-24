@@ -22,6 +22,7 @@ from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
     InterpretationEventRecord,
+    InterpretationKind,
     InterpretationSource,
 )
 from elspeth.contracts.errors import AuditIntegrityError
@@ -744,6 +745,7 @@ class SessionServiceProtocol(Protocol):
         affected_node_id: str,
         tool_call_id: str,
         user_term: str,
+        kind: InterpretationKind = InterpretationKind.VAGUE_TERM,
         llm_draft: str,
         model_identifier: str,
         model_version: str,
@@ -753,10 +755,12 @@ class SessionServiceProtocol(Protocol):
     ) -> InterpretationEventRecord:
         """Insert a PENDING interpretation event.
 
-        Implementations MUST validate ``affected_node_id`` exists in
-        the parent composition state's ``nodes`` JSON before INSERT
-        (writer-boundary check per CLAUDE.md offensive programming).
-        Raises ``ValueError`` on a missing state or unknown node.
+        ``kind`` defaults to ``vague_term`` for the pre-kind
+        ``request_interpretation_review`` caller. Implementations MUST
+        validate ``affected_node_id`` exists in the parent composition
+        state's ``nodes`` JSON before INSERT (writer-boundary check per
+        CLAUDE.md offensive programming). Raises ``ValueError`` on a
+        missing state, unknown node, or non-``InterpretationKind`` kind.
         """
         ...
 
@@ -852,6 +856,7 @@ class SessionServiceProtocol(Protocol):
         *,
         session_id: UUID,
         actor: str,
+        kind: InterpretationKind = InterpretationKind.VAGUE_TERM,
         model_identifier: str,
         model_version: str,
         provider: str,
@@ -874,12 +879,11 @@ class SessionServiceProtocol(Protocol):
         * Interpretation-surface fields are NULL: ``composition_state_id``,
           ``affected_node_id``, ``tool_call_id``, ``user_term``,
           ``llm_draft`` (the rejected request never produced a surface).
-        * LLM provenance fields MUST be populated — the composer LLM
+        * ``kind`` and LLM provenance fields MUST be populated — the composer LLM
           that triggered the rate cap is fully identifiable from the
           compose-loop snapshot.
-        * ``arguments_hash`` is NULL because the
-          ``INTERPRETATION_HASH_DOMAIN_V1`` set requires
-          surface fields that don't exist for this row shape.
+        * ``arguments_hash`` is NULL because no user-visible surface was
+          created to resolve.
         * ``resolved_at`` equals ``created_at`` (the rate-cap event is
           itself a resolution).
         """

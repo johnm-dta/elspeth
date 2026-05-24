@@ -26,9 +26,10 @@ from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 from elspeth.contracts.advisory_locks import ELSPETH_SESSIONS_LOCK_CLASSID
 from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.composer_interpretation import (
-    INTERPRETATION_HASH_DOMAIN_V1,
+    INTERPRETATION_HASH_DOMAIN_V2,
     InterpretationChoice,
     InterpretationEventRecord,
+    InterpretationKind,
     InterpretationSource,
 )
 from elspeth.contracts.errors import AuditIntegrityError
@@ -404,6 +405,7 @@ def _interpretation_event_record_from_row(row: Any) -> InterpretationEventRecord
         affected_node_id=row.affected_node_id,
         tool_call_id=row.tool_call_id,
         user_term=row.user_term,
+        kind=InterpretationKind(row.kind) if row.kind is not None else None,
         llm_draft=row.llm_draft,
         accepted_value=row.accepted_value,
         choice=InterpretationChoice(row.choice),
@@ -2027,6 +2029,7 @@ class SessionServiceImpl:
         affected_node_id: str,
         tool_call_id: str,
         user_term: str,
+        kind: InterpretationKind = InterpretationKind.VAGUE_TERM,
         llm_draft: str,
         model_identifier: str,
         model_version: str,
@@ -2061,9 +2064,12 @@ class SessionServiceImpl:
         Telemetry: NONE — composition-time user decisions are audit-primary;
         no ephemeral operational signal required.
         """
+        if not isinstance(kind, InterpretationKind):
+            raise ValueError(f"kind must be InterpretationKind, got {type(kind).__name__}: {kind!r}")
         now = self._ensure_utc(created_at) if created_at is not None else self._now()
         sid = str(session_id)
         state_id_str = str(composition_state_id)
+        kind_value = kind.value
         event_id = str(uuid.uuid4())
 
         def _sync() -> InterpretationEventRecord:
@@ -2087,6 +2093,7 @@ class SessionServiceImpl:
                                 affected_node_id=None,
                                 tool_call_id=None,
                                 user_term=None,
+                                kind=None,
                                 llm_draft=None,
                                 accepted_value=None,
                                 choice=InterpretationChoice.OPTED_OUT.value,
@@ -2149,6 +2156,7 @@ class SessionServiceImpl:
                         affected_node_id=affected_node_id,
                         tool_call_id=tool_call_id,
                         user_term=user_term,
+                        kind=kind_value,
                         llm_draft=llm_draft,
                         accepted_value=None,
                         choice=InterpretationChoice.PENDING.value,
@@ -2212,7 +2220,7 @@ class SessionServiceImpl:
             4a. Compute ``resolved_prompt_template_hash`` via
                 :func:`stable_hash` over the resolved prompt string.
                 ``CANONICAL_VERSION = "sha256-rfc8785-v1"``. NOT part of
-                ``INTERPRETATION_HASH_DOMAIN_V1`` — covers a different
+                ``INTERPRETATION_HASH_DOMAIN_V2`` — covers a different
                 input.
             5. UPDATE interpretation_events with the settled fields.
             5a. Write the new composition_states row with provenance =
@@ -2360,7 +2368,7 @@ class SessionServiceImpl:
                 patched_validation = state_from_record(patched_state_record).validate()
                 patched_validation_errors = [error.message for error in patched_validation.errors] or None
 
-                # Compute arguments_hash over the INTERPRETATION_HASH_DOMAIN_V1
+                # Compute arguments_hash over the INTERPRETATION_HASH_DOMAIN_V2
                 # field set. The closed domain is the source of truth — read
                 # from the constant, do not duplicate the field list inline.
                 # The composition_state_id in the hash domain is the surfacing
@@ -2375,6 +2383,7 @@ class SessionServiceImpl:
                     "affected_node_id": event_row.affected_node_id,
                     "tool_call_id": event_row.tool_call_id,
                     "user_term": event_row.user_term,
+                    "kind": event_row.kind,
                     "llm_draft": event_row.llm_draft,
                     "accepted_value": accepted_value,
                     "actor": actor,
@@ -2386,11 +2395,11 @@ class SessionServiceImpl:
                 # Mechanical guard: if a field is added to the contract dataclass
                 # but not to this domain dict, the hash silently drifts. Crash
                 # rather than fabricate.
-                if set(domain_dict.keys()) != INTERPRETATION_HASH_DOMAIN_V1:
+                if set(domain_dict.keys()) != INTERPRETATION_HASH_DOMAIN_V2:
                     raise AssertionError(
                         f"resolve_interpretation_event: domain dict keys "
                         f"{set(domain_dict.keys())!r} drifted from "
-                        f"INTERPRETATION_HASH_DOMAIN_V1 {INTERPRETATION_HASH_DOMAIN_V1!r}"
+                        f"INTERPRETATION_HASH_DOMAIN_V2 {INTERPRETATION_HASH_DOMAIN_V2!r}"
                     )
                 arguments_hash = stable_hash(domain_dict)
 
@@ -2411,7 +2420,7 @@ class SessionServiceImpl:
                             resolved_at=now,
                             actor=actor,
                             arguments_hash=arguments_hash,
-                            hash_domain_version="v1",
+                            hash_domain_version="v2",
                             runtime_model_identifier_at_resolve=runtime_model_identifier,
                             runtime_model_version_at_resolve=runtime_model_version,
                             resolved_prompt_template_hash=resolved_prompt_template_hash,
@@ -2577,6 +2586,7 @@ class SessionServiceImpl:
                         affected_node_id=None,
                         tool_call_id=None,
                         user_term=None,
+                        kind=None,
                         llm_draft=None,
                         accepted_value=None,
                         choice=InterpretationChoice.OPTED_OUT.value,
@@ -2677,6 +2687,7 @@ class SessionServiceImpl:
         *,
         session_id: UUID,
         actor: str,
+        kind: InterpretationKind = InterpretationKind.VAGUE_TERM,
         model_identifier: str,
         model_version: str,
         provider: str,
@@ -2695,21 +2706,23 @@ class SessionServiceImpl:
         Validates against ``ck_interpretation_events_no_surfaces_shape``:
         the five interpretation-surface fields (composition_state_id,
         affected_node_id, tool_call_id, user_term, llm_draft) MUST be
-        NULL; the four LLM provenance fields (model_identifier,
+        NULL; kind and the four LLM provenance fields (model_identifier,
         model_version, provider, composer_skill_hash) MUST be NOT NULL.
 
         ``choice`` is set to ``OPTED_OUT`` because the resolve semantics
         are "no further user action required" — the rate cap is the
         resolution. ``resolved_at`` equals ``created_at`` because the
-        row is born resolved. ``arguments_hash`` is NULL because the
-        ``INTERPRETATION_HASH_DOMAIN_V1`` field set has no values for
-        this row shape (the surface fields it hashes over are all NULL).
+        row is born resolved. ``arguments_hash`` is NULL because no
+        user-visible surface was created to resolve.
 
         Telemetry: NONE — composition-time user decisions are
         audit-primary; no ephemeral operational signal required.
         """
+        if not isinstance(kind, InterpretationKind):
+            raise ValueError(f"kind must be InterpretationKind, got {type(kind).__name__}: {kind!r}")
         now = self._ensure_utc(created_at) if created_at is not None else self._now()
         sid = str(session_id)
+        kind_value = kind.value
         event_id = str(uuid.uuid4())
 
         def _sync() -> InterpretationEventRecord:
@@ -2722,6 +2735,7 @@ class SessionServiceImpl:
                         affected_node_id=None,
                         tool_call_id=None,
                         user_term=None,
+                        kind=kind_value,
                         llm_draft=None,
                         accepted_value=None,
                         choice=InterpretationChoice.OPTED_OUT.value,

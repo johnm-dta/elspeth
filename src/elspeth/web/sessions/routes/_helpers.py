@@ -562,6 +562,7 @@ def _interpretation_event_response(event: InterpretationEventRecord) -> Interpre
         affected_node_id=event.affected_node_id,
         tool_call_id=event.tool_call_id,
         user_term=event.user_term,
+        kind=event.kind.value if event.kind is not None else None,
         llm_draft=event.llm_draft,
         accepted_value=event.accepted_value,
         choice=event.choice.value,

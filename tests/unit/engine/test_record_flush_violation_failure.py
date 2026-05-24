@@ -93,6 +93,7 @@ def test_recorder_failure_mid_loop_raises_audit_integrity_error() -> None:
         source_node_id=NodeID("source-0"),
         source_on_success="default",
         traversal=traversal,
+        scheduler=setup.factory.scheduler,
     )
     # Swap the recorder for one that fails.
     original_record = processor._data_flow.record_token_outcome
@@ -100,7 +101,7 @@ def test_recorder_failure_mid_loop_raises_audit_integrity_error() -> None:
     def _faulty_recorder(*args: Any, **kwargs: Any) -> Any:
         raise LandscapeRecordError("simulated audit DB outage")
 
-    processor._data_flow.record_token_outcome = _faulty_recorder  # type: ignore[assignment]
+    processor._data_flow.record_token_outcome = _faulty_recorder  # type: ignore[method-assign]
 
     transform = Mock(spec=TransformProtocol)
     transform.node_id = "agg-node"
@@ -133,7 +134,7 @@ def test_recorder_failure_mid_loop_raises_audit_integrity_error() -> None:
     assert "INCOMPLETE" in str(exc_info.value)
 
     # Restore the recorder.
-    processor._data_flow.record_token_outcome = original_record  # type: ignore[assignment]
+    processor._data_flow.record_token_outcome = original_record  # type: ignore[method-assign]
 
 
 def test_non_landscape_recorder_bug_mid_loop_propagates_plainly() -> None:
@@ -161,13 +162,14 @@ def test_non_landscape_recorder_bug_mid_loop_propagates_plainly() -> None:
         source_node_id=NodeID("source-0"),
         source_on_success="default",
         traversal=traversal,
+        scheduler=setup.factory.scheduler,
     )
     original_record = processor._data_flow.record_token_outcome
 
     def _faulty_recorder(*args: Any, **kwargs: Any) -> Any:
         raise ValueError("recorder validation bug")
 
-    processor._data_flow.record_token_outcome = _faulty_recorder  # type: ignore[assignment]
+    processor._data_flow.record_token_outcome = _faulty_recorder  # type: ignore[method-assign]
 
     transform = Mock(spec=TransformProtocol)
     transform.node_id = "agg-node"
@@ -190,4 +192,4 @@ def test_non_landscape_recorder_bug_mid_loop_propagates_plainly() -> None:
     with pytest.raises(ValueError, match="recorder validation bug"):
         processor._record_flush_violation(fctx, violation)
 
-    processor._data_flow.record_token_outcome = original_record  # type: ignore[assignment]
+    processor._data_flow.record_token_outcome = original_record  # type: ignore[method-assign]

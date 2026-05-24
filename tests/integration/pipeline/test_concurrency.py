@@ -116,6 +116,7 @@ class TestConcurrencyConfigInRowProcessor:
             source_on_success=source_on_success,
             traversal=traversal,
             max_workers=4,
+            scheduler=factory.scheduler,
         )
         # Verify max_workers was passed to TransformExecutor
         assert processor._transform_executor._max_workers == 4
@@ -134,6 +135,7 @@ class TestConcurrencyConfigInRowProcessor:
             source_node_id=source_node_id,
             source_on_success=source_on_success,
             traversal=traversal,
+            scheduler=factory.scheduler,
         )
         # No max_workers means no cap
         assert processor._transform_executor._max_workers is None

@@ -78,6 +78,7 @@ from tests.fixtures.landscape import make_recorder_with_run
 # =============================================================================
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+_DEFAULT_SCHEDULER = object()
 
 
 def _make_contract() -> SchemaContract:
@@ -89,6 +90,67 @@ def _make_source_row(data: dict[str, Any] | None = None) -> SourceRow:
     """Create a valid SourceRow with contract."""
     contract = _make_contract()
     return make_source_row(data or {"value": 42}, contract=contract)
+
+
+def _persist_token_for_scheduler(
+    factory: RecorderFactory,
+    token: TokenInfo,
+    *,
+    run_id: str = "test-run",
+    source_node_id: str = "source-0",
+    row_index: int | None = None,
+    source_row_index: int | None = None,
+    ingest_sequence: int = 0,
+) -> None:
+    """Persist a fabricated unit-test token before scheduler-backed processing."""
+    try:
+        factory.data_flow.resolve_row_ingest_sequence(token.row_id)
+    except AuditIntegrityError:
+        factory.data_flow.create_row(
+            run_id=run_id,
+            source_node_id=source_node_id,
+            row_index=ingest_sequence if row_index is None else row_index,
+            source_row_index=ingest_sequence if source_row_index is None else source_row_index,
+            ingest_sequence=ingest_sequence,
+            row_id=token.row_id,
+            data=token.row_data.to_dict(),
+        )
+    if factory.query.get_token(token.token_id) is None:
+        factory.data_flow.create_token(
+            token.row_id,
+            token_id=token.token_id,
+            branch_name=token.branch_name,
+            fork_group_id=token.fork_group_id or (f"test-fork:{token.row_id}" if token.branch_name is not None else None),
+            join_group_id=token.join_group_id,
+        )
+
+
+def _persist_blocked_scheduler_work(
+    factory: RecorderFactory,
+    processor: RowProcessor,
+    token: TokenInfo,
+    *,
+    node_id: NodeID,
+    barrier_key: str,
+    ingest_sequence: int = 0,
+) -> None:
+    """Persist BLOCKED scheduler work matching a fabricated buffered token."""
+    _persist_token_for_scheduler(factory, token, ingest_sequence=ingest_sequence)
+    processor._scheduler.ensure_blocked_barrier_work_item(
+        run_id=processor.run_id,
+        token_id=token.token_id,
+        row_id=token.row_id,
+        node_id=str(node_id),
+        step_index=processor.resolve_node_step(node_id),
+        ingest_sequence=factory.data_flow.resolve_row_ingest_sequence(token.row_id),
+        row_payload_json=processor._scheduler.serialize_row_payload(token.row_data),
+        barrier_key=barrier_key,
+        available_at=processor._clock.now_utc(),
+        branch_name=token.branch_name,
+        fork_group_id=token.fork_group_id,
+        join_group_id=token.join_group_id,
+        expand_group_id=token.expand_group_id,
+    )
 
 
 def _assert_outcome_pair(
@@ -143,7 +205,7 @@ def _make_processor(
     restored_coalesce_state: CoalesceCheckpointState | None = None,
     telemetry_manager: Any = None,
     sink_names: frozenset[str] | None = None,
-    scheduler: Any = None,
+    scheduler: Any = _DEFAULT_SCHEDULER,
     scheduler_lease_owner: str | None = None,
     clock: Any = None,
 ) -> RowProcessor:
@@ -168,6 +230,41 @@ def _make_processor(
     traversal_next.setdefault(source_node, None)
     for coalesce_node in coalesce_nodes.values():
         traversal_next.setdefault(coalesce_node, None)
+
+    node_ids_to_register: set[NodeID] = set(traversal_steps)
+    node_ids_to_register.update(traversal_node_to_plugin)
+    node_ids_to_register.update(traversal_next)
+    node_ids_to_register.update(node_id for node_id in traversal_next.values() if node_id is not None)
+    node_ids_to_register.update(coalesce_nodes.values())
+    node_ids_to_register.update((aggregation_settings or {}).keys())
+
+    for node_id in sorted(node_ids_to_register, key=str):
+        if node_id == source_node:
+            continue
+        if factory.data_flow.get_node(str(node_id), run_id) is not None:
+            continue
+        plugin = traversal_node_to_plugin.get(node_id)
+        if node_id in coalesce_nodes.values():
+            node_type = NodeType.COALESCE
+            plugin_name = "coalesce"
+        elif node_id in (aggregation_settings or {}):
+            node_type = NodeType.AGGREGATION
+            plugin_name = "aggregation"
+        elif isinstance(plugin, GateSettings):
+            node_type = NodeType.GATE
+            plugin_name = "gate"
+        else:
+            node_type = NodeType.TRANSFORM
+            plugin_name = getattr(plugin, "name", "transform")
+        factory.data_flow.register_node(
+            run_id=run_id,
+            plugin_name=str(plugin_name),
+            node_type=node_type,
+            plugin_version="1.0",
+            config={},
+            node_id=str(node_id),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
 
     traversal = DAGTraversalContext(
         node_step_map=traversal_steps,
@@ -197,7 +294,7 @@ def _make_processor(
         restored_coalesce_state=restored_coalesce_state,
         telemetry_manager=telemetry_manager,
         sink_names=sink_names,
-        scheduler=scheduler,
+        scheduler=factory.scheduler if scheduler is _DEFAULT_SCHEDULER else scheduler,
         scheduler_lease_owner=scheduler_lease_owner,
         clock=clock,
     )
@@ -242,6 +339,13 @@ def _make_mock_transform(
 
 class TestConstructorErrorEdgeMap:
     """Tests for error edge map construction in __init__."""
+
+    def test_scheduler_repository_is_required(self) -> None:
+        """RowProcessor must not expose the legacy in-memory drain path."""
+        _, factory = _make_factory()
+
+        with pytest.raises(TypeError, match="scheduler"):
+            _make_processor(factory, scheduler=None)
 
     def test_default_scheduler_lease_owner_is_instance_unique(self) -> None:
         """Implicit scheduler lease owners must distinguish processors for the same run."""
@@ -432,6 +536,7 @@ class TestAuditStepResolutionInvariants:
             source_node_id=source_node,
             source_on_success="default",
             traversal=traversal,
+            scheduler=factory.scheduler,
         )
 
         assert processor._resolve_audit_step_for_node(source_node) == 0
@@ -1794,6 +1899,7 @@ class TestAggregationFailureMatrix:
             success_reason={"action": "passthrough"},
         )
         buffered_token = make_token_info(data={"value": 10})
+        _persist_blocked_scheduler_work(factory, processor, buffered_token, node_id=agg_node, barrier_key=str(agg_node))
 
         with patch.object(
             processor._aggregation_executor,
@@ -1821,6 +1927,7 @@ class TestAggregationFailureMatrix:
             success_reason={"action": "passthrough"},
         )
         buffered_token = make_token_info(data={"value": 10})
+        _persist_blocked_scheduler_work(factory, processor, buffered_token, node_id=agg_node, barrier_key=str(agg_node))
 
         with patch.object(
             processor._aggregation_executor,
@@ -1852,6 +1959,7 @@ class TestAggregationFailureMatrix:
         ctx = make_context(landscape=factory.plugin_audit_writer())
         captured: dict[str, TokenInfo] = {}
         valid_buffered_token = make_token_info(row_id="row-a", token_id="token-valid", data={"value": 1})
+        _persist_blocked_scheduler_work(factory, processor, valid_buffered_token, node_id=NodeID("agg-1"), barrier_key="agg-1")
 
         # The triggering token is the second buffered token. Index 1 in
         # quarantined_indices means the triggering token IS quarantined while
@@ -1882,12 +1990,12 @@ class TestAggregationFailureMatrix:
             patch.object(processor._token_manager, "expand_token", return_value=([], "expand-group-1")),
         ):
             results = processor.process_row(
-                row_index=0,
+                row_index=1,
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
-                source_row_index=0,
-                ingest_sequence=0,
+                source_row_index=1,
+                ingest_sequence=1,
             )
 
         # The triggering token must be returned as QUARANTINED, matching the data_flow.
@@ -1970,6 +2078,7 @@ class TestAggregationFailureMatrix:
         ctx = make_context(landscape=factory.plugin_audit_writer())
         captured: dict[str, TokenInfo] = {}
         valid_buffered_token = make_token_info(row_id="row-a", token_id="token-valid", data={"value": 1})
+        _persist_blocked_scheduler_work(factory, processor, valid_buffered_token, node_id=NodeID("agg-1"), barrier_key="agg-1")
 
         flush_result = TransformResult.success(
             make_row({"value": 999}, contract=_make_contract()),
@@ -1997,12 +2106,12 @@ class TestAggregationFailureMatrix:
             patch.object(processor._token_manager, "expand_token", return_value=([], "expand-group-1")) as expand_token,
         ):
             processor.process_row(
-                row_index=0,
+                row_index=1,
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
-                source_row_index=0,
-                ingest_sequence=0,
+                source_row_index=1,
+                ingest_sequence=1,
             )
 
         assert expand_token.call_args is not None
@@ -2014,6 +2123,10 @@ class TestAggregationFailureMatrix:
         ctx = make_context(landscape=factory.plugin_audit_writer())
         quarantined_token = make_token_info(row_id="row-a", token_id="token-quarantined", data={"value": 1})
         valid_token = make_token_info(row_id="row-b", token_id="token-valid", data={"value": 2})
+        _persist_blocked_scheduler_work(
+            factory, processor, quarantined_token, node_id=agg_node, barrier_key=str(agg_node), ingest_sequence=0
+        )
+        _persist_blocked_scheduler_work(factory, processor, valid_token, node_id=agg_node, barrier_key=str(agg_node), ingest_sequence=1)
 
         flush_result = TransformResult.success(
             make_row({"value": 999}, contract=_make_contract()),
@@ -2491,6 +2604,7 @@ class TestProcessRowGateBranching:
             node_step_map={NodeID("source-0"): 0},
             node_to_next={NodeID("source-0"): None},
         )
+        _persist_token_for_scheduler(factory, token)
 
         results = processor.process_token(
             token=token,
@@ -2578,6 +2692,8 @@ class TestProcessRowGateBranching:
                 row_data=token.row_data,
                 branch_name="sink_b",
             )
+            _persist_token_for_scheduler(factory, child_a)
+            _persist_token_for_scheduler(factory, child_b)
             fork_action = RoutingAction.fork_to_paths(["sink_a", "sink_b"])
             fork_result = GateResult(
                 row=token.row_data.to_dict(),
@@ -2819,6 +2935,7 @@ class TestProcessToken:
 
         # Create a token to process
         token = make_token_info(data={"value": 42})
+        _persist_token_for_scheduler(factory, token)
 
         results = processor.process_token(
             token=token,
@@ -2844,6 +2961,7 @@ class TestProcessToken:
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 42})
+        _persist_token_for_scheduler(factory, token)
 
         results = processor.process_token(
             token=token,
@@ -2874,6 +2992,7 @@ class TestProcessToken:
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 42})
+        _persist_token_for_scheduler(factory, token)
 
         with patch.object(
             processor,
@@ -2912,13 +3031,19 @@ class TestDrainWorkQueueIterationGuard:
         processor = _make_processor(factory)
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 1})
+        _persist_token_for_scheduler(factory, token)
+        produced = 0
 
         # Mock _process_single_token to always produce more work
         def infinite_loop_producer(token, ctx, current_node_id, **kwargs):
-            new_token = make_token_info(data={"value": 1})
+            nonlocal produced
+            produced += 1
+            new_token = make_token_info(row_id=token.row_id, token_id=f"loop-token-{produced}", data={"value": 1})
+            _persist_token_for_scheduler(factory, new_token)
             return (None, [WorkItem(token=new_token, current_node_id=NodeID("source-0"))])
 
         with (
+            patch("elspeth.engine.processor.MAX_WORK_QUEUE_ITERATIONS", 3),
             patch.object(processor, "_process_single_token", side_effect=infinite_loop_producer),
             pytest.raises(RuntimeError, match=r"exceeded.*iterations"),
         ):
@@ -2933,8 +3058,9 @@ class TestDrainWorkQueueIterationGuard:
         processor = _make_processor(factory)
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 1})
-        max_supported_copies = BatchReplicateConfig.model_json_schema()["properties"]["max_copies"]["maximum"]
-        remaining_children = max_supported_copies
+        _persist_token_for_scheduler(factory, token)
+        supported_copies = 3
+        remaining_children = supported_copies
 
         def supported_fanout_producer(token, ctx, current_node_id, **kwargs):
             nonlocal remaining_children
@@ -2942,21 +3068,29 @@ class TestDrainWorkQueueIterationGuard:
                 return (None, [])
 
             remaining_children -= 1
-            child = make_token_info(data={"remaining": remaining_children})
+            child = make_token_info(
+                row_id=token.row_id, token_id=f"fanout-token-{remaining_children}", data={"remaining": remaining_children}
+            )
+            _persist_token_for_scheduler(factory, child)
             return (None, [WorkItem(token=child, current_node_id=NodeID("source-0"))])
 
-        with patch.object(processor, "_process_single_token", side_effect=supported_fanout_producer) as mock_process_single_token:
+        with (
+            patch("elspeth.engine.processor.MAX_WORK_QUEUE_ITERATIONS", supported_copies + 2),
+            patch.object(processor, "_process_single_token", side_effect=supported_fanout_producer) as mock_process_single_token,
+        ):
             results = processor._drain_work_queue(
                 WorkItem(token=token, current_node_id=NodeID("source-0")),
                 ctx=ctx,
             )
 
         assert results == []
-        assert mock_process_single_token.call_count == max_supported_copies + 1
+        assert mock_process_single_token.call_count == supported_copies + 1
 
     def test_max_iterations_constant_is_reasonable(self) -> None:
         """MAX_WORK_QUEUE_ITERATIONS should be at least 1000."""
         assert MAX_WORK_QUEUE_ITERATIONS >= 1000
+        max_supported_copies = BatchReplicateConfig.model_json_schema()["properties"]["max_copies"]["maximum"]
+        assert max_supported_copies < MAX_WORK_QUEUE_ITERATIONS
 
 
 class TestDurableSchedulerResumeDrain:
@@ -5379,6 +5513,13 @@ class TestNotifyCoalesceOfLostBranch:
             coalesce_node_ids={CoalesceName("merge"): NodeID("coalesce::merge")},
             node_step_map={NodeID("coalesce::merge"): 3},
         )
+        _persist_blocked_scheduler_work(
+            factory,
+            processor,
+            sibling_token,
+            node_id=NodeID("coalesce::merge"),
+            barrier_key="merge",
+        )
         token = TokenInfo(
             row_id="row-1",
             token_id="token-1",
@@ -6138,6 +6279,13 @@ class TestGateSinkRoutingNotifiesCoalesce:
             coalesce_executor=coalesce,
             branch_to_coalesce={BranchName("path_a"): CoalesceName("merge")},
             coalesce_node_ids={CoalesceName("merge"): NodeID("coalesce::merge")},
+        )
+        _persist_blocked_scheduler_work(
+            factory,
+            processor,
+            sibling_token,
+            node_id=NodeID("coalesce::merge"),
+            barrier_key="merge",
         )
 
         token = TokenInfo(

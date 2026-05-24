@@ -70,6 +70,13 @@ where the architectural fix landed:
   symptom amplifier (gate-routing pipelines need sinks; LLM defaults
   ``collision_policy="fail_if_exists"``; stale eval artifacts collide),
   not the cause.
+* Shape 9 — Phase P4/P3 of ``elspeth-fdebcaa79a`` widened ``blob_ref`` /
+  ``inline_content`` config-content-ref capability. Pinned by
+  ``TestComposerRuntimeBlobInlineAgreement``: validate-time metadata checks
+  surface structured ``ValidationResult`` rows; runtime hash mismatch fails
+  closed before settings/plugin construction; successful runtime resolution
+  records the hash in ``blob_inline_resolutions`` before the resolved bytes
+  enter plugin settings.
 
 Adding a new shape: file the eval-finding issue, land the structural fix,
 then extend this docstring with the shape's number, the originating eval
@@ -92,9 +99,14 @@ structural contract rather than incidentally passing.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import threading
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -124,6 +136,7 @@ from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline
 from elspeth.engine.orchestrator.types import RouteValidationError
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
+from elspeth.web.blobs.protocol import BlobIntegrityError
 from elspeth.web.composer import yaml_generator as composer_yaml_generator
 from elspeth.web.composer.state import (
     CompositionState,
@@ -135,7 +148,9 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.schemas import CompletedData
+from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.execution.validation import validate_pipeline
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.fixtures.base_classes import _TestSchema, as_sink, as_source, as_transform
 from tests.fixtures.landscape import make_factory
 from tests.fixtures.pipeline import build_production_graph
@@ -3008,3 +3023,239 @@ class TestComposerRuntimeFileSinkCollisionAgreement:
         assert check_by_name["plugin_instantiation"].passed is True, (
             f"plugin_instantiation must pass when sink path is free; got detail={check_by_name['plugin_instantiation'].detail!r}"
         )
+
+
+class TestComposerRuntimeBlobInlineAgreement:
+    """Shape 9 — widened blob_ref / inline_content agreement.
+
+    Bug verification for sub-pin A was captured before commit ``2aaa4be2e``:
+    without the ``blob_inline_refs`` validate-time metadata bridge,
+    ``validate_pipeline(..., blob_get_metadata=...)`` rejected the new keyword
+    argument and the service path never queried ``BlobService.get_blob``.
+
+    Bug verification for sub-pins B/C was captured in
+    ``tests/unit/web/execution/test_service.py::TestInlineBlobRuntimePreflight``:
+    removing the runtime resolver or audit-write block lets settings/plugin
+    construction proceed without the fail-closed hash/audit invariant.
+    """
+
+    @staticmethod
+    def _validation_settings(data_dir: Path) -> SimpleNamespace:
+        return SimpleNamespace(data_dir=data_dir)
+
+    @staticmethod
+    def _state_with_inline_prompt(tmp_path: Path, blob_id: UUID, sha256: str) -> CompositionState:
+        blobs_dir = tmp_path / "blobs"
+        outputs_dir = tmp_path / "outputs"
+        blobs_dir.mkdir(parents=True, exist_ok=True)
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        return CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="classify_input",
+                options={
+                    "path": str(blobs_dir / "input.csv"),
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="discard",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="classify",
+                    node_type="transform",
+                    plugin="llm",
+                    input="classify_input",
+                    on_success="results",
+                    on_error="discard",
+                    options={
+                        "provider": "openrouter",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                        "model": "openai/gpt-4o",
+                        "prompt_template": {
+                            "blob_ref": str(blob_id),
+                            "mode": "inline_content",
+                            "sha256": sha256,
+                        },
+                        "required_input_fields": [],
+                        "schema": {"mode": "observed"},
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="results",
+                    plugin="json",
+                    options={
+                        "path": str(outputs_dir / "results.jsonl"),
+                        "format": "jsonl",
+                        "schema": {"mode": "observed"},
+                    },
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(name="Shape 9 inline blob agreement", description=""),
+            version=1,
+        )
+
+    @staticmethod
+    def _pipeline_yaml(blob_id: UUID, sha256: str) -> str:
+        return f"""
+source:
+  plugin: csv
+  options:
+    path: input.csv
+transforms:
+  - name: classify
+    plugin: llm
+    options:
+      prompt_template:
+        blob_ref: {blob_id}
+        mode: inline_content
+        sha256: {sha256}
+sinks:
+  results:
+    plugin: json
+    options:
+      path: output.jsonl
+"""
+
+    @staticmethod
+    def _execution_service(tmp_path: Path) -> tuple[ExecutionServiceImpl, MagicMock, asyncio.AbstractEventLoop]:
+        loop = asyncio.new_event_loop()
+        settings = MagicMock()
+        settings.get_landscape_url.return_value = "sqlite:///:memory:"
+        settings.get_payload_store_path.return_value = tmp_path / "payloads"
+        settings.landscape_passphrase = None
+        settings.data_dir = str(tmp_path)
+
+        session_service = MagicMock()
+        session_service.update_run_status = AsyncMock()
+        session_service.get_run = AsyncMock(return_value=MagicMock(status="running"))
+        session_service.record_blob_inline_resolutions = AsyncMock()
+
+        service = ExecutionServiceImpl(
+            loop=MagicMock(),
+            broadcaster=cast(Any, MagicMock()),
+            settings=settings,
+            session_service=session_service,
+            yaml_generator=MagicMock(),
+            telemetry=build_sessions_telemetry(),
+        )
+
+        def _call_async(coro: Any) -> Any:
+            return loop.run_until_complete(coro)
+
+        cast(Any, service)._call_async = _call_async
+        return service, session_service, loop
+
+    def test_validate_returns_structured_error_for_missing_inline_blob(self, tmp_path: Path) -> None:
+        blob_id = uuid4()
+        state = self._state_with_inline_prompt(tmp_path, blob_id, "a" * 64)
+
+        result = validate_pipeline(
+            state,
+            self._validation_settings(tmp_path),
+            composer_yaml_generator,
+            blob_get_metadata=lambda _blob_id: None,
+        )
+
+        assert result.is_valid is False
+        check = next(check for check in result.checks if check.name == "blob_inline_refs")
+        assert check.passed is False
+        assert any(error.error_code == "missing_inline_blob_content" for error in result.errors)
+        assert any(error.component_id == "classify" and error.component_type == "transform" for error in result.errors)
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_runtime_fails_closed_on_hash_mismatch_before_settings_load(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        mock_orch_cls: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        del mock_payload_cls, mock_landscape_cls
+        service, _session_service, loop = self._execution_service(tmp_path)
+        content = b"actual prompt bytes"
+        blob_id = uuid4()
+        run_id = uuid4()
+        blob_record = MagicMock()
+        blob_record.mime_type = "text/plain"
+        blob_record.size_bytes = len(content)
+        blob_service = MagicMock()
+        blob_service.link_blob_to_run = AsyncMock(return_value=None)
+        blob_service.read_blob_content = AsyncMock(return_value=content)
+        blob_service.get_blob = AsyncMock(return_value=blob_record)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(errors=[]))
+        cast(Any, service)._blob_service = blob_service
+
+        try:
+            with pytest.raises(BlobIntegrityError):
+                service._run_pipeline(str(run_id), self._pipeline_yaml(blob_id, "b" * 64), threading.Event())
+        finally:
+            loop.close()
+
+        mock_load.assert_not_called()
+        mock_orch_cls.assert_not_called()
+
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_runtime_records_audit_hash_before_settings_load(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        tmp_path: Path,
+    ) -> None:
+        del mock_payload_cls, mock_landscape_cls
+        service, session_service, loop = self._execution_service(tmp_path)
+        content = b"You are an audited prompt."
+        sha256 = hashlib.sha256(content).hexdigest()
+        blob_id = uuid4()
+        run_id = uuid4()
+        order: list[str] = []
+
+        blob_record = MagicMock()
+        blob_record.mime_type = "text/plain"
+        blob_record.size_bytes = len(content)
+        blob_service = MagicMock()
+        blob_service.link_blob_to_run = AsyncMock(return_value=None)
+        blob_service.read_blob_content = AsyncMock(return_value=content)
+        blob_service.get_blob = AsyncMock(return_value=blob_record)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(errors=[]))
+        cast(Any, service)._blob_service = blob_service
+
+        async def record_blob_inline_resolutions(*_args: Any, **_kwargs: Any) -> None:
+            order.append("record")
+
+        session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
+
+        def stop_after_audit(yaml_text: str) -> None:
+            assert "record" in order, "audit row must be recorded before settings/plugin construction"
+            assert "You are an audited prompt." in yaml_text
+            raise RuntimeError("stop after inline audit")
+
+        mock_load.side_effect = stop_after_audit
+
+        try:
+            with pytest.raises(RuntimeError, match="stop after inline audit"):
+                service._run_pipeline(str(run_id), self._pipeline_yaml(blob_id, sha256), threading.Event())
+        finally:
+            loop.close()
+
+        session_service.record_blob_inline_resolutions.assert_awaited_once()
+        resolutions = session_service.record_blob_inline_resolutions.await_args.kwargs["resolutions"]
+        assert len(resolutions) == 1
+        assert resolutions[0].field_path == "node:classify.options.prompt_template"
+        assert resolutions[0].content_hash == sha256

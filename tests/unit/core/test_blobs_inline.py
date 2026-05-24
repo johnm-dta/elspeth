@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+from copy import deepcopy
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 
 from elspeth.contracts.blobs import BlobContentMissingError, BlobIntegrityError, BlobNotFoundError, BlobStateError
-from elspeth.contracts.blobs_inline import BlobContentResolutionError, BlobInlineRef
-from elspeth.core.blobs_inline import _discover_blob_content_refs, _fetch_blob_contents
+from elspeth.contracts.blobs_inline import BlobContentResolutionError, BlobInlineRef, ResolvedBlobContent
+from elspeth.core.blobs_inline import _discover_blob_content_refs, _fetch_blob_contents, _substitute_blob_content_refs
 
 VALID_HASH = "a" * 64
 BLOB1 = "5b7a4e0e-9e4a-4f0b-8d3e-2c0e1f0d3a4b"
@@ -22,6 +24,15 @@ def _marker(blob_id: str = BLOB1, sha256: str = VALID_HASH) -> dict[str, str]:
 
 def _ref(blob_id: str = BLOB1, field_path: str = "source.options.x") -> BlobInlineRef:
     return BlobInlineRef(field_path=field_path, blob_id=UUID(blob_id), sha256=VALID_HASH, encoding="utf-8")
+
+
+def _ref_with_hash(content: bytes, field_path: str = "source.options.system_prompt", blob_id: str = BLOB1) -> BlobInlineRef:
+    return BlobInlineRef(
+        field_path=field_path,
+        blob_id=UUID(blob_id),
+        sha256=hashlib.sha256(content).hexdigest(),
+        encoding="utf-8",
+    )
 
 
 class TestDiscoverBlobContentRefs:
@@ -203,3 +214,127 @@ class TestFetchBlobContents:
             await _fetch_blob_contents(blob_service, [_ref()])
 
         assert exc_info.value.not_ready == (("source.options.x", "Blob is pending"),)
+
+
+class TestSubstituteBlobContentRefs:
+    def test_replaces_marker_with_decoded_string_and_audit_record(self) -> None:
+        content = b"You are a helpful assistant."
+        ref = _ref_with_hash(content)
+        config = {
+            "source": {
+                "options": {
+                    "system_prompt": {
+                        "blob_ref": BLOB1,
+                        "mode": "inline_content",
+                        "sha256": ref.sha256,
+                    }
+                }
+            }
+        }
+
+        substituted, audit = _substitute_blob_content_refs(
+            deepcopy(config),
+            {ref: content},
+            refs=[ref],
+            blob_metadata={ref.blob_id: ("text/plain", len(content))},
+        )
+
+        assert substituted["source"]["options"]["system_prompt"] == "You are a helpful assistant."
+        assert audit == [
+            ResolvedBlobContent(
+                field_path="source.options.system_prompt",
+                blob_id=UUID(BLOB1),
+                content_hash=ref.sha256,
+                byte_length=len(content),
+                mime_type="text/plain",
+                encoding="utf-8",
+            )
+        ]
+
+    def test_replaces_node_and_output_paths(self) -> None:
+        node_content = b"Classify strictly."
+        output_content = b"Footer text"
+        node_ref = _ref_with_hash(node_content, "node:classify.options.system_prompt", BLOB1)
+        output_ref = _ref_with_hash(output_content, "output:writeback.options.footer_template", BLOB2)
+        config = {
+            "transforms": [
+                {
+                    "name": "classify",
+                    "options": {
+                        "system_prompt": {
+                            "blob_ref": BLOB1,
+                            "mode": "inline_content",
+                            "sha256": node_ref.sha256,
+                        }
+                    },
+                }
+            ],
+            "sinks": {
+                "writeback": {
+                    "options": {
+                        "footer_template": {
+                            "blob_ref": BLOB2,
+                            "mode": "inline_content",
+                            "sha256": output_ref.sha256,
+                        }
+                    }
+                }
+            },
+        }
+
+        substituted, audit = _substitute_blob_content_refs(
+            deepcopy(config),
+            {node_ref: node_content, output_ref: output_content},
+            refs=[node_ref, output_ref],
+            blob_metadata={
+                node_ref.blob_id: ("text/plain", len(node_content)),
+                output_ref.blob_id: ("text/plain", len(output_content)),
+            },
+        )
+
+        assert substituted["transforms"][0]["options"]["system_prompt"] == "Classify strictly."
+        assert substituted["sinks"]["writeback"]["options"]["footer_template"] == "Footer text"
+        assert [entry.field_path for entry in audit] == [
+            "node:classify.options.system_prompt",
+            "output:writeback.options.footer_template",
+        ]
+
+    def test_hash_mismatch_propagates_integrity_error(self) -> None:
+        content = b"You are a helpful assistant."
+        ref = BlobInlineRef(
+            field_path="source.options.system_prompt",
+            blob_id=UUID(BLOB1),
+            sha256="b" * 64,
+            encoding="utf-8",
+        )
+        config = {"source": {"options": {"system_prompt": _marker(BLOB1, ref.sha256)}}}
+
+        with pytest.raises(BlobIntegrityError):
+            _substitute_blob_content_refs(
+                config,
+                {ref: content},
+                refs=[ref],
+                blob_metadata={ref.blob_id: ("text/plain", len(content))},
+            )
+
+    def test_decode_failures_are_batched_without_mutating_config(self) -> None:
+        content = b"\xff\xfe\xfd"
+        ref = BlobInlineRef(
+            field_path="source.options.x",
+            blob_id=UUID(BLOB1),
+            sha256=hashlib.sha256(content).hexdigest(),
+            encoding="utf-8",
+        )
+        config = {"source": {"options": {"x": _marker(BLOB1, ref.sha256)}}}
+        original = deepcopy(config)
+
+        with pytest.raises(BlobContentResolutionError) as exc_info:
+            _substitute_blob_content_refs(
+                config,
+                {ref: content},
+                refs=[ref],
+                blob_metadata={ref.blob_id: ("text/plain", len(content))},
+            )
+
+        assert exc_info.value.undecodable == (("source.options.x", "utf-8"),)
+        assert config == original

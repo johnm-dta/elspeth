@@ -10,10 +10,13 @@ substitution phases. This first slice implements pure discovery only.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 from typing import Any, Final, cast
 from uuid import UUID
 
 from elspeth.contracts.blobs import (
+    AllowedMimeType,
     BlobContentMissingError,
     BlobIntegrityError,
     BlobNotFoundError,
@@ -23,6 +26,7 @@ from elspeth.contracts.blobs import (
 from elspeth.contracts.blobs_inline import (
     BlobContentResolutionError,
     BlobInlineRef,
+    ResolvedBlobContent,
     WidenedBlobRefShape,
     is_widened_blob_ref,
 )
@@ -105,6 +109,141 @@ def _refs_by_blob_id(refs: list[BlobInlineRef]) -> dict[UUID, list[BlobInlineRef
             refs_by_blob[ref.blob_id] = []
         refs_by_blob[ref.blob_id].append(ref)
     return refs_by_blob
+
+
+def _substitute_blob_content_refs(
+    config: dict[str, Any],
+    fetched: dict[BlobInlineRef, bytes],
+    *,
+    refs: list[BlobInlineRef],
+    blob_metadata: dict[UUID, tuple[AllowedMimeType, int]],
+) -> tuple[dict[str, Any], list[ResolvedBlobContent]]:
+    """Replace inline-content markers with decoded strings and audit rows."""
+    decoded_by_ref: dict[BlobInlineRef, str] = {}
+    audit: list[ResolvedBlobContent] = []
+    undecodable: list[tuple[str, str]] = []
+
+    for ref in refs:
+        content = fetched[ref]
+        actual_hash = hashlib.sha256(content).hexdigest()
+        if not hmac.compare_digest(actual_hash, ref.sha256):
+            raise BlobIntegrityError(str(ref.blob_id), expected=ref.sha256, actual=actual_hash)
+        decoded, decode_error = _decode_blob_content(ref, content)
+        if decode_error is not None:
+            undecodable.append(decode_error)
+            continue
+        if decoded is None:
+            raise RuntimeError("Blob inline decode helper returned neither decoded content nor an error")
+
+        decoded_by_ref[ref] = decoded
+        mime_type, byte_length = blob_metadata[ref.blob_id]
+        audit.append(
+            ResolvedBlobContent(
+                field_path=ref.field_path,
+                blob_id=ref.blob_id,
+                content_hash=actual_hash,
+                byte_length=byte_length,
+                mime_type=mime_type,
+                encoding=ref.encoding,
+            )
+        )
+
+    if undecodable:
+        raise BlobContentResolutionError(undecodable=undecodable)
+
+    for ref in refs:
+        _substitute_at_path(config, ref.field_path, decoded_by_ref[ref])
+
+    return config, audit
+
+
+def _decode_blob_content(ref: BlobInlineRef, content: bytes) -> tuple[str, None] | tuple[None, tuple[str, str]]:
+    try:
+        return content.decode(ref.encoding), None
+    except UnicodeDecodeError:
+        return None, (ref.field_path, ref.encoding)
+
+
+def _substitute_at_path(config: dict[str, Any], field_path: str, value: str) -> None:
+    if ".options." not in field_path:
+        raise ValueError(f"Unrecognised blob inline field_path: {field_path!r}")
+    prefix, rest = field_path.split(".options.", 1)
+    keys = rest.split(".")
+    if prefix == "source":
+        container = _source_options(config)
+    elif prefix.startswith("node:"):
+        container = _node_options(config, prefix[len("node:") :])
+    elif prefix.startswith("output:"):
+        container = _output_options(config, prefix[len("output:") :])
+    else:
+        raise ValueError(f"Unrecognised blob inline field_path prefix: {prefix!r}")
+    _assign_nested_option(container, keys, value)
+
+
+def _source_options(config: dict[str, Any]) -> dict[str, Any]:
+    source = config["source"]
+    if type(source) is not dict:
+        raise TypeError("source must be a mapping")
+    source_dict = cast(dict[str, object], source)
+    options = source_dict["options"]
+    if type(options) is not dict:
+        raise TypeError("source.options must be a mapping")
+    return cast(dict[str, Any], options)
+
+
+def _node_options(config: dict[str, Any], node_name: str) -> dict[str, Any]:
+    for collection_key in _NODE_COLLECTION_KEYS:
+        if collection_key not in config:
+            continue
+        nodes = config[collection_key]
+        if type(nodes) is not list:
+            continue
+        for node in cast(list[object], nodes):
+            if type(node) is not dict:
+                continue
+            node_dict = cast(dict[str, object], node)
+            if "name" not in node_dict or node_dict["name"] != node_name:
+                continue
+            if "options" not in node_dict:
+                raise KeyError(f"Node {node_name!r} has no options mapping")
+            options = node_dict["options"]
+            if type(options) is not dict:
+                raise TypeError(f"Node {node_name!r}.options must be a mapping")
+            return cast(dict[str, Any], options)
+    raise KeyError(f"Node {node_name!r} not found")
+
+
+def _output_options(config: dict[str, Any], output_name: str) -> dict[str, Any]:
+    for collection_key in _OUTPUT_COLLECTION_KEYS:
+        if collection_key not in config:
+            continue
+        outputs = config[collection_key]
+        if type(outputs) is not dict:
+            continue
+        outputs_dict = cast(dict[str, object], outputs)
+        if output_name not in outputs_dict:
+            continue
+        output = outputs_dict[output_name]
+        if type(output) is not dict:
+            raise TypeError(f"Output {output_name!r} must be a mapping")
+        output_dict = cast(dict[str, object], output)
+        if "options" not in output_dict:
+            raise KeyError(f"Output {output_name!r} has no options mapping")
+        options = output_dict["options"]
+        if type(options) is not dict:
+            raise TypeError(f"Output {output_name!r}.options must be a mapping")
+        return cast(dict[str, Any], options)
+    raise KeyError(f"Output {output_name!r} not found")
+
+
+def _assign_nested_option(container: dict[str, Any], keys: list[str], value: str) -> None:
+    current = container
+    for key in keys[:-1]:
+        child = current[key]
+        if type(child) is not dict:
+            raise TypeError(f"Inline blob path segment {key!r} must point to a mapping")
+        current = cast(dict[str, Any], child)
+    current[keys[-1]] = value
 
 
 def _walk_source(

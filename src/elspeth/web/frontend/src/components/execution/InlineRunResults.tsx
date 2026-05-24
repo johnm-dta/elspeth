@@ -12,7 +12,14 @@ import { ProgressView } from "@/components/execution/ProgressView";
 import { RunOutputsPanel } from "@/components/inspector/RunOutputsPanel";
 import { NarrativeResults } from "@/components/composer/NarrativeResults";
 import { useNarrativeMode } from "@/hooks/useNarrativeMode";
-import { isTerminalRunStatus, type Run, type RunProgress, type RunStatus } from "@/types/index";
+import {
+  isTerminalRunStatus,
+  type DiscardStageSummary,
+  type DiscardSummary,
+  type Run,
+  type RunProgress,
+  type RunStatus,
+} from "@/types/index";
 import { RunsHistoryDrawer } from "./RunsHistoryDrawer";
 
 function statusLabel(status: RunStatus | null): string {
@@ -54,7 +61,97 @@ function runSummaryParts(
   if (failed !== null) {
     parts.push(`${failed} failed`);
   }
+  const discardTotal = run?.discard_summary?.total ?? 0;
+  if (discardTotal > 0) {
+    parts.push(`${discardTotal} discarded`);
+  }
   return parts;
+}
+
+function pluralRows(count: number): string {
+  return `${count} ${count === 1 ? "row" : "rows"}`;
+}
+
+function sourceValidationFallbackStage(summary: DiscardSummary): DiscardStageSummary | null {
+  if (summary.validation_errors <= 0) return null;
+  return {
+    stage: "source_validation",
+    node_id: null,
+    count: summary.validation_errors,
+  };
+}
+
+function transformValidationFallbackStage(summary: DiscardSummary): DiscardStageSummary | null {
+  if (summary.transform_errors <= 0) return null;
+  return {
+    stage: "transform_validation",
+    node_id: null,
+    count: summary.transform_errors,
+  };
+}
+
+function sinkDiscardFallbackStage(summary: DiscardSummary): DiscardStageSummary | null {
+  if (summary.sink_discards <= 0) return null;
+  return {
+    stage: "sink_discard",
+    node_id: null,
+    count: summary.sink_discards,
+  };
+}
+
+function primaryDiscardStage(summary: DiscardSummary): DiscardStageSummary | null {
+  const stages = summary.stages ?? [];
+  return (
+    stages.find((stage) => stage.stage === "source_validation") ??
+    stages.find((stage) => stage.stage === "transform_validation") ??
+    stages.find((stage) => stage.stage === "sink_discard") ??
+    sourceValidationFallbackStage(summary) ??
+    transformValidationFallbackStage(summary) ??
+    sinkDiscardFallbackStage(summary)
+  );
+}
+
+function discardStageLabel(stage: DiscardStageSummary): string {
+  switch (stage.stage) {
+    case "source_validation":
+      return "source validation";
+    case "transform_validation":
+      return "transform validation";
+    case "sink_discard":
+      return "sink discard handling";
+  }
+}
+
+function discardCauseText(stage: DiscardStageSummary): string {
+  switch (stage.stage) {
+    case "source_validation":
+      return "Common causes: source schema declares fields the input data does not contain; CSV header mismatch; on_validation_failure: \"discard\" is dropping rows.";
+    case "transform_validation":
+      return "Common causes: transform output did not match its declared schema; error routing sends invalid rows to discard; upstream fields changed shape.";
+    case "sink_discard":
+      return "Common causes: sink write failure handling routed rows to discard before an output artifact was produced.";
+  }
+}
+
+function DiscardSummaryWarning({ run }: { run: Run | null }): JSX.Element | null {
+  const summary = run?.discard_summary;
+  if (!run || !summary || summary.total <= 0) return null;
+  const stage = primaryDiscardStage(summary);
+  if (!stage) return null;
+  const nodeSuffix = stage.node_id ? ` (${stage.node_id})` : "";
+  const terminalNote =
+    run.status === "empty"
+      ? "Run terminated empty."
+      : "Run completed with discarded rows.";
+  return (
+    <div role="alert" className="discard-summary-warning">
+      <strong>
+        {pluralRows(stage.count)} discarded at {discardStageLabel(stage)}
+        {nodeSuffix}. {terminalNote}
+      </strong>
+      <span>{discardCauseText(stage)} View diagnostics for the first failed row's error message.</span>
+    </div>
+  );
 }
 
 export function InlineRunResults(): JSX.Element | null {
@@ -150,6 +247,7 @@ export function InlineRunResults(): JSX.Element | null {
         </div>
       </div>
 
+      {!isCollapsed && <DiscardSummaryWarning run={displayRun} />}
       {!isCollapsed && showProgress && <ProgressView />}
       {!isCollapsed && outputRunId && <NarrativeResultsBranch runId={outputRunId} />}
 

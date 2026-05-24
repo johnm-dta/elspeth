@@ -656,6 +656,75 @@ describe("executionStore progress events advance live accounting", () => {
       finished_at: "2026-04-26T05:32:08.000Z",
     });
   });
+
+  it("refreshes the run list after terminal completion so discard summaries reach the UI", async () => {
+    const close = vi.fn();
+    const accounting = makeAccounting({
+      source: { rows_processed: 0 },
+      tokens: {
+        emitted: 0,
+        terminal: 0,
+        succeeded: 0,
+        failed: 0,
+        structural: 0,
+        pending: 0,
+      },
+    });
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    const { fetchRuns } = await import("@/api/client");
+    (fetchRuns as ReturnType<typeof vi.fn>).mockResolvedValue([
+      makeRun({
+        id: "run-1",
+        status: "empty",
+        accounting,
+        discard_summary: {
+          total: 2,
+          validation_errors: 2,
+          transform_errors: 0,
+          sink_discards: 0,
+          stages: [
+            {
+              stage: "source_validation",
+              node_id: "source_csv_upload",
+              count: 2,
+            },
+          ],
+        },
+      }),
+    ]);
+    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      progress: {
+        source_rows_processed: 0,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        accounting: null,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    const completedEvent: RunEvent = {
+      run_id: "run-1",
+      timestamp: "2026-04-26T05:32:08.000Z",
+      event_type: "completed",
+      data: {
+        status: "empty",
+        accounting,
+        landscape_run_id: "landscape-run-1",
+      },
+    };
+    handlers.onComplete(completedEvent, completedEvent.data);
+
+    expect(fetchRuns).toHaveBeenCalledWith("session-1");
+  });
 });
 
 describe("executionStore run diagnostics", () => {

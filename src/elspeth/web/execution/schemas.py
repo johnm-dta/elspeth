@@ -507,6 +507,14 @@ if _mapping_keys != _literal_values:
 del _event_type_literal, _mapping_keys, _literal_values
 
 
+class DiscardStageSummary(_StrictResponse):
+    """Per-stage contribution to a virtual discard sink summary."""
+
+    stage: Literal["source_validation", "transform_validation", "sink_discard"]
+    node_id: str | None
+    count: int = Field(ge=1)
+
+
 class DiscardSummary(_StrictResponse):
     """Counts routed to the virtual ``discard`` sink.
 
@@ -516,12 +524,16 @@ class DiscardSummary(_StrictResponse):
     ``token_outcomes.sink_name='__discard__'`` rows for sink-write
     diversions.  ``total`` is stored explicitly in the response so clients
     can render the visible virtual sink without duplicating the arithmetic.
+    ``stages`` carries the node/stage attribution needed for operator-facing
+    copy; it is optional at construction time so older route-level tests that
+    inject prebuilt summaries remain focused on their endpoint contracts.
     """
 
     total: int = Field(ge=0)
     validation_errors: int = Field(ge=0)
     transform_errors: int = Field(ge=0)
     sink_discards: int = Field(ge=0)
+    stages: tuple[DiscardStageSummary, ...] = Field(default_factory=tuple)
 
     @model_validator(mode="after")
     def _check_total(self) -> Self:
@@ -533,6 +545,28 @@ class DiscardSummary(_StrictResponse):
                 f"+ transform_errors({self.transform_errors}) "
                 f"+ sink_discards({self.sink_discards}) = {expected}"
             )
+        if self.stages:
+            stage_totals = {
+                "source_validation": 0,
+                "transform_validation": 0,
+                "sink_discard": 0,
+            }
+            for stage in self.stages:
+                stage_totals[stage.stage] += stage.count
+            if stage_totals["source_validation"] != self.validation_errors:
+                raise ValueError(
+                    "Discard source_validation stage count mismatch: "
+                    f"{stage_totals['source_validation']} != validation_errors({self.validation_errors})"
+                )
+            if stage_totals["transform_validation"] != self.transform_errors:
+                raise ValueError(
+                    "Discard transform_validation stage count mismatch: "
+                    f"{stage_totals['transform_validation']} != transform_errors({self.transform_errors})"
+                )
+            if stage_totals["sink_discard"] != self.sink_discards:
+                raise ValueError(
+                    f"Discard sink_discard stage count mismatch: {stage_totals['sink_discard']} != sink_discards({self.sink_discards})"
+                )
         return self
 
 

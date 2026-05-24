@@ -103,7 +103,7 @@ def test_validate_returns_structured_violation_for_missing_inline_blob(tmp_path:
 
 @pytest.mark.asyncio
 async def test_execution_service_validate_state_passes_blob_metadata_bridge(tmp_path: Path) -> None:
-    blob_service = MagicMock()
+    blob_service = MagicMock(spec=object)
     blob_service.get_blob = AsyncMock(side_effect=BlobNotFoundError(str(BLOB_ID)))
     loop = asyncio.get_running_loop()
     service = ExecutionServiceImpl(
@@ -117,7 +117,7 @@ async def test_execution_service_validate_state_passes_blob_metadata_bridge(tmp_
             composer_rate_limit_per_minute=60,
             shareable_link_signing_key=SecretBytes(b"\x00" * 32),
         ),
-        session_service=MagicMock(),
+        session_service=MagicMock(spec=object),
         yaml_generator=composer_yaml_generator,
         telemetry=build_sessions_telemetry(),
         blob_service=blob_service,

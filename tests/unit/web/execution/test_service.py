@@ -723,11 +723,11 @@ class TestB2ShutdownEvent:
         mock_session_service: MagicMock,
     ) -> None:
         mock_load.return_value = _mock_pipeline_settings()
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
-        mock_bundle.source_settings = MagicMock()
+        mock_bundle = MagicMock(spec=object)
+        mock_bundle.source = MagicMock(spec=object)
+        mock_bundle.source_settings = MagicMock(spec=object)
         mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
+        mock_bundle.sinks = {"primary": MagicMock(spec=object)}
         mock_bundle.aggregations = {}
         mock_instantiate.return_value = mock_bundle
         mock_graph = MagicMock()
@@ -735,9 +735,9 @@ class TestB2ShutdownEvent:
         shutdown_event = threading.Event()
         run_id = uuid4()
 
-        mock_orch = MagicMock()
+        mock_orch = MagicMock(spec=["run"])
         mock_orch_cls.return_value = mock_orch
-        mock_result = MagicMock()
+        mock_result = MagicMock(spec=object)
         mock_result.run_id = str(run_id)
         mock_result.status = RunStatus.COMPLETED
         mock_result.rows_processed = 10
@@ -860,7 +860,7 @@ class TestInlineBlobRuntimePreflight:
         sha256 = hashlib.sha256(content).hexdigest()
         order: list[str] = []
 
-        blob_record = MagicMock()
+        blob_record = MagicMock(spec=object)
         blob_record.mime_type = "text/plain"
         blob_record.size_bytes = len(content)
 
@@ -878,11 +878,11 @@ class TestInlineBlobRuntimePreflight:
         async def record_blob_inline_resolutions(*_args: Any, **_kwargs: Any) -> None:
             order.append("record")
 
-        blob_service = MagicMock()
+        blob_service = MagicMock(spec=object)
         blob_service.link_blob_to_run = AsyncMock(side_effect=link_blob_to_run)
         blob_service.read_blob_content = AsyncMock(side_effect=read_blob_content)
         blob_service.get_blob = AsyncMock(side_effect=get_blob)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
         cast(Any, service)._blob_service = blob_service
         mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
 
@@ -896,14 +896,14 @@ class TestInlineBlobRuntimePreflight:
 
         mock_load.side_effect = load_settings
 
-        mock_bundle = MagicMock()
-        mock_bundle.source = MagicMock()
+        mock_bundle = MagicMock(spec=object)
+        mock_bundle.source = MagicMock(spec=object)
         mock_bundle.transforms = ()
-        mock_bundle.sinks = {"primary": MagicMock()}
+        mock_bundle.sinks = {"primary": MagicMock(spec=object)}
         mock_bundle.aggregations = {}
-        mock_runtime = MagicMock()
+        mock_runtime = MagicMock(spec=object)
         mock_runtime.plugin_bundle = mock_bundle
-        mock_runtime.graph = MagicMock()
+        mock_runtime.graph = MagicMock(spec=object)
         mock_runtime_graph.return_value = mock_runtime
 
         mock_orch = MagicMock()
@@ -976,15 +976,15 @@ sinks:
         run_id = uuid4()
         sha256 = hashlib.sha256(content).hexdigest()
 
-        blob_record = MagicMock()
+        blob_record = MagicMock(spec=object)
         blob_record.mime_type = "text/plain"
         blob_record.size_bytes = len(content)
 
-        blob_service = MagicMock()
+        blob_service = MagicMock(spec=object)
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
         blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
         cast(Any, service)._blob_service = blob_service
         mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=AuditIntegrityError("audit write refused"))
 
@@ -1036,18 +1036,18 @@ sinks:
         content = b"actual prompt bytes"
         blob_id = uuid4()
         run_id = uuid4()
-        hash_counter = MagicMock()
+        hash_counter = MagicMock(spec=["add"])
         monkeypatch.setattr(service_module, "_BLOB_INLINE_HASH_MISMATCH_TOTAL", hash_counter)
 
-        blob_record = MagicMock()
+        blob_record = MagicMock(spec=object)
         blob_record.mime_type = "text/plain"
         blob_record.size_bytes = len(content)
 
-        blob_service = MagicMock()
+        blob_service = MagicMock(spec=object)
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
         blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
         cast(Any, service)._blob_service = blob_service
 
         pipeline_yaml = f"""

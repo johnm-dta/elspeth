@@ -605,7 +605,7 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
 
     app, service = _make_app(tmp_path)
     app.state.session_engine = service._engine
-    catalog = MagicMock()
+    catalog = MagicMock(spec=["list_sources", "list_transforms", "list_sinks", "get_schema"])
     catalog.list_sources.return_value = [
         PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
     ]
@@ -717,7 +717,7 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
 
     app, service = _make_app(tmp_path)
     app.state.session_engine = service._engine
-    catalog = MagicMock()
+    catalog = MagicMock(spec=["get_schema"])
     catalog.get_schema.return_value = PluginSchemaInfo(
         name="csv",
         plugin_type="source",

@@ -3129,23 +3129,30 @@ sinks:
     @staticmethod
     def _execution_service(tmp_path: Path) -> tuple[ExecutionServiceImpl, MagicMock, asyncio.AbstractEventLoop]:
         loop = asyncio.new_event_loop()
-        settings = MagicMock()
+        settings = MagicMock(
+            spec=[
+                "get_landscape_url",
+                "get_payload_store_path",
+                "landscape_passphrase",
+                "data_dir",
+            ]
+        )
         settings.get_landscape_url.return_value = "sqlite:///:memory:"
         settings.get_payload_store_path.return_value = tmp_path / "payloads"
         settings.landscape_passphrase = None
         settings.data_dir = str(tmp_path)
 
-        session_service = MagicMock()
+        session_service = MagicMock(spec=["update_run_status", "get_run", "record_blob_inline_resolutions"])
         session_service.update_run_status = AsyncMock()
-        session_service.get_run = AsyncMock(return_value=MagicMock(status="running"))
+        session_service.get_run = AsyncMock(return_value=MagicMock(spec=object, status="running"))
         session_service.record_blob_inline_resolutions = AsyncMock()
 
         service = ExecutionServiceImpl(
-            loop=MagicMock(),
-            broadcaster=cast(Any, MagicMock()),
+            loop=MagicMock(spec=object),
+            broadcaster=cast(Any, MagicMock(spec=["broadcast", "cleanup_run"])),
             settings=settings,
             session_service=session_service,
-            yaml_generator=MagicMock(),
+            yaml_generator=MagicMock(spec=object),
             telemetry=build_sessions_telemetry(),
         )
 
@@ -3189,14 +3196,14 @@ sinks:
         content = b"actual prompt bytes"
         blob_id = uuid4()
         run_id = uuid4()
-        blob_record = MagicMock()
+        blob_record = MagicMock(spec=object)
         blob_record.mime_type = "text/plain"
         blob_record.size_bytes = len(content)
-        blob_service = MagicMock()
+        blob_service = MagicMock(spec=object)
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
         blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
         cast(Any, service)._blob_service = blob_service
 
         try:
@@ -3226,14 +3233,14 @@ sinks:
         run_id = uuid4()
         order: list[str] = []
 
-        blob_record = MagicMock()
+        blob_record = MagicMock(spec=object)
         blob_record.mime_type = "text/plain"
         blob_record.size_bytes = len(content)
-        blob_service = MagicMock()
+        blob_service = MagicMock(spec=object)
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
         blob_service.get_blob = AsyncMock(return_value=blob_record)
-        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(errors=[]))
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
         cast(Any, service)._blob_service = blob_service
 
         async def record_blob_inline_resolutions(*_args: Any, **_kwargs: Any) -> None:

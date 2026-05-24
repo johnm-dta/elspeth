@@ -149,8 +149,8 @@ class TestResumeFinalizesAsFailed:
         run_id = "run-empty-coalesce-state"
         empty_coalesce_state = CoalesceCheckpointState(version="4.0", pending=(), completed_keys=())
         mock_factory = MagicMock(spec=RecorderFactory)
-        mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock()
-        mock_factory.run_lifecycle.finalize_run = MagicMock()
+        mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock(spec=object)
+        mock_factory.run_lifecycle.finalize_run = MagicMock(spec=object)
 
         checkpoint = Checkpoint(
             checkpoint_id="cp-empty-coalesce-state",
@@ -176,7 +176,7 @@ class TestResumeFinalizesAsFailed:
             restored_aggregation_state={},
             restored_coalesce_state=empty_coalesce_state,
             unprocessed_rows=(),
-            schema_contract=MagicMock(),
+            schema_contract=MagicMock(spec=object),
         )
 
         with (
@@ -192,8 +192,8 @@ class TestResumeFinalizesAsFailed:
         ):
             result = orch.resume(
                 resume_point,
-                MagicMock(),
-                MagicMock(),
+                MagicMock(spec=object),
+                MagicMock(spec=object),
                 payload_store=MockPayloadStore(),
             )
 

@@ -12,6 +12,7 @@ import pytest
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
     InterpretationEventRecord,
+    InterpretationKind,
     InterpretationSource,
 )
 from elspeth.contracts.secrets import SecretInventoryItem
@@ -245,6 +246,7 @@ def _make_event(
             affected_node_id=None,
             tool_call_id=None,
             user_term=None,
+            kind=None,
             llm_draft=None,
             accepted_value=None,
             choice=InterpretationChoice.OPTED_OUT,
@@ -270,6 +272,7 @@ def _make_event(
             affected_node_id=None,
             tool_call_id=None,
             user_term=None,
+            kind=InterpretationKind.VAGUE_TERM,
             llm_draft=None,
             accepted_value=None,
             choice=InterpretationChoice.OPTED_OUT,
@@ -296,6 +299,7 @@ def _make_event(
         affected_node_id=affected_node_id,
         tool_call_id="tc_1",
         user_term=user_term,
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="something cool",
         accepted_value="something cool" if resolved else None,
         choice=choice,

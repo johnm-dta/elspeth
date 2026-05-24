@@ -19,7 +19,7 @@ def _read_allowlist(path: Path) -> list[dict[str, Any]]:
     return list(data.get("allow_hits", []))
 
 
-def test_main_writes_todo_entry_for_new_only_violation(tmp_path: Path, monkeypatch: Any) -> None:
+def test_main_writes_bounded_entry_for_new_only_violation(tmp_path: Path, monkeypatch: Any) -> None:
     allowlist_dir = tmp_path / "config" / "cicd" / "enforce_tier_model"
     core_yaml = _write_allowlist(allowlist_dir, "core", [])
     monkeypatch.setattr(rotator, "ALLOWLIST_DIR", allowlist_dir)
@@ -46,13 +46,13 @@ def test_main_writes_todo_entry_for_new_only_violation(tmp_path: Path, monkeypat
     assert entries == [
         {
             "key": "core/runtime.py:R1:RuntimeBoundary:load:fp=abc123",
-            "owner": "TODO",
+            "owner": "trust-tier-maintenance",
             "reason": (
-                "TODO — fingerprint rotation without matching stale entry; review whether this is a new violation "
-                "that needs an explicit allowlist entry or a fix"
+                "ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint rotation; review whether "
+                "this is new debt that needs a source fix or a more specific justification"
             ),
-            "safety": "TODO",
-            "expires": None,
+            "safety": "Exact-fingerprint allowlist entry only; bounded expiry forces follow-up review instead of adding permanent debt",
+            "expires": "2026-08-24",
         }
     ]
 

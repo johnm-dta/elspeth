@@ -1003,6 +1003,19 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
     ),
     # ------ tests/unit/web/composer/* — blob-provenance user-message fixtures ------
     ReviewedWriter(
+        path="tests/unit/web/composer/test_blob_inline_tools.py",
+        enclosing_symbol="blob_env",
+        table="chat_messages",
+        operation="sqlalchemy_table_insert",
+        purpose=(
+            "inline-blob tool fixture: seeds the route-level user message "
+            "that blob provenance requires before exercising the production "
+            "blob tool handlers. The fixture owns the in-memory SQLite engine "
+            "and exists only to provide the immutable created_from_message_id "
+            "anchor for attribution assertions."
+        ),
+    ),
+    ReviewedWriter(
         path="tests/unit/web/composer/test_agent_tooling.py",
         enclosing_symbol="_insert_user_message",
         table="chat_messages",
@@ -1093,6 +1106,31 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         ),
     ),
     # ------ tests/unit/web/sessions/* — targeted chat transcript fixtures ------
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_blob_inline_resolutions_schema.py",
+        enclosing_symbol="_seed_run_and_blob",
+        table="composition_states",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "blob-inline-resolution schema fixture: seeds a composition_states "
+            "parent row so blob_inline_resolutions FK and CHECK constraints can "
+            "be exercised directly. The test owns the in-memory SQLite engine "
+            "and is pinning schema behaviour, not the production session writer."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/sessions/test_record_blob_inline_resolutions.py",
+        enclosing_symbol="_seed_run_and_blob",
+        table="composition_states",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "record_blob_inline_resolutions service fixture: seeds the parent "
+            "composition_states row required by the audit table FK before "
+            "exercising the production SessionServiceImpl audit writer. Direct "
+            "setup keeps the test focused on the audit write and DB-failure "
+            "behaviour."
+        ),
+    ),
     ReviewedWriter(
         path="tests/unit/web/sessions/test_count_tool_responses_for_assistant.py",
         enclosing_symbol="_persist_assistant_with_tools",

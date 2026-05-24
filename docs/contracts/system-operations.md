@@ -108,6 +108,27 @@ class SourceQuarantineReason(TypedDict):
 RoutingReason = ConfigGateReason | TransformErrorReason | SourceQuarantineReason
 ```
 
+### Multi-Source Fan-In Policy
+
+Direct multi-source fan-in to a sink is allowed without an explicit queue.
+Sinks are terminal write boundaries, not ordinary processing nodes. They do
+not transform, aggregate, gate, fork, or coalesce row contents; they persist a
+terminal result that already carries source attribution through `row_id` and
+`source_node_id`.
+
+`ingest_sequence` remains the ordering authority for direct sink fan-in. In
+the RC6 contract, sources are ingested sequentially in YAML declaration order,
+and the durable scheduler claims ready work by `ingest_sequence` before later
+step-order tiebreakers. A sink receiving rows from multiple sources therefore
+sees deterministic run order, but it is not a join primitive: it must not be
+used to correlate rows from different sources.
+
+Transforms, aggregations, and gates still require an explicit `queue` before
+multi-source fan-in. Those nodes execute logic over row data, so accepting
+multiple producers without a queue would hide the ordering/batching decision
+inside ordinary processing. Coalesce remains a same-`row_id` branch-merge
+primitive, not a cross-source join.
+
 ---
 
 ## Gates

@@ -102,6 +102,37 @@ class TestTypedEdgeContracts:
         ]
 
 
+class TestMultiProducerFanInValidation:
+    """Multi-producer fan-in policy distinguishes terminal sinks from processing nodes."""
+
+    def test_multi_source_direct_sink_fan_in_is_valid(self) -> None:
+        """Direct multi-source sink fan-in is terminal write policy, not QUEUE bypass."""
+        graph = ExecutionGraph()
+        graph.add_node("orders", node_type=NodeType.SOURCE, plugin_name="csv")
+        graph.add_node("refunds", node_type=NodeType.SOURCE, plugin_name="csv")
+        graph.add_node("audit_sink", node_type=NodeType.SINK, plugin_name="json")
+
+        graph.add_edge("orders", "audit_sink", label="orders_out", mode=RoutingMode.MOVE)
+        graph.add_edge("refunds", "audit_sink", label="refunds_out", mode=RoutingMode.MOVE)
+
+        graph.validate()
+
+    def test_multi_source_processing_node_fan_in_requires_queue(self) -> None:
+        """Ordinary processing nodes still require explicit QUEUE fan-in."""
+        graph = ExecutionGraph()
+        graph.add_node("orders", node_type=NodeType.SOURCE, plugin_name="csv")
+        graph.add_node("refunds", node_type=NodeType.SOURCE, plugin_name="csv")
+        graph.add_node("normalize", node_type=NodeType.TRANSFORM, plugin_name="mapper")
+        graph.add_node("audit_sink", node_type=NodeType.SINK, plugin_name="json")
+
+        graph.add_edge("orders", "normalize", label="orders_out", mode=RoutingMode.MOVE)
+        graph.add_edge("refunds", "normalize", label="refunds_out", mode=RoutingMode.MOVE)
+        graph.add_edge("normalize", "audit_sink", label="normalized", mode=RoutingMode.MOVE)
+
+        with pytest.raises(GraphValidationError, match="fan-in from multiple producers without a queue"):
+            graph.validate()
+
+
 # ---------------------------------------------------------------------------
 # Gap 3: NodeInfo.__post_init__ node_id length validation
 # ---------------------------------------------------------------------------
@@ -263,37 +294,40 @@ class TestTopologicalOrderCycleDetection:
 
 
 # ---------------------------------------------------------------------------
-# Gap 5: get_source() with zero and multiple sources
+# Gap 5: get_sources() with zero and multiple sources
 # ---------------------------------------------------------------------------
 
 
 class TestGetSourceErrorPaths:
-    """get_source() must raise GraphValidationError when source count != 1.
-
-    The method documents this as a "construction bug" signal. Tests verify
-    both the zero-source and multi-source cases.
-    """
+    """get_sources() exposes the current multi-source graph contract."""
 
     def test_no_sources_raises(self) -> None:
-        """Graph with only non-source nodes must raise."""
+        """Graph validation rejects a graph with no source nodes."""
         graph = ExecutionGraph()
         graph.add_node("t1", node_type=NodeType.TRANSFORM, plugin_name="passthrough")
+        graph.add_node("sink", node_type=NodeType.SINK, plugin_name="json")
+        graph.add_edge("t1", "sink", label="out", mode=RoutingMode.MOVE)
 
-        with pytest.raises(GraphValidationError, match=r"Expected exactly 1 source.*found 0"):
-            graph.get_sources()[0]
+        assert graph.get_sources() == []
+        with pytest.raises(GraphValidationError, match="Graph must have at least one source"):
+            graph.validate()
 
-    def test_multiple_sources_raises(self) -> None:
-        """Graph with two source nodes must raise."""
+    def test_multiple_sources_are_returned(self) -> None:
+        """Graph with two source nodes is valid in the multi-source model."""
         graph = ExecutionGraph()
         graph.add_node("src_a", node_type=NodeType.SOURCE, plugin_name="csv")
         graph.add_node("src_b", node_type=NodeType.SOURCE, plugin_name="csv")
+        graph.add_node("sink", node_type=NodeType.SINK, plugin_name="json")
+        graph.add_edge("src_a", "sink", label="src_a_out", mode=RoutingMode.MOVE)
+        graph.add_edge("src_b", "sink", label="src_b_out", mode=RoutingMode.MOVE)
 
-        with pytest.raises(GraphValidationError, match=r"Expected exactly 1 source.*found 2"):
-            graph.get_sources()[0]
+        assert graph.get_sources() == [NodeID("src_a"), NodeID("src_b")]
+        graph.validate()
 
     def test_empty_graph_raises(self) -> None:
-        """Completely empty graph has zero sources."""
+        """Completely empty graph has zero sources and fails validation."""
         graph = ExecutionGraph()
 
-        with pytest.raises(GraphValidationError, match=r"Expected exactly 1 source.*found 0"):
-            graph.get_sources()[0]
+        assert graph.get_sources() == []
+        with pytest.raises(GraphValidationError, match="Graph must have at least one source"):
+            graph.validate()

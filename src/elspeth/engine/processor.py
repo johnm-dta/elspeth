@@ -302,6 +302,8 @@ class RowProcessor:
 
         result = processor.process_row(
             row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
             source_row=SourceRow.valid({"value": 42}, contract=contract),
             transforms=[transform1, transform2],
             ctx=ctx,
@@ -455,9 +457,7 @@ class RowProcessor:
         self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
         self._scheduler_lease_seconds = scheduler_lease_seconds
         if scheduler_heartbeat_seconds <= 0:
-            raise OrchestrationInvariantError(
-                f"scheduler_heartbeat_seconds must be positive, got {scheduler_heartbeat_seconds}"
-            )
+            raise OrchestrationInvariantError(f"scheduler_heartbeat_seconds must be positive, got {scheduler_heartbeat_seconds}")
         if scheduler_heartbeat_seconds >= scheduler_lease_seconds:
             raise OrchestrationInvariantError(
                 f"scheduler_heartbeat_seconds ({scheduler_heartbeat_seconds}) must be less than "
@@ -2019,8 +2019,8 @@ class RowProcessor:
         source_node_id: NodeID | None = None,
         source_plugin: SourceProtocol | None = None,
         source_on_success: str | None = None,
-        source_row_index: int | None = None,
-        ingest_sequence: int | None = None,
+        source_row_index: int,
+        ingest_sequence: int,
     ) -> list[RowResult]:
         """Process a row through all transforms.
 
@@ -2038,6 +2038,10 @@ class RowProcessor:
             source_on_success: Source-specific terminal sink. Required by
                 multi-source callers when a source row may terminalize without
                 entering a transform.
+            source_row_index: Position within the active source stream. Required
+                to preserve per-source row identity in the audit trail.
+            ingest_sequence: Global ingest-order position across all sources.
+                Required to preserve deterministic resume ordering.
 
         Returns:
             List of RowResults, one per terminal token (parent + children)

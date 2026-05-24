@@ -1,7 +1,8 @@
 # tests/unit/engine/test_tokens.py
 """Tests for TokenManager."""
 
-from typing import Any
+import inspect
+from typing import Any, get_type_hints
 
 import pytest
 
@@ -860,44 +861,24 @@ class TestTokenManagerExpand:
 class TestTokenManagerBoundaryPaths:
     """Coverage for error guards and quarantine/resume token paths."""
 
+    def test_source_identity_parameters_are_required_by_signature(self) -> None:
+        from elspeth.engine.tokens import TokenManager
+
+        for method_name in ("create_initial_token", "create_quarantine_token"):
+            signature = inspect.signature(getattr(TokenManager, method_name))
+            type_hints = get_type_hints(getattr(TokenManager, method_name))
+            for parameter_name in ("source_row_index", "ingest_sequence"):
+                parameter = signature.parameters[parameter_name]
+                assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+                assert parameter.default is inspect.Parameter.empty
+                assert type_hints[parameter_name] is int
+
     def test_create_initial_token_requires_contract(self) -> None:
         # Since elspeth-a27e71979f, SourceRow.__post_init__ rejects contract=None
         # at construction time, so the engine's guard is now unreachable via
         # normal construction. Verify the earlier guard fires instead.
         with pytest.raises(TypeError, match="contract"):
             SourceRow.valid({"value": 42})
-
-    def test_create_initial_token_requires_explicit_source_identity(self) -> None:
-        manager, _factory, run_id, source_node_id = _make_manager_context()
-
-        with pytest.raises(
-            OrchestrationInvariantError,
-            match=r"TokenManager requires explicit source row identity.*source_row_index.*ingest_sequence",
-        ):
-            manager.create_initial_token(
-                run_id=run_id,
-                source_node_id=source_node_id,
-                row_index=0,
-                source_row=_make_source_row({"value": 42}),
-            )
-
-    def test_create_quarantine_token_requires_explicit_source_identity(self) -> None:
-        manager, _factory, run_id, source_node_id = _make_manager_context()
-
-        with pytest.raises(
-            OrchestrationInvariantError,
-            match=r"TokenManager requires explicit source row identity.*source_row_index.*ingest_sequence",
-        ):
-            manager.create_quarantine_token(
-                run_id=run_id,
-                source_node_id=source_node_id,
-                row_index=0,
-                source_row=SourceRow.quarantined(
-                    row={"raw": "invalid"},
-                    error="bad data",
-                    destination="quarantine",
-                ),
-            )
 
     def test_create_quarantine_token_rejects_non_quarantined_source_row(self) -> None:
         manager, _factory, run_id, source_node_id = _make_manager_context()

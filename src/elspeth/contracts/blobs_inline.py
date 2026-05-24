@@ -29,6 +29,9 @@ BlobRefMode = Literal["bind_source", "inline_content"]
 ALLOWED_BLOB_REF_MODES: frozenset[str] = frozenset(get_args(BlobRefMode))
 """Runtime view derived from ``BlobRefMode`` to prevent drift."""
 
+BlobInlineValidationCategory = Literal["missing", "oversized", "not_ready", "hash_mismatch", "malformed"]
+"""Validation failure categories for inline-content blob refs."""
+
 _SHA256_HEX_PATTERN: Final = re.compile(r"^[0-9a-f]{64}$")
 _UUID_PATTERN: Final = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _FIELD_PATH_PATTERN: Final = re.compile(
@@ -90,6 +93,15 @@ class BlobInlineRef:
         _validate_sha256(type(self).__name__, self.sha256)
         if self.encoding not in ALLOWED_CONTENT_ENCODINGS:
             raise ValueError(f"{type(self).__name__}: encoding must be one of {sorted(ALLOWED_CONTENT_ENCODINGS)}")
+
+
+@dataclass(frozen=True, slots=True)
+class BlobInlineValidationViolation:
+    """Structured validate-path violation for inline blob content refs."""
+
+    category: BlobInlineValidationCategory
+    field_path: str
+    detail: str
 
 
 @dataclass(frozen=True, slots=True)

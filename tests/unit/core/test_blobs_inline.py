@@ -17,10 +17,9 @@ from elspeth.contracts.blobs import (
     BlobRecord,
     BlobStateError,
 )
-from elspeth.contracts.blobs_inline import BlobContentResolutionError, BlobInlineRef, ResolvedBlobContent
+from elspeth.contracts.blobs_inline import BlobContentResolutionError, BlobInlineRef, BlobInlineValidationViolation, ResolvedBlobContent
 from elspeth.contracts.enums import CreationModality
 from elspeth.core.blobs_inline import (
-    BlobInlineValidationViolation,
     _discover_blob_content_refs,
     _fetch_blob_contents,
     _substitute_blob_content_refs,

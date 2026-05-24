@@ -13,8 +13,7 @@ import asyncio
 import hashlib
 import hmac
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, cast
 from uuid import UUID
 
 from elspeth.contracts.blobs import (
@@ -29,6 +28,7 @@ from elspeth.contracts.blobs import (
 from elspeth.contracts.blobs_inline import (
     BlobContentResolutionError,
     BlobInlineRef,
+    BlobInlineValidationViolation,
     ResolvedBlobContent,
     WidenedBlobRefShape,
     is_widened_blob_ref,
@@ -36,17 +36,6 @@ from elspeth.contracts.blobs_inline import (
 
 _NODE_COLLECTION_KEYS: Final = ("transforms", "gates", "aggregations", "coalesce")
 _OUTPUT_COLLECTION_KEYS: Final = ("outputs", "sinks")
-
-BlobInlineValidationCategory = Literal["missing", "oversized", "not_ready", "hash_mismatch", "malformed"]
-
-
-@dataclass(frozen=True, slots=True)
-class BlobInlineValidationViolation:
-    """Structured validate-path violation for inline blob content refs."""
-
-    category: BlobInlineValidationCategory
-    field_path: str
-    detail: str
 
 
 def _discover_blob_content_refs(config: dict[str, Any]) -> list[BlobInlineRef]:

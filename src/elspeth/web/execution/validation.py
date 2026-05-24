@@ -32,8 +32,9 @@ import yaml
 from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.blobs import BlobRecord
+from elspeth.contracts.blobs_inline import BlobInlineValidationViolation
 from elspeth.contracts.secrets import SecretRefPlacementViolation, WebSecretResolver
-from elspeth.core.blobs_inline import BlobInlineValidationViolation, _validate_blob_content_refs_sync
+from elspeth.core.blobs_inline import _validate_blob_content_refs_sync
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.dag.models import EdgeContractError, GraphValidationError
 from elspeth.core.secrets import (

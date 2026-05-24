@@ -205,6 +205,27 @@ allowed_dict_patterns:
   # Secret refs resolver - walks arbitrary pipeline config trees to replace secret refs
   - "src/elspeth/core/secrets.py:resolve_secret_refs:config"
 
+  # Blob inline resolver - walks arbitrary pipeline YAML trees to discover,
+  # validate, and substitute widened blob_ref markers inside plugin options.
+  # The marker/value grammar is centralized in contracts/blobs_inline.py; the
+  # surrounding config dict remains dynamic because source/node/output plugin
+  # options are open-ended YAML.
+  - "src/elspeth/core/blobs_inline.py:_discover_blob_content_refs:config"
+  - "src/elspeth/core/blobs_inline.py:_validate_blob_content_refs:config"
+  - "src/elspeth/core/blobs_inline.py:_validate_blob_content_refs_sync:config"
+  - "src/elspeth/core/blobs_inline.py:_substitute_blob_content_refs:config"
+  - "src/elspeth/core/blobs_inline.py:_substitute_at_path:config"
+  - "src/elspeth/core/blobs_inline.py:_source_options:config"
+  - "src/elspeth/core/blobs_inline.py:_source_options:return"
+  - "src/elspeth/core/blobs_inline.py:_node_options:config"
+  - "src/elspeth/core/blobs_inline.py:_node_options:return"
+  - "src/elspeth/core/blobs_inline.py:_output_options:config"
+  - "src/elspeth/core/blobs_inline.py:_output_options:return"
+  - "src/elspeth/core/blobs_inline.py:_assign_nested_option:container"
+  - "src/elspeth/core/blobs_inline.py:_walk_source:config"
+  - "src/elspeth/core/blobs_inline.py:_walk_nodes:config"
+  - "src/elspeth/core/blobs_inline.py:_walk_outputs:config"
+
   # Config - runtime configuration dicts
   - "src/elspeth/core/config.py:resolve_config:return"
   - "src/elspeth/core/config.py:_expand_env_vars:config"
@@ -703,7 +724,13 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools/outputs.py:_handle_remove_output:arguments"
   # Blob tool handlers — same pattern as above, LLM-provided arguments
   - "src/elspeth/web/composer/tools/blobs.py:_handle_list_blobs:arguments"
+  - "src/elspeth/web/composer/tools/blobs.py:_handle_list_composer_blobs:arguments"
   - "src/elspeth/web/composer/tools/blobs.py:_handle_get_blob_metadata:arguments"
+  # Blob inline marker patching writes into dynamic plugin option dicts; the
+  # validated marker grammar lives in contracts/blobs_inline.py.
+  - "src/elspeth/web/composer/tools/blobs.py:_set_nested_option:container"
+  - "src/elspeth/web/composer/tools/blobs.py:_set_nested_option:return"
+  - "src/elspeth/web/composer/tools/blobs.py:_apply_inline_blob_marker:marker"
   - "src/elspeth/web/composer/tools/sources.py:_execute_set_source_from_blob:arguments"
   - "src/elspeth/web/composer/tools/sources.py:_execute_inspect_source:arguments"
   - "src/elspeth/web/composer/tools/sessions.py:_execute_apply_pipeline_recipe:arguments"
@@ -752,8 +779,12 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._dispatch_session_aware_tool:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_session_aware_kwargs:arguments"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_session_aware_kwargs:return"
-  # Blob sync helpers — return dicts for tool response payloads
+  # Blob sync helpers — return dicts for LLM-visible tool response payloads.
+  # The list_composer_blobs shape is deliberately metadata-only, enforced by
+  # the construction helper; bytes/previews/storage paths stay outside the
+  # response surface.
   - "src/elspeth/web/composer/tools/blobs.py:_sync_list_blobs:return (list)"
+  - "src/elspeth/web/composer/tools/blobs.py:_sync_list_ready_blob_inline_descriptors:return (list)"
   # Secret tool handlers — same pattern as above, LLM-provided arguments
   - "src/elspeth/web/composer/tools/secrets.py:_handle_list_secret_refs:arguments"
   - "src/elspeth/web/composer/tools/secrets.py:_handle_validate_secret_ref:arguments"
@@ -770,6 +801,7 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools/transforms.py:_handle_patch_node_options:arguments"
   - "src/elspeth/web/composer/tools/outputs.py:_execute_patch_output_options:args"
   - "src/elspeth/web/composer/tools/outputs.py:_handle_patch_output_options:arguments"
+  - "src/elspeth/web/composer/tools/_common.py:_source_options_for_prevalidation:return"
   # Wave 4 tool handlers — same pattern as above, LLM-provided arguments
   - "src/elspeth/web/composer/tools/sources.py:_execute_clear_source:args"
   - "src/elspeth/web/composer/tools/sources.py:_handle_clear_source:arguments"
@@ -785,6 +817,7 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools/blobs.py:_execute_update_blob:arguments"
   - "src/elspeth/web/composer/tools/blobs.py:_execute_delete_blob:arguments"
   - "src/elspeth/web/composer/tools/blobs.py:_execute_get_blob_content:arguments"
+  - "src/elspeth/web/composer/tools/blobs.py:_execute_wire_blob_inline_ref:arguments"
   - "src/elspeth/web/composer/tools/generation.py:_execute_diff_pipeline:args"
   - "src/elspeth/web/composer/tools/sessions.py:_execute_get_pipeline_state:args"
   # Serialization helpers — produce JSON dicts for LLM tool responses

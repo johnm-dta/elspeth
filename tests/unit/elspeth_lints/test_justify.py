@@ -612,6 +612,38 @@ def test_justify_accepted_writes_entry_with_judge_metadata(tmp_path: Path) -> No
     assert entry.judge_recorded_at.tzinfo is not None
 
 
+def test_justify_signed_confidence_round_trips_through_source_root_loader(tmp_path: Path) -> None:
+    """The HMAC signs the exact confidence scalar persisted to YAML."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    confidence = 0.123456789
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "payload is Tier-3 external data from upstream tool-call",
+        "--owner",
+        "test-agent-confidence",
+    ]
+    with _mock_judge_call(verdict="ACCEPTED", rationale="confidence precision matters", confidence=confidence):
+        assert main(argv) == 0
+
+    target_yaml = allowlist_dir / "plugins.yaml"
+    with patch.dict(os.environ, {"ELSPETH_JUDGE_METADATA_HMAC_KEY": "test-judge-metadata-hmac-key-2026-05-24"}, clear=False):
+        loaded = load_allowlist(target_yaml, valid_rule_ids={"R1"}, source_root=root)
+
+    assert len(loaded.entries) == 1
+    assert loaded.entries[0].judge_confidence == pytest.approx(confidence)
+
+
 def test_justify_can_write_trust_boundary_honesty_gate_entry(tmp_path: Path) -> None:
     root = tmp_path / "src_root"
     root.mkdir()
@@ -1150,6 +1182,40 @@ def test_justify_dry_run_never_writes(tmp_path: Path, verdict_str: str) -> None:
     assert exit_code == expected_exit
     target_yaml = allowlist_dir / "plugins.yaml"
     assert not target_yaml.exists()
+
+
+def test_justify_blocked_dry_run_does_not_write_judge_metrics(tmp_path: Path) -> None:
+    """A blocked dry-run must not append C3 decision events."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_root = tmp_path / "config" / "cicd"
+    allowlist_dir = allowlist_root / "enforce_tier_model"
+    allowlist_dir.mkdir(parents=True)
+    (allowlist_dir / "_defaults.yaml").write_text(
+        "version: 1\ndefaults:\n  fail_on_stale: false\n  fail_on_expired: false\n",
+        encoding="utf-8",
+    )
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "I want to preview the judge decision only",
+        "--owner",
+        "test-agent-dry-run",
+        "--dry-run",
+    ]
+    with _mock_judge_call(verdict="BLOCKED", rationale="rationale is shallow; fix the code"):
+        assert main(argv) == 1
+
+    assert not (allowlist_dir / "plugins.yaml").exists()
+    assert not judge_decision_events_path(allowlist_dir).exists()
 
 
 def test_justify_cli_forwards_max_tokens_to_judge(tmp_path: Path) -> None:

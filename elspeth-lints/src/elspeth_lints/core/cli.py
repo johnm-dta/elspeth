@@ -1389,14 +1389,15 @@ def _run_justify(args: argparse.Namespace) -> int:
     # judge's rationale + the model that produced it, do not write, exit
     # non-zero. This is the "judge does not fix" load-bearing constraint.
     if response.verdict == JudgeVerdict.BLOCKED and not args.operator_override:
-        _append_judge_decision_event_after_judge(
-            allowlist_dir=allowlist_dir,
-            finding=finding,
-            effective_verdict=write_verdict,
-            model_verdict=response.verdict,
-            recorded_at=response.recorded_at,
-            write_disposition="blocked_without_override",
-        )
+        if not args.dry_run:
+            _append_judge_decision_event_after_judge(
+                allowlist_dir=allowlist_dir,
+                finding=finding,
+                effective_verdict=write_verdict,
+                model_verdict=response.verdict,
+                recorded_at=response.recorded_at,
+                write_disposition="blocked_without_override",
+            )
         _emit_justify_output(
             args=args,
             verdict=write_verdict,
@@ -1848,6 +1849,7 @@ def _build_yaml_entry_text(
             "missing) and would be rejected by the loader's invariant 7."
         )
 
+    persisted_judge_confidence = _persisted_judge_confidence(judge_confidence)
     judge_metadata_signature = compute_judge_metadata_signature(
         key=key,
         file_fingerprint=file_fingerprint,
@@ -1858,7 +1860,7 @@ def _build_yaml_entry_text(
         judge_model=model_id,
         judge_rationale=judge_rationale,
         judge_policy_hash=policy_hash,
-        judge_confidence=judge_confidence,
+        judge_confidence=persisted_judge_confidence,
         judge_excerpt_redactions=excerpt_redactions,
     )
     expiry = (recorded_at + timedelta(days=90)).date()
@@ -1877,8 +1879,8 @@ def _build_yaml_entry_text(
     lines.append(f"  judge_recorded_at: '{recorded_at.isoformat()}'")
     lines.append(f"  judge_model: {_yaml_inline_scalar(model_id)}")
     lines.append(f"  judge_policy_hash: {_yaml_inline_scalar(policy_hash)}")
-    if judge_confidence is not None:
-        lines.append(f"  judge_confidence: {judge_confidence:.6g}")
+    if persisted_judge_confidence is not None:
+        lines.append(f"  judge_confidence: {persisted_judge_confidence!r}")
     lines.append("  judge_rationale: |-")
     for rationale_line in judge_rationale.splitlines() or [""]:
         lines.append(f"    {rationale_line}")
@@ -1904,6 +1906,12 @@ def _build_yaml_entry_text(
             lines.append(f"      byte_count: {record.byte_count}")
             lines.append(f"      redacted_hash: {_yaml_inline_scalar(record.redacted_hash)}")
     return "\n".join(lines) + "\n"
+
+
+def _persisted_judge_confidence(judge_confidence: float | None) -> float | None:
+    if judge_confidence is None:
+        return None
+    return float(repr(judge_confidence))
 
 
 def _build_audit_review_text(

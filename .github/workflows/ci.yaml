@@ -154,6 +154,7 @@ jobs:
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         env:
           ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
+          ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'shape-only-when-key-missing' || 'required' }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules trust_tier.tier_model \
@@ -163,6 +164,7 @@ jobs:
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         env:
           ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
+          ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'shape-only-when-key-missing' || 'required' }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules trust_boundary.tests,trust_boundary.scope,trust_boundary.tier \
@@ -278,6 +280,7 @@ jobs:
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         env:
           ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
+          ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'shape-only-when-key-missing' || 'required' }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \

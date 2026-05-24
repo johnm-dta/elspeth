@@ -1019,6 +1019,30 @@ def test_signed_judge_metadata_requires_hmac_key_at_source_root_load(
         load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
 
 
+def test_source_root_load_can_skip_hmac_recompute_for_untrusted_fork_ci(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fork PR static analysis can inspect signed entries without the private key."""
+    source_root = tmp_path / "src"
+    src_path = _write_source(source_root, "fork_ci.py", "payload = {'name': 'Ada'}\n")
+    file_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key="fork_ci.py:R1:fn:fp=somehash",
+        file_fingerprint=file_fp,
+        ast_path="body[0]",
+    )
+    monkeypatch.delenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", raising=False)
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE", "shape-only-when-key-missing")
+
+    loaded = load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+    assert len(loaded.entries) == 1
+    assert loaded.entries[0].judge_metadata_signature is not None
+
+
 def test_load_without_source_root_skips_recompute_but_still_requires_binding(tmp_path: Path) -> None:
     """Loaders that don't have a source root (override_rate, judge_coverage) still enforce co-presence.
 

@@ -231,8 +231,8 @@ def test_static_analysis_runs_composer_skill_inventory_drift_gate() -> None:
     assert "scripts/cicd/generate_skill_inventory.py --check" in run
 
 
-def test_static_analysis_signed_allowlist_steps_receive_hmac_secret() -> None:
-    """Signed allowlist loaders must not crash CI for lack of the HMAC key."""
+def test_static_analysis_signed_allowlist_steps_handle_trusted_and_fork_prs() -> None:
+    """Signed allowlist loaders verify with secrets when available and degrade for forks."""
     workflow = _ci_workflow()
     static_analysis = workflow["jobs"]["static-analysis"]
     expected_secret = "${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}"
@@ -246,3 +246,9 @@ def test_static_analysis_signed_allowlist_steps_receive_hmac_secret() -> None:
         env = step.get("env")
         assert isinstance(env, dict), f"{step_name!r} must define step env"
         assert env.get("ELSPETH_JUDGE_METADATA_HMAC_KEY") == expected_secret
+        verify_mode = env.get("ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE")
+        assert isinstance(verify_mode, str), f"{step_name!r} must define signature verification mode"
+        assert "github.event_name == 'pull_request'" in verify_mode
+        assert "github.event.pull_request.head.repo.full_name != github.repository" in verify_mode
+        assert "shape-only-when-key-missing" in verify_mode
+        assert "required" in verify_mode

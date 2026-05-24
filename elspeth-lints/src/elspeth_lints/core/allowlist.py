@@ -19,6 +19,9 @@ import yaml
 from elspeth_lints.core.source_excerpt import RedactionRecord
 
 _JUDGE_METADATA_SIGNATURE_ENV_VAR = "ELSPETH_JUDGE_METADATA_HMAC_KEY"
+_JUDGE_METADATA_SIGNATURE_VERIFY_MODE_ENV_VAR = "ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE"
+_JUDGE_METADATA_SIGNATURE_VERIFY_REQUIRED = "required"
+_JUDGE_METADATA_SIGNATURE_VERIFY_SHAPE_ONLY_WHEN_KEY_MISSING = "shape-only-when-key-missing"
 _JUDGE_METADATA_SIGNATURE_PREFIX = "hmac-sha256:v1:"
 _MIN_JUDGE_METADATA_HMAC_KEY_BYTES = 32
 _MAX_ALLOWLIST_YAML_BYTES = 5 * 1024 * 1024
@@ -598,6 +601,26 @@ def _judge_metadata_hmac_key() -> bytes:
     return key
 
 
+def _judge_metadata_signature_verify_mode() -> str:
+    raw = os.environ.get(_JUDGE_METADATA_SIGNATURE_VERIFY_MODE_ENV_VAR, _JUDGE_METADATA_SIGNATURE_VERIFY_REQUIRED)
+    if raw not in {
+        _JUDGE_METADATA_SIGNATURE_VERIFY_REQUIRED,
+        _JUDGE_METADATA_SIGNATURE_VERIFY_SHAPE_ONLY_WHEN_KEY_MISSING,
+    }:
+        raise ValueError(
+            f"{_JUDGE_METADATA_SIGNATURE_VERIFY_MODE_ENV_VAR} must be "
+            f"{_JUDGE_METADATA_SIGNATURE_VERIFY_REQUIRED!r} or "
+            f"{_JUDGE_METADATA_SIGNATURE_VERIFY_SHAPE_ONLY_WHEN_KEY_MISSING!r}; got {raw!r}"
+        )
+    return raw
+
+
+def _can_skip_judge_metadata_hmac_recompute_for_missing_key() -> bool:
+    mode = _judge_metadata_signature_verify_mode()
+    raw_key = os.environ.get(_JUDGE_METADATA_SIGNATURE_ENV_VAR)
+    return mode == _JUDGE_METADATA_SIGNATURE_VERIFY_SHAPE_ONLY_WHEN_KEY_MISSING and (raw_key is None or raw_key == "")
+
+
 def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: str) -> None:
     """Assert a post-judge entry's verdict metadata has not been edited."""
     if entry.judge_metadata_signature is None:
@@ -617,6 +640,8 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
     assert entry.judge_model is not None
     assert entry.judge_rationale is not None
     assert entry.judge_policy_hash is not None
+    if _can_skip_judge_metadata_hmac_recompute_for_missing_key():
+        return
     expected = compute_judge_metadata_signature(
         key=entry.key,
         file_fingerprint=entry.file_fingerprint,

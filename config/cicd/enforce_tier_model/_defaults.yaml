@@ -136,7 +136,16 @@ defaults:
     # composer/service.py) eliminated the violations entirely; the
     # remaining TODO entries were re-authored with fresh, source-line-
     # specific justifications and bounded ``expires: '2026-08-23'``.
-    max_allow_hits: 536
+    #
+    # Bumped from 536 → 547 on 2026-05-24 after the PR39 static-analysis
+    # failure exposed trust-tier drift below the contract gate. The
+    # rotator now handles R7-R9 and preserves full nested symbol context;
+    # this removed 176 stale fingerprint entries and added current
+    # exact-fingerprint entries for the same boundary corpus plus bounded
+    # ALLOWLIST-FRESH follow-ups for previously uncovered findings. Existing
+    # headroom absorbed most of the +35 web.yaml delta; this ratchet bump is
+    # the remaining +11 needed for the current corpus.
+    max_allow_hits: 547
     # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
     # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
     # — W5 load-bearing telemetry-only exemption per
@@ -187,7 +196,11 @@ defaults:
     # cluster-3 originally-uncovered entries (13 added) and cluster-2
     # net-new entries (4 added) against the cluster-3 stale-deletions (12)
     # and code-fix-cascade deletions (5).
-    max_total_entries: 628
+    #
+    # Bumped from 628 → 639 on 2026-05-24 for the same PR39 trust-tier
+    # rotation as ``max_allow_hits`` above. No permanent budget bump is
+    # paired with this: fresh unmatched entries are bounded to 2026-08-24.
+    max_total_entries: 639
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.

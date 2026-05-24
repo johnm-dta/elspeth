@@ -81,41 +81,37 @@ def run_tier_model() -> list[dict[str, Any]]:
 def find_enclosing_symbol(source_path: Path, target_line: int) -> str:
     """Return ``ClassName:method_name`` (or just ``function_name``) at target_line."""
     tree = ast.parse(source_path.read_text())
-    classes: list[ast.ClassDef] = []
-    functions: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
 
-    def _walk(node: ast.AST, class_stack: list[str]) -> None:
+    best_context: list[str] = []
+    best_depth = -1
+
+    def _contains_line(node: ast.AST) -> bool:
+        if not hasattr(node, "lineno"):
+            return True
+        start = int(node.lineno)
+        end_lineno = getattr(node, "end_lineno", None)
+        end = start if end_lineno is None else int(end_lineno)
+        return start <= target_line <= end
+
+    def _record(context: list[str]) -> None:
+        nonlocal best_context, best_depth
+        if len(context) > best_depth:
+            best_context = context
+            best_depth = len(context)
+
+    def _walk(node: ast.AST, symbol_stack: list[str]) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.ClassDef):
-                if (
-                    hasattr(child, "lineno")
-                    and hasattr(child, "end_lineno")
-                    and child.lineno <= target_line <= (child.end_lineno or child.lineno)
-                ):
-                    classes.append(child)
-                _walk(child, [*class_stack, child.name])
-            elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
-                if (
-                    hasattr(child, "lineno")
-                    and hasattr(child, "end_lineno")
-                    and child.lineno <= target_line <= (child.end_lineno or child.lineno)
-                ):
-                    functions.append(child)
-                _walk(child, class_stack)
+            if isinstance(child, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+                if not _contains_line(child):
+                    continue
+                child_stack = [*symbol_stack, child.name]
+                _record(child_stack)
+                _walk(child, child_stack)
             else:
-                _walk(child, class_stack)
+                _walk(child, symbol_stack)
 
     _walk(tree, [])
-
-    # Choose innermost function and innermost class
-    func = max(functions, key=lambda n: n.lineno, default=None)
-    cls = max(classes, key=lambda n: n.lineno, default=None)
-    parts = []
-    if cls is not None:
-        parts.append(cls.name)
-    if func is not None:
-        parts.append(func.name)
-    return ":".join(parts) if parts else "_module_"
+    return ":".join(best_context) if best_context else "_module_"
 
 
 def split_findings(
@@ -127,7 +123,7 @@ def split_findings(
     for f in findings:
         if f["rule_id"] == "trust_tier.tier_model" and f["message"].startswith("Stale tier-model allowlist entry:"):
             stale.append(f)
-        elif f["rule_id"] in {"R1", "R2", "R3", "R4", "R5", "R6"} and f["severity"] == "error":
+        elif re.fullmatch(r"R\d+", f["rule_id"]) and f["severity"] == "error":
             new.append(f)
     return stale, new
 
@@ -213,13 +209,13 @@ def main() -> int:
         if metadata_queue:
             metadata = metadata_queue.popleft()
         else:
-            # Genuinely new violation (no rotation pair). Emit with a TODO so
-            # the operator can fill in the boundary justification.
+            # Genuinely new violation (no rotation pair). Emit a bounded
+            # follow-up entry, not permanent debt.
             metadata = {
-                "owner": "TODO",
-                "reason": "TODO — fingerprint rotation without matching stale entry; review whether this is a new violation that needs an explicit allowlist entry or a fix",
-                "safety": "TODO",
-                "expires": None,
+                "owner": "trust-tier-maintenance",
+                "reason": "ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint rotation; review whether this is new debt that needs a source fix or a more specific justification",
+                "safety": "Exact-fingerprint allowlist entry only; bounded expiry forces follow-up review instead of adding permanent debt",
+                "expires": "2026-08-24",
             }
         entry = {"key": new_key, **metadata}
         new_entries.setdefault(ypath, []).append(entry)

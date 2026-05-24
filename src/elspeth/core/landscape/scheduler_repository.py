@@ -613,6 +613,8 @@ class TokenSchedulerRepository:
                     updated_at=now,
                 )
             )
+            if result.rowcount == 0:
+                return None
             if result.rowcount != 1:
                 raise AuditIntegrityError(
                     f"Scheduler claim_ready lost race on run_id={run_id!r} "
@@ -701,6 +703,8 @@ class TokenSchedulerRepository:
                     updated_at=now,
                 )
             )
+            if result.rowcount == 0:
+                return None
             if result.rowcount != 1:
                 raise AuditIntegrityError(
                     f"Scheduler claim_pending_sink lost race on run_id={run_id!r} work_item_id={row['work_item_id']!r}: "

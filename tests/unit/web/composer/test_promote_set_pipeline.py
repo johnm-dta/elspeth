@@ -376,6 +376,39 @@ class TestPromoteSetPipelineArgErrorRouting:
             rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
         assert rows == []
 
+    def test_non_blob_source_rejects_manual_source_authoring(self) -> None:
+        """source_authoring is reserved for blob provenance, not caller options."""
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {
+                    "path": "/data/in.csv",
+                    "schema": {"mode": "observed"},
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": CreationModality.LLM_GENERATED.value,
+                        "content_hash": "0" * 64,
+                        "review_event_id": None,
+                        "resolved_kind": None,
+                    },
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [],
+        }
+
+        result = _execute_set_pipeline(
+            args,
+            _empty_state(),
+            ToolContext(catalog=_mock_catalog()),
+        )
+
+        assert result.success is False
+        assert result.updated_state.source is None
+        assert SOURCE_AUTHORING_KEY in result.data["error"]
+
     def test_csv_fixed_schema_accepts_advertised_field_definition_shape(self, tmp_path: Path) -> None:
         """CSV prevalidation accepts the field shape exposed by plugin JSON Schema."""
         user_message_content = "Use this exact CSV:\nurl\nhttps://example.test\n"

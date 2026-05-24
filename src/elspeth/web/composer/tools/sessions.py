@@ -78,6 +78,7 @@ from elspeth.web.composer.tools.declarations import (
 from elspeth.web.composer.tools.sources import (
     _MIME_TO_SOURCE,
     _header_only_inline_csv_conflict,
+    _reject_manual_source_authoring,
     _reject_manual_source_blob_ref,
     _resolve_source_blob,
     _ResolvedSourceBlob,
@@ -217,6 +218,9 @@ def _execute_set_pipeline(
     )
     if manual_blob_ref_error is not None:
         return _failure_result(state, manual_blob_ref_error)
+    manual_authoring_error = _reject_manual_source_authoring(src_options, tool_name="set_pipeline")
+    if manual_authoring_error is not None:
+        return _failure_result(state, manual_authoring_error)
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id="source",
@@ -244,6 +248,7 @@ def _execute_set_pipeline(
             catalog=catalog,
             session_engine=session_engine,
             session_id=session_id,
+            tool_name="set_pipeline",
         )
         if isinstance(resolved, ToolResult):
             return resolved

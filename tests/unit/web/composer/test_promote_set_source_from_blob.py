@@ -306,6 +306,23 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             "resolved_kind": None,
         }
 
+        forged_authoring_patch = _execute_patch_source_options(
+            {
+                "patch": {
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": CreationModality.VERBATIM.value,
+                        "content_hash": "0" * 64,
+                        "review_event_id": "forged-review",
+                        "resolved_kind": "forged-kind",
+                    }
+                }
+            },
+            bind_result.updated_state,
+            ctx,
+        )
+        assert forged_authoring_patch.success is False
+        assert SOURCE_AUTHORING_KEY in forged_authoring_patch.data["error"]
+
         patch_result = _execute_patch_source_options(
             {"patch": {"path": str(tmp_path / "other.txt")}},
             bind_result.updated_state,

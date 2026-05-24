@@ -13,6 +13,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
@@ -42,6 +43,7 @@ from elspeth.web.composer.tools import (
     get_tool_definitions,
 )
 from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationReadiness, ValidationResult
+from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -496,6 +498,35 @@ class TestSetSource:
         assert result.success is False
         assert result.updated_state.source is None
         assert "set_source_from_blob" in result.data["error"]
+
+    def test_set_source_rejects_manual_source_authoring_in_options(self) -> None:
+        """Caller-supplied source_authoring must not bypass blob provenance stamping."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "t1",
+                "options": {
+                    "path": "/data/in.csv",
+                    "schema": {"mode": "observed"},
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": CreationModality.LLM_GENERATED.value,
+                        "content_hash": "0" * 64,
+                        "review_event_id": None,
+                        "resolved_kind": None,
+                    },
+                },
+                "on_validation_failure": "quarantine",
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state.source is None
+        assert SOURCE_AUTHORING_KEY in result.data["error"]
 
 
 class TestVfDestinationAdvisory:

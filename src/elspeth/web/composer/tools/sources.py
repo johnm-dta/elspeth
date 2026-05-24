@@ -199,6 +199,26 @@ def _source_authoring_options(
     }
 
 
+def _manual_source_authoring_error(*, tool_name: str) -> str:
+    """Return the source-options error for caller-supplied source_authoring."""
+    return (
+        f"{tool_name} must not be called with '{SOURCE_AUTHORING_KEY}' in source.options. "
+        "source_authoring is reserved for ELSPETH's blob provenance writer and is stamped only when "
+        "a source is bound through set_source_from_blob, source.blob_id, or source.inline_blob."
+    )
+
+
+def _reject_manual_source_authoring(
+    options: Mapping[str, Any],
+    *,
+    tool_name: str = "set_source_from_blob",
+) -> str | None:
+    """Reject caller-supplied source_authoring outside provenance stamping."""
+    if SOURCE_AUTHORING_KEY not in options:
+        return None
+    return _manual_source_authoring_error(tool_name=tool_name)
+
+
 def _resolve_source_blob(
     *,
     blob_id: str,
@@ -209,10 +229,14 @@ def _resolve_source_blob(
     catalog: CatalogService,
     session_engine: Engine | None,
     session_id: str | None,
+    tool_name: str = "set_source_from_blob",
 ) -> _ResolvedSourceBlob | ToolResult:
     """Resolve an existing ready blob into authoritative source options."""
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
+    manual_authoring_error = _reject_manual_source_authoring(caller_options, tool_name=tool_name)
+    if manual_authoring_error is not None:
+        return _failure_result(state, manual_authoring_error)
     blob = _sync_get_blob(session_engine, blob_id, session_id)
     if blob is None:
         return _failure_result(state, f"Blob '{blob_id}' not found.")
@@ -328,6 +352,9 @@ def _execute_set_source(
     manual_blob_ref_error = _reject_manual_source_blob_ref(options, tool_name="set_source")
     if manual_blob_ref_error is not None:
         return _failure_result(state, manual_blob_ref_error)
+    manual_authoring_error = _reject_manual_source_authoring(options, tool_name="set_source")
+    if manual_authoring_error is not None:
+        return _failure_result(state, manual_authoring_error)
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id="source",
@@ -407,6 +434,7 @@ def _execute_set_source_from_blob(
         catalog=context.catalog,
         session_engine=context.session_engine,
         session_id=context.session_id,
+        tool_name="set_source_from_blob",
     )
     if isinstance(resolved, ToolResult):
         return resolved
@@ -650,6 +678,10 @@ def _execute_patch_source_options(
             actual_type=type(exc).__name__,
         ) from exc
     patch = validated.patch
+
+    manual_authoring_error = _reject_manual_source_authoring(patch, tool_name="patch_source_options")
+    if manual_authoring_error is not None:
+        return _failure_result(state, manual_authoring_error)
 
     # Lock the (path, blob_ref) pair on blob-backed sources.  Once
     # set_source_from_blob has bound a source to a blob, the path is the

@@ -177,6 +177,8 @@ Eleven rules (numbered 0-10) that cover the historical convergence-failure modes
    - `mode: "flexible"` with declared fields when downstream needs typed access AND the source may carry extras.
    - `mode: "fixed"` only when the operator explicitly asked to project to a smaller schema.
 
+   If a blob is being read as `plugin: "csv"` but the first record is really data (for example a URL list in a `.txt` blob), declare `options.columns` so the first record stays data. A CSV schema whose required fields have no overlap with the parsed blob header is blocked with code `csv_source_blob_header_mismatch`; repair by adding the real header row or by setting `columns` to the declared field names for headerless input.
+
 3. **Reject CSV blobs with duplicate headers.** When `inspect_source` warnings include `csv_duplicate_headers`, the underlying CSV reader (`csv.DictReader` and similar) silently collapses duplicate-named columns last-write-wins, fabricating a single column from multiple source columns. The proof step promotes this to blocking with code `csv_duplicate_headers` and forces a repair turn. Resolve before previewing: rename the offending header at the source, declare explicit `columns` in source options, configure `field_mapping` to disambiguate, or route the source to a configured quarantine output via `on_validation_failure`. Do not ignore the warning — silent column collapse is a Tier-1 audit-integrity violation.
 
 4. **Declare numeric types before any numeric gate or `value_transform` arithmetic.** A `gate` condition like `row['price'] >= 100` against a CSV-string field will fail at runtime. Either:
@@ -228,7 +230,7 @@ Eleven rules (numbered 0-10) that cover the historical convergence-failure modes
     https://www.dta.gov.au
     ```
 
-    bound to a `csv` source declaring `schema.fields: ["url: str"]` is **guaranteed to produce zero rows**. Line 1 is eaten as the header (header-normalized into `https_www_finance_gov_au`); the remaining two lines fail validation because they have no `url` column; `on_validation_failure: "discard"` silently drops them. The run terminates `empty`. The first URL is permanently lost — it was the header.
+    bound to a `csv` source declaring `schema.fields: ["url: str"]` is **guaranteed to produce zero rows**. Line 1 is eaten as the header (header-normalized into `https_www_finance_gov_au`); the remaining two lines fail validation because they have no `url` column; `on_validation_failure: "discard"` silently drops them. The run terminates `empty`. The first URL is permanently lost — it was the header. `preview_pipeline` now blocks this shape with code `csv_source_blob_header_mismatch`; repair it by prepending a real header row or by setting `options.columns`.
 
     **Two valid shapes; pick one, then verify the blob agrees.**
 

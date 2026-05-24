@@ -99,16 +99,13 @@ def inspect_blob_content(
     byte_range = (0, len(inspected))
     truncated = len(content) > _MAX_BYTES
 
-    redacted_identity: dict[str, str] = {
-        "filename": filename,
-        "mime_type": mime_type,
-        "byte_size": str(len(content)),
-    }
-    if blob_id is not None:
-        redacted_identity["blob_id"] = str(blob_id)
-    if content_hash:
-        # Surface only the prefix so identity is verifiable without leaking the full hash.
-        redacted_identity["content_hash_prefix"] = content_hash[:8]
+    redacted_identity = _redacted_identity(
+        filename=filename,
+        mime_type=mime_type,
+        byte_size=len(content),
+        blob_id=blob_id,
+        content_hash=content_hash,
+    )
 
     kind = _detect_kind(filename, mime_type, inspected)
 
@@ -136,6 +133,57 @@ def inspect_blob_content(
         url_candidates=_url_candidates_from_text(_safe_decode(inspected)),
         warnings=(f"unrecognised mime_type {mime_type!r} and filename {filename!r}",),
     )
+
+
+def inspect_csv_source_content(
+    *,
+    content: bytes,
+    filename: str,
+    mime_type: str,
+    delimiter: str,
+    skip_rows: int,
+    columns: tuple[str, ...] | None = None,
+    blob_id: UUID | None = None,
+    content_hash: str | None = None,
+) -> SourceInspectionFacts:
+    """Inspect blob bytes using CSVSource semantics instead of MIME inference."""
+    inspected = content[:_MAX_BYTES]
+    return _inspect_csv(
+        inspected,
+        _redacted_identity(
+            filename=filename,
+            mime_type=mime_type,
+            byte_size=len(content),
+            blob_id=blob_id,
+            content_hash=content_hash,
+        ),
+        (0, len(inspected)),
+        delimiter=delimiter,
+        skip_rows=skip_rows,
+        columns=columns,
+        skip_blank_records=True,
+    )
+
+
+def _redacted_identity(
+    *,
+    filename: str,
+    mime_type: str,
+    byte_size: int,
+    blob_id: UUID | None,
+    content_hash: str | None,
+) -> dict[str, str]:
+    redacted_identity: dict[str, str] = {
+        "filename": filename,
+        "mime_type": mime_type,
+        "byte_size": str(byte_size),
+    }
+    if blob_id is not None:
+        redacted_identity["blob_id"] = str(blob_id)
+    if content_hash:
+        # Surface only the prefix so identity is verifiable without leaking the full hash.
+        redacted_identity["content_hash_prefix"] = content_hash[:8]
+    return redacted_identity
 
 
 def _detect_kind(filename: str, mime_type: str, sample: bytes) -> SourceKind:
@@ -236,7 +284,12 @@ def _inspect_csv(
     byte_range: tuple[int, int],
     *,
     delimiter: str = ",",
+    skip_rows: int = 0,
+    columns: tuple[str, ...] | None = None,
+    skip_blank_records: bool = False,
 ) -> SourceInspectionFacts:
+    if skip_rows < 0:
+        raise ValueError(f"skip_rows must be non-negative for CSV inspection; got {skip_rows}")
     text = _safe_decode(sample)
     decode_replacements = _count_replacement_chars(text)
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
@@ -270,8 +323,42 @@ def _inspect_csv(
             warnings=("csv content is empty",),
         )
 
-    headers = tuple(h.strip() for h in rows[0])
-    data_rows = rows[1:]
+    if skip_rows:
+        rows = rows[skip_rows:]
+        if skip_blank_records:
+            rows = [row for row in rows if row]
+        if not rows:
+            return SourceInspectionFacts(
+                source_kind="csv",
+                redacted_identity=redacted_identity,
+                byte_range_inspected=byte_range,
+                sample_row_count=0,
+                observed_headers=None,
+                inferred_types=None,
+                url_candidates=(),
+                warnings=(f"csv content exhausted by skip_rows={skip_rows}",),
+            )
+
+    if skip_blank_records:
+        rows = [row for row in rows if row]
+        if not rows:
+            return SourceInspectionFacts(
+                source_kind="csv",
+                redacted_identity=redacted_identity,
+                byte_range_inspected=byte_range,
+                sample_row_count=0,
+                observed_headers=None,
+                inferred_types=None,
+                url_candidates=(),
+                warnings=("csv content has no nonblank records",),
+            )
+
+    if columns is None:
+        headers = tuple(h.strip() for h in rows[0])
+        data_rows = rows[1:]
+    else:
+        headers = columns
+        data_rows = rows
     warnings: list[str] = []
 
     if delimiter != ",":
@@ -310,7 +397,7 @@ def _inspect_csv(
 
     # If the first row looks like data (every cell parseable as int/float/bool),
     # the file probably has no headers.
-    headerless = all(_infer_scalar_type(cell) in {"int", "float", "bool"} for cell in rows[0] if cell.strip())
+    headerless = columns is None and all(_infer_scalar_type(cell) in {"int", "float", "bool"} for cell in rows[0] if cell.strip())
     if headerless and rows[0]:
         warnings.append("first row looks like data, not headers — consider explicit columns or field_mapping")
 
@@ -688,6 +775,20 @@ def _declared_field_name(field: DeclaredFieldSpec) -> str | None:
     return None
 
 
+def _declared_field_is_required(field: DeclaredFieldSpec) -> bool:
+    if isinstance(field, str):
+        parts = field.split(":", 1)
+        if len(parts) != 2:
+            return True
+        return not parts[1].strip().endswith("?")
+    required = field.get("required")
+    if required is None:
+        return True
+    if type(required) is not bool:
+        raise ValueError(f"field spec required flag must be bool when present; got {type(required).__name__}")
+    return required
+
+
 def derive_extra_column_risk(
     facts: SourceInspectionFacts,
     declared_fields: tuple[DeclaredFieldSpec, ...] | None,
@@ -704,3 +805,32 @@ def derive_extra_column_risk(
     declared_lower = {name.lower() for field in declared_fields if (name := _declared_field_name(field)) is not None}
     missing = tuple(h for h in facts.observed_headers if h.lower() not in declared_lower)
     return missing
+
+
+def derive_required_header_mismatch_risk(
+    facts: SourceInspectionFacts,
+    declared_fields: tuple[DeclaredFieldSpec, ...] | None,
+    *,
+    explicit_required_fields: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Return required declared fields when none overlap observed CSV headers."""
+    if declared_fields is None or facts.observed_headers is None:
+        return ()
+
+    required_names: list[str] = []
+    for field in declared_fields:
+        name = _declared_field_name(field)
+        if name is not None and _declared_field_is_required(field):
+            required_names.append(name)
+    for name in explicit_required_fields:
+        if name not in required_names:
+            required_names.append(name)
+
+    if not required_names:
+        return ()
+
+    observed_lower = {header.lower() for header in facts.observed_headers}
+    required_lower = {name.lower() for name in required_names}
+    if observed_lower & required_lower:
+        return ()
+    return tuple(required_names)

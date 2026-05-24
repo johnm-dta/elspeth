@@ -65,4 +65,54 @@ describe("ProgressView", () => {
     expect(screen.getByText("cancelling")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel pipeline execution" })).not.toBeInTheDocument();
   });
+
+  it("shows closed accounting totals for structural-token DAG completions", () => {
+    (useWebSocket as ReturnType<typeof vi.fn>).mockReturnValue({
+      activeRunId: "run-1",
+      wsDisconnected: false,
+      progress: {
+        source_rows_processed: 1,
+        tokens_succeeded: 9_323,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        cancel_requested: false,
+        accounting: {
+          source: { rows_processed: 1 },
+          tokens: {
+            emitted: 9_324,
+            terminal: 9_324,
+            succeeded: 9_323,
+            failed: 0,
+            structural: 1,
+            pending: 0,
+          },
+          routing: {
+            routed_success: 0,
+            routed_failure: 0,
+            quarantined: 0,
+            discarded: 0,
+          },
+          integrity: {
+            closure: "closed",
+            missing_terminal_outcomes: 0,
+            duplicate_terminal_outcomes: 0,
+          },
+        },
+        recent_errors: [],
+        status: "completed",
+      },
+    });
+
+    render(<ProgressView />);
+
+    expect(screen.getByLabelText("Run accounting")).toBeInTheDocument();
+    expect(screen.getByText("Tokens Emitted")).toBeInTheDocument();
+    expect(screen.getAllByText("9,324")).toHaveLength(2);
+    expect(screen.getByText("Tokens Terminal")).toBeInTheDocument();
+    expect(screen.getByText("Tokens Structural")).toBeInTheDocument();
+    expect(screen.getByText("Audit Closure")).toBeInTheDocument();
+    expect(screen.getByText("closed")).toBeInTheDocument();
+  });
 });

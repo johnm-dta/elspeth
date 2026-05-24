@@ -1,8 +1,8 @@
 /* execution.css — Execution progress UI.
    Owners: .progress-container, .progress-ws-banner, .progress-status-*,
    .progress-cancel-btn, .progress-bar-outer, .progress-counters*,
-   .progress-routing-summary, .progress-cancelled-msg, .progress-failed-msg,
-   .progress-errors-*, .progress-error-*. */
+   .progress-routing-summary, .progress-accounting*, .progress-cancelled-msg,
+   .progress-failed-msg, .progress-errors-*, .progress-error-*. */
 
 /* ---------------------------------------------------------------------------
    ProgressView
@@ -73,6 +73,53 @@
   margin-bottom: var(--space-md);
   color: var(--color-text-muted);
   font-size: var(--font-size-xs);
+}
+
+.progress-accounting {
+  margin-bottom: var(--space-md);
+  padding-top: var(--space-xs);
+  border-top: 1px solid var(--color-border);
+}
+
+.progress-accounting-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: var(--space-sm);
+  margin: 0;
+}
+
+.progress-accounting-item {
+  min-width: 0;
+}
+
+.progress-accounting-item dt,
+.progress-accounting-integrity-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.progress-accounting-item dd {
+  margin: 2px 0 0;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.progress-accounting-integrity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  margin-top: var(--space-sm);
+  font-size: var(--font-size-xs);
+}
+
+.progress-accounting-integrity-item {
+  display: inline-flex;
+  gap: var(--space-xs);
+  align-items: baseline;
+}
+
+.progress-accounting-integrity-item--warning strong {
+  color: var(--color-error);
 }
 
 .progress-cancelled-msg {

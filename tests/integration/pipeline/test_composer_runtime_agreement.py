@@ -50,7 +50,7 @@ where the architectural fix landed:
   adds a single contract-layer biconditional smoke
   (``TestComposerRuntimeSecretInventoryAgreement``) so a future drift on
   the ``available ⟺ reason is None`` invariant fails the agreement gate too.
-* Shape 7 — Phase 2.1 pipeline_done_callback row-decomposition agreement
+* Shape 7 — Phase 2.1 pipeline_done_callback run-accounting agreement
   (eval run 44f52421, csv → batch_stats group_by → json sink wrote output
   but ``/api/runs/{rid}`` lagged because ``CompletedData`` rejected the
   legitimate aggregation row-count shape). Closes ``elspeth-31d53c7493``
@@ -2661,34 +2661,26 @@ class TestComposerRuntimeSecretInventoryAgreement:
         assert SecretUnavailabilityReason is not None  # imported for type alias presence
 
 
-# ── Shape 7 — pipeline_done_callback row-decomposition agreement ─────────────
+# ── Shape 7 — pipeline_done_callback run-accounting agreement ────────────────
 # Closes elspeth-31d53c7493 / Phase 2.1 (commit 5e26d0a6).  Origin: 2026-05-01
 # eval, S2 successful run 44f52421-a379-459b-96a8-6f0656086f16 (csv 6 rows →
-# batch_stats group_by → json sink).  Pre-fix, ``CompletedData``'s
-# ``_check_row_decomposition`` enforced equality (rows_processed == sum of
-# four buckets); the equality formulation rejected the legitimate aggregation
-# shape where source rows reach ``CONSUMED_IN_BATCH`` (no terminal-bucket
-# counter) and break the equality.  ``pipeline_done_callback`` then crashed
-# with ``ValueError``/``ValidationError`` while the engine output had already
-# landed on disk.  Post-fix, the validator accepts inequality
-# (rows_processed >= sum of four buckets) so legitimate aggregation runs no
-# longer trip the readback layer.  This single-occurrence regression test
-# pins the agreement contract: an aggregation pipeline run by the orchestrator
-# produces row counts that the API readback layer accepts without raising.
+# batch_stats group_by → json sink). The original bug was a linear
+# row-decomposition equality on ``CompletedData``; the current contract loads
+# explicit Landscape-derived source/token/routing/integrity accounting from
+# the orchestrator-emitted run and verifies the API payload accepts that audit
+# projection without reconstructing row fate from engine counters.
 
 
 class _BatchAggregateTransform(BaseTransform):
     """Batch-aware transform mirroring S2's aggregation shape (csv 6 rows →
     1 aggregated output row).
 
-    Reproduces the structural shape that broke the equality formulation of
-    ``_validate_row_decomposition``: source rows reach
-    ``(TRANSIENT, BATCH_CONSUMED)`` (no terminal-bucket counter) while the
-    aggregated output row reaches ``COMPLETED``.  Net effect:
-    ``rows_processed > rows_succeeded + rows_failed + rows_routed +
-    rows_quarantined`` — pre-fix the readback validator rejected this with
-    ``ValidationError`` and ``pipeline_done_callback`` crashed; post-fix the
-    inequality formulation (``>=``) accepts it.
+    Reproduces the structural shape that broke the old row-decomposition
+    equality: source rows reach ``CONSUMED_IN_BATCH`` while the aggregated
+    output row reaches ``COMPLETED``. Net effect: source-row cardinality and
+    materialized terminal-token cardinality intentionally diverge. The current
+    readback contract must accept the explicit Landscape-derived accounting
+    for that run.
 
     Defined inline so the test is self-contained as the agreement contract
     rather than depending on the BatchStats production plugin's internal
@@ -2744,26 +2736,15 @@ class _BatchAggregateTransform(BaseTransform):
 
 
 class TestComposerRuntimeRunCompletionAgreement:
-    """Shape 7 — engine row counts on aggregation pipelines must construct
-    ``CompletedData`` without raising.
+    """Shape 7 — aggregation runs must construct ``CompletedData`` from audit accounting.
 
     Single-occurrence regression coverage.  The unit-level pin lives at
-    ``tests/unit/web/execution/test_schemas.py::test_aggregation_undercount_accepted``
-    (it hand-constructs the row counts).  The agreement-suite contribution
-    here is to drive the row counts from a real orchestrator-emitted
-    aggregation run.  A future aggregation refactor that changes which
-    counter buckets bump for batch-flush emission would slip past the unit
-    test (which hand-constructs the numbers) but fail this test (because
-    the engine's actual emission would no longer match the readback
-    contract).
-
-    Bug verification protocol (executed manually before this test landed):
-    temporarily reverted ``_validate_row_decomposition`` from ``>=`` to
-    ``==`` in ``src/elspeth/web/execution/schemas.py`` and confirmed this
-    test fails with ``pydantic.ValidationError("decomposition mismatch")``
-    on the ``CompletedData`` construction line.  Restored the inequality
-    after verification.  This protocol guards against the "passes pre-fix
-    AND post-fix" failure mode the test exists to prevent.
+    ``tests/unit/web/execution/test_run_accounting_projection.py``. The
+    agreement-suite contribution here is to drive the accounting from a real
+    orchestrator-emitted aggregation run. A future aggregation refactor that
+    changes terminal-token emission would slip past unit tests that
+    hand-construct accounting but fail this test because the engine's actual
+    audit output would no longer match the readback contract.
     """
 
     def test_agreement_aggregation_run_counts_construct_completed_data(self, landscape_db: LandscapeDB, payload_store) -> None:
@@ -2771,9 +2752,9 @@ class TestComposerRuntimeRunCompletionAgreement:
         aggregation that emits 1 output row.  Source rows reach
         ``CONSUMED_IN_BATCH`` (no terminal-bucket counter).  Engine counts
         end up as ``rows_processed=6, rows_succeeded=1, rows_failed=0,
-        rows_routed_success=0, rows_routed_failure=0, rows_quarantined=0`` — pre-fix the readback
-        validator rejected this shape (sum-of-buckets=1 but rows_processed=6
-        violates equality); post-fix the inequality accepts it.
+        rows_routed_success=0, rows_routed_failure=0, rows_quarantined=0``.
+        The public readback payload must be validated from Landscape-derived
+        accounting rather than from a row-counter equality.
         """
         from elspeth.contracts.types import NodeID
 
@@ -2836,17 +2817,16 @@ class TestComposerRuntimeRunCompletionAgreement:
 
         run_result = Orchestrator(landscape_db).run(config, graph=graph, payload_store=payload_store)
 
-        # Engine emission contract: 6 source rows in, 1 aggregated row out,
-        # source rows reach CONSUMED_IN_BATCH (not counted in the four
-        # terminal buckets).  This produces the inequality the Phase 2.1 fix
-        # legitimised.
+        # Engine emission contract: 6 source rows in, 1 aggregated row out;
+        # source rows reach CONSUMED_IN_BATCH while the output token reaches
+        # COMPLETED.
         assert run_result.rows_processed == 6, (
             f"agreement_batch_aggregate must emit rows_processed=6 to reproduce S2 shape; got {run_result.rows_processed}"
         )
         assert run_result.rows_succeeded == 1, (
             f"the aggregated output row must be the only success terminal; got rows_succeeded={run_result.rows_succeeded}"
         )
-        # The inequality the fix made legitimate:
+        # The old row-counter equality rejected this legitimate shape:
         #   rows_processed (6) > sum-of-four-buckets (1)
         sum_of_buckets = (
             run_result.rows_succeeded
@@ -2856,10 +2836,9 @@ class TestComposerRuntimeRunCompletionAgreement:
             + run_result.rows_quarantined
         )
         assert run_result.rows_processed > sum_of_buckets, (
-            "Pre-fix-shape sanity check: this test exercises the "
-            f"rows_processed > sum-of-buckets inequality (got {run_result.rows_processed} vs {sum_of_buckets}); "
-            "if this assertion fails the test no longer pins the legitimate shape and a future "
-            "regression of the row-decomposition validator from `>=` back to `==` would slip past."
+            "Shape sanity check: this test exercises source rows exceeding "
+            f"terminal success/failure buckets (got {run_result.rows_processed} vs {sum_of_buckets}); "
+            "if this assertion fails the test no longer pins the legitimate aggregation shape."
         )
 
         # Drive the completed-event validator from the engine's actual

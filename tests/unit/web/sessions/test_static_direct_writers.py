@@ -859,6 +859,17 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
         ),
     ),
     ReviewedWriter(
+        path="tests/unit/web/sessions/test_interpretation_events_table.py",
+        enclosing_symbol="test_blob_llm_provenance_rejects_blank_strings",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "blob provenance schema test: seeds the created_from_message_id "
+            "anchor so the test can isolate the creating_* blank-string CHECK "
+            "constraint instead of failing the composite FK first."
+        ),
+    ),
+    ReviewedWriter(
         path="tests/unit/web/shareable_reviews/test_service.py",
         enclosing_symbol="session_engine_with_row",
         table="composition_states",
@@ -1344,7 +1355,7 @@ _LOCK_DISCIPLINE_NEGATIVE_TESTS: tuple[LockDisciplineNegativeTest, ...] = (
 # ---------------------------------------------------------------------------
 #
 # The reviewed-writer snapshot for ``tests/unit/web/blobs/test_service.py``
-# (11 sites) and ``tests/unit/web/composer/test_tools.py`` (5 sites) is
+# (12 sites) and ``tests/unit/web/composer/test_tools.py`` (5 sites) is
 # tedious to enumerate by hand: each line lives in a distinct test
 # function and the enclosing-symbol resolution requires AST traversal.
 # Rather than hand-tabulating 16 entries, we expand the allowlist at
@@ -1353,7 +1364,7 @@ _LOCK_DISCIPLINE_NEGATIVE_TESTS: tuple[LockDisciplineNegativeTest, ...] = (
 # (a new direct insert added in either file) shows up as a violation.
 
 _BLOBS_ALLOWLIST_PATH = "tests/unit/web/blobs/test_service.py"
-_BLOBS_EXPECTED_LINES = (315, 374, 441, 511, 577, 654, 716, 1272, 1427, 1887, 2255)
+_BLOBS_EXPECTED_LINES = (318, 377, 441, 520, 590, 656, 733, 795, 1366, 1521, 1976, 2344)
 _COMPOSER_TOOLS_ALLOWLIST_PATH = "tests/unit/web/composer/test_tools.py"
 _COMPOSER_TOOLS_EXPECTED_LINES = (3125, 3188, 7581, 7634, 7875)
 

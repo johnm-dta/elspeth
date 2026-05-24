@@ -111,14 +111,26 @@ def test_interpretation_sites_reports_legacy_and_structured_pending_sites() -> N
     assert structured_sites[0].kind is InterpretationKind.VAGUE_TERM
 
 
-def test_interpretation_requirement_missing_kind_fails_closed() -> None:
+def test_legacy_interpretation_requirement_missing_kind_defaults_to_vague_term() -> None:
     options = _pending_options()
     requirement = dict(options[INTERPRETATION_REQUIREMENTS_KEY][0])  # type: ignore[index]
     del requirement["kind"]
     options[INTERPRETATION_REQUIREMENTS_KEY] = [requirement]
     state = _state_with_llm(options)
 
-    with pytest.raises(TypeError, match="interpretation requirement kind is required"):
+    sites = interpretation_sites(state)
+
+    assert sites[0].kind is InterpretationKind.VAGUE_TERM
+
+
+def test_interpretation_requirement_non_string_kind_still_fails_closed() -> None:
+    options = _pending_options()
+    requirement = dict(options[INTERPRETATION_REQUIREMENTS_KEY][0])  # type: ignore[index]
+    requirement["kind"] = 123
+    options[INTERPRETATION_REQUIREMENTS_KEY] = [requirement]
+    state = _state_with_llm(options)
+
+    with pytest.raises(TypeError, match="interpretation requirement kind must be a string"):
         interpretation_sites(state)
 
 

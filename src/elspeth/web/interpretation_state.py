@@ -17,6 +17,7 @@ from typing import Any, Literal, NotRequired, TypedDict
 
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.enums import CreationModality
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.hashing import stable_hash
 from elspeth.web.composer.state import CompositionState, NodeSpec, SourceSpec
 from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
@@ -85,6 +86,9 @@ class InterpretationReviewPending:
     """Execution/readiness blocker for unresolved interpretation review."""
 
     sites: Sequence[InterpretationReviewSite]
+
+    def __post_init__(self) -> None:
+        freeze_fields(self, "sites")
 
 
 def strip_authoring_options(options: Mapping[str, Any]) -> dict[str, Any]:
@@ -342,9 +346,7 @@ def _coerce_requirement(value: Mapping[str, Any]) -> InterpretationRequirement:
     requirement_id = value["id"]
     user_term = value["user_term"]
     status = value["status"]
-    if "kind" not in value:
-        raise TypeError("interpretation requirement kind is required")
-    kind_value = value["kind"]
+    kind_value = value["kind"] if "kind" in value else InterpretationKind.VAGUE_TERM.value
     if not isinstance(requirement_id, str) or not requirement_id.strip():
         raise TypeError("interpretation requirement id must be a non-empty string")
     if not isinstance(user_term, str) or not user_term.strip():

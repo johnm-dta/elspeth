@@ -46,7 +46,9 @@ from elspeth.web.interpretation_state import (
     PROMPT_TEMPLATE_PARTS_KEY,
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
+    materialize_state_for_execution,
 )
+from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     composition_states_table,
@@ -1221,6 +1223,30 @@ async def test_create_pending_after_session_opt_out_writes_surface_specific_audi
         InterpretationKind.VAGUE_TERM,
         InterpretationKind.LLM_PROMPT_TEMPLATE,
     ]
+
+    with service._engine.begin() as conn:
+        latest_state_row = conn.execute(
+            select(composition_states_table)
+            .where(composition_states_table.c.session_id == str(session_id))
+            .order_by(composition_states_table.c.version.desc())
+            .limit(1)
+        ).one()
+    latest_state = state_from_record(service._row_to_state_record(latest_state_row))
+    materialized = materialize_state_for_execution(latest_state)
+
+    assert isinstance(materialized, CompositionState)
+    assert materialized.source is not None
+    source_options = materialized.source.options
+    source_requirement = source_options[INTERPRETATION_REQUIREMENTS_KEY][0]
+    assert source_requirement["status"] == "resolved"
+    assert source_requirement["accepted_value"] == "https://example.gov.au"
+    assert source_options[SOURCE_AUTHORING_KEY]["review_event_id"] == str(surface_rows[0].id)
+
+    prompt_node = next(node for node in materialized.nodes if node.id == "identify_colour")
+    prompt_requirement = prompt_node.options[INTERPRETATION_REQUIREMENTS_KEY][0]
+    assert prompt_requirement["status"] == "resolved"
+    assert prompt_requirement["accepted_value"] == "Read {{ row.html }} and return JSON."
+    assert prompt_node.options["resolved_prompt_template_hash"] == stable_hash("Read {{ row.html }} and return JSON.")
 
 
 @pytest.mark.asyncio

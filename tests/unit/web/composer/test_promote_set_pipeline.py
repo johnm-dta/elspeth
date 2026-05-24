@@ -54,7 +54,7 @@ from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_set_pipeline
 from elspeth.web.composer.tools._common import ToolContext
-from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, SOURCE_AUTHORING_KEY
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -568,6 +568,66 @@ class TestPromoteSetPipelineArgErrorRouting:
         with engine.connect() as conn:
             row = conn.execute(select(blobs_table).where(blobs_table.c.id == options["blob_ref"])).one()
         assert row.creation_modality == CreationModality.LLM_GENERATED.value
+
+    def test_inline_blob_llm_authored_source_prevalidation_ignores_review_metadata(self, tmp_path: Path) -> None:
+        """Plugin prevalidation strips web-only interpretation metadata but preserves it in state."""
+        user_message_content = "Create a generated CSV for later source review."
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "source_review",
+                            "kind": "invented_source",
+                            "user_term": "inline_source_url_list",
+                            "status": "pending",
+                            "draft": "url\nhttps://example.test\n",
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+                "inline_blob": {
+                    "filename": "generated.csv",
+                    "mime_type": "text/csv",
+                    "content": "url\nhttps://example.test\n",
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [],
+        }
+
+        result = _execute_set_pipeline(
+            args,
+            _empty_state(),
+            ToolContext(
+                catalog=_mock_catalog(),
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
+                composer_model_identifier="openai/gpt-5-mini",
+                composer_model_version="gpt-5-mini-2026-05-01",
+                composer_provider="openai",
+                composer_skill_hash="sha256:composer-skill",
+                tool_arguments_hash="sha256:tool-arguments",
+            ),
+        )
+
+        assert result.success is True, result.data
+        assert result.updated_state.source is not None
+        options = result.updated_state.source.options
+        assert INTERPRETATION_REQUIREMENTS_KEY in options
+        assert SOURCE_AUTHORING_KEY in options
 
     def test_omitted_metadata_validates_at_model_layer(self) -> None:
         """``metadata`` is optional at the top level; absent leaves the field None."""

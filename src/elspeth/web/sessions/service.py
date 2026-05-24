@@ -2466,11 +2466,37 @@ class SessionServiceImpl:
                             f"{affected_node_id!r} is not present"
                         )
                     state_record = self._row_to_state_record(state_row)
-                    _find_llm_transform_node(
+                    node = _find_llm_transform_node(
                         state_record,
                         affected_node_id=affected_node_id,
                         context="create_pending_interpretation_event",
                     )
+                    if kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
+                        options = _require_mapping(
+                            node["options"],
+                            message=f"create_pending_interpretation_event: node {affected_node_id!r} options is not a mapping",
+                        )
+                        prompt_template = options["prompt_template"]
+                        if not isinstance(prompt_template, str):
+                            raise ValueError(
+                                f"create_pending_interpretation_event: node {affected_node_id!r} options.prompt_template is not a string"
+                            )
+                        if llm_draft != prompt_template:
+                            raise ValueError(
+                                "create_pending_interpretation_event: llm_prompt_template event draft must match current options.prompt_template"
+                            )
+                        try:
+                            _matching_pending_requirement_index(
+                                options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None,
+                                kind=kind,
+                                user_term=user_term,
+                                context="create_pending_interpretation_event",
+                            )
+                        except InterpretationPlaceholderConsumedError as exc:
+                            raise ValueError(
+                                "create_pending_interpretation_event: node options.interpretation_requirements "
+                                f"must contain exactly one pending {kind.value!r} requirement for {user_term!r}"
+                            ) from exc
 
                 session_row = conn.execute(
                     select(sessions_table.c.interpretation_review_disabled).where(sessions_table.c.id == sid)
@@ -2527,6 +2553,56 @@ class SessionServiceImpl:
                         composer_skill_hash=composer_skill_hash,
                         context="create_pending_interpretation_event",
                     )
+                    live_state_row = conn.execute(
+                        select(composition_states_table)
+                        .where(composition_states_table.c.session_id == sid)
+                        .order_by(desc(composition_states_table.c.version))
+                        .limit(1)
+                    ).one_or_none()
+                    if live_state_row is None:
+                        raise AuditIntegrityError(f"create_pending_interpretation_event: session {sid!r} has no composition state to patch")
+                    live_state_record = self._row_to_state_record(live_state_row)
+                    final_source: Mapping[str, Any] | None
+                    final_nodes: list[Mapping[str, Any]]
+                    resolved_prompt_template_hash: str | None
+                    if kind is InterpretationKind.VAGUE_TERM:
+                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_vague_term(
+                            live_state_record,
+                            affected_node_id=affected_node_id,
+                            user_term=user_term,
+                            accepted_value=llm_draft,
+                        )
+                    elif kind is InterpretationKind.LLM_PROMPT_TEMPLATE:
+                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
+                            live_state_record,
+                            event_id=event_id,
+                            affected_node_id=affected_node_id,
+                            user_term=user_term,
+                            accepted_value=llm_draft,
+                        )
+                    elif kind is InterpretationKind.INVENTED_SOURCE:
+                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
+                            live_state_record,
+                            event_id=event_id,
+                            affected_node_id=affected_node_id,
+                            user_term=user_term,
+                            llm_draft=llm_draft,
+                            accepted_value=llm_draft,
+                        )
+                    else:
+                        raise AssertionError(f"unhandled InterpretationKind {kind!r}")
+
+                    from elspeth.web.sessions.converters import state_from_record
+
+                    patched_state_record = replace(
+                        live_state_record,
+                        source=final_source,
+                        nodes=final_nodes,
+                        is_valid=False,
+                        validation_errors=None,
+                    )
+                    patched_validation = state_from_record(patched_state_record).validate()
+                    patched_validation_errors = [error.message for error in patched_validation.errors] or None
                     conn.execute(
                         insert(interpretation_events_table).values(
                             id=event_id,
@@ -2552,9 +2628,28 @@ class SessionServiceImpl:
                             runtime_model_identifier_at_resolve=None,
                             runtime_model_version_at_resolve=None,
                             resolved_prompt_template_hash=(
-                                stable_hash(llm_draft) if kind is InterpretationKind.LLM_PROMPT_TEMPLATE else None
+                                resolved_prompt_template_hash if kind is InterpretationKind.LLM_PROMPT_TEMPLATE else None
                             ),
                         )
+                    )
+                    self._insert_composition_state(
+                        conn,
+                        session_id=sid,
+                        payload=StatePayload(
+                            data=CompositionStateData(
+                                source=final_source,
+                                nodes=final_nodes,
+                                edges=live_state_record.edges,
+                                outputs=live_state_record.outputs,
+                                metadata_=live_state_record.metadata_,
+                                is_valid=patched_validation.is_valid,
+                                validation_errors=patched_validation_errors,
+                                composer_meta=live_state_record.composer_meta,
+                            ),
+                            derived_from_state_id=str(live_state_record.id),
+                        ),
+                        provenance="interpretation_resolve",
+                        created_at=now,
                     )
                     row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)).one()
                     return _interpretation_event_record_from_row(row)

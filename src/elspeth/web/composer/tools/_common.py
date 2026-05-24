@@ -61,7 +61,7 @@ from elspeth.web.composer.state import (
     _serialize_branches,
 )
 from elspeth.web.execution.schemas import ValidationResult
-from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
+from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY, strip_authoring_options
 from elspeth.web.paths import (
     allowed_sink_directories,
     allowed_source_directories,
@@ -1156,7 +1156,9 @@ _WEB_ONLY_SOURCE_KEYS = frozenset({"blob_ref", SOURCE_AUTHORING_KEY})
 
 def _source_options_for_prevalidation(options: Mapping[str, Any]) -> dict[str, Any]:
     """Strip source blob-binding metadata before plugin config validation."""
-    filtered = {k: v for k, v in options.items() if k not in _WEB_ONLY_SOURCE_KEYS}
+    filtered = strip_authoring_options(options)
+    for key in _WEB_ONLY_SOURCE_KEYS:
+        filtered.pop(key, None)
     if options.get("blob_ref") is not None and options.get("mode") == "bind_source":
         filtered.pop("mode", None)
     return filtered
@@ -1278,9 +1280,9 @@ def _prevalidate_source(
     )
 
 
-def _prevalidate_transform(plugin_name: str, options: dict[str, Any]) -> str | None:
+def _prevalidate_transform(plugin_name: str, options: Mapping[str, Any]) -> str | None:
     """Pre-validate transform options."""
-    return _prevalidate_plugin_options("transform", plugin_name, options)
+    return _prevalidate_plugin_options("transform", plugin_name, strip_authoring_options(options))
 
 
 def _prevalidate_sink(plugin_name: str, options: dict[str, Any]) -> str | None:

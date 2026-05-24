@@ -91,7 +91,10 @@ from sqlalchemy.types import JSON
 #   15 → blob_inline_resolutions.blob_id preserved as historical audit data
 #        without a live blobs.id foreign key, so completed-run audit rows do
 #        not prevent blob deletion.
-SESSION_SCHEMA_EPOCH = 15
+#   16 → blobs LLM-authored provenance CHECK constraint now rejects any
+#        creating_* field on verbatim rows; whitespace strings can no longer
+#        bypass the verbatim-side nullability invariant.
+SESSION_SCHEMA_EPOCH = 16
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 
@@ -1179,22 +1182,25 @@ blobs_table = Table(
     ),
     # LLM-provenance nullability invariant: the three LLM-authored
     # modalities MUST carry a non-blank created_from_message_id plus all
-    # five creating_* fields; verbatim MUST NOT carry any creating_* fields
-    # and is allowed to omit the message anchor.  Expressed as ``LHS = RHS``
-    # where LHS is the modality membership predicate and RHS is the
-    # "message anchor plus all five fields populated" predicate — the
-    # biconditional rejects both "claimed LLM but missing provenance" and
-    # "verbatim but somehow has LLM fields".
+    # five creating_* fields; verbatim MUST carry no creating_* fields and
+    # may carry or omit the triggering message anchor. Keep the verbatim
+    # branch explicit: a biconditional over the LLM-populated predicate
+    # lets partial/whitespace creating_* values on verbatim rows pass as
+    # "not fully populated", which weakens the audit nullability contract.
     CheckConstraint(
-        "(creation_modality IN ('llm_generated', 'disambiguated', 'llm_generated_then_amended')) = "
-        "(created_from_message_id IS NOT NULL AND "
+        "((creation_modality IN ('llm_generated', 'disambiguated', 'llm_generated_then_amended')) AND "
+        "created_from_message_id IS NOT NULL AND "
         f"{_sql_non_blank_text('created_from_message_id')} AND "
         "creating_model_identifier IS NOT NULL AND creating_model_version IS NOT NULL AND "
         "creating_provider IS NOT NULL AND creating_composer_skill_hash IS NOT NULL AND "
         "creating_arguments_hash IS NOT NULL AND "
         f"{_sql_non_blank_text('creating_model_identifier')} AND {_sql_non_blank_text('creating_model_version')} AND "
         f"{_sql_non_blank_text('creating_provider')} AND {_sql_non_blank_text('creating_composer_skill_hash')} AND "
-        f"{_sql_non_blank_text('creating_arguments_hash')})",
+        f"{_sql_non_blank_text('creating_arguments_hash')}) OR "
+        "(creation_modality = 'verbatim' AND "
+        "creating_model_identifier IS NULL AND creating_model_version IS NULL AND "
+        "creating_provider IS NULL AND creating_composer_skill_hash IS NULL AND "
+        "creating_arguments_hash IS NULL)",
         name="ck_blobs_creating_llm_provenance_nullability",
     ),
     CheckConstraint(

@@ -14,6 +14,7 @@ chat-completion semantics.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import time
@@ -38,7 +39,6 @@ from elspeth.plugins.infrastructure.clients.llm import (
     RateLimitError,
     ServerError,
 )
-from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
 from elspeth.plugins.transforms.llm.provider import LLMQueryResult, parse_finish_reason
@@ -113,6 +113,39 @@ def normalize_openrouter_base_url(value: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
+def _is_loopback_hostname(hostname: str) -> bool:
+    normalized = hostname.lower().rstrip(".")
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_openrouter_base_url(value: str) -> str:
+    """Validate OpenRouter base URLs without blocking local chaos endpoints.
+
+    Real credential-bearing OpenRouter/proxy endpoints must use HTTPS. The
+    documented ChaosLLM examples target loopback HTTP servers with fake keys, so
+    HTTP is allowed only for syntactic loopback hosts and still rejects userinfo.
+    """
+    stripped = value.strip()
+    if not stripped:
+        raise ValueError("base_url must not be empty")
+
+    parsed = urlsplit(stripped)
+    if not parsed.hostname:
+        raise ValueError("base_url must include a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("base_url must not contain embedded credentials")
+    if parsed.scheme == "https":
+        return stripped
+    if parsed.scheme == "http" and _is_loopback_hostname(parsed.hostname):
+        return stripped
+    raise ValueError(f"base_url must use HTTPS scheme, got {parsed.scheme!r}")
+
+
 class OpenRouterConfig(LLMConfig):
     """OpenRouter-specific configuration.
 
@@ -141,7 +174,7 @@ class OpenRouterConfig(LLMConfig):
     @field_validator("base_url")
     @classmethod
     def _normalize_base_url(cls, value: str) -> str:
-        return normalize_openrouter_base_url(validate_credential_safe_https_url(value, field_name="base_url"))
+        return normalize_openrouter_base_url(_validate_openrouter_base_url(value))
 
     # Tier 2: Plugin-internal tracing (optional, Langfuse only)
     # Azure AI tracing is NOT supported - it auto-instruments the OpenAI SDK,

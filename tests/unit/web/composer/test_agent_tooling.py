@@ -114,7 +114,7 @@ def execute_tool(
     **kwargs: Any,
 ) -> ToolResult:
     if (
-        tool_name == "create_blob"
+        tool_name in {"create_blob", "update_blob"}
         and session_engine is not None
         and session_id is not None
         and "user_message_id" not in kwargs

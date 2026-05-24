@@ -229,7 +229,7 @@ def _state_with_source(source: SourceSpec) -> CompositionState:
     )
 
 
-def _llm_generated_source() -> SourceSpec:
+def _llm_generated_source(*, draft: str = "https://example.gov.au") -> SourceSpec:
     return SourceSpec(
         plugin="csv",
         on_success="rows",
@@ -247,7 +247,7 @@ def _llm_generated_source() -> SourceSpec:
                     "kind": InterpretationKind.INVENTED_SOURCE.value,
                     "user_term": "inline_source_url_list",
                     "status": "pending",
-                    "draft": "https://example.gov.au",
+                    "draft": draft,
                     "event_id": None,
                     "accepted_value": None,
                     "accepted_artifact_hash": None,
@@ -321,7 +321,7 @@ async def _seed_session(service: SessionServiceImpl, session_id: UUID) -> UUID:
     return state.id
 
 
-async def _seed_source_session(service: SessionServiceImpl, session_id: UUID) -> UUID:
+async def _seed_source_session(service: SessionServiceImpl, session_id: UUID, *, source: SourceSpec | None = None) -> UUID:
     with service._engine.begin() as conn:
         conn.execute(
             insert(sessions_table).values(
@@ -333,7 +333,7 @@ async def _seed_source_session(service: SessionServiceImpl, session_id: UUID) ->
                 updated_at=datetime.now(UTC),
             )
         )
-    state_dict = _state_with_source(_llm_generated_source()).to_dict()
+    state_dict = _state_with_source(source if source is not None else _llm_generated_source()).to_dict()
     state = await service.save_composition_state(
         session_id,
         CompositionStateData(
@@ -571,6 +571,17 @@ def test_05d_structured_pending_requirement_for_different_term_still_fails() -> 
         _assert_affected_component(state, "rate_node", InterpretationKind.VAGUE_TERM, "cool")
 
 
+def test_05e_legacy_structured_pending_requirement_without_kind_defaults_to_vague_term() -> None:
+    node = _structured_llm_node()
+    requirement = dict(node.options[INTERPRETATION_REQUIREMENTS_KEY][0])  # type: ignore[index]
+    del requirement["kind"]
+    options = dict(node.options)
+    options[INTERPRETATION_REQUIREMENTS_KEY] = [requirement]
+    state = _state_with(replace(node, options=options))
+
+    _assert_affected_component(state, "rate_node", InterpretationKind.VAGUE_TERM, "cool")
+
+
 @pytest.mark.asyncio
 async def test_request_interpretation_review_accepts_prompt_template_kind() -> None:
     state = _state_with(_prompt_template_review_node())
@@ -598,6 +609,34 @@ async def test_request_interpretation_review_accepts_prompt_template_kind() -> N
     assert result.data["affected_node_id"] == "identify_colour"
     assert result.data["kind"] == "llm_prompt_template"
     assert result.data["llm_draft"] == "Read {{ row.html }} and return JSON."
+
+
+@pytest.mark.asyncio
+async def test_request_interpretation_review_rejects_stale_prompt_template_draft() -> None:
+    state = _state_with(_prompt_template_review_node())
+
+    async def fail_if_called(**_: Any) -> InterpretationEventRecord:
+        pytest.fail("stale prompt-template drafts must be rejected before creating an audit row")
+
+    with pytest.raises(ToolArgumentError, match=r"llm_draft|prompt_template"):
+        await _handle_request_interpretation_review(
+            {
+                "affected_node_id": "identify_colour",
+                "kind": "llm_prompt_template",
+                "user_term": "llm_prompt_template:identify_colour",
+                "llm_draft": "Read {{ row.body }} and return JSON.",
+            },
+            state,
+            session_id=uuid4(),
+            composition_state_id=uuid4(),
+            tool_call_id="call_prompt_template_stale",
+            now=_now(),
+            per_term_cap=3,
+            per_session_day_cap=10,
+            create_pending_interpretation_event=fail_if_called,
+            list_interpretation_events=_empty_list_interpretation_events,
+            **_provenance_kwargs(),
+        )
 
 
 @pytest.mark.asyncio
@@ -655,6 +694,42 @@ async def test_request_interpretation_review_accepts_source_component_for_invent
     assert result.success is True
     assert result.data["affected_node_id"] == SOURCE_COMPONENT_ID
     assert result.data["kind"] == "invented_source"
+
+
+@pytest.mark.asyncio
+async def test_request_interpretation_review_accepts_multiline_source_artifact_with_real_service(
+    service: SessionServiceImpl,
+) -> None:
+    """URL-list source drafts are source artifacts, not vague single-line terms."""
+    session_id = uuid4()
+    draft = "url\nhttps://example.gov.au/a\nhttps://example.gov.au/b\n"
+    source = _llm_generated_source(draft=draft)
+    state_id = await _seed_source_session(service, session_id, source=source)
+    state = _state_with_source(source)
+
+    result = await _handle_request_interpretation_review(
+        {
+            "affected_node_id": SOURCE_COMPONENT_ID,
+            "kind": "invented_source",
+            "user_term": "inline_source_url_list",
+            "llm_draft": draft,
+        },
+        state,
+        session_id=session_id,
+        composition_state_id=state_id,
+        tool_call_id="call_source_review_url_list",
+        now=_now(),
+        per_term_cap=3,
+        per_session_day_cap=10,
+        create_pending_interpretation_event=service.create_pending_interpretation_event,
+        list_interpretation_events=service.list_interpretation_events,
+        **_provenance_kwargs(),
+    )
+
+    assert result.success is True
+    rows = await service.list_interpretation_events(session_id, status="pending")
+    assert len(rows) == 1
+    assert rows[0].llm_draft == draft
 
 
 @pytest.mark.asyncio

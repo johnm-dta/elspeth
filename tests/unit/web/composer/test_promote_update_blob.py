@@ -218,6 +218,8 @@ class TestPromoteUpdateBlobArgErrorRouting:
         assert create_result.success is True
         blob_id = create_result.data["blob_id"]
 
+        update_user_message_content = "Use this exact content:\nnew contents"
+        update_user_message_id = _insert_user_message(engine, session_id, update_user_message_content)
         update_result = _execute_update_blob(
             {"blob_id": blob_id, "content": "new contents"},
             _empty_state(),
@@ -226,6 +228,8 @@ class TestPromoteUpdateBlobArgErrorRouting:
                 data_dir=str(tmp_path),
                 session_engine=engine,
                 session_id=session_id,
+                user_message_id=update_user_message_id,
+                user_message_content=update_user_message_content,
             ),
         )
         assert update_result.success is True

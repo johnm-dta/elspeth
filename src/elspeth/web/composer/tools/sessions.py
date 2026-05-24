@@ -142,6 +142,27 @@ class _RequestInterpretationReviewArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _validate_source_artifact_review_content(value: str) -> None:
+    """Validate generated source-artifact review text.
+
+    Invented-source reviews carry source artifacts (CSV/JSONL/URL lists), not
+    single-phrase interpretation text. They may be multiline, but still must
+    not carry template metacharacters, credential-shaped content, or
+    non-whitespace control characters.
+    """
+
+    if "{{" in value or "}}" in value:
+        raise ValueError("source artifact review content must not contain template metacharacters {{ or }}")
+    for character in value:
+        codepoint = ord(character)
+        if codepoint == 0x7F or (codepoint < 0x20 and character not in "\t\n\r"):
+            raise ValueError("source artifact review content must not contain non-printable control characters")
+    for line in value.splitlines():
+        if len(line) > 1024:
+            raise ValueError("source artifact review content has a line exceeding the 1024-character limit")
+    _reject_credential_shaped_content(value)
+
+
 def _execute_set_pipeline(
     args: dict[str, Any],
     state: CompositionState,
@@ -1045,6 +1066,7 @@ def _assert_affected_component(
     affected_node_id: str,
     kind: InterpretationKind,
     user_term: str,
+    llm_draft: str | None = None,
 ) -> None:
     """Tier-3 boundary check on the LLM-supplied review component.
 
@@ -1108,6 +1130,12 @@ def _assert_affected_component(
             argument="affected_node_id",
             expected=(f"node {affected_node_id!r} to contain a pending {expected_kind} requirement or placeholder for {user_term!r}"),
             actual_type=f"missing pending {expected_kind} review site",
+        )
+    if kind is InterpretationKind.LLM_PROMPT_TEMPLATE and llm_draft is not None and llm_draft != prompt_template:
+        raise ToolArgumentError(
+            argument="llm_draft",
+            expected=f"current options.prompt_template for node {affected_node_id!r}",
+            actual_type="stale prompt-template draft",
         )
 
 
@@ -1354,7 +1382,7 @@ async def _handle_request_interpretation_review(
     # before any DB write. Prompt-template reviews deliberately carry real
     # Jinja such as ``{{ row.html }}``, so they keep the credential prefilter
     # above but skip the accepted-value validator.
-    if parsed.kind in (InterpretationKind.VAGUE_TERM, InterpretationKind.INVENTED_SOURCE):
+    if parsed.kind is InterpretationKind.VAGUE_TERM:
         try:
             _validate_accepted_value_content(parsed.llm_draft)
         except ValueError as exc:
@@ -1363,12 +1391,21 @@ async def _handle_request_interpretation_review(
                 expected="content without template metacharacters, control characters, or credential patterns",
                 actual_type="rejected by accepted-value content validator",
             ) from exc
+    elif parsed.kind is InterpretationKind.INVENTED_SOURCE:
+        try:
+            _validate_source_artifact_review_content(parsed.llm_draft)
+        except ValueError as exc:
+            raise ToolArgumentError(
+                argument="llm_draft",
+                expected="source artifact content without template metacharacters, credential patterns, or non-printable controls",
+                actual_type="rejected by source-artifact content validator",
+            ) from exc
     # Tier-3 boundary check on the LLM-supplied component/kind pair. Missing
     # component, wrong component kind, and absent review metadata all raise
     # ARG_ERROR so the LLM can retry after fixing composition state. This must
     # happen before rate limiting so cap-exceeded audit rows are emitted only
     # for valid pending review sites.
-    _assert_affected_component(state, parsed.affected_node_id, parsed.kind, parsed.user_term)
+    _assert_affected_component(state, parsed.affected_node_id, parsed.kind, parsed.user_term, parsed.llm_draft)
     # Rate-limit gate. Cap-exceeded raises ToolArgumentError; the compose
     # loop is expected to react by writing an AUTO_INTERPRETED_NO_SURFACES
     # event (handled in service.py — see ``record_auto_interpreted_no_surfaces_event``).

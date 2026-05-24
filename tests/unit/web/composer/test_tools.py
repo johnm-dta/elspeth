@@ -43,7 +43,7 @@ from elspeth.web.composer.tools import (
     get_tool_definitions,
 )
 from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationReadiness, ValidationResult
-from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -6215,6 +6215,55 @@ class TestSetPipeline:
             literal_value=literal,
             field="code_themes:api_key",
         )
+
+    def test_upsert_node_llm_prevalidation_ignores_review_metadata(self) -> None:
+        """LLM plugin validation strips web-only prompt review metadata but keeps it in state."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Classify pending interpretation: {{ row.text }}",
+                    "schema": {"mode": "observed"},
+                    PROMPT_TEMPLATE_PARTS_KEY: [
+                        {"kind": "text", "text": "Classify "},
+                        {"kind": "interpretation_ref", "requirement_id": "prompt_review"},
+                        {"kind": "text", "text": ": {{ row.text }}"},
+                    ],
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "prompt_review",
+                            "kind": "llm_prompt_template",
+                            "user_term": "llm_prompt_template:code_themes",
+                            "status": "pending",
+                            "draft": "Classify pending interpretation: {{ row.text }}",
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is True, result.data
+        node = result.updated_state.nodes[0]
+        assert PROMPT_TEMPLATE_PARTS_KEY in node.options
+        assert INTERPRETATION_REQUIREMENTS_KEY in node.options
 
     def test_set_pipeline_rejects_manual_blob_ref_in_source_options(self) -> None:
         """Manual blob_ref must not bypass the blob-backed source binding tools."""

@@ -196,8 +196,8 @@ def _surface_opt_out_row(*, row_id: str, session_id: str, state_id: str) -> dict
     }
 
 
-def test_proposal_provenance_schema_cohort_epoch_is_14() -> None:
-    assert SESSION_SCHEMA_EPOCH == 14
+def test_proposal_provenance_schema_cohort_epoch_is_16() -> None:
+    assert SESSION_SCHEMA_EPOCH == 16
 
 
 def test_composition_proposal_composer_provenance_is_all_or_none(engine) -> None:
@@ -342,6 +342,48 @@ def test_blob_llm_provenance_rejects_blank_strings(engine, blank_value: str) -> 
                 creating_arguments_hash="sha256:tool-arguments",
             )
         )
+
+
+@pytest.mark.parametrize(
+    "creating_field",
+    [
+        "creating_model_identifier",
+        "creating_model_version",
+        "creating_provider",
+        "creating_composer_skill_hash",
+        "creating_arguments_hash",
+    ],
+)
+def test_blob_verbatim_provenance_rejects_any_creating_field(engine, creating_field: str) -> None:
+    session_id = str(uuid.uuid4())
+    values = {
+        "id": str(uuid.uuid4()),
+        "session_id": session_id,
+        "filename": "verbatim.csv",
+        "mime_type": "text/csv",
+        "size_bytes": 1,
+        "content_hash": "a" * 64,
+        "storage_path": "/tmp/verbatim.csv",
+        "created_at": datetime.now(UTC),
+        "created_by": "assistant",
+        "source_description": None,
+        "status": "ready",
+        "creation_modality": "verbatim",
+        "created_from_message_id": None,
+        "creating_model_identifier": None,
+        "creating_model_version": None,
+        "creating_provider": None,
+        "creating_composer_skill_hash": None,
+        "creating_arguments_hash": None,
+    }
+    values[creating_field] = "   "
+
+    with (
+        pytest.raises(IntegrityError, match="ck_blobs_creating_llm_provenance_nullability"),
+        engine.begin() as conn,
+    ):
+        _insert_session(conn, session_id)
+        conn.execute(insert(blobs_table).values(**values))
 
 
 # Test 1 — table exists with all expected columns -----------------------------

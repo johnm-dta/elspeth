@@ -18,8 +18,13 @@ tooling (the ``trust_tier.tier_model`` elspeth-lints rule, and the companion
 * verify that the function under the decorator actually reads from
   ``source_param`` (a separate gate prevents the decorator from becoming a
   whole-function exemption cloak);
-* verify that ``test_ref`` (when present) points to a pytest node that
-  exercises the documented invariant on malformed input.
+* verify that ``test_ref`` (when present) points to a pytest node whose own
+  body contains a raising assertion for malformed-input rejection, invokes
+  the decorated function through ``source_param``, matches the exception type
+  declared by ``invariant`` when one is present, and matches the recorded
+  ``test_fingerprint``. The ``source`` prose remains reviewer-facing
+  documentation; static analysis does not prove a whole-repository external
+  data call graph for that field.
 
 The decorator itself enforces only what is checkable at decoration time:
 
@@ -85,7 +90,7 @@ class TrustBoundaryMetadata:
 
     * ``tier`` is :data:`Literal[3]` (int scalar).
     * ``source``, ``source_param``, ``invariant``, ``qualname`` are ``str``.
-    * ``test_ref`` is ``str | None``.
+    * ``test_ref`` and ``test_fingerprint`` are ``str | None``.
     * ``suppresses`` is a ``tuple`` of :data:`BoundaryRule` Literals.
     * ``func`` is the wrapped :class:`Callable` (not a container; not
       deep-freezable, but immutable in the sense that ``frozen=True``
@@ -103,6 +108,7 @@ class TrustBoundaryMetadata:
     qualname: str
     func: Callable[..., Any]
     test_ref: str | None = None
+    test_fingerprint: str | None = None
 
 
 def trust_boundary(
@@ -113,6 +119,7 @@ def trust_boundary(
     suppresses: tuple[BoundaryRule, ...],
     invariant: str,
     test_ref: str | None = None,
+    test_fingerprint: str | None = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Mark a function as a Tier-3 external-data trust boundary.
 
@@ -137,10 +144,16 @@ def trust_boundary(
         invariant: Operator-facing description of what the function
             guarantees on malformed input (e.g. ``"raises
             ToolArgumentError on shape mismatch; never coerces silently"``).
-        test_ref: Optional pytest nodeid of the test that exercises the
-            invariant on malformed input. A separate CI gate enforces that
-            this is present and points to a real test; the decorator itself
-            does not check for liveness.
+        test_ref: Optional pytest nodeid of the test that should cover the
+            malformed-input invariant. A separate CI gate enforces that this
+            is present, points to a real test, and that the named test's own
+            body contains a raising assertion that directly invokes the
+            decorated function through ``source_param``.
+        test_fingerprint: Optional canonical AST fingerprint of the referenced
+            test body. The companion CI gate requires this whenever
+            ``test_ref`` is present and reports drift if the nodeid still
+            resolves but the test function was renamed, repurposed, or edited
+            after review.
 
     Returns:
         A decorator that, when applied to a function, returns a wrapper
@@ -152,7 +165,8 @@ def trust_boundary(
 
     Raises:
         TypeError: If ``tier`` is not ``3``, or if ``source_param`` does
-            not name a parameter of the wrapped function. Both checks fire
+            not name a parameter of the wrapped function, or if the function
+            is already decorated with ``@trust_boundary``. These checks fire
             at decoration time (module import) rather than at call time.
     """
     if tier != 3:
@@ -160,12 +174,16 @@ def trust_boundary(
         # have data-manifesto-mandated crash semantics; a suppression
         # decorator at those tiers is structurally wrong, not configurably
         # wrong, so we reject it at import rather than offering a flag.
-        raise TypeError(
-            "@trust_boundary only applies to tier=3 trust boundaries; "
-            "Tier-1 and Tier-2 must crash, not suppress."
-        )
+        raise TypeError("@trust_boundary only applies to tier=3 trust boundaries; Tier-1 and Tier-2 must crash, not suppress.")
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        existing_metadata = func.__dict__["__trust_boundary__"] if "__trust_boundary__" in func.__dict__ else None
+        if existing_metadata is not None:
+            raise TypeError(
+                f"@trust_boundary cannot be stacked on {func.__qualname__}; "
+                "a function may carry exactly one trust-boundary metadata record."
+            )
+
         signature = inspect.signature(func)
         if source_param not in signature.parameters:
             raise TypeError(
@@ -184,6 +202,7 @@ def trust_boundary(
             qualname=func.__qualname__,
             func=func,
             test_ref=test_ref,
+            test_fingerprint=test_fingerprint,
         )
 
         @functools.wraps(func)

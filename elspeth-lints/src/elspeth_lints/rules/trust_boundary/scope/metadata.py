@@ -42,13 +42,15 @@ RULE_METADATA = RuleMetadata(
     description=(
         "@trust_boundary source_param must name a function parameter that "
         "the body actually reads from. Stops drive-by decorators on functions "
-        "that don't take external data."
+        "that don't take a locally scoped boundary parameter; the source "
+        "description remains reviewer-facing documentation, not an external "
+        "call-graph proof."
     ),
     severity=Severity.ERROR,
     category=Category.TRUST_TIER,
     cwe=("CWE-754",),
     scope=RuleScope.WHOLE_REPO,
     path_filter=r".*\.py$",
-    examples_violation_count=1,
+    examples_violation_count=2,
     examples_clean_count=1,
 )

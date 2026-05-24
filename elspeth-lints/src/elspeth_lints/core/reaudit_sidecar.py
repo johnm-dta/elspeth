@@ -130,10 +130,11 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict
 from elspeth_lints.core.reaudit import (
+    ReauditCause,
     ReauditDivergence,
     ReauditError,
     ReauditOutcome,
@@ -145,7 +146,7 @@ from elspeth_lints.core.reaudit import (
 # operator's mid-sweep state is bound to a specific schema, and an
 # upgrade that silently changes line shapes would corrupt
 # reconstruction.
-SIDECAR_SCHEMA_VERSION = 2  # v2: outcome records carry excerpt_redactions (closes elspeth-ebb2b88753 / C2-2 on sidecar trail)
+SIDECAR_SCHEMA_VERSION = 5  # v5: outcome records carry the reaudit cause axis
 
 SIDECAR_DIRNAME = ".reaudit-state"
 
@@ -784,9 +785,14 @@ def _outcome_to_dict(outcome: ReauditOutcome) -> dict[str, Any]:
         "original_verdict": _verdict_value(outcome.original_verdict),
         "original_model_verdict": _verdict_value(outcome.original_model_verdict),
         "fresh_verdict": _verdict_value(outcome.fresh_verdict),
+        "fresh_model_id": outcome.fresh_model_id,
         "fresh_rationale": outcome.fresh_rationale,
         "fresh_recorded_at": outcome.fresh_recorded_at.isoformat() if outcome.fresh_recorded_at is not None else None,
+        "judge_call_attempted": outcome.judge_call_attempted,
+        "fresh_prompt_tokens_total": outcome.fresh_prompt_tokens_total,
+        "fresh_prompt_tokens_cached": outcome.fresh_prompt_tokens_cached,
         "divergence": outcome.divergence.value,
+        "cause": outcome.cause.value,
         "code_snapshot": outcome.code_snapshot,
         # Secrets-scrubber audit record (closes elspeth-ebb2b88753 /
         # C2-2 on the sweep path). Each redaction is captured as a
@@ -816,6 +822,11 @@ def _outcome_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: 
         divergence = ReauditDivergence(divergence_str)
     except ValueError as exc:
         raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: unknown divergence {divergence_str!r}") from exc
+    cause_str = _required(payload, "cause", str, sidecar_path, line_no)
+    try:
+        cause = ReauditCause(cause_str)
+    except ValueError as exc:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: unknown cause {cause_str!r}") from exc
     fresh_recorded_at_raw = payload.get("fresh_recorded_at")
     if fresh_recorded_at_raw is not None:
         if not isinstance(fresh_recorded_at_raw, str):
@@ -832,8 +843,18 @@ def _outcome_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: 
         raise SidecarCorruptError(
             f"sidecar {sidecar_path} line {line_no}: fresh_rationale must be str or null; got {type(fresh_rationale).__name__}"
         )
+    if "fresh_model_id" not in payload:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: missing required field 'fresh_model_id'")
+    fresh_model_id = payload["fresh_model_id"]
+    if fresh_model_id is not None and not isinstance(fresh_model_id, str):
+        raise SidecarCorruptError(
+            f"sidecar {sidecar_path} line {line_no}: fresh_model_id must be str or null; got {type(fresh_model_id).__name__}"
+        )
+    judge_call_attempted = _required(payload, "judge_call_attempted", bool, sidecar_path, line_no)
+    fresh_prompt_tokens_total = _optional_int(payload, "fresh_prompt_tokens_total", sidecar_path, line_no)
+    fresh_prompt_tokens_cached = _optional_int(payload, "fresh_prompt_tokens_cached", sidecar_path, line_no)
     # excerpt_redactions is REQUIRED on every outcome line written
-    # by this version of the writer (sidecar schema v2). Per the
+    # by this version of the writer (sidecar schema v3). Per the
     # project's Tier-1 doctrine + the No Legacy Code Policy, a v1
     # sidecar (without the field) crashes the load via the
     # schema_version check on the header; that is the right
@@ -863,7 +884,12 @@ def _outcome_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: 
         fresh_verdict=_verdict_from_value(payload.get("fresh_verdict"), sidecar_path, line_no, "fresh_verdict"),
         fresh_rationale=fresh_rationale,
         fresh_recorded_at=fresh_recorded_at,
+        fresh_model_id=fresh_model_id,
+        judge_call_attempted=judge_call_attempted,
+        fresh_prompt_tokens_total=fresh_prompt_tokens_total,
+        fresh_prompt_tokens_cached=fresh_prompt_tokens_cached,
         divergence=divergence,
+        cause=cause,
         code_snapshot=_required(payload, "code_snapshot", str, sidecar_path, line_no),
         excerpt_redactions=tuple(redactions),
     )
@@ -884,7 +910,10 @@ def _entry_to_dict(entry: AllowlistEntry) -> dict[str, Any]:
         "judge_recorded_at": entry.judge_recorded_at.isoformat() if entry.judge_recorded_at is not None else None,
         "judge_model": entry.judge_model,
         "judge_rationale": entry.judge_rationale,
+        "judge_confidence": entry.judge_confidence,
         "judge_model_verdict": _verdict_value(entry.judge_model_verdict),
+        "judge_policy_hash": entry.judge_policy_hash,
+        "judge_metadata_signature": entry.judge_metadata_signature,
     }
 
 
@@ -926,7 +955,10 @@ def _entry_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: in
         judge_recorded_at=judge_recorded_at,
         judge_model=_optional_str(payload, "judge_model", sidecar_path, line_no),
         judge_rationale=_optional_str(payload, "judge_rationale", sidecar_path, line_no),
+        judge_confidence=_optional_confidence(payload, "judge_confidence", sidecar_path, line_no),
         judge_model_verdict=_verdict_from_value(payload.get("judge_model_verdict"), sidecar_path, line_no, "entry.judge_model_verdict"),
+        judge_policy_hash=_optional_str(payload, "judge_policy_hash", sidecar_path, line_no),
+        judge_metadata_signature=_optional_str(payload, "judge_metadata_signature", sidecar_path, line_no),
     )
 
 
@@ -974,6 +1006,31 @@ def _optional_str(payload: dict[str, Any], field: str, sidecar_path: Path, line_
     if not isinstance(value, str):
         raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: {field} must be str or null; got {type(value).__name__}")
     return value
+
+
+def _optional_int(payload: dict[str, Any], field: str, sidecar_path: Path, line_no: int) -> int | None:
+    value = payload.get(field)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: {field} must be int or null; got {type(value).__name__}")
+    if value < 0:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: {field} must be non-negative")
+    return cast(int, value)
+
+
+def _optional_confidence(payload: dict[str, Any], field: str, sidecar_path: Path, line_no: int) -> float | None:
+    value = payload.get(field)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise SidecarCorruptError(
+            f"sidecar {sidecar_path} line {line_no}: {field} must be a number from 0.0 to 1.0 or null; got {type(value).__name__}"
+        )
+    confidence = float(value)
+    if not 0.0 <= confidence <= 1.0:
+        raise SidecarCorruptError(f"sidecar {sidecar_path} line {line_no}: {field} must be between 0.0 and 1.0")
+    return confidence
 
 
 def _parse_iso_datetime(value: str, *, sidecar_path: Path, line_no: int, field: str) -> datetime:

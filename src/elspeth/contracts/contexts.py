@@ -32,7 +32,15 @@ if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.plugin_context import ValidationErrorToken
     from elspeth.contracts.schema_contract import SchemaContract
-    from elspeth.core.rate_limit import RateLimitRegistry
+
+
+@runtime_checkable
+class RateLimitRegistryProtocol(Protocol):
+    """Minimal rate-limit registry surface exposed to plugins."""
+
+    def get_limiter(self, service_name: str) -> Any:
+        """Return a limiter object for the named external service."""
+        ...
 
 
 @runtime_checkable
@@ -197,7 +205,7 @@ class LifecycleContext(Protocol):
     def payload_store(self) -> PayloadStore | None: ...
 
     @property
-    def rate_limit_registry(self) -> RateLimitRegistry | None: ...
+    def rate_limit_registry(self) -> RateLimitRegistryProtocol | None: ...
 
     @property
     def telemetry_emit(self) -> Callable[[Any], None]: ...

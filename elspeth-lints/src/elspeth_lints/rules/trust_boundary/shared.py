@@ -25,11 +25,16 @@ identically — the decorator composes with any callable. Both
 from __future__ import annotations
 
 import ast
+import hashlib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from elspeth_lints.core.allowlist import Allowlist, AllowlistEntry, FindingKey, load_allowlist, verify_entry_binding_against_finding
+from elspeth_lints.core.protocols import Finding, RuleMetadata
+
 _TRUST_BOUNDARY_NAME = "trust_boundary"
+TRUST_BOUNDARY_ALLOWLIST_DIR = "enforce_trust_boundary_honesty"
 
 
 def _is_trust_boundary_decorator(decorator: ast.expr) -> ast.Call | None:
@@ -227,8 +232,12 @@ def display_path(file_path: Path, root: Path) -> str:
         return file_path.as_posix()
 
 
-def repository_root(root: Path) -> Path:
+def repository_root(root: Path, explicit_repo_root: Path | None = None) -> Path:
     """Return the repository root from a scan root.
+
+    If ``explicit_repo_root`` is provided, it wins. This lets CI use a
+    non-canonical scan root while still resolving repository-relative
+    evidence paths such as ``tests/...`` deterministically.
 
     When the scan root is ``<repo>/src/elspeth`` (the canonical invocation),
     the repository root is ``root.parent.parent``. Otherwise the scan root
@@ -238,6 +247,137 @@ def repository_root(root: Path) -> Path:
     pytest nodeids that point to ``tests/...`` paths even though the scan
     root is ``src/elspeth/``.
     """
+    if explicit_repo_root is not None:
+        return explicit_repo_root
     if root.name == "elspeth" and root.parent.name == "src":
         return root.parent.parent
     return root
+
+
+def allowlist_path_for_root(root: Path) -> Path:
+    """Return the shared trust-boundary honesty-gate allowlist path.
+
+    The canonical scan root in CI is ``<repo>/src/elspeth`` while allowlist
+    governance lives under ``<repo>/config/cicd``. This mirrors tier_model's
+    upward discovery, but all three trust-boundary honesty gates share one
+    directory so escape entries stay in one audited surface.
+    """
+    relative_dir = Path("config") / "cicd" / TRUST_BOUNDARY_ALLOWLIST_DIR
+    local_dir = root / relative_dir
+    if local_dir.is_dir():
+        return local_dir
+
+    if root.name == "elspeth" and root.parent.name == "src":
+        for candidate in root.parents:
+            dir_path = candidate / relative_dir
+            if dir_path.is_dir():
+                return dir_path
+    return local_dir
+
+
+def load_honesty_gate_allowlist(
+    root: Path,
+    *,
+    allowlist_dir_override: Path | None,
+    valid_rule_ids: frozenset[str],
+) -> Allowlist:
+    """Load the narrow allowlist surface for trust-boundary honesty gates.
+
+    Honesty-gate findings are suppressible only as exact, judge-attested
+    entries. Pre-judge grandfathering and per-file blanket rules are rejected
+    here because these rules guard the decorator's own truthfulness; an escape
+    must be a reviewed exception to one finding, not a new suppression language.
+    """
+    allowlist_path = allowlist_dir_override if allowlist_dir_override is not None else allowlist_path_for_root(root)
+    if not allowlist_path.exists():
+        if allowlist_dir_override is not None:
+            raise FileNotFoundError(f"{allowlist_path}: trust-boundary allowlist directory does not exist")
+        return Allowlist(entries=[])
+    allowlist = load_allowlist(allowlist_path, valid_rule_ids=valid_rule_ids, source_root=root)
+    _validate_honesty_gate_allowlist(allowlist, valid_rule_ids=valid_rule_ids)
+    return allowlist
+
+
+def filter_allowlisted_findings(findings: list[Finding], allowlist: Allowlist) -> list[Finding]:
+    """Return findings not covered by the trust-boundary allowlist."""
+    return [finding for finding in findings if _allowlist_match(allowlist, finding) is None]
+
+
+def _validate_honesty_gate_allowlist(allowlist: Allowlist, *, valid_rule_ids: frozenset[str]) -> None:
+    if allowlist.per_file_rules:
+        source_files = ", ".join(sorted({rule.source_file for rule in allowlist.per_file_rules if rule.source_file}))
+        suffix = f" in {source_files}" if source_files else ""
+        raise ValueError(f"trust-boundary honesty gates only allow exact allow_hits; per_file_rules are forbidden{suffix}")
+
+    for entry in allowlist.entries:
+        rule_id = _rule_id_from_canonical_key(entry.key)
+        source_ctx = f" in {entry.source_file}" if entry.source_file else ""
+        if rule_id not in valid_rule_ids:
+            raise ValueError(f"allow_hits entry has unknown trust-boundary honesty rule id {rule_id!r}{source_ctx}: {entry.key}")
+        if entry.judge_verdict is None:
+            raise ValueError(f"trust-boundary honesty allow_hits entry must carry judge_verdict metadata{source_ctx}: {entry.key}")
+        if entry.expires is None:
+            raise ValueError(f"trust-boundary honesty allow_hits entry must expire{source_ctx}: {entry.key}")
+
+
+def _allowlist_match(allowlist: Allowlist, finding: Finding) -> object | None:
+    matched = allowlist.match(
+        FindingKey(
+            file_path=finding.file_path,
+            rule_id=finding.rule_id,
+            symbol_context=finding.symbol_context,
+            fingerprint=finding.fingerprint,
+        )
+    )
+    if isinstance(matched, AllowlistEntry) and matched.judge_verdict is not None:
+        if not finding.ast_path:
+            raise ValueError(
+                f"trust-boundary finding {finding.canonical_key()} has no ast_path; "
+                "signed allowlist entries require binding to the inspected AST node."
+            )
+        verify_entry_binding_against_finding(matched, file_path=finding.file_path, ast_path=finding.ast_path)
+    return matched
+
+
+def _rule_id_from_canonical_key(key: str) -> str:
+    marker = ".py:"
+    py_index = key.find(marker)
+    if py_index < 0 or ":fp=" not in key:
+        raise ValueError(f"allowlist key is not in canonical finding form: {key!r}")
+    remainder = key[py_index + len(marker) :]
+    rule_id, sep, _symbol_and_fingerprint = remainder.partition(":")
+    if not sep or not rule_id:
+        raise ValueError(f"allowlist key is missing its rule-id segment: {key!r}")
+    return rule_id
+
+
+def make_decorator_finding(
+    *,
+    metadata: RuleMetadata,
+    rule_id: str,
+    file_path: str,
+    call: ast.Call,
+    message: str,
+    suggestion: str,
+    symbol_context: tuple[str, ...] = (),
+) -> Finding:
+    """Build a finding for a ``@trust_boundary`` decorator call site.
+
+    All trust-boundary honesty gates fingerprint decorator findings with
+    the same stable payload: ``rule_id|file_path|lineno|col``. Keeping this
+    helper in ``shared`` prevents the three rules from drifting if the
+    fingerprint shape changes again.
+    """
+    fingerprint = hashlib.sha256(f"{rule_id}|{file_path}|{call.lineno}|{call.col_offset}".encode()).hexdigest()[:16]
+    return Finding(
+        rule_id=rule_id,
+        file_path=file_path,
+        line=call.lineno,
+        column=call.col_offset,
+        message=message,
+        fingerprint=fingerprint,
+        severity=metadata.severity,
+        suggestion=suggestion,
+        symbol_context=symbol_context,
+        ast_path=f"decorator:{call.lineno}:{call.col_offset}",
+    )

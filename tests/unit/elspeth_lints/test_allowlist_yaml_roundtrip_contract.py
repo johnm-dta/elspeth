@@ -38,14 +38,16 @@ import yaml
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from elspeth_lints.core.allowlist import JudgeVerdict, load_allowlist
+from elspeth_lints.core.allowlist import AuditReviewVerdict, JudgeVerdict, load_allowlist
 from elspeth_lints.core.cli import (
     _YAML11_IMPLICIT_NON_STR_RESOLVERS,
+    _build_audit_review_text,
     _build_yaml_entry_text,
     _value_resolves_to_non_str,
     _yaml_inline_scalar,
     main,
 )
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL
 
 # ---------- helpers ----------
 
@@ -84,8 +86,10 @@ def _mock_openrouter_completion(*, verdict: str, rationale: str) -> MagicMock:
     completion = MagicMock()
     completion.choices = [MagicMock()]
     completion.choices[0].message = MagicMock()
-    completion.choices[0].message.content = _json.dumps({"verdict": verdict, "rationale": rationale, "should_use_decorator": None})
-    completion.model = "anthropic/claude-opus-4"
+    completion.choices[0].message.content = _json.dumps(
+        {"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None}
+    )
+    completion.model = DEFAULT_JUDGE_MODEL
     completion.usage = MagicMock()
     completion.usage.prompt_tokens = 4000
     completion.usage.completion_tokens = 50
@@ -101,7 +105,14 @@ def _mock_judge_call(*, verdict: str, rationale: str) -> Iterator[MagicMock]:
     fake_client = MagicMock()
     fake_client.chat.completions.create.return_value = fake_completion
     with (
-        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch.dict(
+            os.environ,
+            {
+                "OPENROUTER_API_KEY": "sk-or-test-key",
+                "ELSPETH_JUDGE_METADATA_HMAC_KEY": "test-judge-metadata-hmac-key-2026-05-24",
+            },
+            clear=False,
+        ),
         patch("openai.OpenAI", return_value=fake_client) as client_class,
     ):
         yield client_class
@@ -178,6 +189,7 @@ _NUMERIC_SENTINELS = (
 )
 _TIMESTAMP_SENTINELS = ("2024-01-01",)
 _MERGE_VALUE_SENTINELS = ("<<", "=")
+_PLAIN_SCALAR_SYNTAX_SENTINELS = ("-",)
 
 
 @pytest.mark.parametrize("value", _BOOL_SENTINELS + _NULL_SENTINELS + _NUMERIC_SENTINELS + _TIMESTAMP_SENTINELS + _MERGE_VALUE_SENTINELS)
@@ -199,7 +211,7 @@ def test_value_resolves_to_non_str_detects_pyyaml_sentinels(value: str) -> None:
     [
         "agent",
         "binding-test-agent",
-        "anthropic/claude-opus-4",
+        DEFAULT_JUDGE_MODEL,
         "Yes please",
         "yEs",
         "tRue",
@@ -247,6 +259,18 @@ def test_writer_quotes_non_bool_implicit_resolvers(number_like: str) -> None:
     integer ``42`` — the audit field's type is part of the legal record.
     """
     assert _emit_and_reload_scalar(number_like) == number_like
+
+
+@pytest.mark.parametrize("indicator", _PLAIN_SCALAR_SYNTAX_SENTINELS)
+def test_writer_quotes_plain_scalar_syntax_indicators(indicator: str) -> None:
+    """C2-6 regression: a single bare hyphen is YAML syntax, not data.
+
+    ``x: -`` raises ``ScannerError`` because PyYAML reads the hyphen as a
+    block-sequence indicator. The writer must quote the operator-supplied
+    string before it reaches the loader.
+    """
+    assert _yaml_inline_scalar(indicator) == f"'{indicator}'"
+    assert _emit_and_reload_scalar(indicator) == indicator
 
 
 def test_writer_emits_empty_string_safely() -> None:
@@ -371,7 +395,7 @@ def test_writer_accepts_inline_safe_chars(ok_char: str) -> None:
 
 @pytest.mark.parametrize(
     "sentinel",
-    ["yes", "no", "true", "false", "null", "on", "off", "Yes", "YES", "True", "NULL", "~", "42", "2024-01-01", ""],
+    ["yes", "no", "true", "false", "null", "on", "off", "Yes", "YES", "True", "NULL", "42", "2024-01-01", ""],
 )
 def test_justify_cli_with_sentinel_owner_round_trips(tmp_path: Path, sentinel: str) -> None:
     """The original C2-5 fire path: operator passes a sentinel as ``--owner``.
@@ -381,10 +405,12 @@ def test_justify_cli_with_sentinel_owner_round_trips(tmp_path: Path, sentinel: s
     ``owner=True``. Post-fix: the writer single-quotes the value and the
     loader recovers the original string.
 
-    The empty-string case exercises the upstream argparse guard
-    (``_non_empty_string``) which rejects empty owner; we skip the CLI
-    end-to-end for that case but the bare-writer round-trip is still pinned
-    above.
+    Punctuation-only sentinels such as ``~`` and ``-`` remain covered by
+    helper-level YAML quoting tests, but the CLI must now reject them as
+    non-substantive audit anchors before writing an unloadable allowlist row.
+    The empty-string case exercises the upstream argparse guard; we skip the
+    CLI end-to-end for that case but the bare-writer round-trip is still
+    pinned above.
     """
     if sentinel == "":
         pytest.skip("argparse --owner type=_non_empty_string rejects empty input upstream")
@@ -411,7 +437,8 @@ def test_justify_cli_with_sentinel_owner_round_trips(tmp_path: Path, sentinel: s
         assert main(argv) == 0
 
     target_yaml = allowlist_dir / "plugins.yaml"
-    loaded = load_allowlist(target_yaml, valid_rule_ids={"R1"}, source_root=root)
+    with patch.dict(os.environ, {"ELSPETH_JUDGE_METADATA_HMAC_KEY": "test-judge-metadata-hmac-key-2026-05-24"}, clear=False):
+        loaded = load_allowlist(target_yaml, valid_rule_ids={"R1"}, source_root=root)
     assert len(loaded.entries) == 1
     entry = loaded.entries[0]
     assert entry.owner == sentinel
@@ -421,27 +448,32 @@ def test_justify_cli_with_sentinel_owner_round_trips(tmp_path: Path, sentinel: s
 # ---------- _build_yaml_entry_text: all helper-routed fields are safe ----------
 
 
-@pytest.mark.parametrize("sentinel", ["yes", "null", "42", "on", "False", "~"])
+@pytest.mark.parametrize("sentinel", ["yes", "null", "42", "on", "False", "~", "-"])
 def test_build_yaml_entry_text_quotes_all_helper_routed_fields(sentinel: str) -> None:
     """Every field that flows through ``_yaml_inline_scalar`` must round-trip.
 
-    Today the four such fields are ``owner``, ``judge_model``,
-    ``file_fingerprint``, and ``ast_path`` (see ``_build_yaml_entry_text``).
-    This test sets each of them to the same sentinel and asserts the
-    full entry round-trips — pinning the fix at the call-site level, not
-    just the helper.
+    Today the operator/source-derived helper-routed fields are
+    ``owner``, ``judge_model``, ``judge_policy_hash``, ``file_fingerprint``,
+    and ``ast_path``. The generated ``judge_metadata_signature`` also routes through the
+    helper and is asserted separately. This test sets each operator/
+    source-derived field to the same sentinel and asserts the full entry
+    round-trips — pinning the fix at the call-site level, not just the
+    helper.
     """
-    text = _build_yaml_entry_text(
-        key="plugins/widget.py:R1:Widget:lookup:fp=" + sentinel,
-        owner=sentinel,
-        reason="tier-3 boundary",
-        verdict=JudgeVerdict.ACCEPTED,
-        recorded_at=datetime(2026, 5, 24, 12, 0, 0, tzinfo=UTC),
-        model_id=sentinel,
-        judge_rationale="judge agrees",
-        file_fingerprint=sentinel,
-        ast_path=sentinel,
-    )
+    with patch.dict(os.environ, {"ELSPETH_JUDGE_METADATA_HMAC_KEY": "test-judge-metadata-hmac-key-2026-05-24"}, clear=False):
+        text = _build_yaml_entry_text(
+            key="plugins/widget.py:R1:Widget:lookup:fp=" + sentinel,
+            owner=sentinel,
+            reason="tier-3 boundary",
+            verdict=JudgeVerdict.ACCEPTED,
+            recorded_at=datetime(2026, 5, 24, 12, 0, 0, tzinfo=UTC),
+            model_id=sentinel,
+            policy_hash=sentinel,
+            judge_rationale="judge agrees",
+            judge_confidence=0.5,
+            file_fingerprint=sentinel,
+            ast_path=sentinel,
+        )
     full_yaml = "allow_hits:\n" + text
     loaded = yaml.safe_load(io.StringIO(full_yaml))
     assert isinstance(loaded, dict)
@@ -450,8 +482,30 @@ def test_build_yaml_entry_text_quotes_all_helper_routed_fields(sentinel: str) ->
     e = entries[0]
     assert e["owner"] == sentinel and isinstance(e["owner"], str)
     assert e["judge_model"] == sentinel and isinstance(e["judge_model"], str)
+    assert e["judge_policy_hash"] == sentinel and isinstance(e["judge_policy_hash"], str)
     assert e["file_fingerprint"] == sentinel and isinstance(e["file_fingerprint"], str)
     assert e["ast_path"] == sentinel and isinstance(e["ast_path"], str)
+    assert isinstance(e["judge_metadata_signature"], str)
+    assert e["judge_metadata_signature"].startswith("hmac-sha256:v1:")
+
+
+def test_build_audit_review_text_quotes_all_helper_routed_fields() -> None:
+    """Nested audit-review scalar fields must also survive YAML reload."""
+    reviewed_at = datetime(2026, 5, 24, 12, 0, 0, tzinfo=UTC)
+    text = _build_audit_review_text(
+        verdict=AuditReviewVerdict.JUDGE_ACCEPTED_WRONG,
+        reviewer="yes",
+        reviewed_at=reviewed_at,
+        rationale="Later reproduction showed the accepted suppression hid a real tier leak.",
+    )
+
+    full_yaml = f"allow_hits:\n- key: plugins/widget.py:R1:Widget:lookup:fp=abc\n  owner: operator\n  reason: tier-3 boundary\n{text}"
+    loaded = yaml.safe_load(io.StringIO(full_yaml))
+    assert isinstance(loaded, dict)
+    review = loaded["allow_hits"][0]["audit_review"]
+    assert review["reviewer"] == "yes" and isinstance(review["reviewer"], str)
+    assert review["reviewed_at"] == reviewed_at.isoformat()
+    assert isinstance(review["reviewed_at"], str)
 
 
 # ---------- inventory: future-proofing the helper-call surface ----------
@@ -467,15 +521,16 @@ def test_yaml_inline_scalar_call_sites_are_inventoried() -> None:
     it through the helper or add a written rationale.
 
     The check is byte-grep over ``cli.py`` for the helper's name. The
-    expected count is 6:
-      4 entry-level scalars (owner, judge_model, file_fingerprint,
-        ast_path)
+    expected count is 10:
+      6 entry-level scalars (owner, judge_model, judge_policy_hash,
+        file_fingerprint, ast_path, judge_metadata_signature)
       2 redaction-record fields per nested ``judge_excerpt_redactions``
         entry (pattern, redacted_hash) — these route through the same
         helper because a maliciously-crafted source file could in
         principle produce a hash collision against a YAML 1.1 sentinel
         token, and ``pattern_name`` is a fixed vocabulary today but a
         future addition could trigger the same.
+      2 nested ``audit_review`` scalars (reviewer, reviewed_at)
     Update this number deliberately when the inventory legitimately
     grows.
     """
@@ -486,10 +541,10 @@ def test_yaml_inline_scalar_call_sites_are_inventoried() -> None:
     total_token_matches = text.count("_yaml_inline_scalar(")
     definition_count = text.count("def _yaml_inline_scalar(")
     call_count = total_token_matches - definition_count
-    assert call_count == 6, (
-        f"expected 6 _yaml_inline_scalar(...) call sites in cli.py, found "
+    assert call_count == 10, (
+        f"expected 10 _yaml_inline_scalar(...) call sites in cli.py, found "
         f"{call_count}; if a new field was added, also extend "
-        f"test_build_yaml_entry_text_quotes_all_helper_routed_fields above."
+        "the helper-routed field round-trip tests above."
     )
 
 

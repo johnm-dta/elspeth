@@ -19,13 +19,11 @@ the OpenRouter LLM call. Two security gates:
    auditability standard, an unrecorded transformation is fraud.
 
 Why a single helper module: every code path that builds the judge prompt
-MUST go through ``extract_safe_excerpt``. The structural guarantee is
-mechanical (one importable surface) rather than audit-by-grep. The two
-call sites in this commit are ``cli._run_justify`` (single-entry write
-path, closes elspeth-9bbb9df9a5 / C1-2(c) + C2-2) and
-``reaudit._reaudit_one_entry`` (N-entry sweep path, closes
-elspeth-ebb2b88753 / C3-4 where the same defect amplifies to N
-exfiltrations per CI invocation).
+MUST go through this scrubber surface. Filesystem-derived excerpts use
+``extract_safe_excerpt`` for path containment + scrubbing. Already-inline
+labelled corpus snippets use ``scrub_secrets`` directly because there is
+no filesystem path to contain, but the outbound prompt text still must
+be secret-redacted before it reaches OpenRouter.
 
 Failure shape:
 

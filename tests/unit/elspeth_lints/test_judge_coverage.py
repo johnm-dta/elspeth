@@ -23,7 +23,8 @@ against a baseline ref. These tests probe the boundaries of:
 5. Baseline-file-absent / directory-absent / git-rev-bad failure
    modes produce actionable diagnostics, not silent passes.
 6. The ``allow_classes:`` and private-``entries:`` legacy shapes
-   are silently skipped (scope discipline).
+   surface as ``UNRECOGNIZED_ENTRY_SHAPE`` rather than silently
+   bypassing coverage enforcement.
 
 Test discipline per M5: parameterise invariant violations first.
 Each "happy path" assertion is paired with a "what breaks the
@@ -35,20 +36,39 @@ half).
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 import textwrap
 from pathlib import Path
 
 import pytest
 
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.core.judge_coverage import (
+    JUDGE_METADATA_MUTATED,
+    PER_FILE_RULE_REQUIRES_JUDGE,
     JudgeCoverageError,
     JudgeCoverageReport,
     _discriminator,
+    _git_show,
+    _ls_tree_yaml_files,
     _missing_judge_fields,
     check_judge_coverage,
     check_one_directory,
 )
+
+_FAKE_JUDGE_METADATA_SIGNATURE = "hmac-sha256:v1:" + "0" * 64
+
+
+def test_judge_gates_do_not_reintroduce_private_yaml_loaders() -> None:
+    """C1/C3 gates share allowlist_io for YAML parsing and allow_hits iteration."""
+    from elspeth_lints.core import judge_coverage, override_rate
+
+    assert "_load_yaml_strict" not in vars(judge_coverage)
+    assert "_load_yaml_strict" not in vars(override_rate)
+    assert "yaml.safe_load" not in inspect.getsource(judge_coverage)
+    assert "yaml.safe_load" not in inspect.getsource(override_rate)
+
 
 # =========================================================================
 # Discriminator: rotation policy unit tests (no git, no filesystem)
@@ -63,8 +83,10 @@ def _make_entry(
     judge_verdict=None,
     judge_recorded_at=None,
     judge_model=None,
+    judge_policy_hash=None,
     judge_rationale=None,
     judge_model_verdict=None,
+    judge_metadata_signature=None,
 ):
     """Construct an AllowlistEntry for discriminator/judge-field tests."""
     from elspeth_lints.core.allowlist import AllowlistEntry
@@ -82,8 +104,10 @@ def _make_entry(
         judge_verdict=judge_verdict,
         judge_recorded_at=judge_recorded_at,
         judge_model=judge_model,
+        judge_policy_hash=judge_policy_hash,
         judge_rationale=judge_rationale,
         judge_model_verdict=judge_model_verdict,
+        judge_metadata_signature=judge_metadata_signature,
     )
 
 
@@ -138,6 +162,25 @@ def test_discriminator_normalises_whitespace_in_reason() -> None:
     assert _discriminator(a) == _discriminator(b)
 
 
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("owner", "x"),
+        ("owner", "."),
+        ("reason", "x"),
+        ("reason", "."),
+    ],
+)
+def test_discriminator_rejects_trivial_owner_reason_anchors(field: str, value: str) -> None:
+    """Grandfathering must fail closed when owner/reason cannot disambiguate entries."""
+    kwargs = {"key": "web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa", "owner": "qa", "reason": "real boundary reason"}
+    kwargs[field] = value
+    entry = _make_entry(**kwargs)
+
+    with pytest.raises(JudgeCoverageError, match=field):
+        _discriminator(entry)
+
+
 # =========================================================================
 # Missing-fields validation: atomic-quartet invariant probes
 # =========================================================================
@@ -150,8 +193,27 @@ def test_missing_judge_fields_reports_all_absent_for_pre_judge() -> None:
         "judge_verdict",
         "judge_recorded_at",
         "judge_model",
+        "judge_policy_hash",
         "judge_rationale",
+        "judge_metadata_signature",
     )
+
+
+def test_missing_judge_fields_requires_metadata_signature() -> None:
+    """A judged entry without the HMAC marker is field-present but not authentic."""
+    from datetime import UTC, datetime
+
+    from elspeth_lints.core.allowlist import JudgeVerdict
+
+    entry = _make_entry(
+        key="web/x.py:R1:fn:fp=aa",
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime(2026, 5, 23, tzinfo=UTC),
+        judge_model=DEFAULT_JUDGE_MODEL,
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        judge_rationale="rationale",
+    )
+    assert _missing_judge_fields(entry) == ("judge_metadata_signature",)
 
 
 def test_missing_judge_fields_empty_for_complete_entry() -> None:
@@ -164,8 +226,10 @@ def test_missing_judge_fields_empty_for_complete_entry() -> None:
         key="web/x.py:R1:fn:fp=aa",
         judge_verdict=JudgeVerdict.ACCEPTED,
         judge_recorded_at=datetime(2026, 5, 23, tzinfo=UTC),
-        judge_model="anthropic/claude-opus-4",
+        judge_model=DEFAULT_JUDGE_MODEL,
+        judge_policy_hash=JUDGE_POLICY_HASH,
         judge_rationale="rationale",
+        judge_metadata_signature=_FAKE_JUDGE_METADATA_SIGNATURE,
     )
     assert _missing_judge_fields(entry) == ()
 
@@ -296,14 +360,14 @@ def test_e2e_new_pre_judge_entry_added_in_pr_is_flagged(tmp_path: Path) -> None:
 
 
 def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path) -> None:
-    """A new entry that records the atomic quartet satisfies the gate."""
+    """A new entry that records signed judge metadata satisfies the gate."""
     enforce_dir = _init_git_fixture(tmp_path)
     yaml_path = enforce_dir / "web.yaml"
     yaml_path.write_text("allow_hits: []\n")
     baseline = _commit(tmp_path, "initial: empty allowlist")
 
     yaml_path.write_text(
-        textwrap.dedent("""\
+        textwrap.dedent(f"""\
         allow_hits:
         - key: web/x.py:R5:judged:fp=dddddddddddddddd
           owner: alice
@@ -311,10 +375,12 @@ def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path) -> None:
           safety: contained
           judge_verdict: ACCEPTED
           judge_recorded_at: '2026-05-23T12:00:00+00:00'
-          judge_model: anthropic/claude-opus-4
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
           judge_rationale: model reasoned that this boundary is legitimate.
           file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
           ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
     """)
     )
     _commit(tmp_path, "PR: judged new entry")
@@ -329,6 +395,62 @@ def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path) -> None:
     assert report.new_entry_count == 1
     assert report.violations == ()
     assert report.passes
+
+
+def test_e2e_grandfathered_judge_metadata_mutation_is_flagged(tmp_path: Path) -> None:
+    """Editing judge metadata on an existing entry must not be grandfathered."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=dddddddddddddddd
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: original rationale
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: judged entry")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=dddddddddddddddd
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: mutated rationale
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    _commit(tmp_path, "PR: mutate judge rationale")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 0
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (JUDGE_METADATA_MUTATED,)
+    assert not report.passes
 
 
 def test_e2e_baseline_absent_directory_treats_all_entries_as_new(tmp_path: Path) -> None:
@@ -382,8 +504,14 @@ def test_check_judge_coverage_rejects_bad_baseline_ref(tmp_path: Path) -> None:
     assert "baseline-ref" in str(exc_info.value)
 
 
-def test_check_judge_coverage_skips_legacy_allow_classes_shape(tmp_path: Path) -> None:
-    """Directories using ``allow_classes:`` (private legacy shape) are skipped."""
+def test_check_judge_coverage_skips_standalone_legacy_allow_classes_shape(tmp_path: Path) -> None:
+    """Standalone legacy allowlist formats are outside the C1 judge surface.
+
+    ``audit_evidence.nominal_base`` uses ``allow_classes:`` and has no
+    per-finding judge metadata representation. C1 should not route that
+    directory into judge-coverage unless it also contains a standard
+    ``allow_hits`` / ``per_file_rules`` surface.
+    """
     subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
     subprocess.run(
         ["git", "-C", str(tmp_path), "config", "user.email", "t@e.com"],
@@ -412,8 +540,186 @@ def test_check_judge_coverage_skips_legacy_allow_classes_shape(tmp_path: Path) -
         baseline_ref=baseline,
         repo_root=tmp_path,
     )
-    # Legacy-format directory should not appear in the report keys.
-    assert "enforce_audit_evidence_nominal" not in reports
+    assert reports == {}
+
+
+def test_check_judge_coverage_skips_standalone_custom_entries_shape(tmp_path: Path) -> None:
+    """Custom governance ``entries:`` manifests are not judgeable allow_hits.
+
+    The telemetry-backfill trailer allowlist stores commit SHA exemptions under
+    ``entries:``. Those records are audited by their own CI backstop and should
+    not fail the allowlist-judge metadata gate.
+    """
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@e.com"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "T"], check=True)
+    enforce_root = tmp_path / "config" / "cicd"
+    custom = enforce_root / "enforce_telemetry_backfill_trailer"
+    custom.mkdir(parents=True)
+    (custom / "cohorts.yaml").write_text(
+        textwrap.dedent("""\
+        entries:
+        - commit_sha: 0123456789abcdef0123456789abcdef01234567
+          cohort: b2
+          reason: pre-hook cohort backfill
+          owner: codex
+          expires: 2026-06-30
+    """),
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "initial")
+
+    reports = check_judge_coverage(
+        allowlist_root=enforce_root,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+    assert reports == {}
+
+
+def test_check_judge_coverage_reports_mixed_allow_hits_and_allow_classes(tmp_path: Path) -> None:
+    """A legacy entry shape remains visible even beside valid ``allow_hits``."""
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@e.com"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "T"], check=True)
+    enforce_root = tmp_path / "config" / "cicd"
+    mixed = enforce_root / "enforce_mixed"
+    mixed.mkdir(parents=True)
+    (mixed / "mixed.yaml").write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: x.py:R1:fn:fp=aa
+          owner: alice
+          reason: real boundary reason
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T00:00:00+00:00'
+          judge_model: m
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: judge accepted the suppression
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
+        allow_classes:
+        - key: x.py:AEN1:Legacy
+          owner: bob
+          reason: legacy class allowlist
+          safety: contained
+    """),
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "initial")
+
+    reports = check_judge_coverage(
+        allowlist_root=enforce_root,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    report = reports["enforce_mixed"]
+    assert report.head_entry_count == 2
+    assert report.grandfathered_count == 1
+    assert report.new_entry_count == 1
+    assert len(report.violations) == 1
+    assert report.violations[0].entry_key == "allow_classes[0]::x.py:AEN1:Legacy"
+    assert report.violations[0].missing_fields == ("UNRECOGNIZED_ENTRY_SHAPE",)
+
+
+def test_check_judge_coverage_flags_new_per_file_rule_as_separate_category(tmp_path: Path) -> None:
+    """A newly-created per-file wildcard rule must not bypass judge coverage."""
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@e.com"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "T"], check=True)
+    enforce_root = tmp_path / "config" / "cicd"
+    enforce_dir = enforce_root / "enforce_tier_model"
+    enforce_dir.mkdir(parents=True)
+    (enforce_dir / "core.yaml").write_text("allow_hits: []\n")
+    baseline = _commit(tmp_path, "initial")
+
+    (enforce_dir / "core.yaml").write_text(
+        textwrap.dedent("""\
+        per_file_rules:
+        - pattern: core/config.py
+          rules: [R1, R6]
+          reason: configuration loader validates user YAML at the boundary
+          expires: null
+          max_hits: 4
+    """),
+        encoding="utf-8",
+    )
+    _commit(tmp_path, "PR: add per-file rule")
+
+    reports = check_judge_coverage(
+        allowlist_root=enforce_root,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    report = reports["enforce_tier_model"]
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert len(report.violations) == 1
+    assert report.violations[0].entry_key == "per_file_rules[0]::pattern=core/config.py::rules=R1,R6"
+    assert report.violations[0].missing_fields == (PER_FILE_RULE_REQUIRES_JUDGE,)
+
+
+def test_check_judge_coverage_grandfathers_existing_per_file_rule(tmp_path: Path) -> None:
+    """Existing per-file rules remain visible but do not fail C1 retroactively."""
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@e.com"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "T"], check=True)
+    enforce_root = tmp_path / "config" / "cicd"
+    enforce_dir = enforce_root / "enforce_tier_model"
+    enforce_dir.mkdir(parents=True)
+    (enforce_dir / "core.yaml").write_text(
+        textwrap.dedent("""\
+        per_file_rules:
+        - pattern: core/config.py
+          rules: [R1, R6]
+          reason: configuration loader validates user YAML at the boundary
+          expires: null
+          max_hits: 4
+    """),
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "initial")
+
+    reports = check_judge_coverage(
+        allowlist_root=enforce_root,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    report = reports["enforce_tier_model"]
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 1
+    assert report.new_entry_count == 0
+    assert report.violations == ()
+
+
+def test_check_judge_coverage_skips_empty_legacy_shape(tmp_path: Path) -> None:
+    """Empty legacy stubs do not create entry-shaped violations."""
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "t@e.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "T"],
+        check=True,
+    )
+    enforce_root = tmp_path / "config" / "cicd"
+    legacy = enforce_root / "enforce_audit_evidence_nominal"
+    legacy.mkdir(parents=True)
+    (legacy / "errors.yaml").write_text("allow_classes: []\n")
+    baseline = _commit(tmp_path, "initial")
+
+    reports = check_judge_coverage(
+        allowlist_root=enforce_root,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+    assert reports == {}
 
 
 def test_check_judge_coverage_root_not_a_dir_errors(tmp_path: Path) -> None:
@@ -474,7 +780,7 @@ def test_directory_routing_oserror_raises_judge_coverage_error(tmp_path: Path, m
             repo_root=tmp_path,
         )
     assert "web.yaml" in str(exc_info.value)
-    assert "routing for allow_hits" in str(exc_info.value)
+    assert "routing for allowlist entries" in str(exc_info.value)
 
 
 def test_directory_routing_oserror_cli_exit_code_is_two(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -528,7 +834,21 @@ def test_directory_routing_detects_crlf_line_endings(tmp_path: Path) -> None:
     enforce_dir = _init_git_fixture(tmp_path)
     yaml_path = enforce_dir / "web.yaml"
     # CRLF line endings with allow_hits NOT at start-of-file.
-    yaml_content = "# leading comment\r\nallow_hits:\r\n- key: web/x.py:R1:fn:fp=aa\r\n  owner: alice\r\n  reason: r\r\n  safety: contained\r\n  judge_verdict: ACCEPTED\r\n  judge_recorded_at: '2026-05-23T00:00:00+00:00'\r\n  judge_model: m\r\n  judge_rationale: r\r\n  file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'\r\n  ast_path: body[0]\r\n"
+    yaml_content = (
+        "# leading comment\r\n"
+        "allow_hits:\r\n"
+        "- key: web/x.py:R1:fn:fp=aa\r\n"
+        "  owner: alice\r\n"
+        "  reason: real boundary reason\r\n"
+        "  safety: contained\r\n"
+        "  judge_verdict: ACCEPTED\r\n"
+        "  judge_recorded_at: '2026-05-23T00:00:00+00:00'\r\n"
+        "  judge_model: m\r\n"
+        f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'\r\n"
+        "  judge_rationale: r\r\n"
+        "  file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'\r\n"
+        "  ast_path: body[0]\r\n"
+    )
     yaml_path.write_bytes(yaml_content.encode("utf-8"))
     baseline = _commit(tmp_path, "initial: CRLF allow_hits")
 
@@ -557,11 +877,12 @@ def test_directory_routing_detects_allow_hits_at_start_of_file(tmp_path: Path) -
         "allow_hits:\n"
         "- key: web/x.py:R1:fn:fp=aa\n"
         "  owner: alice\n"
-        "  reason: r\n"
+        "  reason: real boundary reason\n"
         "  safety: contained\n"
         "  judge_verdict: ACCEPTED\n"
         "  judge_recorded_at: '2026-05-23T00:00:00+00:00'\n"
         "  judge_model: m\n"
+        f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'\n"
         "  judge_rationale: r\n"
         "  file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'\n"
         "  ast_path: body[0]\n"
@@ -604,7 +925,7 @@ def test_baseline_parse_failure_raises_judge_coverage_error(tmp_path: Path) -> N
 
     # HEAD content is a well-formed allow_hits with one entry.
     yaml_path.write_text(
-        textwrap.dedent("""\
+        textwrap.dedent(f"""\
         allow_hits:
         - key: web/x.py:R1:fn:fp=aa
           owner: alice
@@ -612,7 +933,8 @@ def test_baseline_parse_failure_raises_judge_coverage_error(tmp_path: Path) -> N
           safety: contained
           judge_verdict: ACCEPTED
           judge_recorded_at: '2026-05-23T00:00:00+00:00'
-          judge_model: anthropic/claude-opus-4
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
           judge_rationale: rationale
           file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
           ast_path: body[0]
@@ -715,3 +1037,60 @@ def test_head_yamlerror_cli_exit_code_is_two(tmp_path: Path) -> None:
         ]
     )
     assert exit_code == 2
+
+
+# =========================================================================
+# M7-14/M7-15: git plumbing failures are structured and locale-stable
+# =========================================================================
+
+
+def test_git_show_returns_none_for_true_baseline_path_absence(tmp_path: Path) -> None:
+    """A missing path at a valid baseline ref is the only semantic ``None`` case."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    (enforce_dir / "web.yaml").write_text("allow_hits: []\n")
+    baseline = _commit(tmp_path, "initial")
+
+    assert (
+        _git_show(
+            baseline_ref=baseline,
+            rel_path="config/cicd/enforce_tier_model/missing.yaml",
+            repo_root=tmp_path,
+        )
+        is None
+    )
+
+
+def test_git_show_bad_baseline_ref_raises_judge_coverage_error(tmp_path: Path) -> None:
+    """An invalid baseline ref is a gate error, not an empty baseline file."""
+    _init_git_fixture(tmp_path)
+    (tmp_path / "README.md").write_text("seed\n")
+    _commit(tmp_path, "initial")
+
+    with pytest.raises(JudgeCoverageError, match="baseline-ref"):
+        _git_show(
+            baseline_ref="definitely-not-a-ref",
+            rel_path="config/cicd/enforce_tier_model/web.yaml",
+            repo_root=tmp_path,
+        )
+
+
+def test_git_commands_force_c_locale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Git subprocesses run with ``LC_ALL=C`` and do not depend on localized stderr."""
+    calls: list[dict[str, str]] = []
+
+    def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs.get("env", {}))
+        return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert (
+        _ls_tree_yaml_files(
+            baseline_ref="HEAD",
+            rel_dir="config/cicd/enforce_tier_model",
+            repo_root=tmp_path,
+        )
+        == []
+    )
+    assert calls
+    assert all(call["LC_ALL"] == "C" for call in calls)

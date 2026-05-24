@@ -44,6 +44,7 @@ from __future__ import annotations
 import fcntl
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -117,6 +118,26 @@ def _fsync_directory(directory: Path) -> None:
         os.close(dir_fd)
 
 
+def _acquire_lock_fd(path: Path, *, wait: bool) -> int:
+    """Acquire the sibling lock file for ``path`` and return its fd."""
+    lock_path = _lock_path_for(path)
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    flags = fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB
+    try:
+        fcntl.flock(lock_fd, flags)
+    except BlockingIOError as exc:
+        os.close(lock_fd)
+        raise AtomicWriteConflictError(
+            f"atomic_write_text: another writer holds {lock_path}; refusing to wait. Identify the concurrent writer and retry."
+        ) from exc
+    return lock_fd
+
+
+def _release_lock_fd(lock_fd: int) -> None:
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    os.close(lock_fd)
+
+
 def atomic_write_text(
     path: Path,
     content: str,
@@ -151,18 +172,10 @@ def atomic_write_text(
 
     lock_fd: int | None = None
     if lock:
-        lock_path = _lock_path_for(path)
         # ``O_CREAT`` so the lock file is created on first use; the
         # file persists between calls and the same inode is reused
         # for every subsequent ``flock``.
-        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            os.close(lock_fd)
-            raise AtomicWriteConflictError(
-                f"atomic_write_text: another writer holds {lock_path}; refusing to wait. Identify the concurrent writer and retry."
-            ) from exc
+        lock_fd = _acquire_lock_fd(path, wait=False)
 
     temp_path = _temp_path_for(path)
     temp_created = False
@@ -228,5 +241,45 @@ def atomic_write_text(
         if lock_fd is not None:
             # ``LOCK_UN`` and close releases the advisory lock; the
             # ``.lock`` file remains on disk for the next invocation.
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            os.close(lock_fd)
+            _release_lock_fd(lock_fd)
+
+
+def atomic_update_text(
+    path: Path,
+    update: Callable[[str | None], str],
+    *,
+    encoding: str = "utf-8",
+    create_parent: bool = False,
+) -> None:
+    """Atomically read, mutate, and replace ``path`` under one file lock.
+
+    ``atomic_write_text`` protects only the replacement step. Callers that
+    compute new content from the current file contents must use this helper
+    instead, otherwise two processes can both read the same old bytes and
+    then serialize two individually-atomic writes where the later replacement
+    drops the earlier mutation.
+
+    The ``update`` callable runs while the sibling ``.<name>.lock`` is held
+    and receives the current text, or ``None`` if the file does not exist.
+    The returned text is written with the same durable temp+fsync+replace
+    recipe as :func:`atomic_write_text`, with the lock intentionally not
+    reacquired inside the replacement step.
+    """
+    path = Path(path)
+    parent = path.parent
+    if create_parent:
+        parent.mkdir(parents=True, exist_ok=True)
+    elif not parent.exists():
+        raise FileNotFoundError(
+            f"atomic_update_text: parent directory does not exist: {parent}. "
+            "Refusing to create it implicitly; pass create_parent=True for "
+            "callers that own allowlist directory provisioning."
+        )
+
+    lock_fd = _acquire_lock_fd(path, wait=True)
+    try:
+        current = path.read_text(encoding=encoding) if path.exists() else None
+        updated = update(current)
+        atomic_write_text(path, updated, encoding=encoding, lock=False)
+    finally:
+        _release_lock_fd(lock_fd)

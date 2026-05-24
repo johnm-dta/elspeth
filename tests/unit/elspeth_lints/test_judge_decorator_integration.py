@@ -23,6 +23,7 @@ stays voluntary and lags.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Iterator
@@ -33,9 +34,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth_lints.core.allowlist import JudgeVerdict
+from elspeth_lints.core.allowlist import JudgeVerdict, load_allowlist
 from elspeth_lints.core.cli import main
-from elspeth_lints.core.judge import JudgeRequest, call_judge
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JudgeRequest, call_judge
 
 # Small synthetic source: an R1 finding inside a function whose external-data
 # parameter is named ``arguments`` — the canonical decorator-suggestion case
@@ -56,6 +57,11 @@ class ToolExecutor:
 # ---------- helpers ----------
 
 
+_OVERRIDE_TOKEN_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN"
+_OVERRIDE_TOKEN_SHA256_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN_SHA256"
+_OVERRIDE_TEST_TOKEN = "test-operator-override-token-2026-05-24"
+
+
 def _build_source_tree(tmp_path: Path) -> tuple[Path, Path]:
     """Lay out a minimal source root with one boundary-shaped finding."""
     root = tmp_path / "src_root"
@@ -74,6 +80,11 @@ def _build_allowlist_dir(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return allowlist_dir
+
+
+def _set_operator_override_authority(monkeypatch: pytest.MonkeyPatch, *, token: str = _OVERRIDE_TEST_TOKEN) -> None:
+    monkeypatch.setenv(_OVERRIDE_TOKEN_ENV, token)
+    monkeypatch.setenv(_OVERRIDE_TOKEN_SHA256_ENV, hashlib.sha256(token.encode("utf-8")).hexdigest())
 
 
 def _mock_openrouter_completion(
@@ -97,6 +108,7 @@ def _mock_openrouter_completion(
         {
             "verdict": verdict,
             "rationale": rationale,
+            "confidence": 0.91,
             "should_use_decorator": should_use_decorator,
         }
     )
@@ -109,7 +121,7 @@ def _mock_openrouter_completion(
     # this, MagicMock auto-attributes a non-JSON-serialisable Mock object
     # to ``completion.model``, which then flows into JudgeResponse.model_id
     # and breaks JSON serialisation in --format json tests.
-    completion.model = "anthropic/claude-opus-4"
+    completion.model = DEFAULT_JUDGE_MODEL
     completion.usage = MagicMock(
         prompt_tokens=4000,
         prompt_tokens_details=MagicMock(cached_tokens=0),
@@ -133,7 +145,14 @@ def _mock_judge_call(
     fake_client = MagicMock()
     fake_client.chat.completions.create.return_value = fake_completion
     with (
-        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch.dict(
+            os.environ,
+            {
+                "OPENROUTER_API_KEY": "sk-or-test-key",
+                "ELSPETH_JUDGE_METADATA_HMAC_KEY": "test-judge-metadata-hmac-key-2026-05-24",
+            },
+            clear=False,
+        ),
         patch("openai.OpenAI", return_value=fake_client) as client_class,
     ):
         yield client_class
@@ -411,11 +430,151 @@ def test_justify_json_output_null_should_use_decorator_when_absent(
     assert payload["should_use_decorator"] is None
 
 
+# ---------- CLI: hostile-input integration regressions ----------
+
+
+def test_justify_rejects_file_path_outside_root_before_judge_call(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An escaping --file-path must fail before any judge transport is constructed."""
+    root, _target = _build_source_tree(tmp_path)
+    outside = tmp_path / "outside.py"
+    outside.write_text("secret = 'do not send to judge'\n", encoding="utf-8")
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    client_class = MagicMock()
+
+    with patch("openai.OpenAI", client_class):
+        exit_code = main(
+            [
+                "justify",
+                "--root",
+                str(root),
+                "--allowlist-dir",
+                str(allowlist_dir),
+                "--file-path",
+                str(outside),
+                "--symbol",
+                "ToolExecutor._execute_set_pipeline",
+                "--rationale",
+                "attempted root escape",
+                "--owner",
+                "test-agent",
+            ]
+        )
+
+    assert exit_code == 2
+    assert "security violation" in capsys.readouterr().err
+    client_class.assert_not_called()
+    assert not (allowlist_dir / "plugins.yaml").exists()
+
+
+def test_justify_rejects_owner_with_embedded_newline_before_judge_call(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Inline YAML audit fields must reject multiline owner identities at argparse."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "justify",
+                "--root",
+                str(root),
+                "--allowlist-dir",
+                str(allowlist_dir),
+                "--file-path",
+                "plugins/tool_executor.py",
+                "--symbol",
+                "ToolExecutor._execute_set_pipeline",
+                "--rationale",
+                "arguments comes from the composer tool call",
+                "--owner",
+                "operator\nname",
+            ]
+        )
+
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "--owner" in captured.err
+    assert "single-line" in captured.err
+    assert not (allowlist_dir / "plugins.yaml").exists()
+
+
+def test_justify_rationale_with_yaml_directives_round_trips_as_data(tmp_path: Path) -> None:
+    """YAML-looking rationale content must persist as block-scalar data."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    rationale = "%YAML 1.1\n---\n- not: a second document\n..."
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/tool_executor.py",
+        "--symbol",
+        "ToolExecutor._execute_set_pipeline",
+        "--rationale",
+        rationale,
+        "--owner",
+        "test-agent",
+    ]
+    with _mock_judge_call(verdict="ACCEPTED", rationale="judge treats directive-looking text as data"):
+        exit_code = main(argv)
+
+    assert exit_code == 0
+    allowlist = load_allowlist(allowlist_dir / "plugins.yaml", valid_rule_ids={"R1"})
+    assert allowlist.entries[0].reason == rationale
+
+
 # ---------- CLI: operator override preserves the audit signal ----------
+
+
+def test_justify_operator_override_after_model_accepts_records_model_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ACCEPTED+override is odd but auditable: entry override, model verdict ACCEPTED."""
+    _set_operator_override_authority(monkeypatch)
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/tool_executor.py",
+        "--symbol",
+        "ToolExecutor._execute_set_pipeline",
+        "--rationale",
+        "operator wants the override audit trail even though the judge accepted",
+        "--owner",
+        "operator-jdoe",
+        "--operator-override",
+    ]
+    with _mock_judge_call(verdict="ACCEPTED", rationale="model accepted but operator still chose override"):
+        exit_code = main(argv)
+
+    assert exit_code == 0
+    text = (allowlist_dir / "plugins.yaml").read_text(encoding="utf-8")
+    assert "judge_verdict: OVERRIDDEN_BY_OPERATOR" in text
+    assert "judge_model_verdict: ACCEPTED" in text
+    allowlist = load_allowlist(allowlist_dir / "plugins.yaml", valid_rule_ids={"R1"})
+    assert allowlist.entries[0].judge_verdict is JudgeVerdict.OVERRIDDEN_BY_OPERATOR
+    assert allowlist.entries[0].judge_model_verdict is JudgeVerdict.ACCEPTED
 
 
 def test_justify_operator_override_past_decorator_suggestion_records_both_signals(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Override past a should_use_decorator BLOCK preserves the suggestion in rationale.
 
@@ -428,6 +587,7 @@ def test_justify_operator_override_past_decorator_suggestion_records_both_signal
     rationale text contains the model's "use @trust_boundary..." sentence
     and ``judge_model_verdict=BLOCKED`` records the divergence.
     """
+    _set_operator_override_authority(monkeypatch)
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
 

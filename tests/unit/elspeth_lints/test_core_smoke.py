@@ -195,10 +195,11 @@ def test_allowlist_accepts_protocol_schema_fields(tmp_path: Path) -> None:
     quartet, not as a standalone schema extension.
     """
     from elspeth_lints.core.allowlist import FindingKey, load_allowlist
+    from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 
     allowlist_file = tmp_path / "allowlist.yaml"
     allowlist_file.write_text(
-        """
+        f"""
 allow_hits:
   - key: src/example.py:R1:Class.method:fp=abc123
     owner: platform
@@ -207,7 +208,8 @@ allow_hits:
     expires_at: 2099-01-01
     judge_verdict: ACCEPTED
     judge_recorded_at: '2026-05-23T00:00:00+00:00'
-    judge_model: anthropic/claude-opus-4
+    judge_model: {DEFAULT_JUDGE_MODEL}
+    judge_policy_hash: '{JUDGE_POLICY_HASH}'
     judge_rationale: the boundary is legitimate
     file_fingerprint: sha256:source
     ast_path: Module.body[0].body[0]

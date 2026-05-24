@@ -31,19 +31,32 @@ silent reaudit miscount.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import textwrap
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from elspeth_lints.core.allowlist import JudgeVerdict, compute_judge_metadata_signature
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.core.reaudit import (
     _EXCLUDED_FROM_REAUDIT,
+    _RULE_VOCABULARY_REGISTRY,
+    ReauditDivergence,
     ReauditError,
     _scan_via_rule_analyze,
     _supported_rules,
     _valid_rule_ids_for,
     reaudit_entries,
 )
+
+_TEST_JUDGE_METADATA_HMAC_KEY = "test-judge-metadata-hmac-key-2026-05-24"
 
 
 def test_supported_rules_covers_all_builtin_except_explicit_exclusions() -> None:
@@ -87,6 +100,11 @@ def test_every_supported_rule_resolves_a_non_empty_vocabulary() -> None:
         assert vocab, f"{rule_id}: empty vocabulary returned"
 
 
+def test_vocabulary_registry_covers_every_supported_rule() -> None:
+    """The dispatch table is declarative and covers the supported rule set."""
+    assert set(_RULE_VOCABULARY_REGISTRY) == set(_supported_rules())
+
+
 def test_unregistered_rule_filter_raises_reaudit_error() -> None:
     """A rule_id with no vocabulary registration raises a clear error.
 
@@ -96,7 +114,7 @@ def test_unregistered_rule_filter_raises_reaudit_error() -> None:
     with pytest.raises(ReauditError) as exc_info:
         _valid_rule_ids_for("nonexistent.fake.rule")
     assert "No sub-rule vocabulary is registered" in str(exc_info.value)
-    assert "_valid_rule_ids_for" in str(exc_info.value)
+    assert "_RULE_VOCABULARY_REGISTRY" in str(exc_info.value)
 
 
 def test_reaudit_entries_rejects_unsupported_rule_filter(tmp_path: Path) -> None:
@@ -178,3 +196,143 @@ def test_generic_dispatch_handles_syntax_error_as_empty(tmp_path: Path) -> None:
         root=tmp_path,
     )
     assert findings == []
+
+
+def test_generic_dispatch_reaudits_composer_catch_order_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-tier rule re-locates a current finding, calls the judge, and classifies it.
+
+    The earlier multi-rule tests pinned registry/vocabulary shape but
+    did not exercise ``reaudit_entries`` through the generic
+    ``Rule.analyze`` scanner plus canonical-key matcher. ``composer.catch_order``
+    is the smallest self-contained rule that produces a deterministic
+    finding without sibling allowlist state.
+    """
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+    root = tmp_path / "src_root"
+    target = root / "web" / "sessions" / "routes.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        textwrap.dedent(
+            """\
+            def f():
+                try:
+                    pass
+                except ComposerServiceError as exc:
+                    pass
+                except ComposerPluginCrashError as crash:
+                    pass
+            """
+        ),
+        encoding="utf-8",
+    )
+    finding = _single_catch_order_finding(root=root, target=target)
+    entry_key = finding.canonical_key()
+    allowlist_dir = tmp_path / "allowlist"
+    allowlist_dir.mkdir()
+    (allowlist_dir / "_defaults.yaml").write_text(
+        "version: 1\ndefaults:\n  fail_on_stale: false\n  fail_on_expired: false\n",
+        encoding="utf-8",
+    )
+    _write_signed_allow_hit(
+        allowlist_dir / "composer.yaml",
+        key=entry_key,
+        target=target,
+        ast_path="generic:composer.catch_order:CCO1",
+    )
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="catch-order suppression still warranted") as client_class:
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="composer.catch_order",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert len(report.outcomes) == 1
+    outcome = report.outcomes[0]
+    assert outcome.divergence is ReauditDivergence.STILL_AGREES
+    assert outcome.fresh_verdict is JudgeVerdict.ACCEPTED
+    assert "ComposerServiceError" in outcome.code_snapshot
+    assert client_class.return_value.chat.completions.create.call_count == 1
+
+
+def _single_catch_order_finding(*, root: Path, target: Path):
+    findings = _scan_via_rule_analyze(
+        rule_filter="composer.catch_order",
+        target_file=target,
+        root=root,
+    )
+    assert len(findings) == 1
+    return findings[0]
+
+
+def _write_signed_allow_hit(path: Path, *, key: str, target: Path, ast_path: str) -> None:
+    file_fingerprint = hashlib.sha256(target.read_bytes()).hexdigest()
+    recorded_at = datetime(2024, 1, 1, tzinfo=UTC)
+    judge_rationale = "original judge said the catch-order suppression was warranted"
+    signature = compute_judge_metadata_signature(
+        key=key,
+        file_fingerprint=file_fingerprint,
+        ast_path=ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=recorded_at,
+        judge_model=DEFAULT_JUDGE_MODEL,
+        judge_rationale=judge_rationale,
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
+    path.write_text(
+        "\n".join(
+            [
+                "allow_hits:",
+                f"- key: {key}",
+                "  owner: test-owner",
+                "  reason: |-",
+                "    Broad-before-narrow catch order is quarantined during migration.",
+                "  safety: |-",
+                "    Reaudit replays the generic composer.catch_order scanner before accepting the entry.",
+                "  expires: '2030-01-01'",
+                "  judge_verdict: ACCEPTED",
+                f"  judge_recorded_at: '{recorded_at.isoformat()}'",
+                f"  judge_model: {DEFAULT_JUDGE_MODEL}",
+                f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'",
+                "  judge_rationale: |-",
+                f"    {judge_rationale}",
+                f"  file_fingerprint: '{file_fingerprint}'",
+                f"  ast_path: '{ast_path}'",
+                f"  judge_metadata_signature: '{signature}'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _mock_openrouter_completion(*, verdict: str, rationale: str, served_model: str | None = DEFAULT_JUDGE_MODEL) -> MagicMock:
+    message = MagicMock()
+    message.content = json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
+    choice = MagicMock()
+    choice.message = message
+    choice.finish_reason = "stop"
+    completion = MagicMock()
+    completion.choices = [choice]
+    completion.model = served_model
+    completion.usage = MagicMock(
+        prompt_tokens=4000,
+        prompt_tokens_details=MagicMock(cached_tokens=0),
+    )
+    return completion
+
+
+@contextmanager
+def _mock_judge_call(*, verdict: str, rationale: str, served_model: str | None = DEFAULT_JUDGE_MODEL) -> Iterator[MagicMock]:
+    fake_completion = _mock_openrouter_completion(verdict=verdict, rationale=rationale, served_model=served_model)
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client) as client_class,
+    ):
+        yield client_class

@@ -31,6 +31,7 @@ def test_decorator_passes_through_call_and_attaches_metadata() -> None:
         suppresses=("R1", "R5"),
         invariant="raises ToolArgumentError on shape mismatch",
         test_ref="tests/unit/example.py::test_rejects_malformed",
+        test_fingerprint="abc123",
     )
     def handler(arguments: dict[str, Any]) -> str:
         return f"processed:{len(arguments)}"
@@ -45,6 +46,7 @@ def test_decorator_passes_through_call_and_attaches_metadata() -> None:
     assert metadata.suppresses == ("R1", "R5")
     assert metadata.invariant == "raises ToolArgumentError on shape mismatch"
     assert metadata.test_ref == "tests/unit/example.py::test_rejects_malformed"
+    assert metadata.test_fingerprint == "abc123"
     assert metadata.qualname == handler.__wrapped__.__qualname__  # type: ignore[attr-defined]
 
 
@@ -124,6 +126,28 @@ def test_source_param_not_in_signature_raises_typeerror() -> None:
     message = str(exc.value)
     assert "source_param='arguments'" in message
     assert "payload" in message
+
+
+def test_stacked_trust_boundary_decorators_raise_typeerror() -> None:
+    """A second ``@trust_boundary`` must not overwrite the first boundary claim."""
+    with pytest.raises(TypeError, match="cannot be stacked"):
+
+        @trust_boundary(
+            tier=3,
+            source="outer feed",
+            source_param="raw",
+            suppresses=("R1",),
+            invariant="outer invariant",
+        )
+        @trust_boundary(
+            tier=3,
+            source="inner feed",
+            source_param="raw",
+            suppresses=("R5",),
+            invariant="inner invariant",
+        )
+        def _handler(raw: dict[str, Any]) -> int:
+            return len(raw)
 
 
 def test_empty_suppresses_tuple_is_accepted() -> None:

@@ -11,6 +11,11 @@ assignment whose only target is the bare ``_``, or an assignment whose
 only target is a leading-underscore name. Both dead-context patterns are
 structurally inert: the decorator's suppression scope would cover nothing.
 
+This rule deliberately does not prove the decorator's ``source`` prose against
+a whole-repository external-data call graph. ``source`` is documentation for
+reviewers; the mechanical contract here is local suppression scope plus the
+companion tests rule's direct subject-call check.
+
 A "taint-receiving read" is any :class:`ast.Name` in :class:`ast.Load`
 context whose immediate parent propagates the value: a :class:`ast.Subscript`,
 :class:`ast.Attribute`, :class:`ast.Call`, :class:`ast.For`/
@@ -48,7 +53,6 @@ elspeth-1f4634235a (C6-4).
 from __future__ import annotations
 
 import ast
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,7 +73,16 @@ from elspeth_lints.rules.trust_boundary.scope.metadata import (
     SUGGESTION_NONLITERAL,
     SUGGESTION_NOPARAM,
 )
-from elspeth_lints.rules.trust_boundary.shared import display_path, extract_keywords, iter_trust_boundary_decorators
+from elspeth_lints.rules.trust_boundary.shared import (
+    display_path,
+    extract_keywords,
+    filter_allowlisted_findings,
+    iter_trust_boundary_decorators,
+    load_honesty_gate_allowlist,
+    make_decorator_finding,
+)
+
+_ALLOWLIST_RULE_IDS = frozenset({RULE_NOPARAM, RULE_DEAD, RULE_NONLITERAL})
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +97,7 @@ class TrustBoundaryScopeRule:
         """Analyze one tree directly (for focused tests) or walk the scan root."""
         if isinstance(tree, ast.Module) and tree.body and file_path.suffix == ".py":
             return analyze_tree(tree, display_path(file_path, context.root))
-        return scan_root(context.root)
+        return scan_root(context.root, allowlist_dir_override=context.allowlist_dir_override)
 
 
 def analyze_tree(tree: ast.AST, file_path: str) -> list[Finding]:
@@ -101,12 +114,14 @@ def analyze_tree(tree: ast.AST, file_path: str) -> list[Finding]:
             # finding when tier_model is also active is deliberate.
             assert extraction.nonliteral_message is not None  # tagged union invariant
             findings.append(
-                _make_finding(
+                make_decorator_finding(
+                    metadata=RULE_METADATA,
                     rule_id=RULE_NONLITERAL,
                     file_path=file_path,
                     call=call,
                     message=extraction.nonliteral_message,
                     suggestion=SUGGESTION_NONLITERAL,
+                    symbol_context=(func_node.name,),
                 )
             )
             continue
@@ -119,7 +134,8 @@ def analyze_tree(tree: ast.AST, file_path: str) -> list[Finding]:
         param_names = _parameter_names(func_node)
         if source_param not in param_names:
             findings.append(
-                _make_finding(
+                make_decorator_finding(
+                    metadata=RULE_METADATA,
                     rule_id=RULE_NOPARAM,
                     file_path=file_path,
                     call=call,
@@ -128,12 +144,14 @@ def analyze_tree(tree: ast.AST, file_path: str) -> list[Finding]:
                         f"{func_node.name!r}; declared parameters are {tuple(param_names)!r}."
                     ),
                     suggestion=SUGGESTION_NOPARAM,
+                    symbol_context=(func_node.name,),
                 )
             )
             continue
         if not _body_reads_name(func_node, source_param):
             findings.append(
-                _make_finding(
+                make_decorator_finding(
+                    metadata=RULE_METADATA,
                     rule_id=RULE_DEAD,
                     file_path=file_path,
                     call=call,
@@ -143,13 +161,19 @@ def analyze_tree(tree: ast.AST, file_path: str) -> list[Finding]:
                         "the decorator is structurally inert."
                     ),
                     suggestion=SUGGESTION_DEAD,
+                    symbol_context=(func_node.name,),
                 )
             )
     return findings
 
 
-def scan_root(root: Path) -> list[Finding]:
+def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list[Finding]:
     """Walk every Python file under ``root`` and aggregate findings."""
+    allowlist = load_honesty_gate_allowlist(
+        root,
+        allowlist_dir_override=allowlist_dir_override,
+        valid_rule_ids=_ALLOWLIST_RULE_IDS,
+    )
     findings: list[Finding] = []
     for item in walk_python_files(root):
         # Skip non-analysable per-file results — see the analogous comment
@@ -157,7 +181,7 @@ def scan_root(root: Path) -> list[Finding]:
         if isinstance(item, (PythonSyntaxError, PythonFileReadError)):
             continue
         findings.extend(analyze_tree(item.tree, display_path(item.path, root)))
-    return findings
+    return filter_allowlisted_findings(findings, allowlist)
 
 
 def _parameter_names(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
@@ -317,27 +341,6 @@ def _is_dead_target(target: ast.expr) -> bool:
     value somewhere observable.
     """
     return isinstance(target, ast.Name) and target.id.startswith("_")
-
-
-def _make_finding(
-    *,
-    rule_id: str,
-    file_path: str,
-    call: ast.Call,
-    message: str,
-    suggestion: str,
-) -> Finding:
-    fingerprint = hashlib.sha256(f"{rule_id}|{file_path}|{call.lineno}|{call.col_offset}".encode()).hexdigest()[:16]
-    return Finding(
-        rule_id=rule_id,
-        file_path=file_path,
-        line=call.lineno,
-        column=call.col_offset,
-        message=message,
-        fingerprint=fingerprint,
-        severity=RULE_METADATA.severity,
-        suggestion=suggestion,
-    )
 
 
 RULE = TrustBoundaryScopeRule()

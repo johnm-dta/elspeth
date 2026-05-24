@@ -4,28 +4,39 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
+import os
 import re
+import secrets
 import sys
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from elspeth_lints.core.allowlist import AuditReviewVerdict, JudgeVerdict, is_substantive_audit_anchor
 from elspeth_lints.core.ast_walker import (
     ParsedPythonFile,
     PythonFileReadError,
     PythonSyntaxError,
     walk_python_files,
 )
-from elspeth_lints.core.atomic_io import atomic_write_text
+from elspeth_lints.core.atomic_io import atomic_update_text
 from elspeth_lints.core.emitters.github import render_github
 from elspeth_lints.core.emitters.json import render_json
 from elspeth_lints.core.emitters.sarif import render_sarif
 from elspeth_lints.core.emitters.text import render_text
-from elspeth_lints.core.protocols import Finding, Rule, RuleContext, RuleScope
+from elspeth_lints.core.protocols import Finding, Rule, RuleContext, RuleScope, Severity
 from elspeth_lints.core.registry import DEFAULT_REGISTRY, RuleRegistry
 
 if TYPE_CHECKING:
     from elspeth_lints.rules.trust_tier.tier_model.rotate import RotationPlan
+
+
+JUSTIFY_RATIONALE_MAX_BYTES = 8 * 1024
+OPERATOR_OVERRIDE_TOKEN_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN"
+OPERATOR_OVERRIDE_TOKEN_SHA256_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN_SHA256"
+OPERATOR_OVERRIDE_MIN_TOKEN_BYTES = 20
 
 
 def _non_empty_string(value: str) -> str:
@@ -46,7 +57,84 @@ def _non_empty_string(value: str) -> str:
             "rejected because the owner field is the audit signal for "
             "who claimed responsibility for the suppression."
         )
+    if any(char in value for char in ("\n", "\r", "\x85")):
+        raise argparse.ArgumentTypeError(
+            "must be a single-line audit identity; embedded line breaks cannot be represented safely in the inline YAML owner field."
+        )
+    if not is_substantive_audit_anchor(value):
+        raise argparse.ArgumentTypeError(
+            "must be a substantive audit identity with at least two "
+            "alphanumeric characters; values like 'x', '.', '~', or '-' "
+            "cannot safely distinguish rotation-grandfathered entries."
+        )
     return value
+
+
+def _positive_int(value: str) -> int:
+    """Argparse ``type=`` callable that rejects non-positive integers."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
+def _timezone_aware_datetime_arg(value: str) -> datetime:
+    """Argparse ``type=`` callable that accepts only timezone-aware timestamps."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"must be a valid ISO-8601 timestamp; got {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError("must include a timezone offset")
+    return parsed
+
+
+def _bounded_rationale_string(value: str) -> str:
+    """Argparse ``type=`` callable for operator-supplied judge rationales."""
+    stripped = value.strip()
+    if not stripped:
+        raise argparse.ArgumentTypeError(
+            "must be a non-empty rationale; empty / whitespace-only values would produce an audit entry with no operator explanation."
+        )
+    byte_count = len(value.encode("utf-8"))
+    if byte_count > JUSTIFY_RATIONALE_MAX_BYTES:
+        raise argparse.ArgumentTypeError(
+            f"must be at most {JUSTIFY_RATIONALE_MAX_BYTES} bytes when UTF-8 "
+            f"encoded; got {byte_count} bytes. Shorten the rationale and keep "
+            "supporting detail in the linked issue or review notes."
+        )
+    return value
+
+
+def _operator_override_authorization_error() -> str | None:
+    """Return a refusal reason when ``--operator-override`` is not authorized.
+
+    The override token is secret; the SHA-256 fingerprint is non-secret policy
+    material supplied by CI/operator environment. Requiring both prevents the
+    CLI flag alone from becoming the authority while keeping the token out of
+    command lines, YAML entries, and logs.
+    """
+
+    token = os.environ.get(OPERATOR_OVERRIDE_TOKEN_ENV)
+    if token is None or not token.strip():
+        return f"{OPERATOR_OVERRIDE_TOKEN_ENV} is not set; --operator-override requires an operator-controlled token in the environment."
+    if len(token.encode("utf-8")) < OPERATOR_OVERRIDE_MIN_TOKEN_BYTES:
+        return f"{OPERATOR_OVERRIDE_TOKEN_ENV} is too short; expected at least {OPERATOR_OVERRIDE_MIN_TOKEN_BYTES} UTF-8 bytes."
+
+    expected_fingerprint = os.environ.get(OPERATOR_OVERRIDE_TOKEN_SHA256_ENV)
+    if expected_fingerprint is None or not expected_fingerprint.strip():
+        return f"{OPERATOR_OVERRIDE_TOKEN_SHA256_ENV} is not set; --operator-override requires the token's non-secret SHA-256 fingerprint."
+    expected = expected_fingerprint.strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+        return f"{OPERATOR_OVERRIDE_TOKEN_SHA256_ENV} must be a 64-character lowercase or uppercase SHA-256 hex digest."
+
+    actual = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not secrets.compare_digest(actual, expected):
+        return f"{OPERATOR_OVERRIDE_TOKEN_ENV} fingerprint does not match {OPERATOR_OVERRIDE_TOKEN_SHA256_ENV}; refusing override."
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -62,10 +150,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_rotate(args)
     if args.command == "justify":
         return _run_justify(args)
+    if args.command == "audit-verdict":
+        return _run_audit_verdict(args)
     if args.command == "reaudit":
         return _run_reaudit(args)
     if args.command == "check-judge-coverage":
         return _run_check_judge_coverage(args)
+    if args.command == "check-judge-quality":
+        return _run_check_judge_quality(args)
+    if args.command == "check-trust-boundary-diff":
+        return _run_check_trust_boundary_diff(args)
+    if args.command == "check-rotation-audit":
+        return _run_check_rotation_audit(args)
     if args.command == "check-override-rate":
         return _run_check_override_rate(args)
     sys.stderr.write(f"Unknown command {args.command!r}\n")
@@ -81,6 +177,15 @@ def _build_parser() -> argparse.ArgumentParser:
     check.add_argument("--rule-set", choices=("static", "full"), default="static")
     check.add_argument("--format", choices=("text", "json", "sarif", "github"), default="text")
     check.add_argument("--root", type=Path, default=Path.cwd())
+    check.add_argument(
+        "--repo-root",
+        type=Path,
+        help=(
+            "Repository working tree root for rules that resolve repository-relative "
+            "evidence paths. When omitted, rules derive it from --root using their "
+            "documented fallback; when supplied, this explicit value wins."
+        ),
+    )
     check.add_argument(
         "--allowlist-dir",
         type=Path,
@@ -105,6 +210,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     rotate.add_argument("--dry-run", action="store_true", help="Plan only; do not modify files")
     rotate.add_argument(
+        "--rotation-log",
+        type=Path,
+        default=Path(".elspeth/rotations.log"),
+        help=("JSONL audit manifest written on non-dry-run rotation applies. Default: .elspeth/rotations.log."),
+    )
+    rotate.add_argument(
         "--no-auto-pair-symmetric",
         dest="auto_pair_symmetric",
         action="store_false",
@@ -117,14 +228,29 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     rotate.add_argument(
+        "--remove-stale",
+        dest="remove_stale",
+        action="store_true",
+        default=False,
+        help=(
+            "Remove stale allowlist entries (entries whose underlying "
+            "violation site no longer exists). Default is to keep stale "
+            "entries and surface them for operator-confirmed cleanup."
+        ),
+    )
+    rotate.add_argument(
         "--no-remove-stale",
         dest="remove_stale",
         action="store_false",
-        default=True,
+        help=("Deprecated compatibility flag. Stale removal is already off by default; pass --remove-stale to opt into deletion."),
+    )
+    rotate.add_argument(
+        "--accept-todo-debt",
+        action="store_true",
         help=(
-            "Skip removal of stale allowlist entries (entries whose "
-            "underlying violation site no longer exists). Default is to "
-            "remove them, mirroring the prior tool's behaviour."
+            "Allow apply even when the plan reports historical TODO-stub "
+            "allowlist entries. Default is to refuse so placeholder debt "
+            "cannot be carried through a rotation silently."
         ),
     )
     rotate.add_argument(
@@ -144,6 +270,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("src/elspeth"),
         help="Source tree to scan (used to re-run the rule on --file-path)",
+    )
+    justify.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help=(
+            "Repository root for trust-boundary honesty rules that resolve "
+            "repo-relative evidence such as test_ref nodeids. Defaults to the "
+            "rule's source-root heuristic."
+        ),
     )
     justify.add_argument(
         "--allowlist-dir",
@@ -168,16 +304,26 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         required=True,
         help=(
-            "Qualified symbol name (e.g. 'MyClass._method'). Use the literal "
-            "'_module_' for module-scope findings (matches the canonical-key "
-            "sentinel)."
+            "Qualified symbol name that must uniquely identify one current finding "
+            "(e.g. 'MyClass._method'). Use the literal '_module_' for module-scope "
+            "findings (matches the canonical-key sentinel)."
+        ),
+    )
+    justify.add_argument(
+        "--fingerprint",
+        type=str,
+        default=None,
+        help=(
+            "Exact finding fingerprint used to disambiguate when --symbol "
+            "matches multiple current findings. Accepts the bare fingerprint "
+            "or fp=<fingerprint>."
         ),
     )
     justify.add_argument(
         "--rationale",
-        type=str,
+        type=_bounded_rationale_string,
         required=True,
-        help="Agent's proposed justification for the suppression",
+        help=(f"Agent's proposed justification for the suppression (max {JUSTIFY_RATIONALE_MAX_BYTES} UTF-8 bytes)."),
     )
     justify.add_argument(
         "--owner",
@@ -196,7 +342,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Bypass the judge's verdict. The judge is still called (to record "
             "what the model would have said) but the entry is written with "
-            "verdict=OVERRIDDEN_BY_OPERATOR."
+            "verdict=OVERRIDDEN_BY_OPERATOR. Requires "
+            f"{OPERATOR_OVERRIDE_TOKEN_ENV} and "
+            f"{OPERATOR_OVERRIDE_TOKEN_SHA256_ENV} to authorize the override."
+        ),
+    )
+    justify.add_argument(
+        "--max-tokens",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Maximum completion tokens for the judge response. Defaults to "
+            "the judge module's DEFAULT_JUDGE_MAX_TOKENS; increase when the "
+            "provider returns finish_reason=length."
         ),
     )
     justify.add_argument(
@@ -210,6 +368,51 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("text", "json"),
         default="text",
         help="Output format for the verdict",
+    )
+
+    audit_verdict = subparsers.add_parser(
+        "audit-verdict",
+        help="Attach a human post-review verdict to a judge-accepted allowlist entry",
+    )
+    audit_verdict.add_argument(
+        "--allowlist-dir",
+        type=Path,
+        default=Path("config/cicd/enforce_tier_model"),
+        help="Directory of per-module allowlist YAML files containing the entry",
+    )
+    audit_verdict.add_argument(
+        "--key",
+        required=True,
+        help="Exact allow_hits key whose prior ACCEPTED judge verdict is being reviewed",
+    )
+    audit_verdict.add_argument(
+        "--verdict",
+        choices=tuple(verdict.value for verdict in AuditReviewVerdict),
+        required=True,
+        help="Post-review verdict to attach",
+    )
+    audit_verdict.add_argument(
+        "--reviewer",
+        type=_non_empty_string,
+        required=True,
+        help="Audit identity of the human/operator recording the review",
+    )
+    audit_verdict.add_argument(
+        "--rationale",
+        type=_bounded_rationale_string,
+        required=True,
+        help=(f"Reason the prior judge-accepted suppression is being marked wrong (max {JUSTIFY_RATIONALE_MAX_BYTES} UTF-8 bytes)."),
+    )
+    audit_verdict.add_argument(
+        "--reviewed-at",
+        type=_timezone_aware_datetime_arg,
+        default=None,
+        help="Timezone-aware ISO-8601 review timestamp. Defaults to current UTC.",
+    )
+    audit_verdict.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and print the review block; do not write",
     )
 
     reaudit = subparsers.add_parser(
@@ -253,6 +456,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "Only reaudit the first N entries surviving the other filters. "
             "Use for incremental sweeps — the ~700-entry allowlist should "
             "not be re-judged in one pass."
+        ),
+    )
+    reaudit.add_argument(
+        "--max-calls",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Stop this invocation after N actual judge calls. Unlike --limit, "
+            "this is a spend guard: entries resolved before the judge boundary "
+            "do not consume it, and an exhausted budget leaves the sweep "
+            "incomplete so it can be resumed later."
         ),
     )
     reaudit.add_argument(
@@ -322,8 +536,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # CI gate: every new ``allow_hits`` entry in this PR must carry the
     # atomic judge metadata quartet. See ``judge_coverage.py`` docstring
     # for the convergent finding C1 context, the rotation-grandfather
-    # policy, and the scope boundary (only ``allow_hits:`` shape; other
-    # legacy YAML shapes are out of scope).
+    # policy, and the scope boundary (``allow_hits:`` is the only
+    # judge-covered entry schema; non-empty legacy entry schemas are
+    # reported as unrecognized rather than silently skipped).
     check_coverage = subparsers.add_parser(
         "check-judge-coverage",
         help=(
@@ -348,8 +563,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("config/cicd"),
         help=(
             "Directory whose 'enforce_*' subdirectories are checked. Default: "
-            "config/cicd. Subdirectories that use legacy YAML shapes (no "
-            "'allow_hits:' block) are silently skipped."
+            "config/cicd. Non-empty legacy entry shapes without an 'allow_hits:' "
+            "block produce UNRECOGNIZED_ENTRY_SHAPE violations."
         ),
     )
     check_coverage.add_argument(
@@ -360,6 +575,110 @@ def _build_parser() -> argparse.ArgumentParser:
             "Repository working tree root. Required for git commands. Defaults to "
             "the current working directory (the repo root in standard CI usage)."
         ),
+    )
+
+    check_quality = subparsers.add_parser(
+        "check-judge-quality",
+        help=(
+            "Run the labelled judge-quality corpus through the live cicd-judge "
+            "and fail if verdict/decorator accuracy drops below threshold."
+        ),
+    )
+    check_quality.add_argument(
+        "--corpus",
+        type=Path,
+        default=Path("config/cicd/judge-quality-corpus/v1.jsonl"),
+        help="Strict JSONL corpus of labelled judge-quality cases.",
+    )
+    check_quality.add_argument(
+        "--min-accuracy",
+        type=float,
+        default=0.90,
+        help="Minimum exact-match accuracy required, as a fraction in [0.0, 1.0]. Default: 0.90.",
+    )
+    check_quality.add_argument(
+        "--min-cases",
+        type=int,
+        default=10,
+        help="Minimum accepted corpus size. Default: 10.",
+    )
+    check_quality.add_argument(
+        "--max-cases",
+        type=int,
+        default=30,
+        help="Maximum accepted corpus size. Default: 30.",
+    )
+    check_quality.add_argument(
+        "--model",
+        default=None,
+        help="OpenRouter model id. Defaults to the judge module's DEFAULT_JUDGE_MODEL.",
+    )
+    check_quality.add_argument(
+        "--max-tokens",
+        type=_positive_int,
+        default=None,
+        help="Maximum completion tokens for each judge response. Defaults to DEFAULT_JUDGE_MAX_TOKENS.",
+    )
+    check_quality.add_argument(
+        "--format",
+        dest="judge_quality_format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format for the quality report.",
+    )
+
+    check_trust_boundary_diff = subparsers.add_parser(
+        "check-trust-boundary-diff",
+        help=(
+            "Report @trust_boundary decorators added in this PR. "
+            "Diffs HEAD against --baseline-ref and exits 0 when the report "
+            "is produced; this is a review-surfacing step, not an enforcing gate."
+        ),
+    )
+    check_trust_boundary_diff.add_argument(
+        "--baseline-ref",
+        required=True,
+        help="Git ref to diff HEAD against (typically the PR merge-base).",
+    )
+    check_trust_boundary_diff.add_argument(
+        "--root",
+        type=Path,
+        default=Path("src/elspeth"),
+        help="Source tree to scan for changed Python files.",
+    )
+    check_trust_boundary_diff.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help="Repository working tree root. Required for git commands.",
+    )
+
+    check_rotation_audit = subparsers.add_parser(
+        "check-rotation-audit",
+        help=("Fail if this PR rotates tier_model allowlist fingerprints without matching .elspeth/rotations.log manifest records."),
+    )
+    check_rotation_audit.add_argument(
+        "--baseline-ref",
+        required=True,
+        help="Git ref to diff HEAD against (typically the PR merge-base).",
+    )
+    check_rotation_audit.add_argument(
+        "--allowlist-root",
+        type=Path,
+        default=Path("config/cicd"),
+        help="Directory whose enforce_* allowlist YAML files are checked.",
+    )
+    check_rotation_audit.add_argument(
+        "--rotation-log",
+        type=Path,
+        default=Path(".elspeth/rotations.log"),
+        help="JSONL manifest produced by elspeth-lints rotate.",
+    )
+    check_rotation_audit.add_argument(
+        "--repo-root",
+        type=Path,
+        default=Path.cwd(),
+        help="Repository working tree root. Required for git commands.",
     )
 
     # CI gate: override-rate drift (convergent finding C3).
@@ -405,6 +724,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     check_overrides.add_argument(
+        "--max-overrides",
+        type=int,
+        default=None,
+        help=(
+            "Optional absolute cap on OVERRIDDEN_BY_OPERATOR entries inside "
+            "the window. When set, the gate fails if the count exceeds this "
+            "value even when the ratio remains below --max-rate."
+        ),
+    )
+    check_overrides.add_argument(
         "--reference-time",
         type=str,
         default=None,
@@ -412,6 +741,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "Window anchor as a timezone-aware ISO-8601 timestamp (e.g. "
             "'2026-05-23T00:00:00Z'). Defaults to current UTC; override for "
             "reproducibility in CI replays."
+        ),
+    )
+    check_overrides.add_argument(
+        "--counter-snapshot",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the hash-bound override-rate counter snapshot. Default: <allowlist-root>/.judge-metrics/override-rate-counters.json."
         ),
     )
 
@@ -435,7 +772,11 @@ def _run_check(args: argparse.Namespace, *, registry: RuleRegistry) -> int:
     if allowlist_dir is not None and not allowlist_dir.is_dir():
         sys.stderr.write(f"--allowlist-dir: {allowlist_dir} is not a directory\n")
         return 2
-    context = RuleContext(root=args.root, allowlist_dir_override=allowlist_dir)
+    repo_root = getattr(args, "repo_root", None)
+    if repo_root is not None and not repo_root.is_dir():
+        sys.stderr.write(f"--repo-root: {repo_root} is not a directory\n")
+        return 2
+    context = RuleContext(root=args.root, allowlist_dir_override=allowlist_dir, repo_root=repo_root)
     selected_rules = [registry.get(rule_id) for rule_id in requested_rules]
     whole_repo_rules = [rule for rule in selected_rules if rule.scope == RuleScope.WHOLE_REPO]
     incremental_rules = [rule for rule in selected_rules if rule.scope == RuleScope.INCREMENTAL]
@@ -618,7 +959,13 @@ def _run_rotate(args: argparse.Namespace) -> int:
             "applied": {},
         }
         if not args.dry_run and (plan.rotations or (args.remove_stale and plan.stale_entries)):
-            applied = apply_plan(plan, allowlist_dir=args.allowlist_dir, remove_stale=args.remove_stale)
+            applied = apply_plan(
+                plan,
+                allowlist_dir=args.allowlist_dir,
+                remove_stale=args.remove_stale,
+                accept_todo_debt=args.accept_todo_debt,
+                rotation_log_path=args.rotation_log,
+            )
             payload["applied"] = {
                 src: {"rotations_applied": r.rotations_applied, "stale_entries_removed": r.stale_entries_removed}
                 for src, r in applied.items()
@@ -632,7 +979,13 @@ def _run_rotate(args: argparse.Namespace) -> int:
     if args.dry_run:
         return exit_code
     if plan.has_rotations or (args.remove_stale and plan.stale_entries):
-        applied = apply_plan(plan, allowlist_dir=args.allowlist_dir, remove_stale=args.remove_stale)
+        applied = apply_plan(
+            plan,
+            allowlist_dir=args.allowlist_dir,
+            remove_stale=args.remove_stale,
+            accept_todo_debt=args.accept_todo_debt,
+            rotation_log_path=args.rotation_log,
+        )
         sys.stdout.write("\nApplied:\n")
         for src, r in sorted(applied.items()):
             parts: list[str] = []
@@ -641,6 +994,7 @@ def _run_rotate(args: argparse.Namespace) -> int:
             if r.stale_entries_removed:
                 parts.append(f"{r.stale_entries_removed} stale removal(s)")
             sys.stdout.write(f"  {src}: {', '.join(parts)}\n")
+        sys.stdout.write(f"Rotation audit log: {args.rotation_log}\n")
     return exit_code
 
 
@@ -770,10 +1124,14 @@ def _run_justify(args: argparse.Namespace) -> int:
     # responsive on subcommands that don't need them.
     from elspeth_lints.core.allowlist import JudgeVerdict
     from elspeth_lints.core.judge import (
+        DEFAULT_JUDGE_MAX_TOKENS,
         DEFAULT_JUDGE_MODEL,
+        JUDGE_EXCERPT_CONTEXT_LINES,
         JudgeConfigurationError,
+        JudgeContractError,
         JudgeRequest,
         JudgeResponse,
+        JudgeTransportError,
         call_judge,
     )
     from elspeth_lints.core.source_excerpt import (
@@ -781,19 +1139,24 @@ def _run_justify(args: argparse.Namespace) -> int:
         extract_safe_excerpt,
         resolve_safe_excerpt_path,
     )
-    from elspeth_lints.rules.trust_tier.tier_model.rule import (
-        scan_file,
-        scan_layer_imports_file,
-    )
 
     root: Path = args.root.resolve()
     if not root.is_dir():
         sys.stderr.write(f"--root: {root} is not a directory\n")
         return 2
+    repo_root: Path | None = args.repo_root.resolve() if args.repo_root is not None else None
+    if repo_root is not None and not repo_root.is_dir():
+        sys.stderr.write(f"--repo-root: {repo_root} is not a directory\n")
+        return 2
     allowlist_dir: Path = args.allowlist_dir
     if not allowlist_dir.is_dir():
         sys.stderr.write(f"--allowlist-dir: {allowlist_dir} is not a directory\n")
         return 2
+    if args.operator_override:
+        authorization_error = _operator_override_authorization_error()
+        if authorization_error is not None:
+            sys.stderr.write(f"operator override refused: {authorization_error}\n")
+            return 2
 
     # Path-containment gate (closes elspeth-9bbb9df9a5 / C1-2(c)). The
     # ``--file-path`` arg is operator-supplied here but the same code
@@ -816,13 +1179,24 @@ def _run_justify(args: argparse.Namespace) -> int:
         sys.stderr.write(f"--file-path security violation: {exc}\n")
         return 2
 
-    symbol_tuple = _parse_symbol(args.symbol)
-    findings = _scan_single_file_findings(
-        target_file=target_file, root=root, scan_file=scan_file, scan_layer_imports_file=scan_layer_imports_file
-    )
-    matching = [f for f in findings if _finding_symbol_matches(f, symbol_tuple)]
+    try:
+        symbol_tuple = _parse_symbol(args.symbol)
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
+    try:
+        findings, package_rule_assertions, valid_rule_ids = _scan_single_file_findings_for_justify(
+            target_file=target_file,
+            root=root,
+            repo_root=repo_root,
+            asserted_rule=args.rule,
+        )
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 2
+    symbol_matches = [f for f in findings if _finding_symbol_matches(f, symbol_tuple)]
 
-    if not matching:
+    if not symbol_matches:
         sys.stderr.write(
             f"No findings on {args.file_path} match symbol {args.symbol!r}. "
             f"Scanned {len(findings)} finding(s) on that file. "
@@ -830,19 +1204,57 @@ def _run_justify(args: argparse.Namespace) -> int:
             "finding is already covered by a per_file_rule.\n"
         )
         return 2
+
+    if args.rule in package_rule_assertions:
+        matching = list(symbol_matches)
+    else:
+        matching = [f for f in symbol_matches if f.rule_id == args.rule]
+        if not matching:
+            reported = ", ".join(sorted({f.rule_id for f in symbol_matches}))
+            sys.stderr.write(
+                f"--rule mismatch: operator asserted {args.rule!r} but the scanner "
+                f"reported {reported} for symbol {args.symbol!r} in "
+                f"{args.file_path}. Either correct --rule to one of the reported "
+                "rule ids (if you intended to suppress the finding the scanner "
+                "actually flagged), or pick a different --symbol (if you intended "
+                f"to suppress a {args.rule!r} finding elsewhere in this file). "
+                "Refusing to write the entry — silently rebinding the operator's "
+                "--rule to the scanner's rule_id would corrupt the audit attribution.\n"
+            )
+            return 2
+
+    if args.fingerprint is not None:
+        requested_fingerprint = args.fingerprint.strip().removeprefix("fp=")
+        if not requested_fingerprint:
+            sys.stderr.write("--fingerprint must be a non-empty finding fingerprint.\n")
+            return 2
+        fingerprint_candidates = list(matching)
+        matching = [f for f in fingerprint_candidates if f.fingerprint == requested_fingerprint]
+        if not matching:
+            sys.stderr.write(
+                f"No findings on {args.file_path} match symbol {args.symbol!r}, "
+                f"rule {args.rule!r}, and fingerprint {requested_fingerprint!r}. "
+                "Matching symbol/rule findings:\n"
+            )
+            for finding in fingerprint_candidates:
+                sys.stderr.write(f"  {_finding_canonical_key(finding)}  ({finding.rule_id} at line {finding.line})\n")
+            return 2
+
     if len(matching) > 1:
         sys.stderr.write(
             f"Ambiguous: {len(matching)} findings on {args.file_path} match "
             f"symbol {args.symbol!r}. The judge gate requires a unique "
-            "finding per entry. Either narrow the symbol path or run "
-            "`elspeth-lints rotate` first if these are stale fingerprints. "
+            "finding per entry. Pass --fingerprint with one of the listed "
+            "fingerprints, narrow the symbol path, or run `elspeth-lints rotate` "
+            "first if these are stale fingerprints. "
             "Matching findings:\n"
         )
         for finding in matching:
-            sys.stderr.write(f"  {finding.canonical_key}  ({finding.rule_id} at line {finding.line})\n")
+            sys.stderr.write(f"  {_finding_canonical_key(finding)}  ({finding.rule_id} at line {finding.line})\n")
         return 2
 
     finding = matching[0]
+    finding_key = _finding_canonical_key(finding)
 
     # Cross-check the operator-asserted --rule against the rule_id the
     # scanner actually reported for the chosen symbol. The default
@@ -856,7 +1268,7 @@ def _run_justify(args: argparse.Namespace) -> int:
     # sees R1, the YAML entry binds to R1, and a future reaudit
     # against R5 misses it). Refuse rather than silently rebinding.
     # Closes elspeth-98c06d159f (C2-3).
-    if args.rule != "trust_tier.tier_model" and args.rule != finding.rule_id:
+    if args.rule not in package_rule_assertions and args.rule != finding.rule_id:
         sys.stderr.write(
             f"--rule mismatch: operator asserted {args.rule!r} but the scanner "
             f"reported {finding.rule_id!r} for symbol {args.symbol!r} in "
@@ -883,8 +1295,18 @@ def _run_justify(args: argparse.Namespace) -> int:
         root=root,
         target_file=target_file,
         line=finding.line,
-        context_lines=15,
+        context_lines=JUDGE_EXCERPT_CONTEXT_LINES,
     )
+    try:
+        rationale_duplicate_count, similar_entries = _find_similar_allowlist_entries(
+            allowlist_dir=allowlist_dir,
+            rationale=args.rationale,
+            valid_rule_ids=valid_rule_ids,
+            exclude_key=finding_key,
+        )
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"allowlist similarity scan failed: {exc}\n")
+        return 2
     request = JudgeRequest(
         file_path=finding.file_path,
         rule_id=finding.rule_id,
@@ -892,12 +1314,24 @@ def _run_justify(args: argparse.Namespace) -> int:
         fingerprint=finding.fingerprint,
         rationale=args.rationale,
         surrounding_code=safe_excerpt.text,
+        rationale_duplicate_count=rationale_duplicate_count,
+        similar_entries=similar_entries,
     )
 
     try:
-        response: JudgeResponse = call_judge(request, model_id=DEFAULT_JUDGE_MODEL)
+        response: JudgeResponse = call_judge(
+            request,
+            model_id=DEFAULT_JUDGE_MODEL,
+            max_tokens=args.max_tokens or DEFAULT_JUDGE_MAX_TOKENS,
+        )
     except JudgeConfigurationError as exc:
         sys.stderr.write(f"Judge configuration error: {exc}\n")
+        return 2
+    except JudgeTransportError as exc:
+        sys.stderr.write(f"Judge transport error: {exc}\n")
+        return 2
+    except JudgeContractError as exc:
+        sys.stderr.write(f"Judge contract error: {exc}\n")
         return 2
 
     # Resolve the verdict the entry will carry. If the operator
@@ -935,16 +1369,18 @@ def _run_justify(args: argparse.Namespace) -> int:
     # transplant attack vector.
     file_fingerprint = safe_excerpt.file_fingerprint
     yaml_entry = _build_yaml_entry_text(
-        key=finding.canonical_key,
+        key=finding_key,
         owner=args.owner,
         reason=args.rationale,
         verdict=write_verdict,
         recorded_at=response.recorded_at,
         model_id=response.model_id,
         judge_rationale=response.judge_rationale,
+        judge_confidence=response.confidence,
+        policy_hash=response.policy_hash,
         model_verdict=model_verdict,
         file_fingerprint=file_fingerprint,
-        ast_path=finding.ast_path,
+        ast_path=_finding_ast_path(finding),
         excerpt_redactions=safe_excerpt.redactions,
     )
     target_yaml = _suggest_yaml_target(finding=finding, allowlist_dir=allowlist_dir)
@@ -953,6 +1389,14 @@ def _run_justify(args: argparse.Namespace) -> int:
     # judge's rationale + the model that produced it, do not write, exit
     # non-zero. This is the "judge does not fix" load-bearing constraint.
     if response.verdict == JudgeVerdict.BLOCKED and not args.operator_override:
+        _append_judge_decision_event_after_judge(
+            allowlist_dir=allowlist_dir,
+            finding=finding,
+            effective_verdict=write_verdict,
+            model_verdict=response.verdict,
+            recorded_at=response.recorded_at,
+            write_disposition="blocked_without_override",
+        )
         _emit_justify_output(
             args=args,
             verdict=write_verdict,
@@ -979,6 +1423,15 @@ def _run_justify(args: argparse.Namespace) -> int:
         return 0
 
     _append_entry_to_yaml(target_yaml, yaml_entry)
+    _append_judge_decision_event_after_judge(
+        allowlist_dir=allowlist_dir,
+        finding=finding,
+        effective_verdict=write_verdict,
+        model_verdict=response.verdict,
+        recorded_at=response.recorded_at,
+        write_disposition="written",
+    )
+    _refresh_override_rate_counter_snapshot_after_allowlist_write(target_yaml)
     _emit_justify_output(
         args=args,
         verdict=write_verdict,
@@ -989,6 +1442,115 @@ def _run_justify(args: argparse.Namespace) -> int:
         blocked=False,
         excerpt_redactions=safe_excerpt.redactions,
     )
+    return 0
+
+
+def _append_judge_decision_event_after_judge(
+    *,
+    allowlist_dir: Path,
+    finding: Any,
+    effective_verdict: JudgeVerdict,
+    model_verdict: JudgeVerdict | None,
+    recorded_at: datetime,
+    write_disposition: str,
+) -> None:
+    from elspeth_lints.core.override_rate import OverrideRateError, append_judge_decision_event
+
+    try:
+        append_judge_decision_event(
+            allowlist_dir,
+            source_file=finding.file_path,
+            entry_key=_finding_canonical_key(finding),
+            rule_id=finding.rule_id,
+            effective_verdict=effective_verdict,
+            model_verdict=model_verdict,
+            recorded_at=recorded_at,
+            write_disposition=write_disposition,
+        )
+    except (OSError, OverrideRateError) as exc:
+        sys.stderr.write(f"judge metrics: decision event append failed: {exc}\n")
+
+
+def _refresh_override_rate_counter_snapshot_after_allowlist_write(target_yaml: Path) -> None:
+    """Best-effort telemetry refresh after the allowlist audit write succeeds."""
+    from elspeth_lints.core.override_rate import (
+        OverrideRateError,
+        default_counter_snapshot_path,
+        write_override_rate_counter_snapshot,
+    )
+
+    # target_yaml is <allowlist-root>/<enforce_dir>/<file>.yaml for the
+    # shipped CI layout. Custom one-off allowlist dirs are outside C3's
+    # aggregation contract, so skip the snapshot rather than emitting a
+    # misleading empty-root metric.
+    if not target_yaml.parent.name.startswith("enforce_"):
+        return
+    allowlist_root = target_yaml.parent.parent
+    snapshot_path = default_counter_snapshot_path(allowlist_root)
+    try:
+        write_override_rate_counter_snapshot(allowlist_root, snapshot_path=snapshot_path)
+    except (OSError, OverrideRateError) as exc:
+        sys.stderr.write(f"judge metrics: counter snapshot refresh failed: {exc}\n")
+        return
+    sys.stderr.write(f"judge metrics: refreshed counter snapshot {snapshot_path}\n")
+
+
+def _run_audit_verdict(args: argparse.Namespace) -> int:
+    """Attach a post-judge audit review to one accepted allowlist entry."""
+    from elspeth_lints.core.allowlist import load_allowlist
+    from elspeth_lints.rules.trust_tier.tier_model.rule import RULES as TIER_MODEL_RULES
+
+    allowlist_dir = args.allowlist_dir
+    if not allowlist_dir.is_dir():
+        sys.stderr.write(f"audit-verdict: --allowlist-dir {allowlist_dir} is not a directory\n")
+        return 2
+
+    valid_rule_ids = frozenset(TIER_MODEL_RULES)
+    try:
+        allowlist = load_allowlist(allowlist_dir, valid_rule_ids=valid_rule_ids)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"audit-verdict: cannot load allowlist: {exc}\n")
+        return 2
+
+    matches = [entry for entry in allowlist.entries if entry.key == args.key]
+    if not matches:
+        sys.stderr.write(f"audit-verdict: no allow_hits entry found for key {args.key!r}\n")
+        return 2
+    if len(matches) > 1:
+        sources = ", ".join(sorted(entry.source_file for entry in matches))
+        sys.stderr.write(f"audit-verdict: key {args.key!r} appears in multiple allowlist files ({sources}); refusing ambiguous write\n")
+        return 2
+
+    entry = matches[0]
+    if entry.judge_verdict is not JudgeVerdict.ACCEPTED:
+        actual = "None" if entry.judge_verdict is None else entry.judge_verdict.value
+        sys.stderr.write(
+            "audit-verdict: audit_review can only be attached to "
+            f"judge_verdict=ACCEPTED entries; key {entry.key!r} has judge_verdict={actual}.\n"
+        )
+        return 2
+
+    verdict = AuditReviewVerdict(args.verdict)
+    reviewed_at = args.reviewed_at or datetime.now(UTC).replace(microsecond=0)
+    review_text = _build_audit_review_text(
+        verdict=verdict,
+        reviewer=args.reviewer,
+        reviewed_at=reviewed_at,
+        rationale=args.rationale,
+    )
+    target_yaml = allowlist_dir / entry.source_file
+
+    if args.dry_run:
+        sys.stdout.write(review_text)
+        return 0
+
+    try:
+        _upsert_audit_review_in_yaml(target_yaml, entry_key=entry.key, review_text=review_text)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"audit-verdict: cannot write audit_review: {exc}\n")
+        return 2
+
+    sys.stdout.write(f"audit-verdict: recorded {verdict.value} for {entry.key} in {target_yaml}\n")
     return 0
 
 
@@ -1028,9 +1590,190 @@ def _scan_single_file_findings(
     return findings
 
 
+def _scan_single_file_findings_for_justify(
+    *,
+    target_file: Path,
+    root: Path,
+    repo_root: Path | None,
+    asserted_rule: str,
+) -> tuple[list[Any], frozenset[str], frozenset[str]]:
+    """Return current findings for the rule family selected by ``justify``.
+
+    ``justify`` historically served only ``trust_tier.tier_model``. The
+    trust-boundary honesty gates now share the same judged allowlist protocol,
+    so this dispatcher keeps the scanner choice explicit while preserving the
+    existing exact ``--rule`` cross-check.
+    """
+    from elspeth_lints.core.ast_walker import parse_python_file
+    from elspeth_lints.rules.trust_boundary.scope import rule as scope_rule
+    from elspeth_lints.rules.trust_boundary.scope.metadata import RULE_DEAD, RULE_NOPARAM
+    from elspeth_lints.rules.trust_boundary.scope.metadata import RULE_NONLITERAL as SCOPE_NONLITERAL
+    from elspeth_lints.rules.trust_boundary.shared import display_path, repository_root
+    from elspeth_lints.rules.trust_boundary.tests import rule as tests_rule
+    from elspeth_lints.rules.trust_boundary.tests.metadata import (
+        RULE_FILE_MISSING,
+        RULE_FINGERPRINT_MISMATCH,
+        RULE_FINGERPRINT_MISSING,
+        RULE_FUNCTION_MISSING,
+        RULE_INPUT_IRRELEVANT,
+        RULE_INVARIANT_MISMATCH,
+        RULE_MISSING,
+        RULE_NOTFOUND,
+        RULE_PARSE_ERROR,
+        RULE_TOO_LARGE,
+        RULE_WEAK,
+    )
+    from elspeth_lints.rules.trust_boundary.tests.metadata import (
+        RULE_NONLITERAL as TESTS_NONLITERAL,
+    )
+    from elspeth_lints.rules.trust_boundary.tier import rule as tier_rule
+    from elspeth_lints.rules.trust_boundary.tier.metadata import RULE_INVALID
+    from elspeth_lints.rules.trust_boundary.tier.metadata import RULE_NONLITERAL as TIER_NONLITERAL
+    from elspeth_lints.rules.trust_tier.tier_model.rule import RULES, scan_file, scan_layer_imports_file
+
+    scope_rule_ids = frozenset({RULE_NOPARAM, RULE_DEAD, SCOPE_NONLITERAL})
+    tests_rule_ids = frozenset(
+        {
+            RULE_MISSING,
+            RULE_NOTFOUND,
+            RULE_WEAK,
+            TESTS_NONLITERAL,
+            RULE_FILE_MISSING,
+            RULE_PARSE_ERROR,
+            RULE_FUNCTION_MISSING,
+            RULE_TOO_LARGE,
+            RULE_INVARIANT_MISMATCH,
+            RULE_INPUT_IRRELEVANT,
+            RULE_FINGERPRINT_MISSING,
+            RULE_FINGERPRINT_MISMATCH,
+        }
+    )
+    tier_rule_ids = frozenset({RULE_INVALID, TIER_NONLITERAL})
+    trust_boundary_rule_ids = frozenset().union(scope_rule_ids, tests_rule_ids, tier_rule_ids)
+
+    if asserted_rule == "trust_tier.tier_model" or asserted_rule in RULES:
+        return (
+            _scan_single_file_findings(
+                target_file=target_file,
+                root=root,
+                scan_file=scan_file,
+                scan_layer_imports_file=scan_layer_imports_file,
+            ),
+            frozenset({"trust_tier.tier_model"}),
+            frozenset(RULES.keys()),
+        )
+
+    parsed = parse_python_file(target_file)
+    if isinstance(parsed, PythonSyntaxError):
+        raise ValueError(f"--file-path: {target_file} cannot be parsed at {parsed.line}:{parsed.column}: {parsed.message}")
+    if isinstance(parsed, PythonFileReadError):
+        raise ValueError(f"--file-path: {target_file} cannot be read: {parsed.error_type}: {parsed.message}")
+
+    display = display_path(target_file, root)
+    if asserted_rule == "trust_boundary.scope" or asserted_rule in scope_rule_ids:
+        return (
+            scope_rule.analyze_tree(parsed.tree, display),
+            frozenset({"trust_boundary.scope"}),
+            trust_boundary_rule_ids,
+        )
+    if asserted_rule == "trust_boundary.tests" or asserted_rule in tests_rule_ids:
+        return (
+            tests_rule.analyze_tree(parsed.tree, display, repo_root=repository_root(root, repo_root)),
+            frozenset({"trust_boundary.tests"}),
+            trust_boundary_rule_ids,
+        )
+    if asserted_rule == "trust_boundary.tier" or asserted_rule in tier_rule_ids:
+        return (
+            tier_rule.analyze_tree(parsed.tree, display),
+            frozenset({"trust_boundary.tier"}),
+            trust_boundary_rule_ids,
+        )
+
+    raise ValueError(
+        f"--rule {asserted_rule!r} is not supported by justify; use a tier_model rule id, "
+        "trust_tier.tier_model, a trust_boundary.* package id, or a concrete "
+        "trust-boundary honesty-gate finding id."
+    )
+
+
+def _find_similar_allowlist_entries(
+    *,
+    allowlist_dir: Path,
+    rationale: str,
+    valid_rule_ids: frozenset[str],
+    exclude_key: str,
+    limit: int = 5,
+) -> tuple[int, tuple[Any, ...]]:
+    """Return exact duplicate-rationale context for the judge prompt.
+
+    Exact normalized duplicates are a strong, auditable signal of
+    copy/paste rationale drift. Fuzzier similarity can be added later
+    without weakening this hard duplicate count.
+    """
+    from elspeth_lints.core.allowlist import load_allowlist
+    from elspeth_lints.core.judge import SimilarAllowlistEntry
+
+    normalized = _normalize_rationale_for_similarity(rationale)
+    if not normalized:
+        return 0, ()
+
+    allowlist = load_allowlist(allowlist_dir, valid_rule_ids=valid_rule_ids)
+    duplicates = [
+        entry for entry in allowlist.entries if entry.key != exclude_key and _normalize_rationale_for_similarity(entry.reason) == normalized
+    ]
+    similar_entries = tuple(
+        SimilarAllowlistEntry(
+            key=entry.key,
+            owner=entry.owner,
+            reason_excerpt=_reason_excerpt(entry.reason),
+        )
+        for entry in duplicates[:limit]
+    )
+    return len(duplicates), similar_entries
+
+
+def _normalize_rationale_for_similarity(text: str) -> str:
+    """Normalize rationale text for exact duplicate detection."""
+    return " ".join(text.casefold().split())
+
+
+def _reason_excerpt(text: str, *, limit: int = 240) -> str:
+    """Return a compact single-line rationale excerpt for prompt context."""
+    single_line = " ".join(text.split())
+    if len(single_line) <= limit:
+        return single_line
+    return single_line[: limit - 3] + "..."
+
+
 def _finding_symbol_matches(finding: Any, symbol_tuple: tuple[str, ...]) -> bool:
     """Return True iff the finding's ``symbol_context`` equals the tuple."""
-    return tuple(finding.symbol_context) == symbol_tuple
+    return _finding_symbol_context(finding) == symbol_tuple
+
+
+def _finding_symbol_context(finding: Any) -> tuple[str, ...]:
+    raw = getattr(finding, "symbol_context", ())
+    return tuple(raw)
+
+
+def _finding_canonical_key(finding: Any) -> str:
+    canonical_key = finding.canonical_key
+    if callable(canonical_key):
+        canonical_key = canonical_key()
+    if not isinstance(canonical_key, str):
+        raise TypeError(
+            f"finding.canonical_key must be a string or zero-argument callable returning a string; got {type(canonical_key).__name__}"
+        )
+    return canonical_key
+
+
+def _finding_ast_path(finding: Any) -> str:
+    ast_path = getattr(finding, "ast_path", "")
+    if not isinstance(ast_path, str) or not ast_path:
+        raise ValueError(
+            f"finding {_finding_canonical_key(finding)} has no ast_path; "
+            "judge-gated allowlist entries must bind to the AST node the judge inspected."
+        )
+    return ast_path
 
 
 def _suggest_yaml_target(*, finding: Any, allowlist_dir: Path) -> Path:
@@ -1061,6 +1804,8 @@ def _build_yaml_entry_text(
     recorded_at: Any,  # datetime
     model_id: str,
     judge_rationale: str,
+    judge_confidence: float | None,
+    policy_hash: str,
     file_fingerprint: str,
     ast_path: str,
     excerpt_redactions: tuple[Any, ...] = (),  # tuple[RedactionRecord, ...]
@@ -1087,6 +1832,8 @@ def _build_yaml_entry_text(
     """
     from datetime import timedelta  # local import to keep top-of-file footprint small
 
+    from elspeth_lints.core.allowlist import compute_judge_metadata_signature
+
     # Writer-side parity with loader invariant 7 in
     # allowlist._validate_judge_metadata_atomic: a whitespace-only rationale
     # would be rejected at load time, but we refuse to persist it in the
@@ -1101,6 +1848,19 @@ def _build_yaml_entry_text(
             "missing) and would be rejected by the loader's invariant 7."
         )
 
+    judge_metadata_signature = compute_judge_metadata_signature(
+        key=key,
+        file_fingerprint=file_fingerprint,
+        ast_path=ast_path,
+        judge_verdict=verdict,
+        judge_model_verdict=model_verdict,
+        judge_recorded_at=recorded_at,
+        judge_model=model_id,
+        judge_rationale=judge_rationale,
+        judge_policy_hash=policy_hash,
+        judge_confidence=judge_confidence,
+        judge_excerpt_redactions=excerpt_redactions,
+    )
     expiry = (recorded_at + timedelta(days=90)).date()
     lines: list[str] = []
     lines.append(f"- key: {key}")
@@ -1116,6 +1876,9 @@ def _build_yaml_entry_text(
         lines.append(f"  judge_model_verdict: {model_verdict.value}")
     lines.append(f"  judge_recorded_at: '{recorded_at.isoformat()}'")
     lines.append(f"  judge_model: {_yaml_inline_scalar(model_id)}")
+    lines.append(f"  judge_policy_hash: {_yaml_inline_scalar(policy_hash)}")
+    if judge_confidence is not None:
+        lines.append(f"  judge_confidence: {judge_confidence:.6g}")
     lines.append("  judge_rationale: |-")
     for rationale_line in judge_rationale.splitlines() or [""]:
         lines.append(f"    {rationale_line}")
@@ -1127,6 +1890,7 @@ def _build_yaml_entry_text(
     # source drift. Both are scalars; emit inline.
     lines.append(f"  file_fingerprint: {_yaml_inline_scalar(file_fingerprint)}")
     lines.append(f"  ast_path: {_yaml_inline_scalar(ast_path)}")
+    lines.append(f"  judge_metadata_signature: {_yaml_inline_scalar(judge_metadata_signature)}")
     # Excerpt-redaction audit record (closes elspeth-9bbb9df9a5 / C2-2).
     # The judge's prompt may have had inline secrets scrubbed by
     # ``source_excerpt.scrub_secrets`` before transit to OpenRouter;
@@ -1139,6 +1903,33 @@ def _build_yaml_entry_text(
             lines.append(f"    - pattern: {_yaml_inline_scalar(record.pattern_name)}")
             lines.append(f"      byte_count: {record.byte_count}")
             lines.append(f"      redacted_hash: {_yaml_inline_scalar(record.redacted_hash)}")
+    return "\n".join(lines) + "\n"
+
+
+def _build_audit_review_text(
+    *,
+    verdict: AuditReviewVerdict,
+    reviewer: str,
+    reviewed_at: datetime,
+    rationale: str,
+) -> str:
+    """Render the nested ``audit_review`` block for one allow_hits entry."""
+    if not is_substantive_audit_anchor(reviewer):
+        raise ValueError("_build_audit_review_text: reviewer must be a substantive audit identity")
+    if not rationale.strip() or not is_substantive_audit_anchor(rationale):
+        raise ValueError("_build_audit_review_text: rationale must be a substantive non-empty audit explanation")
+    if reviewed_at.tzinfo is None:
+        raise ValueError("_build_audit_review_text: reviewed_at must include a timezone")
+
+    lines = [
+        "  audit_review:",
+        f"    verdict: {verdict.value}",
+        f"    reviewer: {_yaml_inline_scalar(reviewer)}",
+        f"    reviewed_at: {_yaml_inline_scalar(reviewed_at.isoformat())}",
+        "    rationale: |-",
+    ]
+    for rationale_line in rationale.splitlines() or [""]:
+        lines.append(f"      {rationale_line}")
     return "\n".join(lines) + "\n"
 
 
@@ -1204,6 +1995,12 @@ _YAML11_IMPLICIT_NON_STR_RESOLVERS: tuple[re.Pattern[str], ...] = (
     _YAML11_TIMESTAMP_RE,
 )
 
+# Plain scalars that are syntactically legal characters in our narrow bare
+# set but are not legal values in ``key: <value>`` position. PyYAML parses a
+# bare ``-`` as a block-sequence entry and raises ``ScannerError`` for
+# ``x: -``; quote it before it can corrupt Tier-1 audit YAML.
+_YAML11_PLAIN_SCALAR_SYNTAX_SENTINELS = frozenset({"-"})
+
 
 def _value_resolves_to_non_str(value: str) -> bool:
     """Return True iff PyYAML safe_load would coerce ``value`` (as a plain
@@ -1231,6 +2028,10 @@ def _yaml_inline_scalar(value: str) -> str:
        This is the C2-5 fix: an operator passing ``--owner yes`` must
        not have the audit record's ``owner`` field reload as the Python
        boolean ``True``.
+    3. The value is a YAML plain-scalar syntax sentinel in mapping-value
+       position. A single bare ``-`` is not a string value in ``x: -``;
+       PyYAML treats it as a block-sequence indicator and rejects the
+       document. This is the C2-6 single-hyphen round-trip fix.
 
     Quoting style is single-quoted with internal ``'`` doubled, per YAML
     1.1 §9.3.2. Single-quoted scalars cannot represent C0 control
@@ -1289,11 +2090,108 @@ def _yaml_inline_scalar(value: str) -> str:
                 f"value that won't round-trip. Use a block scalar for "
                 f"multi-line audit fields."
             )
-    needs_quote = not value or any(not (ch.isalnum() or ch in "._/-") for ch in value) or _value_resolves_to_non_str(value)
+    needs_quote = (
+        not value
+        or value in _YAML11_PLAIN_SCALAR_SYNTAX_SENTINELS
+        or any(not (ch.isalnum() or ch in "._/-") for ch in value)
+        or _value_resolves_to_non_str(value)
+    )
     if not needs_quote:
         return value
     escaped = value.replace("'", "''")
     return f"'{escaped}'"
+
+
+def _entry_key_from_yaml_entry(entry_text: str) -> str:
+    """Extract the canonical key from writer-produced allow_hits YAML."""
+    for line in entry_text.splitlines():
+        if line.startswith("- key: "):
+            key = line.removeprefix("- key: ").strip()
+            if key:
+                return key
+            break
+    raise ValueError("_append_entry_to_yaml: entry_text must start with a non-empty '- key: ...' line")
+
+
+def _allow_hit_entry_ranges(lines: list[str], *, start: int, end: int) -> list[tuple[int, int]]:
+    """Return ``[start, end)`` ranges for top-level entries in allow_hits."""
+    ranges: list[tuple[int, int]] = []
+    idx = start
+    while idx < end:
+        if not lines[idx].startswith("- "):
+            idx += 1
+            continue
+        entry_start = idx
+        idx += 1
+        while idx < end and not lines[idx].startswith("- "):
+            idx += 1
+        ranges.append((entry_start, idx))
+    return ranges
+
+
+def _is_allow_hits_block_line(line: str) -> bool:
+    """Return True when a line still belongs to the ``allow_hits`` block."""
+    return line.startswith("- ") or line.startswith(" ") or line.lstrip().startswith("#")
+
+
+def _upsert_audit_review_in_yaml(target_yaml: Path, *, entry_key: str, review_text: str) -> None:
+    """Insert or replace one nested ``audit_review`` block in an allowlist entry."""
+
+    def upsert_in(current: str | None) -> str:
+        if current is None:
+            raise ValueError(f"{target_yaml}: allowlist YAML file is required")
+
+        lines = current.splitlines(keepends=True)
+        header_index = None
+        for idx, line in enumerate(lines):
+            if line.rstrip("\r\n") == "allow_hits:":
+                header_index = idx
+                break
+        if header_index is None:
+            raise ValueError(f"{target_yaml}: no allow_hits block found")
+
+        block_end = len(lines)
+        for idx in range(header_index + 1, len(lines)):
+            line = lines[idx]
+            if not line.strip():
+                continue
+            if _is_allow_hits_block_line(line):
+                continue
+            block_end = idx
+            break
+
+        key_line = f"- key: {entry_key}"
+        matching_ranges = [
+            (entry_start, entry_end)
+            for entry_start, entry_end in _allow_hit_entry_ranges(lines, start=header_index + 1, end=block_end)
+            if lines[entry_start].rstrip("\r\n") == key_line
+        ]
+        if not matching_ranges:
+            raise ValueError(f"{target_yaml}: no allow_hits entry found for key {entry_key!r}")
+        if len(matching_ranges) > 1:
+            raise ValueError(f"{target_yaml}: duplicate allow_hits entries found for key {entry_key!r}")
+
+        entry_start, entry_end = matching_ranges[0]
+        entry_lines = lines[entry_start:entry_end]
+        cleaned_entry: list[str] = []
+        cursor = 0
+        while cursor < len(entry_lines):
+            line = entry_lines[cursor]
+            if cursor > 0 and line.rstrip("\r\n") == "  audit_review:":
+                cursor += 1
+                while cursor < len(entry_lines) and (entry_lines[cursor].startswith("    ") or not entry_lines[cursor].strip()):
+                    cursor += 1
+                continue
+            cleaned_entry.append(line)
+            cursor += 1
+
+        if cleaned_entry and not cleaned_entry[-1].endswith("\n"):
+            cleaned_entry[-1] = f"{cleaned_entry[-1]}\n"
+        cleaned_entry.append(review_text if review_text.endswith("\n") else f"{review_text}\n")
+        new_lines = [*lines[:entry_start], *cleaned_entry, *lines[entry_end:]]
+        return "".join(new_lines)
+
+    atomic_update_text(target_yaml, upsert_in, encoding="utf-8", create_parent=False)
 
 
 def _append_entry_to_yaml(target_yaml: Path, entry_text: str) -> None:
@@ -1302,53 +2200,77 @@ def _append_entry_to_yaml(target_yaml: Path, entry_text: str) -> None:
     Append-only at the END of the existing ``allow_hits:`` block. If
     the file does not exist, create it with an ``allow_hits:`` header.
     If the file exists but has no ``allow_hits:`` block, append one at
-    the bottom. We deliberately do NOT round-trip through PyYAML —
-    the per-module YAMLs carry multi-paragraph comments that
-    ``yaml.dump`` would erase, and the rotate command's surgical
-    text-edit approach is the established pattern in this codebase.
+    the bottom. The full read → locate block → insert → write sequence
+    runs under ``atomic_update_text`` so concurrent justify invocations
+    cannot compute updates from the same old YAML. We deliberately do
+    NOT round-trip through PyYAML — the per-module YAMLs carry
+    multi-paragraph comments that ``yaml.dump`` would erase, and the
+    rotate command's surgical text-edit approach is the established
+    pattern in this codebase.
     """
-    if not target_yaml.exists():
-        target_yaml.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(target_yaml, f"allow_hits:\n{entry_text}", encoding="utf-8")
-        return
+    entry_key = _entry_key_from_yaml_entry(entry_text)
 
-    text = target_yaml.read_text(encoding="utf-8")
-    lines = text.splitlines(keepends=True)
+    def append_to(current: str | None) -> str:
+        if current is None:
+            return f"allow_hits:\n{entry_text}"
 
-    # Locate the ``allow_hits:`` header line; if absent, append the
-    # whole block at the bottom.
-    header_index = None
-    for idx, line in enumerate(lines):
-        if line.rstrip("\r\n") == "allow_hits:":
-            header_index = idx
+        lines = current.splitlines(keepends=True)
+
+        # Locate the ``allow_hits:`` header line; if absent, append the
+        # whole block at the bottom.
+        header_index = None
+        for idx, line in enumerate(lines):
+            if line.rstrip("\r\n") == "allow_hits:":
+                header_index = idx
+                break
+
+        if header_index is None:
+            prefix = "" if not current or current.endswith("\n") else "\n"
+            return current + f"{prefix}\nallow_hits:\n{entry_text}"
+
+        # Find the end of the allow_hits block: the next line at col 0 that
+        # is non-empty and not part of the block (i.e. starts a new top-
+        # level key). Lines that start with ``- `` or are indented belong
+        # to the block; blank lines and comments inside the block stay.
+        block_end = len(lines)
+        for idx in range(header_index + 1, len(lines)):
+            line = lines[idx]
+            if not line.strip():
+                continue
+            if _is_allow_hits_block_line(line):
+                continue
+            # Hit a new top-level key (e.g. ``defaults:``); the block ends here.
+            block_end = idx
             break
 
-    if header_index is None:
-        prefix = "" if not text or text.endswith("\n") else "\n"
-        atomic_write_text(target_yaml, text + f"{prefix}\nallow_hits:\n{entry_text}", encoding="utf-8")
-        return
+        # Ensure the existing block ends with a newline before our insert.
+        if block_end > header_index + 1 and not lines[block_end - 1].endswith("\n"):
+            lines[block_end - 1] = lines[block_end - 1] + "\n"
 
-    # Find the end of the allow_hits block: the next line at col 0 that
-    # is non-empty and not part of the block (i.e. starts a new top-
-    # level key). Lines that start with ``- `` or are indented belong
-    # to the block; blank lines inside the block stay.
-    block_end = len(lines)
-    for idx in range(header_index + 1, len(lines)):
-        line = lines[idx]
-        if not line.strip():
-            continue
-        if line.startswith("- ") or line.startswith(" "):
-            continue
-        # Hit a new top-level key (e.g. ``defaults:``); the block ends here.
-        block_end = idx
-        break
+        key_line = f"- key: {entry_key}"
+        matching_ranges = [
+            (entry_start, entry_end)
+            for entry_start, entry_end in _allow_hit_entry_ranges(lines, start=header_index + 1, end=block_end)
+            if lines[entry_start].rstrip("\r\n") == key_line
+        ]
+        if matching_ranges:
+            replacement = entry_text if entry_text.endswith("\n") else f"{entry_text}\n"
+            replaced: list[str] = []
+            cursor = 0
+            inserted = False
+            for entry_start, entry_end in matching_ranges:
+                replaced.extend(lines[cursor:entry_start])
+                if not inserted:
+                    replaced.append(replacement)
+                    inserted = True
+                cursor = entry_end
+            replaced.extend(lines[cursor:])
+            return "".join(replaced)
 
-    # Ensure the existing block ends with a newline before our insert.
-    if block_end > header_index + 1 and not lines[block_end - 1].endswith("\n"):
-        lines[block_end - 1] = lines[block_end - 1] + "\n"
+        new_lines = [*lines[:block_end], entry_text, *lines[block_end:]]
+        return "".join(new_lines)
 
-    new_lines = [*lines[:block_end], entry_text, *lines[block_end:]]
-    atomic_write_text(target_yaml, "".join(new_lines), encoding="utf-8")
+    atomic_update_text(target_yaml, append_to, encoding="utf-8", create_parent=True)
 
 
 def _emit_justify_output(
@@ -1386,6 +2308,8 @@ def _emit_justify_output(
         payload = {
             "verdict": verdict.value,
             "model": judge_response.model_id,
+            "confidence": judge_response.confidence,
+            "policy_hash": judge_response.policy_hash,
             "recorded_at": judge_response.recorded_at.isoformat(),
             "judge_rationale": judge_response.judge_rationale,
             "should_use_decorator": should_use_decorator,
@@ -1415,6 +2339,8 @@ def _emit_justify_output(
 
     sys.stdout.write(f"Verdict:          {verdict.value}\n")
     sys.stdout.write(f"Judge model:      {judge_response.model_id}\n")
+    sys.stdout.write(f"Confidence:       {judge_response.confidence:.2f}\n")
+    sys.stdout.write(f"Policy hash:      {judge_response.policy_hash}\n")
     sys.stdout.write(f"Recorded at:      {judge_response.recorded_at.isoformat()}\n")
     sys.stdout.write(f"Target YAML:      {target_yaml}\n")
     sys.stdout.write(f"Operator override:{'  yes' if args.operator_override else '  no'}\n")
@@ -1476,7 +2402,7 @@ def _emit_findings(findings: list[Finding], *, output_format: str, rules: list[R
         sys.stdout.write(render_sarif(findings, metadata=[rule.metadata for rule in rules]))
     else:
         raise ValueError(f"unknown output format: {output_format}")
-    return 1 if findings else 0
+    return 1 if any(finding.severity is not Severity.NOTE for finding in findings) else 0
 
 
 def _run_reaudit(args: argparse.Namespace) -> int:
@@ -1608,6 +2534,10 @@ def _run_reaudit(args: argparse.Namespace) -> int:
 
     else:
         run_id = generate_run_id()
+        from datetime import UTC as _UTC
+        from datetime import datetime as _datetime
+
+        reference_time = _datetime.now(_UTC)
         # The header is constructed before we know ``total_entries`` —
         # which requires loading the allowlist and applying the filters.
         # We defer constructing the SidecarHeader until inside the
@@ -1632,21 +2562,21 @@ def _run_reaudit(args: argparse.Namespace) -> int:
                 valid_rule_ids=valid_rule_ids,
                 source_root=args.root.resolve(),
             )
-        except (FileNotFoundError, NotADirectoryError, ReauditError) as exc:
+        except (FileNotFoundError, NotADirectoryError, ValueError, ReauditError) as exc:
             sys.stderr.write(f"reaudit error: {exc}\n")
             return 2
         filtered_preview = _apply_filters(
             entries=preview.entries,
+            valid_rule_ids=valid_rule_ids,
             include_pre_judge=args.include_pre_judge,
             since=since,
             limit=args.limit,
+            reference_time=reference_time,
         )
-        from datetime import UTC as _UTC
-        from datetime import datetime as _datetime
 
         header = SidecarHeader(
             run_id=run_id,
-            started_at=_datetime.now(_UTC),
+            started_at=reference_time,
             total_entries=len(filtered_preview),
             allowlist_path=str(allowlist_dir.resolve()),
             allowlist_hash=compute_allowlist_hash(allowlist_dir),
@@ -1684,12 +2614,16 @@ def _run_reaudit(args: argparse.Namespace) -> int:
                 since=since,
                 limit=args.limit,
                 include_pre_judge=args.include_pre_judge,
+                max_calls=args.max_calls,
                 sidecar_writer=writer,
                 pre_classified_keys=pre_classified_keys,
                 pre_classified_outcomes=pre_classified_outcomes,
+                reference_time=(resume_state["header"].started_at if is_resume else header.started_at),
+                progress_callback=_emit_reaudit_progress,
             )
-            writer.commit_trailer()
-    except ReauditError as exc:
+            if report.entries_dispatched >= report.total_entries:
+                writer.commit_trailer()
+    except (ValueError, ReauditError) as exc:
         sys.stderr.write(f"reaudit error: {exc}\n")
         return 2
     except JudgeConfigurationError as exc:
@@ -1698,25 +2632,32 @@ def _run_reaudit(args: argparse.Namespace) -> int:
 
     _write_report(report, args)
 
-    # Exit-code policy (closes elspeth-9a4e54cc01 / C3-2 + C3-3 +
-    # elspeth-ebb2b88753 / C3-4):
-    #   0 — sweep complete, every entry produced a verdict-based
-    #       divergence (including ENTRY_OBSOLETE).
-    #   1 — sweep had operator-actionable data-collection gaps:
-    #       either entries the sweep never reached
-    #       (entries_dispatched < total_entries) OR entries whose
-    #       judge call raised a transport error (JUDGE_CALL_FAILED)
-    #       OR entries whose source-excerpt path failed containment
-    #       (SOURCE_EXCERPT_REJECTED — security signal, must be
-    #       surfaced as failure to the CI driver).
-    #       Distinct from the verdict-change cases (which are *signal*,
-    #       not failure) — those still exit 0.
-    judge_call_failures = sum(1 for outcome in report.outcomes if outcome.divergence is ReauditDivergence.JUDGE_CALL_FAILED)
-    excerpt_rejections = sum(1 for outcome in report.outcomes if outcome.divergence is ReauditDivergence.SOURCE_EXCERPT_REJECTED)
+    # Exit-code policy: 0 only when the sweep is complete and every reached
+    # entry still agrees. Any non-STILL_AGREES divergence is gate-firing signal
+    # for CI; exit 2 remains reserved for command/configuration errors above.
+    non_agreeing_outcomes = sum(1 for outcome in report.outcomes if outcome.divergence is not ReauditDivergence.STILL_AGREES)
     incomplete = report.entries_dispatched < report.total_entries
-    if judge_call_failures > 0 or excerpt_rejections > 0 or incomplete:
+    if non_agreeing_outcomes > 0 or incomplete:
         return 1
     return 0
+
+
+def _emit_reaudit_progress(progress: Any) -> None:
+    """Write one operator-facing cost-progress line for reaudit."""
+    if progress.max_judge_calls is None:
+        calls = str(progress.judge_calls_attempted)
+    else:
+        calls = f"{progress.judge_calls_attempted}/{progress.max_judge_calls}"
+    cached = progress.prompt_tokens_cached if progress.prompt_tokens_cached is not None else "n/a"
+    uncached = progress.prompt_tokens_uncached if progress.prompt_tokens_uncached is not None else "n/a"
+    sys.stderr.write(
+        "reaudit progress: "
+        f"entries={progress.entries_dispatched}/{progress.total_entries} "
+        f"judge_calls={calls} "
+        f"prompt_tokens_total={progress.prompt_tokens_total} "
+        f"prompt_tokens_cached={cached} "
+        f"prompt_tokens_uncached={uncached}\n"
+    )
 
 
 def _write_report(report: Any, args: argparse.Namespace) -> None:
@@ -1826,9 +2767,136 @@ def _run_check_judge_coverage(args: argparse.Namespace) -> int:
 
     sys.stdout.write(
         "\nResolve by running 'elspeth-lints justify' on each new "
-        "entry to obtain an LLM-judged verdict, or '--operator-override' "
-        "to record an OVERRIDDEN_BY_OPERATOR verdict if the judge would "
-        "BLOCK incorrectly.\n"
+        "allow_hits entry to obtain an LLM-judged verdict. For new "
+        "per_file_rules violations, replace the wildcard with exact "
+        "allow_hits entries that can carry judge metadata, or split the "
+        "change into a reviewed migration. Use '--operator-override' only "
+        "to record an OVERRIDDEN_BY_OPERATOR verdict when the judge would "
+        "BLOCK an exact entry incorrectly.\n"
+    )
+    return 1
+
+
+def _run_check_judge_quality(args: argparse.Namespace) -> int:
+    """Handle ``elspeth-lints check-judge-quality``.
+
+    Exit-code contract:
+
+    * 0 — live judge exact-match accuracy is at or above threshold.
+    * 1 — the corpus ran, but verdict/decorator accuracy is too low.
+    * 2 — the measurement itself could not run (bad corpus, missing
+      judge dependencies/key, transport failure, malformed judge
+      response, or invalid evaluator configuration).
+    """
+    from elspeth_lints.core.judge import (
+        DEFAULT_JUDGE_MAX_TOKENS,
+        DEFAULT_JUDGE_MODEL,
+        JudgeConfigurationError,
+        JudgeContractError,
+        JudgeTransportError,
+    )
+    from elspeth_lints.core.judge_quality import (
+        JudgeQualityError,
+        evaluate_judge_quality_corpus,
+        load_judge_quality_corpus,
+        render_judge_quality_report_json,
+        render_judge_quality_report_text,
+    )
+
+    try:
+        cases = load_judge_quality_corpus(args.corpus)
+        report = evaluate_judge_quality_corpus(
+            cases=cases,
+            corpus_path=args.corpus,
+            min_accuracy=args.min_accuracy,
+            min_cases=args.min_cases,
+            max_cases=args.max_cases,
+            model_id=args.model or DEFAULT_JUDGE_MODEL,
+            max_tokens=args.max_tokens or DEFAULT_JUDGE_MAX_TOKENS,
+        )
+    except JudgeQualityError as exc:
+        sys.stderr.write(f"check-judge-quality: cannot run: {exc}\n")
+        return 2
+    except JudgeConfigurationError as exc:
+        sys.stderr.write(f"check-judge-quality: judge configuration error: {exc}\n")
+        return 2
+    except JudgeTransportError as exc:
+        sys.stderr.write(f"check-judge-quality: judge transport error: {exc}\n")
+        return 2
+    except JudgeContractError as exc:
+        sys.stderr.write(f"check-judge-quality: judge contract error: {exc}\n")
+        return 2
+
+    if args.judge_quality_format == "json":
+        sys.stdout.write(render_judge_quality_report_json(report))
+    else:
+        sys.stdout.write(render_judge_quality_report_text(report))
+    return 0 if report.passes else 1
+
+
+def _run_check_trust_boundary_diff(args: argparse.Namespace) -> int:
+    """Handle ``elspeth-lints check-trust-boundary-diff``.
+
+    Exit-code contract:
+
+    * 0 — report produced, regardless of whether new decorators exist.
+    * 2 — the diff itself could not run (bad baseline, bad root, git failure).
+    """
+    from elspeth_lints.core.trust_boundary_diff import (
+        TrustBoundaryDiffError,
+        find_new_trust_boundary_decorators,
+        render_trust_boundary_diff_summary,
+    )
+
+    try:
+        report = find_new_trust_boundary_decorators(
+            root=args.root,
+            baseline_ref=args.baseline_ref,
+            repo_root=args.repo_root,
+        )
+    except TrustBoundaryDiffError as exc:
+        sys.stderr.write(f"check-trust-boundary-diff: cannot run: {exc}\n")
+        return 2
+
+    sys.stdout.write(render_trust_boundary_diff_summary(report))
+    return 0
+
+
+def _run_check_rotation_audit(args: argparse.Namespace) -> int:
+    """Handle ``elspeth-lints check-rotation-audit``."""
+    from elspeth_lints.rules.trust_tier.tier_model.rotate import (
+        RotationAuditError,
+        check_rotation_audit_coverage,
+    )
+
+    try:
+        report = check_rotation_audit_coverage(
+            allowlist_root=args.allowlist_root,
+            baseline_ref=args.baseline_ref,
+            repo_root=args.repo_root,
+            rotation_log_path=args.rotation_log,
+        )
+    except RotationAuditError as exc:
+        sys.stderr.write(f"check-rotation-audit: cannot run: {exc}\n")
+        return 2
+
+    sys.stdout.write(
+        f"check-rotation-audit: {report.checked_rotation_count} rotation(s) "
+        f"detected against {report.baseline_ref}; {len(report.violations)} "
+        f"unrecorded. manifest={report.rotation_log_path}\n"
+    )
+    if report.passes:
+        return 0
+
+    sys.stdout.write("\nUnrecorded tier_model allowlist rotations:\n")
+    for violation in report.violations:
+        sys.stdout.write(f"  {violation.allowlist_file}\n")
+        sys.stdout.write(f"    old: {violation.old_key}\n")
+        sys.stdout.write(f"    new: {violation.new_key}\n")
+    sys.stdout.write(
+        "\nResolve by applying rotations through 'elspeth-lints rotate' so "
+        ".elspeth/rotations.log records the old/new key mapping, or add a "
+        "reviewed manifest record that matches the mechanical rotation.\n"
     )
     return 1
 
@@ -1849,6 +2917,8 @@ def _run_check_override_rate(args: argparse.Namespace) -> int:
     from elspeth_lints.core.override_rate import (
         OverrideRateError,
         compute_override_rate,
+        default_counter_snapshot_path,
+        write_override_rate_counter_snapshot,
     )
 
     reference_time = None
@@ -1859,17 +2929,31 @@ def _run_check_override_rate(args: argparse.Namespace) -> int:
             sys.stderr.write(f"check-override-rate: --reference-time must be ISO-8601 (got {args.reference_time!r}): {exc}\n")
             return 2
 
+    counter_snapshot_path = args.counter_snapshot or default_counter_snapshot_path(args.allowlist_root)
+
     try:
         detail = compute_override_rate(
             allowlist_root=args.allowlist_root,
             window_days=args.window_days,
             min_samples=args.min_samples,
             max_rate=args.max_rate,
+            max_overrides=args.max_overrides,
             reference_time=reference_time,
+            counter_snapshot_path=counter_snapshot_path,
         )
     except OverrideRateError as exc:
         sys.stderr.write(f"check-override-rate: cannot run: {exc}\n")
         return 2
+
+    if detail.counter_source == "yaml":
+        try:
+            write_override_rate_counter_snapshot(args.allowlist_root, snapshot_path=counter_snapshot_path)
+        except OverrideRateError as exc:
+            sys.stderr.write(f"check-override-rate: counter snapshot refresh failed: {exc}\n")
+        except OSError as exc:
+            sys.stderr.write(f"check-override-rate: counter snapshot refresh failed: {exc}\n")
+        else:
+            sys.stderr.write(f"check-override-rate: refreshed counter snapshot {counter_snapshot_path}\n")
 
     report = detail.report
     pct = report.rate * 100.0
@@ -1879,9 +2963,27 @@ def _run_check_override_rate(args: argparse.Namespace) -> int:
         f"check-override-rate: window={report.window_days}d, "
         f"reference={report.reference_time.isoformat()}, "
         f"judged_in_window={report.judged_in_window}, "
+        f"accepted_in_window={report.accepted_in_window}, "
         f"overrides_in_window={report.overrides_in_window}, "
-        f"rate={pct:.2f}% (max {max_pct:.2f}%)\n"
+        f"model_accepted_in_window={report.model_accepted_in_window}, "
+        f"model_blocked_in_window={report.model_blocked_in_window}, "
+        f"blocked_without_override_in_window={report.blocked_without_override_in_window}, "
+        f"rate={pct:.2f}% (max {max_pct:.2f}%), "
+        f"counter_source={detail.counter_source}\n"
     )
+    if report.max_overrides is not None:
+        sys.stdout.write(f"check-override-rate: max_overrides={report.max_overrides}\n")
+    if detail.per_rule_reports:
+        sys.stdout.write("per-rule override rates:\n")
+        for per_rule in detail.per_rule_reports:
+            sys.stdout.write(
+                f"  {per_rule.rule_id}: judged={per_rule.judged_in_window}, "
+                f"accepted={per_rule.accepted_in_window}, "
+                f"overrides={per_rule.overrides_in_window}, "
+                f"model_accepted={per_rule.model_accepted_in_window}, "
+                f"model_blocked={per_rule.model_blocked_in_window}, "
+                f"rate={per_rule.rate * 100.0:.2f}%\n"
+            )
 
     if report.insufficient_data:
         sys.stdout.write(
@@ -1896,11 +2998,12 @@ def _run_check_override_rate(args: argparse.Namespace) -> int:
         sys.stdout.write("PASS: override rate within budget.\n")
         return 0
 
-    sys.stdout.write(
-        f"FAIL: override rate {pct:.2f}% exceeds budget {max_pct:.2f}%.\n"
-        f"\n{len(detail.override_entries)} OVERRIDDEN_BY_OPERATOR entries "
-        "in window:\n"
-    )
+    if report.absolute_budget_exceeded:
+        assert report.max_overrides is not None
+        sys.stdout.write(f"FAIL: override count {report.overrides_in_window} exceeds absolute budget {report.max_overrides}.\n")
+    if report.ratio_budget_exceeded:
+        sys.stdout.write(f"FAIL: override rate {pct:.2f}% exceeds budget {max_pct:.2f}%.\n")
+    sys.stdout.write(f"\n{len(detail.override_entries)} OVERRIDDEN_BY_OPERATOR entries in window:\n")
     for record in sorted(
         detail.override_entries,
         key=lambda r: (r.judge_recorded_at, r.entry_key),

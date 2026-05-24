@@ -23,6 +23,7 @@ from textwrap import dedent
 import pytest
 
 from elspeth_lints.core.allowlist import JudgeVerdict
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.rules.trust_tier.tier_model.rule import (
     Allowlist,
     AllowlistBudgetViolation,
@@ -625,6 +626,43 @@ class TestR4BroadExcept:
 
 
 # =============================================================================
+# R6: Silent specific exception handling
+# =============================================================================
+
+
+class TestR6SilentExcept:
+    """Specific exception handlers must be judged in their own lexical scope."""
+
+    def test_nested_raise_does_not_make_handler_non_silent(self) -> None:
+        source = dedent("""
+            try:
+                int("not a number")
+            except ValueError:
+                def helper():
+                    raise RuntimeError("not the handler")
+                helper
+        """)
+        findings = parse_and_visit(source)
+
+        r6_findings = [f for f in findings if f.rule_id == "R6"]
+        assert len(r6_findings) == 1
+
+    def test_nested_non_default_return_does_not_make_handler_non_silent(self) -> None:
+        source = dedent("""
+            try:
+                int("not a number")
+            except ValueError:
+                def helper():
+                    return {"handled": True}
+                helper
+        """)
+        findings = parse_and_visit(source)
+
+        r6_findings = [f for f in findings if f.rule_id == "R6"]
+        assert len(r6_findings) == 1
+
+
+# =============================================================================
 # R8: setdefault() detection
 # =============================================================================
 
@@ -1107,11 +1145,11 @@ allow_hits:
         assert allowlist.fail_on_expired is False
 
     def test_load_nonexistent_file(self, temp_dir: Path) -> None:
-        """Missing allowlist file should produce empty allowlist."""
+        """Missing allowlist file is Tier-1 audit-data loss."""
         allowlist_path = temp_dir / "missing.yaml"
 
-        allowlist = load_allowlist(allowlist_path)
-        assert len(allowlist.entries) == 0
+        with pytest.raises(FileNotFoundError, match="allowlist YAML file is required"):
+            load_allowlist(allowlist_path)
 
 
 # =============================================================================
@@ -1599,6 +1637,25 @@ class TestPerFileRuleMaxHits:
 
 class TestDirectoryLoadingSuggestModuleFile:
     """Tests for _suggest_module_file and related directory loading."""
+
+    def test_load_missing_single_allowlist_file_crashes(self, temp_dir: Path) -> None:
+        """A missing Tier-1 allowlist file is corruption, not an empty allowlist."""
+        missing = temp_dir / "missing.yaml"
+
+        with pytest.raises(FileNotFoundError, match="allowlist YAML file is required"):
+            load_allowlist(missing)
+
+    def test_load_yaml_file_rejects_oversized_input(self, temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The YAML loader checks file size before calling yaml.safe_load."""
+        allowlist_path = temp_dir / "oversized.yaml"
+        allowlist_path.write_text("allow_hits: []\n")
+        monkeypatch.setattr(
+            "elspeth_lints.core.allowlist._MAX_ALLOWLIST_YAML_BYTES",
+            len("allow_hits: []\n") - 1,
+        )
+
+        with pytest.raises(ValueError, match="exceeds maximum allowlist YAML size"):
+            load_allowlist(allowlist_path)
 
     def test_suggest_module_file_single_file(self, temp_dir: Path) -> None:
         """Single file path should return the file path as-is."""
@@ -2340,7 +2397,8 @@ class TestC83InFileTransplantDefence:
             ast_path="body[0]/body[1]/body[99]/value",  # transplanted: DIFFERENT
             judge_verdict=JudgeVerdict.ACCEPTED,
             judge_recorded_at=datetime(2026, 5, 1, tzinfo=UTC),
-            judge_model="anthropic/claude-opus-4",
+            judge_model=DEFAULT_JUDGE_MODEL,
+            judge_policy_hash=JUDGE_POLICY_HASH,
             judge_rationale="judge accepted at a different node entirely",
         )
         al = Allowlist(entries=[entry], per_file_rules=[])
@@ -2370,7 +2428,8 @@ class TestC83InFileTransplantDefence:
             ast_path=finding.ast_path,  # matches
             judge_verdict=JudgeVerdict.ACCEPTED,
             judge_recorded_at=datetime(2026, 5, 1, tzinfo=UTC),
-            judge_model="anthropic/claude-opus-4",
+            judge_model=DEFAULT_JUDGE_MODEL,
+            judge_policy_hash=JUDGE_POLICY_HASH,
             judge_rationale="judge accepted at this exact AST node",
         )
         al = Allowlist(entries=[entry], per_file_rules=[])

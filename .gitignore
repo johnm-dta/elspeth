@@ -227,7 +227,9 @@ examples/large_scale_test/input.csv
 examples/retention_purge/payloads/
 landscape.db-shm
 landscape.db-wal
-.elspeth/
+.elspeth/*
+!.elspeth/rotations.log
+.judge-metrics/
 
 # pre-commit cache
 .pre-commit-cache/

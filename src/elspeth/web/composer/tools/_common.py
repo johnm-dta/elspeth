@@ -1345,9 +1345,10 @@ def _source_options_for_prevalidation(options: Mapping[str, Any]) -> dict[str, A
     """Strip source blob-binding metadata before plugin config validation."""
     filtered = strip_authoring_options(options)
     for key in _WEB_ONLY_SOURCE_KEYS:
-        filtered.pop(key, None)
-    if options.get("blob_ref") is not None and options.get("mode") == "bind_source":
-        filtered.pop("mode", None)
+        if key in filtered:
+            del filtered[key]
+    if options.get("blob_ref") is not None and options.get("mode") == "bind_source" and "mode" in filtered:
+        del filtered["mode"]
     return filtered
 
 

@@ -34,12 +34,12 @@ def test_allow_hits_ceiling_violated(tmp_path: Path) -> None:
             max_allow_hits: 1
         allow_hits:
           - key: "a:b:c:fp=1"
-            owner: x
-            reason: x
+            owner: qa
+            reason: ok
             safety: x
           - key: "a:b:c:fp=2"
-            owner: x
-            reason: x
+            owner: qa
+            reason: ok
             safety: x
     """).strip()
     p = tmp_path / "al.yaml"
@@ -57,13 +57,13 @@ def test_permanent_distinguished_from_total(tmp_path: Path) -> None:
             max_permanent_allow_hits: 0
         allow_hits:
           - key: "a:b:c:fp=1"
-            owner: x
-            reason: x
+            owner: qa
+            reason: ok
             safety: x
             # no expires -> permanent
           - key: "a:b:c:fp=2"
-            owner: x
-            reason: x
+            owner: qa
+            reason: ok
             safety: x
             expires: 2030-01-01
     """).strip()
@@ -148,7 +148,7 @@ def test_allow_hit_pattern_field_round_trips(tmp_path: Path) -> None:
         allow_hits:
           - key: "src/x.py:R1:func:fp=abc"
             owner: bugfix
-            reason: r
+            reason: ok
             safety: s
             pattern: display-fallback
     """).strip()
@@ -164,8 +164,8 @@ def test_allow_hit_pattern_field_defaults_to_none(tmp_path: Path) -> None:
     yaml = textwrap.dedent("""
         allow_hits:
           - key: "src/x.py:R1:func:fp=abc"
-            owner: x
-            reason: r
+            owner: qa
+            reason: ok
             safety: s
     """).strip()
     p = tmp_path / "al.yaml"
@@ -179,8 +179,8 @@ def test_allow_hit_pattern_empty_string_rejected(tmp_path: Path) -> None:
     yaml = textwrap.dedent("""
         allow_hits:
           - key: "src/x.py:R1:func:fp=abc"
-            owner: x
-            reason: r
+            owner: qa
+            reason: ok
             safety: s
             pattern: ""
     """).strip()

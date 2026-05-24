@@ -101,65 +101,6 @@
   File: elspeth-lints/src/elspeth_lints/rules/trust_tier/tier_model/rule.py import block
   Issue: Leading-underscore signals module-private; imported from another module breaks the convention pyright/ruff will report.
   Fix: Rename to BoundaryMetadata (public-by-convention) in trust_boundary_suppress.py; update both import sites.
-  Issue: @trust_boundary applied below @classmethod raises TypeError: <classmethod(...)> is not a callable object at import. @staticmethod works (callable on 3.10+). Asymmetry will surprise authors with a baffling import-time crash.
-  Fix: Either (a) pin with 2 regression tests (@classmethod+below crashes; @staticmethod+below works) so authors learn the requirement from test names, or (b) detect classmethod/staticmethod wrapping and emit diagnostic naming the
-  decorator-order requirement.
-
-  M2. Concurrent justify writes = silent last-write-wins corruption
-
-  Source: quality
-  File: elspeth-lints/src/elspeth_lints/core/cli.py _append_entry_to_yaml uses Path.write_text
-  Issue: Two parallel elspeth-lints justify invocations on the same per-module YAML produce silent corruption. CI agents + local human can both invoke; in-flight CI plus local justify could lose an audit entry. Audit primitive only matters if
-  writes are durable.
-  Fix: Either document "invoke serially" + add a test pinning current behaviour, or use atomic-rename (os.replace) with a tempfile.
-
-  M3. NFR handwave on reaudit operability (~700 entries, no retry/checkpoint/cost ceiling)
-
-  Source: architect M1
-  File: elspeth-lints/src/elspeth_lints/core/reaudit.py:244-258
-  Issue: Reaudit iterates linearly with no retry envelope, no checkpoint, no cost ceiling, no resumability. A 600-call run failing on call 599 leaves no durable artefact and the operator pays for 598 wasted calls. Decay-sweep is the only
-  mechanism that closes the "self-attestation never re-reviewed" failure mode.
-  Fix: Add NFR section to plan doc covering target cost-per-sweep, wall-clock, transient-failure semantics, and resumability via --skip M. Then implement at least checkpoint/resume.
-
-  M4. ADR absence for Pillar A
-
-  Source: architect M2
-  Files: notes/cicd-judge-cli-prototype-plan.md (informal plan, not numbered ADR); no ADR for single-vendor + schema + closed-set rule
-  Issue: Pillar A commits the project to (a) single-vendor OpenRouter routing for an audit-integrity primitive, (b) 5-field audit-record schema baked into AllowlistEntry, (c) OVERRIDDEN_BY_OPERATOR meta-metric with no observation surface, (d)
-  closed-set BoundaryRule literal {R1, R5}. Plan doc captures rationale but isn't ADR-class. Wardline port will re-litigate these from scratch.
-  Fix: File an ADR covering the four decisions. Prototype-tier ADRs can be terse.
-
-  M5. Positive-path-biased test design — process pattern, 3 BLOCKERs in one commit
-
-  Source: quality (process-level finding)
-  Files: tests/unit/elspeth_lints/test_tier_model_decorator_suppression.py (B1 path), test_allowlist_judge_metadata_integrity.py (B2 path), test_justify.py (B3 path)
-  Issue: Implementing agents' green test suites missed three boundary defects that an external reviewer caught. The pattern: verification-of-design ("does the function do what spec says?") not adversarial-probe-of-boundaries ("what shape of
-  input breaks the contract?"). 3 datapoints = pattern, not slip.
-  Fix: Codify the parameterize-invariant-violations-first template from test_allowlist_judge_metadata_integrity.py as the team default for new invariants. Cultural fix, not a commit edit.
-
-  ---
-  MINORs (singleton)
-
-  N1. Tier-artifact disclosure gap in plan doc
-
-  Source: architect M4
-  File: notes/cicd-judge-cli-prototype-plan.md
-  Issue: Plan describes "two-pillar deliverable"; reader doesn't infer that judge enforcement is voluntary. Tier-artifact mismatch.
-  Fix: Add "Delivered vs Enforced" section: two columns showing what ships as code vs what CI fails on.
-
-  N2. "Judge does NOT fix" tension with should_use_decorator suggestion
-
-  Source: architect M3
-  File: notes/cicd-judge-cli-prototype-plan.md:40
-  Issue: Plan says "Judge does NOT fix" flatly; implementation has judge suggesting @trust_boundary as structural alternative. Not contradictory but in tension.
-  Fix: 1-line edit: "Judge does not write code fixes; it MAY name a structural alternative (the @trust_boundary decorator) when the finding fits the decorator's preconditions."
-
-  N3. _BoundaryMetadata private name imported across modules
-
-  Source: python
-  File: elspeth-lints/src/elspeth_lints/rules/trust_tier/tier_model/rule.py import block
-  Issue: Leading-underscore signals module-private; imported from another module breaks the convention pyright/ruff will report.
-  Fix: Rename to BoundaryMetadata (public-by-convention) in trust_boundary_suppress.py; update both import sites.
 
   N4. Any-typed verdict/datetime params in _build_yaml_entry_text
 

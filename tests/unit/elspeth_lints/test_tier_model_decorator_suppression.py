@@ -18,22 +18,42 @@ kwargs, wrong-shaped values) emit their own ``R_TB_NONLITERAL`` /
 from __future__ import annotations
 
 import ast
+import json
+from pathlib import Path
 from textwrap import dedent
 
+from elspeth_lints.core.cli import main
 from elspeth_lints.rules.trust_tier.tier_model.rule import Finding, TierModelVisitor
+from elspeth_lints.rules.trust_tier.tier_model.trust_boundary_suppress import (
+    compute_derived_names,
+    extract_boundary_metadata,
+)
 
 
 def _findings(source: str, filename: str = "test_module.py") -> list[Finding]:
     """Run the tier-model visitor on ``source`` and return findings."""
+    return _visitor(source, filename=filename).findings
+
+
+def _visitor(source: str, filename: str = "test_module.py") -> TierModelVisitor:
+    """Run the tier-model visitor on ``source`` and return the visitor."""
     tree = ast.parse(source, filename=filename)
     source_lines = source.splitlines()
     visitor = TierModelVisitor(filename, source_lines)
     visitor.visit(tree)
-    return visitor.findings
+    return visitor
 
 
 def _findings_by_rule(findings: list[Finding], rule_id: str) -> list[Finding]:
     return [f for f in findings if f.rule_id == rule_id]
+
+
+def _first_function(source: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    tree = ast.parse(dedent(source))
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node
+    raise AssertionError("fixture must contain a top-level function")
 
 
 # =============================================================================
@@ -66,6 +86,85 @@ class TestSuppressionPositive:
         # be suppressed.
         assert _findings_by_rule(findings, "R1") == []
         assert _findings_by_rule(findings, "R5") == []
+
+    def test_suppression_records_non_failing_observation(self) -> None:
+        """Suppressed R1/R5 findings remain auditable as observation records."""
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="LLM tool args",
+                source_param="arguments",
+                suppresses=("R1", "R5"),
+                invariant="raises on shape mismatch",
+                test_ref="tests/test_handler.py::test_rejects_bad_args",
+                test_fingerprint="abc123",
+            )
+            def handler(arguments):
+                if not isinstance(arguments.get("nodes"), list):
+                    raise ValueError("nodes must be a list")
+                return None
+        """)
+        visitor = _visitor(source)
+
+        assert _findings_by_rule(visitor.findings, "R1") == []
+        assert _findings_by_rule(visitor.findings, "R5") == []
+        suppressed = _findings_by_rule(visitor.suppressed_findings, "R_TB_SUPPRESSED")
+        assert sorted(item.message for item in suppressed) == [
+            (
+                "@trust_boundary suppressed R1 under source_param='arguments'; "
+                "source='LLM tool args'; test_ref='tests/test_handler.py::test_rejects_bad_args'; "
+                "suppresses=('R1', 'R5')"
+            ),
+            (
+                "@trust_boundary suppressed R5 under source_param='arguments'; "
+                "source='LLM tool args'; test_ref='tests/test_handler.py::test_rejects_bad_args'; "
+                "suppresses=('R1', 'R5')"
+            ),
+        ]
+
+    def test_core_cli_emits_suppression_observation_without_failing(self, tmp_path: Path, capsys) -> None:
+        """The CI-facing CLI surfaces suppression observations at note severity."""
+        allowlist_dir = tmp_path / "config" / "cicd" / "enforce_tier_model"
+        allowlist_dir.mkdir(parents=True)
+        (tmp_path / "handler.py").write_text(
+            dedent("""
+                from elspeth.contracts import trust_boundary
+
+                @trust_boundary(
+                    tier=3,
+                    source="LLM tool args",
+                    source_param="arguments",
+                    suppresses=("R1",),
+                    invariant="raises on shape mismatch",
+                    test_ref="tests/test_handler.py::test_rejects_bad_args",
+                    test_fingerprint="abc123",
+                )
+                def handler(arguments):
+                    return arguments.get("nodes")
+            """),
+            encoding="utf-8",
+        )
+
+        exit_code = main(
+            [
+                "check",
+                "--rules",
+                "trust_tier.tier_model",
+                "--root",
+                str(tmp_path),
+                "--format",
+                "json",
+            ]
+        )
+
+        assert exit_code == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert [(item["rule_id"], item["severity"]) for item in payload] == [
+            ("R_TB_SUPPRESSED", "note"),
+        ]
+        assert "suppressed R1" in payload[0]["message"]
 
     def test_suppresses_get_on_loop_variable(self) -> None:
         """``for raw in arguments["nodes"]: raw.get("id")`` — both suppressed."""
@@ -146,6 +245,54 @@ class TestSuppressionPositive:
         """)
         findings = _findings(source)
         assert _findings_by_rule(findings, "R1") == []
+
+
+class TestComputeDerivedNames:
+    """Direct coverage for the fixed-point dataflow helper."""
+
+    def test_annotation_augassign_with_and_namedexpr_branches(self) -> None:
+        func = _first_function(
+            """
+            def handler(arguments, total):
+                annotated: object = arguments["annotated"]
+                total += arguments["delta"]
+                with arguments["ctx"] as ctx:
+                    pass
+                if (chosen := arguments["maybe"]):
+                    pass
+            """
+        )
+
+        derived = compute_derived_names(func, "arguments")
+
+        assert {"annotated", "total", "ctx", "chosen"} <= derived
+
+    def test_async_for_async_with_and_comprehension_branches(self) -> None:
+        func = _first_function(
+            """
+            async def handler(arguments):
+                async for item in arguments["items"]:
+                    pass
+                async with arguments["ctx"] as ctx:
+                    pass
+                list_items = [row for row in arguments["rows"]]
+                set_items = {tag for tag in arguments["tags"]}
+                dict_items = {key: value for key, value in arguments["pairs"]}
+                gen_items = (part for part in arguments["parts"])
+            """
+        )
+
+        derived = compute_derived_names(func, "arguments")
+
+        assert {"item", "ctx", "row", "tag", "key", "value", "part"} <= derived
+
+    def test_fixed_point_bound_scales_with_local_name_count(self) -> None:
+        chain = "\n".join(f"    n{index} = {'arguments' if index == 0 else f'n{index - 1}'}" for index in range(40))
+        func = _first_function(f"def handler(arguments):\n{chain}\n")
+
+        derived = compute_derived_names(func, "arguments")
+
+        assert "n39" in derived
 
 
 # =============================================================================
@@ -291,6 +438,144 @@ class TestDecoratorDiagnostics:
         assert len(_findings_by_rule(findings, "R_TB_MALFORMED")) == 1
         # Inner R1 NOT suppressed.
         assert len(_findings_by_rule(findings, "R1")) == 1
+
+    def test_stacked_trust_boundary_decorators_emit_stacked_and_do_not_suppress(self) -> None:
+        """Multiple boundary decorators are ambiguous and must be inert."""
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="outer feed",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="outer invariant",
+            )
+            @trust_boundary(
+                tier=3,
+                source="inner feed",
+                source_param="arguments",
+                suppresses=("R5",),
+                invariant="inner invariant",
+            )
+            def handler(arguments):
+                return arguments.get("k")
+        """)
+        findings = _findings(source)
+        stacked = _findings_by_rule(findings, "R_TB_STACKED")
+        assert len(stacked) == 1
+        assert "multiple @trust_boundary" in stacked[0].message
+        assert len(_findings_by_rule(findings, "R1")) == 1
+
+
+class TestExtractBoundaryMetadata:
+    """Direct branch coverage for decorator metadata extraction."""
+
+    def test_no_decorator_returns_empty_result(self) -> None:
+        func = _first_function(
+            """
+            def handler(arguments):
+                return arguments
+            """
+        )
+
+        metadata, diagnostics = extract_boundary_metadata(func)
+
+        assert metadata is None
+        assert diagnostics == []
+
+    def test_positional_argument_is_malformed(self) -> None:
+        func = _first_function(
+            """
+            @trust_boundary(3, "x", "arguments", ("R1",), "x")
+            def handler(arguments):
+                return arguments
+            """
+        )
+
+        metadata, diagnostics = extract_boundary_metadata(func)
+
+        assert metadata is None
+        assert [item.rule_id for item in diagnostics] == ["R_TB_MALFORMED"]
+        assert "positional arguments" in diagnostics[0].message
+
+    def test_kwargs_unpacking_is_nonliteral(self) -> None:
+        func = _first_function(
+            """
+            @trust_boundary(**metadata)
+            def handler(arguments):
+                return arguments
+            """
+        )
+
+        metadata, diagnostics = extract_boundary_metadata(func)
+
+        assert metadata is None
+        assert [item.rule_id for item in diagnostics] == ["R_TB_NONLITERAL"]
+        assert "**-unpacking" in diagnostics[0].message
+
+    def test_missing_suppresses_is_malformed(self) -> None:
+        func = _first_function(
+            """
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                invariant="x",
+            )
+            def handler(arguments):
+                return arguments
+            """
+        )
+
+        metadata, diagnostics = extract_boundary_metadata(func)
+
+        assert metadata is None
+        assert diagnostics[0].rule_id == "R_TB_MALFORMED"
+        assert "missing kwarg 'suppresses'" in diagnostics[0].message
+
+    def test_non_string_suppresses_item_is_malformed(self) -> None:
+        func = _first_function(
+            """
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1", 5),
+                invariant="x",
+            )
+            def handler(arguments):
+                return arguments
+            """
+        )
+
+        metadata, diagnostics = extract_boundary_metadata(func)
+
+        assert metadata is None
+        assert diagnostics[0].rule_id == "R_TB_MALFORMED"
+        assert "non-string" in diagnostics[0].message
+
+    def test_source_param_wrong_type_and_empty_string_are_malformed(self) -> None:
+        for source_param, expected in (("5", "must be a string"), ("''", "empty string")):
+            func = _first_function(
+                f"""
+                @trust_boundary(
+                    tier=3,
+                    source="x",
+                    source_param={source_param},
+                    suppresses=("R1",),
+                    invariant="x",
+                )
+                def handler(arguments):
+                    return arguments
+                """
+            )
+
+            metadata, diagnostics = extract_boundary_metadata(func)
+
+            assert metadata is None
+            assert diagnostics[0].rule_id == "R_TB_MALFORMED"
+            assert expected in diagnostics[0].message
 
 
 # =============================================================================
@@ -570,6 +855,89 @@ class TestClassBodyScopeLeakRegression:
         )
 
 
+class TestBoundaryDoesNotInheritIntoNestedScopes:
+    """Outer trust-boundary metadata must not suppress nested-scope findings."""
+
+    def test_nested_function_free_variable_get_is_not_suppressed(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="x",
+            )
+            def outer(arguments):
+                def inner():
+                    return arguments.get("k")
+                return inner()
+        """)
+        findings = _findings(source)
+        r1 = _findings_by_rule(findings, "R1")
+        assert len(r1) == 1
+
+    def test_nested_function_shadowed_source_param_get_is_not_suppressed(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="x",
+            )
+            def outer(arguments):
+                def inner(arguments):
+                    return arguments.get("k")
+                return inner({"k": "v"})
+        """)
+        findings = _findings(source)
+        r1 = _findings_by_rule(findings, "R1")
+        assert len(r1) == 1
+
+    def test_lambda_body_get_is_not_suppressed_by_outer_boundary(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="x",
+            )
+            def outer(arguments):
+                inner = lambda arguments: arguments.get("k")
+                return inner({"k": "v"})
+        """)
+        findings = _findings(source)
+        r1 = _findings_by_rule(findings, "R1")
+        assert len(r1) == 1
+
+    def test_nested_class_body_get_is_not_suppressed_by_outer_boundary(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="x",
+            )
+            def outer(arguments):
+                class Inner:
+                    value = arguments.get("k")
+                return Inner.value
+        """)
+        findings = _findings(source)
+        r1 = _findings_by_rule(findings, "R1")
+        assert len(r1) == 1
+
+
 # =============================================================================
 # Regression: M4 — unauthorised rule IDs in suppresses tuple
 # =============================================================================
@@ -660,3 +1028,28 @@ class TestUnauthorisedSuppressRules:
         assert "R3" in malformed[0].message
         r1 = _findings_by_rule(findings, "R1")
         assert len(r1) == 1, "R1 must fire — decorator is inert"
+
+
+class TestUnknownTrustBoundaryKwargs:
+    """Unknown kwargs are malformed, not ignored documentation."""
+
+    def test_unknown_kwarg_emits_diagnostic_and_makes_decorator_inert(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="x",
+                invarant="typo",
+            )
+            def handler(arguments):
+                return arguments.get("k")
+        """)
+        findings = _findings(source)
+        unknown = _findings_by_rule(findings, "R_TB_UNKNOWN_KWARG")
+        assert len(unknown) == 1
+        assert "invarant" in unknown[0].message
+        assert len(_findings_by_rule(findings, "R1")) == 1

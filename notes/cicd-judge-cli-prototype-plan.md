@@ -1,6 +1,6 @@
 # cicd-judge-cli prototype — feature map
 
-**Status:** prototype + convergent-findings remediation landed. Slice 1 (rotate), Slice 2 (judge gate), Slice 3 (reaudit decay-sweep), and the three structural CI gates (judge-coverage on PRs, override-rate threshold, multi-rule reaudit dispatch) ship on `feat/cicd-judge-cli-prototype`. Slice 4 (`@trust_boundary` decorator) ships alongside Slices 1–3 (3 honesty-gate rules plus the L0 decorator).
+**Status:** prototype + convergent-findings remediation landed. Slice 1 (rotate), Slice 2 (judge gate), Slice 3 (reaudit decay-sweep), and the structural CI surfaces (judge-coverage on PRs, override-rate threshold, judge-quality corpus, multi-rule reaudit dispatch) ship on `feat/cicd-judge-cli-prototype`. Slice 4 (`@trust_boundary` decorator) ships alongside Slices 1–3 (3 honesty-gate rules plus the L0 decorator).
 
 ## Delivered vs Enforced
 
@@ -15,8 +15,9 @@ What ships as code (operator-runnable surfaces) and what fails CI now are not th
 | **C1 — Judge-coverage gate** (new-entry quartet required) | ✓ via `elspeth-lints check-judge-coverage` | ✓ via `.github/workflows/enforce-allowlist-judge-gates.yaml` (PR-only; rotation-grandfathered) |
 | **C2 — Multi-rule reaudit dispatch** (no more single-rule artificial restriction) | ✓ via expanded `_supported_rules()` (17 of 19 BUILTIN_RULES) | n/a — same enforcement surface as Slice 3 (reaudit is sweep, not gate) |
 | **C3 — Override-rate gate** (rolling-30d threshold) | ✓ via `elspeth-lints check-override-rate` | ✓ via the same workflow file (push + PR; insufficient-data passes with notice) |
+| **VAL — Judge-quality corpus** (labelled discrimination cases) | ✓ via `elspeth-lints check-judge-quality` + `config/cicd/judge-quality-corpus/v1.jsonl` | ✓ via the same workflow file in trusted contexts with `OPENROUTER_API_KEY` |
 
-Sequencing note for the convergent findings: C1 + C3 together make judge enforcement *architectural* — Pillar A no longer relies on social norms or self-discipline. C2 closes the friction-displacement loop by extending reaudit's reach to all rule packages, so suppression debt cannot route to ungated rules.
+Sequencing note for the convergent findings: C1 + C3 give judge enforcement a mechanical anchor — Pillar A no longer relies only on social norms or self-discipline for new-entry metadata and override-rate policy. VAL gives prompt/model quality a measured anchor rather than relying on parser tests. C2 closes the friction-displacement loop by extending reaudit's reach to all rule packages, so suppression debt cannot quietly route to ungated rules.
 
 This document maps the two pillars of the audit-trail-integrity thesis driving the prototype:
 
@@ -68,11 +69,23 @@ Every verdict gets recorded as a structured row, not a freeform log:
   judge_recorded_at: 2026-05-23T...
   judge_model: claude-opus-4-7
   judge_rationale: <the model's reasoning, recorded verbatim>
+  file_fingerprint: <sha256 of source file bytes judged>
+  ast_path: <AST address of finding judged>
+  judge_metadata_signature: hmac-sha256:v1:<hex>
   expires: <existing field>
   safety: <existing field>
 ```
 
-The judge's rationale is the new audit primitive. It is independently re-readable in 6 months when someone asks "why did we exempt this?" — the YAML answers without re-running the model.
+The judge's rationale is new audit evidence attached to the allowlist entry, not a standalone proof of truth. It is independently re-readable in 6 months when someone asks "why did we exempt this?" — the YAML answers without re-running the model, and the binding fields let the loader verify that evidence has not been silently edited.
+
+### Judge metadata tamper binding
+
+The verdict quartet (`judge_verdict`, `judge_recorded_at`, `judge_model`, `judge_rationale`) is audit-significant evidence, not decorative metadata. Post-judge entries therefore carry two binding layers:
+
+1. `file_fingerprint` + `ast_path` bind the verdict to the source bytes and AST node the judge inspected.
+2. `judge_metadata_signature` is `hmac-sha256:v1:<hex>` over the entry key, `file_fingerprint`, `ast_path`, verdict, model verdict (if any), recorded timestamp, model id, and rationale.
+
+The HMAC key is supplied by `ELSPETH_JUDGE_METADATA_HMAC_KEY`, must be held outside the allowlist YAML, and must be at least 32 UTF-8 bytes. `elspeth-lints justify` refuses to write signed judge metadata without it. Production source-root loads (`load_allowlist(..., source_root=...)`, used by the tier-model gate and reaudit) verify the signature and reject missing or mismatched signatures; report-only loaders without a source root can still inspect historical entries but do not claim tamper verification.
 
 ### Decay sweep (Slice 3 of prototype)
 
@@ -84,6 +97,20 @@ The judge's rationale is the new audit primitive. It is independently re-readabl
 
 `elspeth-lints check-override-rate` measures the rolling-window ratio of `OVERRIDDEN_BY_OPERATOR` verdicts against the population of judged entries. Window default 30 days, threshold default 10%, minimum-samples default 10 (small-N windows pass with an "insufficient data" notice — naive rate gates trip mechanically on a 3-entry corpus with one override). Wired into `enforce-allowlist-judge-gates.yaml` on push + PR. The threshold is policy: changes land via ADR, not by editing the workflow file.
 
+### C3 response protocol
+
+When the override-rate gate fails, the operator response is not to raise the threshold first. Triage the listed override entries by rule and directory, run `elspeth-lints reaudit` against the override-heavy directories, and handle entries whose fresh result says the suppression is no longer justified by refactoring or deleting the allowlist entry. If the overrides remain legitimate after reaudit and review, record the policy decision in an ADR before changing `--max-rate`; the workflow threshold is an audit policy knob, not a quota agents can tune to pass CI. If the gate passes because of insufficient data, treat the summary as informational and do not infer calibration quality until the denominator reaches `--min-samples`.
+
+### Judge-quality corpus (VAL)
+
+`config/cicd/judge-quality-corpus/v1.jsonl` contains a bounded labelled corpus of allowlist-rationale examples. Each case becomes one real `JudgeRequest`; `check-judge-quality` scores exact matches on both `verdict` and `should_use_decorator`. The trusted CI job runs the corpus through the live OpenRouter-backed judge with `--min-accuracy 0.90`, so prompt edits and model changes have a discrimination gate, not just parser/schema tests.
+
+Re-baseline cadence:
+
+- Run the live corpus before and after judge prompt, policy-context, or model changes.
+- Add cases when reviews discover new judge failure modes; keep the corpus at 10-30 cases so CI spend stays bounded.
+- Change expected labels only when the underlying policy or intentionally reviewed decision boundary changes. Do not lower the workflow threshold as a workaround for drift; threshold changes are policy changes.
+
 ### Out-of-scope for the prototype
 
 - No web UI; CLI only.
@@ -92,11 +119,11 @@ The judge's rationale is the new audit primitive. It is independently re-readabl
 
 ---
 
-## Pillar B — `@trust_boundary` decorator (future work, not in prototype)
+## Pillar B — `@trust_boundary` decorator (Slice 4 of prototype)
 
-**Sequencing:** ships AFTER the Cluster 3 (web/composer/tools) reconciliation lands and the residual allowlist shape is known. The decorator's value depends on the final corpus shape — how many of the remaining entries cluster around function-scoped Tier-3 boundaries vs. how many are genuinely orphaned. Without that measurement, the decorator's reach is speculation.
+**Sequencing:** the decorator contract and companion honesty gates ship in this prototype. Bulk migration of existing allowlist entries ships later, after the Cluster 3 (web/composer/tools) reconciliation lands and the residual allowlist shape is known. The migration's value depends on the final corpus shape — how many of the remaining entries cluster around function-scoped Tier-3 boundaries vs. how many are genuinely orphaned. Without that measurement, the migration scope is speculation.
 
-### Shape (sketch — full design lives in ADR draft, not yet filed)
+### Shape
 
 ```python
 # src/elspeth/contracts/trust_boundary.py
@@ -107,6 +134,7 @@ The judge's rationale is the new audit primitive. It is independently re-readabl
     suppresses=("R1", "R5"),
     invariant="raises ToolArgumentError on shape mismatch; never coerces silently",
     test_ref="tests/unit/web/composer/tools/test_sessions.py::test_set_pipeline_rejects_malformed_nodes",
+    test_fingerprint="<canonical AST fingerprint of that pytest node>",
 )
 def _execute_set_pipeline(self, arguments: dict[str, Any]) -> ToolResult:
     if not isinstance(arguments.get("nodes"), list):  # ← R5 suppressed
@@ -123,24 +151,51 @@ The `source_param` field anchors a small dataflow walk inside `tier_model.rule`:
 
 | Gate | What it asserts | Why it matters |
 | --- | --- | --- |
-| `enforce_trust_boundary_tests.py` | Every `@trust_boundary` has a `test_ref` pointing to a real pytest node that exercises malformed input raising the documented error | Stops the decorator from being a vibe-justification; behavioural evidence required |
-| `enforce_trust_boundary_scope.py` | `source_param` is in the function signature; function body actually reads from it | Stops drive-by `@trust_boundary` on functions that don't take external data |
+| `enforce_trust_boundary_tests.py` | Every `@trust_boundary` has a `test_ref` pointing to a real pytest node that directly calls the decorated function through `source_param`, raises the documented exception type, and matches `test_fingerprint` | Stops the decorator from becoming a stale or irrelevant vibe-justification; behavioural evidence required |
+| `enforce_trust_boundary_scope.py` | `source_param` is in the function signature; function body actually reads from it | Stops drive-by `@trust_boundary` on functions that don't use the declared boundary parameter |
 | `enforce_trust_boundary_tier.py` | `tier=3` is the only accepted value | Tier-1 and Tier-2 must crash, not suppress — the decorator is not a general-purpose lint silencer |
+
+### Honesty-gate false-positive escape protocol
+
+The companion gates are fail-closed, but not dead-end. A demonstrated false
+positive can be suppressed only through the shared
+`config/cicd/enforce_trust_boundary_honesty/` allowlist. That directory accepts
+exact `allow_hits` entries only: every entry must carry judge metadata,
+`file_fingerprint`, `ast_path`, `judge_metadata_signature`, and an expiry.
+`per_file_rules` are rejected by the rule loader.
+
+Use `elspeth-lints justify` against the concrete sub-finding id, for example:
+
+```bash
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli justify \
+  --root src/elspeth \
+  --repo-root . \
+  --allowlist-dir config/cicd/enforce_trust_boundary_honesty \
+  --file-path web/composer/tools/sessions.py \
+  --rule TBS2 \
+  --symbol _execute_set_pipeline \
+  --rationale "source_param is forwarded through a closure validated by the referenced test" \
+  --owner codex
+```
+
+The package selectors `trust_boundary.tests`, `trust_boundary.scope`, and
+`trust_boundary.tier` are also accepted by `justify`, but using the concrete
+finding id (`TBE*`, `TBS*`, or `TBT*`) keeps the audit attribution sharper.
 
 ### What the decorator does NOT solve
 
 - **Module-level patterns** (top-level constants, class-body assignments that touch external data) — these have no enclosing function to decorate; they stay in the YAML allowlist or get refactored to a function.
 - **AST-position fingerprint rotation for the residual.** Decorators reduce the residual size; they don't change how the residual is fingerprinted. A separate change to fingerprint on `(file, qualified_symbol, line_relative_to_def_start)` would close that gap and is orthogonal to both pillars.
-- **Author writes shallow justification.** The decorator's `source` and `invariant` fields are still self-attested. The test-ref requirement mitigates this (a behavioural test must exist) but does not eliminate it. This is the residual problem the judge solves at write time.
+- **`source` remains reviewer-facing documentation.** The analyzer does not prove a whole-repository external-data call graph for the prose in `source`; it proves local suppression scope (`source_param`) and local behavioural evidence (`test_ref` + `test_fingerprint`). The judge and reviewer still own whether the source description is truthful.
 
-### Migration phases
+### Residual allowlist migration phases
 
 | Phase | Action | Exit gate |
 | --- | --- | --- |
-| 0 | Cluster 3 + budget reconciliation lands; final allowlist shape known | Operator reviews shape, decides whether to fund pillar B |
-| 1 | Implement `@trust_boundary` + companion lint rule changes | Greenfield lint tests pass; behaviour on hand-crafted fixture validated |
-| 2 | Pick highest-density file (`web/composer/tools/sessions.py` likely); migrate every entry on that file into a decorator on the enclosing function; delete the YAML entries | Allowlist count for that file goes to 0 or near-0; no new findings introduced |
-| 3 | Measure: YAML count drops by N, decorator count rises by M, target ratio M ≪ N | If M ≈ N, decorator is mis-shaped; pause and rethink |
+| 0 | Prototype foundation lands: `@trust_boundary`, dataflow scoping, and companion honesty gates | Greenfield lint tests pass; behaviour on hand-crafted fixture validated |
+| 1 | Cluster 3 + budget reconciliation lands; final allowlist shape known | Operator reviews shape, decides whether to fund broad migration |
+| 2 | Pick highest-density file (`web/composer/tools/sessions.py` likely); write or update the behavioural test first, add the decorator with `test_ref` + `test_fingerprint`, then delete the matching YAML entries | Allowlist count for that file goes to 0 or near-0; no new findings introduced |
+| 3 | Review the migration result: YAML entries removed, decorators added, and whether the remaining entries now read as genuine one-offs | Operator judges whether the reduction is meaningful enough to continue; no CI metric currently proves the ratio mechanically |
 | 4 | Iterate file-by-file until allowlist is reserved for genuinely one-off exemptions | Operator-judged stopping point: "the remaining entries are the ones that should be one-off entries" |
 
 ---
@@ -173,7 +228,7 @@ Open question for the wardline port: whether the judge model identity (currently
 
 - Epic: existing `elspeth-297b8f5c5d` (CI allowlist revalidation)
 - Pillar A subticket: `prototype-cicd-judge` — Slices 1/2/3
-- Pillar B subticket: `adr-trust-boundary-decorator` — ADR-class, blocked on cluster-3 corpus shape
+- Pillar B subticket: `adr-trust-boundary-migration` — ADR-class, blocked on cluster-3 corpus shape
 - Wardline migration subticket: `wardline-port-cicd-judge` — blocked on prototype validation in production
 
 Drafting the ADR before cluster 3 lands would force decisions on the residual corpus shape from a position of ignorance. Hold until measurement exists.

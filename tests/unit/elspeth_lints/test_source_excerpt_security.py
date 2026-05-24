@@ -33,12 +33,15 @@ import json
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from elspeth_lints.core.allowlist import JudgeVerdict, compute_judge_metadata_signature
 from elspeth_lints.core.cli import main
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.core.reaudit import ReauditDivergence, reaudit_entries
 from elspeth_lints.core.source_excerpt import (
     RedactionRecord,
@@ -61,6 +64,8 @@ class Widget:
         # might want to suppress with judge approval.
         return payload.get("name", "anonymous")
 '''
+
+_TEST_JUDGE_METADATA_HMAC_KEY = "test-judge-metadata-hmac-key-2026-05-24"
 
 
 def _build_source_tree(tmp_path: Path) -> tuple[Path, Path]:
@@ -89,12 +94,12 @@ def _build_allowlist_dir(tmp_path: Path) -> Path:
 def _mock_openrouter_completion(*, verdict: str = "ACCEPTED", rationale: str = "ok") -> MagicMock:
     """OpenAI-shape chat-completion mock for OpenRouter routing."""
     message = MagicMock()
-    message.content = json.dumps({"verdict": verdict, "rationale": rationale, "should_use_decorator": None})
+    message.content = json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
     choice = MagicMock()
     choice.message = message
     completion = MagicMock()
     completion.choices = [choice]
-    completion.model = "anthropic/claude-opus-4"
+    completion.model = DEFAULT_JUDGE_MODEL
     completion.usage = MagicMock(prompt_tokens=4000, prompt_tokens_details=MagicMock(cached_tokens=0))
     return completion
 
@@ -112,7 +117,14 @@ def _mock_judge_call(*, verdict: str = "ACCEPTED", rationale: str = "ok") -> Ite
     fake_client = MagicMock()
     fake_client.chat.completions.create.return_value = fake_completion
     with (
-        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch.dict(
+            os.environ,
+            {
+                "OPENROUTER_API_KEY": "sk-or-test-key",
+                "ELSPETH_JUDGE_METADATA_HMAC_KEY": _TEST_JUDGE_METADATA_HMAC_KEY,
+            },
+            clear=False,
+        ),
         patch("openai.OpenAI", return_value=fake_client) as client_class,
     ):
         yield client_class
@@ -132,7 +144,7 @@ def _captured_user_prompt(client_class: MagicMock) -> str:
     call = fake_client.chat.completions.create.call_args
     messages = call.kwargs["messages"]
     user_message = next(m for m in messages if m["role"] == "user")
-    return str(user_message["content"][0]["text"])
+    return "\n".join(str(block["text"]) for block in user_message["content"])
 
 
 def _write_forged_allowlist_entry(allowlist_dir: Path, *, forged_path: str) -> Path:
@@ -637,7 +649,7 @@ def test_justify_excerpt_with_pem_block_does_not_exfiltrate_literal(tmp_path: Pa
 
 
 def test_no_other_prompt_builder_constructs_judge_request_without_scrubber() -> None:
-    """Static guard: every JudgeRequest constructor must be paired with extract_safe_excerpt.
+    """Static guard: every JudgeRequest constructor must be paired with a scrubber.
 
     This is the structural bypass-resistance check the task plan
     calls for. The scan walks the ENTIRE elspeth_lints package — not
@@ -648,12 +660,12 @@ def test_no_other_prompt_builder_constructs_judge_request_without_scrubber() -> 
     bypass; T8b broadens the radius.
 
     The check is dual: every ``JudgeRequest(...)`` construction site
-    has, in the SAME FILE, an ``extract_safe_excerpt`` call. The
-    same-file requirement is deliberate over a project-wide grep — a
-    file that constructs the request must locally evidence that its
-    ``surrounding_code`` value came from the scrubber. The two
-    production sites in this commit are ``cli._run_justify`` and
-    ``reaudit._reaudit_one_entry``; both are in ``core/``.
+    has, in the SAME FILE, either an ``extract_safe_excerpt`` call
+    (filesystem source) or a ``scrub_secrets`` call (already-inline,
+    labelled quality-corpus excerpts). The same-file requirement is
+    deliberate over a project-wide grep — a file that constructs the
+    request must locally evidence that its ``surrounding_code`` value
+    came from the scrubber.
 
     The dataclass definition itself (``judge.py``) is excluded — it
     declares the class but builds no instances. Test fixtures /
@@ -670,16 +682,17 @@ def test_no_other_prompt_builder_constructs_judge_request_without_scrubber() -> 
             continue
         if py_file.name == "judge.py":
             continue
-        if "extract_safe_excerpt" not in text:
+        if "extract_safe_excerpt" not in text and "scrub_secrets" not in text:
             # Report a stable, project-relative path so the failure
             # message points at the offending file regardless of
             # where the package tree lives.
             offending_files.append(str(py_file.relative_to(package_root)))
     assert offending_files == [], (
         f"these files construct JudgeRequest without going through "
-        f"extract_safe_excerpt: {offending_files}. Every code path "
-        f"that builds a judge prompt MUST funnel the surrounding_code "
-        f"through the scrubber — see source_excerpt.py for the contract."
+        f"extract_safe_excerpt or scrub_secrets: {offending_files}. "
+        f"Every code path that builds a judge prompt MUST funnel the "
+        f"surrounding_code through the scrubber — see source_excerpt.py "
+        f"for the contract."
     )
 
 
@@ -756,6 +769,17 @@ def test_reaudit_records_redactions_on_outcome(tmp_path: Path) -> None:
     import hashlib as _hashlib
 
     file_fp = _hashlib.sha256(target.read_bytes()).hexdigest()
+    signature = compute_judge_metadata_signature(
+        key=finding.canonical_key,
+        file_fingerprint=file_fp,
+        ast_path=finding.ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime.fromisoformat("2024-01-01T00:00:00+00:00"),
+        judge_model="claude-opus-4-7",
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        judge_rationale="original judge said the boundary was genuine",
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
     yaml = (
         "allow_hits:\n"
         f"- key: {finding.canonical_key}\n"
@@ -768,10 +792,12 @@ def test_reaudit_records_redactions_on_outcome(tmp_path: Path) -> None:
         "  judge_verdict: ACCEPTED\n"
         "  judge_recorded_at: '2024-01-01T00:00:00+00:00'\n"
         "  judge_model: claude-opus-4-7\n"
+        f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'\n"
         "  judge_rationale: |-\n"
         "    original judge said the boundary was genuine\n"
         f"  file_fingerprint: '{file_fp}'\n"
         f"  ast_path: '{finding.ast_path}'\n"
+        f"  judge_metadata_signature: '{signature}'\n"
     )
     (allowlist_dir / "plugins.yaml").write_text(yaml, encoding="utf-8")
 

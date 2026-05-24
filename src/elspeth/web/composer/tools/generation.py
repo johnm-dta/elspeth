@@ -105,10 +105,10 @@ def _csv_source_columns(options: Mapping[str, Any]) -> tuple[str, ...] | None:
 
 
 def _csv_source_field_mapping(options: Mapping[str, Any]) -> dict[str, str] | None:
-    raw = options.get("field_mapping")
+    raw = options["field_mapping"] if "field_mapping" in options else None
     if raw is None:
         return None
-    if not isinstance(raw, Mapping):
+    if type(raw) is not dict:
         raise ValueError(f"csv source field_mapping must be a mapping when present; got {type(raw).__name__}")
     mapping: dict[str, str] = {}
     for key, value in raw.items():

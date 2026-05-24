@@ -37,11 +37,18 @@ from pathlib import Path
 
 import pytest
 
+from elspeth_lints.core.allowlist import JudgeVerdict
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.core.override_rate import (
     OverrideRateError,
     OverrideRateReport,
+    append_judge_decision_event,
     compute_override_rate,
+    default_counter_snapshot_path,
+    write_override_rate_counter_snapshot,
 )
+
+_FAKE_JUDGE_METADATA_SIGNATURE = "hmac-sha256:v1:" + "0" * 64
 
 
 def _make_allowlist_dir(tmp_path: Path) -> Path:
@@ -52,6 +59,19 @@ def _make_allowlist_dir(tmp_path: Path) -> Path:
     return enforce_root
 
 
+def test_cli_help_documents_override_rate_denominator(capsys: pytest.CaptureFixture[str]) -> None:
+    """Help text must match the denominator that ``compute_override_rate`` uses."""
+    from elspeth_lints.core.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["check-override-rate", "--help"])
+
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "fewer than this many judge-recorded entries fall inside the window" in help_text
+    assert "OVERRIDDEN_BY_OPERATOR / (ACCEPTED + OVERRIDDEN_BY_OPERATOR) across the window" in help_text
+
+
 def _write_entry(
     enforce_dir: Path,
     *,
@@ -60,6 +80,7 @@ def _write_entry(
     verdict: str,
     recorded_at: datetime,
     model_verdict: str | None = None,
+    metadata_signature: str | None = _FAKE_JUDGE_METADATA_SIGNATURE,
 ) -> None:
     """Append one entry to a YAML file inside an enforce_x directory.
 
@@ -68,6 +89,7 @@ def _write_entry(
     yaml_path = enforce_dir / file_name
     iso = recorded_at.isoformat()
     extra = f"  judge_model_verdict: {model_verdict}\n" if model_verdict else ""
+    signature_line = f"  judge_metadata_signature: '{metadata_signature}'\n" if metadata_signature is not None else ""
     # Binding fields (file_fingerprint + ast_path) are required co-presence
     # companions of judge_verdict (per C8-3 invariant 8). The override-rate
     # gate doesn't load through a source-root verifier so the values are
@@ -82,10 +104,12 @@ def _write_entry(
           safety: contained
           judge_verdict: {verdict}
           judge_recorded_at: '{iso}'
-          judge_model: anthropic/claude-opus-4
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
           judge_rationale: test rationale
           file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
           ast_path: 'body[0]'
+        {signature_line.rstrip()}
         {extra}    """)
     )
 
@@ -221,6 +245,30 @@ def test_entry_one_microsecond_before_boundary_is_excluded(tmp_path: Path) -> No
         reference_time=now,
     )
     assert detail.report.judged_in_window == 0
+
+
+def test_judged_entry_without_metadata_signature_is_rejected(tmp_path: Path) -> None:
+    """C3 must not count unsigned judged entries as authentic rate data."""
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    _write_entry(
+        enforce_dir,
+        file_name="a.yaml",
+        key="x.py:R1:a:fp=aa",
+        verdict="ACCEPTED",
+        recorded_at=now - timedelta(days=1),
+        metadata_signature=None,
+    )
+
+    with pytest.raises(OverrideRateError, match="judge_metadata_signature"):
+        compute_override_rate(
+            allowlist_root=enforce_root,
+            window_days=30,
+            min_samples=1,
+            max_rate=0.10,
+            reference_time=now,
+        )
 
 
 def test_future_dated_entries_raise_tampering_detected(tmp_path: Path) -> None:
@@ -413,6 +461,330 @@ def test_rate_above_threshold_fails(tmp_path: Path) -> None:
     assert len(detail.override_entries) == 2
 
 
+def test_per_rule_reports_partition_the_denominator(tmp_path: Path) -> None:
+    """Aggregate rate must expose per-rule calibration signals."""
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    for index in range(2):
+        _write_entry(
+            enforce_dir,
+            file_name=f"r1_override_{index}.yaml",
+            key=f"x.py:R1:override{index}:fp={index:016x}",
+            verdict="OVERRIDDEN_BY_OPERATOR",
+            recorded_at=now - timedelta(days=1),
+            model_verdict="BLOCKED",
+        )
+    for index in range(8):
+        _write_entry(
+            enforce_dir,
+            file_name=f"r5_accept_{index}.yaml",
+            key=f"x.py:R5:accept{index}:fp={index + 10:016x}",
+            verdict="ACCEPTED",
+            recorded_at=now - timedelta(days=1),
+        )
+
+    detail = compute_override_rate(
+        allowlist_root=enforce_root,
+        window_days=30,
+        min_samples=10,
+        max_rate=0.50,
+        reference_time=now,
+    )
+
+    by_rule = {report.rule_id: report for report in detail.per_rule_reports}
+    assert detail.report.accepted_in_window == 8
+    assert detail.report.overrides_in_window == 2
+    assert detail.report.model_accepted_in_window == 8
+    assert detail.report.model_blocked_in_window == 2
+    assert by_rule["R1"].judged_in_window == 2
+    assert by_rule["R1"].overrides_in_window == 2
+    assert by_rule["R1"].rate == pytest.approx(1.0)
+    assert by_rule["R5"].judged_in_window == 8
+    assert by_rule["R5"].accepted_in_window == 8
+    assert by_rule["R5"].rate == pytest.approx(0.0)
+
+
+def test_absolute_override_count_budget_prevents_dilution(tmp_path: Path) -> None:
+    """A large ACCEPTED population cannot dilute overrides past an absolute cap."""
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    for index in range(2):
+        _write_entry(
+            enforce_dir,
+            file_name=f"override_{index}.yaml",
+            key=f"x.py:R1:override{index}:fp={index:016x}",
+            verdict="OVERRIDDEN_BY_OPERATOR",
+            recorded_at=now - timedelta(days=1),
+            model_verdict="BLOCKED",
+        )
+    for index in range(98):
+        _write_entry(
+            enforce_dir,
+            file_name=f"accepted_{index}.yaml",
+            key=f"x.py:R5:accepted{index}:fp={index + 100:016x}",
+            verdict="ACCEPTED",
+            recorded_at=now - timedelta(days=1),
+        )
+
+    detail = compute_override_rate(
+        allowlist_root=enforce_root,
+        window_days=30,
+        min_samples=10,
+        max_rate=0.10,
+        max_overrides=1,
+        reference_time=now,
+    )
+
+    assert detail.report.rate == pytest.approx(0.02)
+    assert detail.report.ratio_budget_exceeded is False
+    assert detail.report.absolute_budget_exceeded is True
+    assert not detail.report.passes
+
+
+def test_counter_snapshot_is_consumed_without_yaml_rescan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh counter snapshot lets C3 consume structured counters directly."""
+    import elspeth_lints.core.override_rate as override_rate_module
+
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    _write_entry(
+        enforce_dir,
+        file_name="accepted.yaml",
+        key="x.py:R1:accepted:fp=aa",
+        verdict="ACCEPTED",
+        recorded_at=now - timedelta(days=1),
+    )
+    _write_entry(
+        enforce_dir,
+        file_name="override.yaml",
+        key="x.py:R1:override:fp=bb",
+        verdict="OVERRIDDEN_BY_OPERATOR",
+        recorded_at=now - timedelta(days=1),
+        model_verdict="BLOCKED",
+    )
+    snapshot = write_override_rate_counter_snapshot(enforce_root)
+
+    def fail_yaml_rescan(_entry_dir: Path) -> list[object]:
+        raise AssertionError("compute_override_rate reparsed YAML instead of consuming counters")
+
+    monkeypatch.setattr(override_rate_module, "_iterate_allow_hits", fail_yaml_rescan)
+
+    detail = compute_override_rate(
+        allowlist_root=enforce_root,
+        window_days=30,
+        min_samples=1,
+        max_rate=0.75,
+        reference_time=now,
+        counter_snapshot_path=snapshot.path,
+    )
+
+    assert detail.counter_source == "counter_snapshot"
+    assert detail.report.judged_in_window == 2
+    assert detail.report.accepted_in_window == 1
+    assert detail.report.overrides_in_window == 1
+
+
+def test_stale_counter_snapshot_falls_back_to_yaml_and_reports_source(tmp_path: Path) -> None:
+    """Snapshot hash drift cannot hide a current YAML change."""
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    _write_entry(
+        enforce_dir,
+        file_name="accepted.yaml",
+        key="x.py:R1:accepted:fp=aa",
+        verdict="ACCEPTED",
+        recorded_at=now - timedelta(days=1),
+    )
+    snapshot = write_override_rate_counter_snapshot(enforce_root)
+    _write_entry(
+        enforce_dir,
+        file_name="override.yaml",
+        key="x.py:R1:override:fp=bb",
+        verdict="OVERRIDDEN_BY_OPERATOR",
+        recorded_at=now - timedelta(days=1),
+        model_verdict="BLOCKED",
+    )
+
+    detail = compute_override_rate(
+        allowlist_root=enforce_root,
+        window_days=30,
+        min_samples=1,
+        max_rate=0.75,
+        reference_time=now,
+        counter_snapshot_path=snapshot.path,
+    )
+
+    assert detail.counter_source == "yaml"
+    assert detail.report.judged_in_window == 2
+    assert detail.report.overrides_in_window == 1
+
+
+def test_cli_check_override_rate_refreshes_counter_snapshot(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The deployed gate emits a reusable counter snapshot after a YAML scan."""
+    from elspeth_lints.core.cli import main
+
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    _write_entry(
+        enforce_dir,
+        file_name="accepted.yaml",
+        key="x.py:R1:accepted:fp=aa",
+        verdict="ACCEPTED",
+        recorded_at=now - timedelta(days=1),
+    )
+
+    exit_code = main(
+        [
+            "check-override-rate",
+            "--allowlist-root",
+            str(enforce_root),
+            "--window-days",
+            "30",
+            "--min-samples",
+            "1",
+            "--max-rate",
+            "0.10",
+            "--reference-time",
+            now.isoformat(),
+        ]
+    )
+
+    assert exit_code == 0
+    assert default_counter_snapshot_path(enforce_root).exists()
+    captured = capsys.readouterr()
+    assert "counter_source=yaml" in captured.out
+    assert "refreshed counter snapshot" in captured.err
+
+
+def test_blocked_without_override_events_surface_under_override_counter(tmp_path: Path) -> None:
+    """C3 reports the one-sided pressure to refactor instead of overriding."""
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    append_judge_decision_event(
+        enforce_dir,
+        source_file="blocked.yaml",
+        entry_key="x.py:R1:blocked:fp=aa",
+        rule_id="R1",
+        effective_verdict=JudgeVerdict.BLOCKED,
+        model_verdict=JudgeVerdict.BLOCKED,
+        recorded_at=now - timedelta(days=1),
+        write_disposition="blocked_without_override",
+    )
+
+    detail = compute_override_rate(
+        allowlist_root=enforce_root,
+        window_days=30,
+        min_samples=1,
+        max_rate=0.10,
+        reference_time=now,
+    )
+
+    assert detail.report.blocked_without_override_in_window == 1
+
+
+def test_cli_check_override_rate_prints_under_override_counter(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The deployed PR-summary surface includes refactor-instead-of-override pressure."""
+    from elspeth_lints.core.cli import main
+
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    append_judge_decision_event(
+        enforce_dir,
+        source_file="blocked.yaml",
+        entry_key="x.py:R1:blocked:fp=aa",
+        rule_id="R1",
+        effective_verdict=JudgeVerdict.BLOCKED,
+        model_verdict=JudgeVerdict.BLOCKED,
+        recorded_at=now - timedelta(days=1),
+        write_disposition="blocked_without_override",
+    )
+
+    exit_code = main(
+        [
+            "check-override-rate",
+            "--allowlist-root",
+            str(enforce_root),
+            "--window-days",
+            "30",
+            "--min-samples",
+            "1",
+            "--max-rate",
+            "0.10",
+            "--reference-time",
+            now.isoformat(),
+        ]
+    )
+
+    assert exit_code == 0
+    assert "blocked_without_override_in_window=1" in capsys.readouterr().out
+
+
+def test_cli_absolute_override_count_budget_exits_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The deployed CLI honors ``--max-overrides`` as a failing gate."""
+    from elspeth_lints.core.cli import main
+
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    for index in range(2):
+        _write_entry(
+            enforce_dir,
+            file_name=f"override_{index}.yaml",
+            key=f"x.py:R1:override{index}:fp={index:016x}",
+            verdict="OVERRIDDEN_BY_OPERATOR",
+            recorded_at=now - timedelta(days=1),
+            model_verdict="BLOCKED",
+        )
+    for index in range(98):
+        _write_entry(
+            enforce_dir,
+            file_name=f"accepted_{index}.yaml",
+            key=f"x.py:R5:accepted{index}:fp={index + 100:016x}",
+            verdict="ACCEPTED",
+            recorded_at=now - timedelta(days=1),
+        )
+
+    exit_code = main(
+        [
+            "check-override-rate",
+            "--allowlist-root",
+            str(enforce_root),
+            "--window-days",
+            "30",
+            "--min-samples",
+            "10",
+            "--max-rate",
+            "0.10",
+            "--max-overrides",
+            "1",
+            "--reference-time",
+            now.isoformat(),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "override count 2 exceeds absolute budget 1" in capsys.readouterr().out
+
+
 # =========================================================================
 # Misconfiguration
 # =========================================================================
@@ -544,7 +916,12 @@ def test_report_rate_on_empty_window_is_zero() -> None:
         reference_time=datetime(2026, 5, 23, tzinfo=UTC),
         min_samples=10,
         max_rate=0.10,
+        max_overrides=None,
         judged_in_window=0,
+        accepted_in_window=0,
         overrides_in_window=0,
+        model_accepted_in_window=0,
+        model_blocked_in_window=0,
+        blocked_without_override_in_window=0,
     )
     assert report.rate == 0.0

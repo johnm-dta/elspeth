@@ -44,6 +44,7 @@ from elspeth_lints.core.allowlist import (
     verify_entry_binding_against_finding,
 )
 from elspeth_lints.core.allowlist import PerFileRule as PerFileRule
+from elspeth_lints.core.ast_walker import iter_own_scope
 from elspeth_lints.core.protocols import (
     Finding as LintFinding,
 )
@@ -51,7 +52,7 @@ from elspeth_lints.core.protocols import RuleContext, RuleMetadata, RuleScope, S
 from elspeth_lints.rules.trust_tier.tier_model.metadata import RULE_ID, RULE_METADATA
 from elspeth_lints.rules.trust_tier.tier_model.trust_boundary_suppress import (
     BoundaryFinding,
-    _BoundaryMetadata,
+    BoundaryMetadata,
     compute_derived_names,
     extract_boundary_metadata,
     subject_is_rooted,
@@ -121,6 +122,7 @@ class CheckResult:
 
     allowlist_path: Path
     violations: list[Finding]
+    suppressed_boundary_findings: list[Finding]
     stale_entries: list[AllowlistEntry]
     expired_entries: list[AllowlistEntry]
     expired_file_rules: list[PerFileRule]
@@ -207,7 +209,7 @@ RULES: dict[str, dict[str, Any]] = {
     # =========================================================================
     # @trust_boundary decorator hygiene
     # =========================================================================
-    # These two findings fire on the decorator itself, not on suppressed
+    # These findings fire on the decorator itself, not on suppressed
     # patterns. They guarantee that a malformed ``@trust_boundary`` cannot
     # silently disable suppression analysis: if the analyzer cannot read the
     # decorator's metadata, the author hears about it AND the decorator is
@@ -234,6 +236,24 @@ RULES: dict[str, dict[str, Any]] = {
             "Compare the call to the documented signature in "
             "src/elspeth/contracts/trust_boundary.py. 'suppresses' must be "
             "tuple[str, ...]; 'source_param' must be a non-empty string."
+        ),
+    },
+    "R_TB_STACKED": {
+        "name": "trust-boundary-stacked-decorator",
+        "description": ("Multiple @trust_boundary decorators on one function make the boundary metadata ambiguous."),
+        "remediation": (
+            "Keep exactly one @trust_boundary decorator per function. Merge the "
+            "intended source_param, suppresses, invariant, and test_ref into a "
+            "single decorator or split the boundary into separate functions."
+        ),
+    },
+    "R_TB_UNKNOWN_KWARG": {
+        "name": "trust-boundary-unknown-kwarg",
+        "description": ("@trust_boundary contains a kwarg outside the runtime decorator signature."),
+        "remediation": (
+            "Remove the unknown kwarg or correct its spelling. The analyzer "
+            "treats the decorator as inert until its metadata matches "
+            "src/elspeth/contracts/trust_boundary.py."
         ),
     },
 }
@@ -457,6 +477,7 @@ class TierModelVisitor(ast.NodeVisitor):
         self.file_path = file_path
         self.source_lines = source_lines
         self.findings: list[Finding] = []
+        self.suppressed_findings: list[Finding] = []
         self.symbol_stack: list[str] = []
         self.class_stack: list[ast.ClassDef] = []
         self.function_stack: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
@@ -469,7 +490,7 @@ class TierModelVisitor(ast.NodeVisitor):
         # decorator. We push on entry to every function so popping is symmetric
         # and we can look at "the innermost enclosing decorated function" via
         # a reverse walk of the stack.
-        self._boundary_stack: list[tuple[_BoundaryMetadata, frozenset[str]] | None] = []
+        self._boundary_stack: list[tuple[BoundaryMetadata, frozenset[str]] | None] = []
 
     def visit(self, node: ast.AST) -> Any:
         """Visit a node while retaining ancestor context for receiver-shape checks."""
@@ -504,22 +525,19 @@ class TierModelVisitor(ast.NodeVisitor):
         payload = f"{rule_id}|{ast_path}|{node_dump}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
-    def _current_boundary(self) -> tuple[_BoundaryMetadata, frozenset[str]] | None:
+    def _current_boundary(self) -> tuple[BoundaryMetadata, frozenset[str]] | None:
         """Return the active ``@trust_boundary`` context, if any.
 
-        Walks the boundary stack from innermost outward and returns the first
-        non-``None`` entry. Nested functions whose own decorator is missing
-        still inherit the outer function's boundary because nested-function
-        bodies share the outer scope's name bindings; finding-suppression
-        inside the nested function on names rooted at the outer boundary
-        parameter is correct under the same dataflow argument.
+        Suppression is intentionally limited to the decorated function's own
+        lexical body. Nested functions, lambdas, and class bodies do not
+        inherit an outer function's boundary metadata; if they need boundary
+        suppression, they must carry their own ``@trust_boundary``.
 
         Returns ``None`` if no enclosing function carries a ``@trust_boundary``.
         """
-        for entry in reversed(self._boundary_stack):
-            if entry is not None:
-                return entry
-        return None
+        if not self._boundary_stack:
+            return None
+        return self._boundary_stack[-1]
 
     def _finding_subject_node(self, rule_id: str, node: ast.AST) -> ast.AST | None:
         """Return the AST node whose rootedness determines suppression.
@@ -556,20 +574,28 @@ class TierModelVisitor(ast.NodeVisitor):
         suppression event; the decorator's existence (visible in code
         review) is the audit signal.
         """
+        return self._boundary_suppression_for(rule_id, node) is not None
+
+    def _boundary_suppression_for(self, rule_id: str, node: ast.AST) -> BoundaryMetadata | None:
+        """Return active boundary metadata if it suppresses this finding."""
         boundary = self._current_boundary()
         if boundary is None:
-            return False
+            return None
         metadata, derived_names = boundary
         if rule_id not in metadata.suppresses:
-            return False
+            return None
         subject = self._finding_subject_node(rule_id, node)
         if subject is None:
-            return False
-        return subject_is_rooted(subject, derived_names)
+            return None
+        if not subject_is_rooted(subject, derived_names):
+            return None
+        return metadata
 
     def _add_finding(self, rule_id: str, node: ast.expr | ast.stmt | ast.ExceptHandler, message: str) -> None:
         """Record a finding, unless an enclosing ``@trust_boundary`` covers it."""
-        if self._is_suppressed_by_boundary(rule_id, node):
+        suppressed_by = self._boundary_suppression_for(rule_id, node)
+        if suppressed_by is not None:
+            self._add_suppressed_boundary_observation(rule_id, node, suppressed_by)
             return
         self.findings.append(
             Finding(
@@ -581,6 +607,32 @@ class TierModelVisitor(ast.NodeVisitor):
                 fingerprint=self._fingerprint_node(rule_id, node),
                 code_snippet=self._get_code_snippet(node.lineno),
                 message=message,
+                ast_path="/".join(self.path_stack) or "<module-root>",
+            )
+        )
+
+    def _add_suppressed_boundary_observation(
+        self,
+        original_rule_id: str,
+        node: ast.expr | ast.stmt | ast.ExceptHandler,
+        metadata: BoundaryMetadata,
+    ) -> None:
+        """Record a non-failing observation for a trust-boundary suppression."""
+        suppresses = tuple(sorted(metadata.suppresses))
+        self.suppressed_findings.append(
+            Finding(
+                rule_id="R_TB_SUPPRESSED",
+                file_path=self.file_path,
+                line=node.lineno,
+                col=node.col_offset,
+                symbol_context=tuple(self.symbol_stack),
+                fingerprint=self._fingerprint_node(f"R_TB_SUPPRESSED:{original_rule_id}", node),
+                code_snippet=self._get_code_snippet(node.lineno),
+                message=(
+                    f"@trust_boundary suppressed {original_rule_id} under "
+                    f"source_param={metadata.source_param!r}; source={metadata.source!r}; "
+                    f"test_ref={metadata.test_ref!r}; suppresses={suppresses!r}"
+                ),
                 ast_path="/".join(self.path_stack) or "<module-root>",
             )
         )
@@ -626,9 +678,21 @@ class TierModelVisitor(ast.NodeVisitor):
         """Track class context."""
         self.symbol_stack.append(node.name)
         self.class_stack.append(node)
-        self.generic_visit(node)
-        self.class_stack.pop()
-        self.symbol_stack.pop()
+        self._boundary_stack.append(None)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._boundary_stack.pop()
+            self.class_stack.pop()
+            self.symbol_stack.pop()
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        """Visit lambda bodies without inheriting enclosing boundary suppression."""
+        self._boundary_stack.append(None)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._boundary_stack.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         """Track function context."""
@@ -729,11 +793,12 @@ class TierModelVisitor(ast.NodeVisitor):
 
     def _handler_is_silent(self, node: ast.ExceptHandler) -> bool:
         """Return True if the except handler swallows errors without re-raise or explicit return."""
-        has_raise = any(isinstance(child, ast.Raise) for child in ast.walk(node))
+        own_scope_nodes = [child for statement in node.body for child in iter_own_scope(statement)]
+        has_raise = any(isinstance(child, ast.Raise) for child in own_scope_nodes)
         if has_raise:
             return False
 
-        returns: list[ast.Return] = [child for child in ast.walk(node) if isinstance(child, ast.Return)]
+        returns: list[ast.Return] = [child for child in own_scope_nodes if isinstance(child, ast.Return)]
         if returns:
             # If all returns are silent defaults, treat as swallow.
             return all(self._is_default_return_value(ret.value) for ret in returns)
@@ -1137,24 +1202,30 @@ class TierModelVisitor(ast.NodeVisitor):
 
 def scan_file(file_path: Path, root: Path) -> list[Finding]:
     """Scan a single Python file for bug-hiding patterns."""
+    findings, _suppressed_findings = scan_file_with_observations(file_path, root)
+    return findings
+
+
+def scan_file_with_observations(file_path: Path, root: Path) -> tuple[list[Finding], list[Finding]]:
+    """Scan a single Python file and return violations plus suppression observations."""
     try:
         source = file_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
-        return []
+        return [], []
 
     try:
         tree = ast.parse(source, filename=str(file_path))
     except SyntaxError as e:
         print(f"Warning: Syntax error in {file_path}: {e}", file=sys.stderr)
-        return []
+        return [], []
 
     source_lines = source.splitlines()
     relative_path = str(file_path.relative_to(root))
 
     visitor = TierModelVisitor(relative_path, source_lines)
     visitor.visit(tree)
-    return visitor.findings
+    return visitor.findings, visitor.suppressed_findings
 
 
 def scan_directory(
@@ -1162,8 +1233,18 @@ def scan_directory(
     exclude_patterns: list[str] | None = None,
 ) -> list[Finding]:
     """Scan all Python files in a directory tree."""
+    findings, _suppressed_findings = scan_directory_with_observations(root, exclude_patterns)
+    return findings
+
+
+def scan_directory_with_observations(
+    root: Path,
+    exclude_patterns: list[str] | None = None,
+) -> tuple[list[Finding], list[Finding]]:
+    """Scan all Python files and return violations plus suppression observations."""
     exclude_patterns = exclude_patterns or []
     findings: list[Finding] = []
+    suppressed_findings: list[Finding] = []
 
     for py_file in root.rglob("*.py"):
         relative = py_file.relative_to(root)
@@ -1179,9 +1260,11 @@ def scan_directory(
         if skip:
             continue
 
-        findings.extend(scan_file(py_file, root))
+        file_findings, file_suppressed_findings = scan_file_with_observations(py_file, root)
+        findings.extend(file_findings)
+        suppressed_findings.extend(file_suppressed_findings)
 
-    return findings
+    return findings, suppressed_findings
 
 
 # =============================================================================
@@ -1871,6 +1954,24 @@ def _validate_allowlist_governance(allowlist: Allowlist) -> None:
         # ``valid_rule_ids=_ALL_RULE_IDS`` is passed to ``load_allowlist``.
 
 
+def _finding_key_for(finding: Finding) -> FindingKey:
+    """Convert a tier_model ``Finding`` to the shared allowlist key shape."""
+    return FindingKey(
+        file_path=finding.file_path,
+        rule_id=finding.rule_id,
+        symbol_context=finding.symbol_context,
+        fingerprint=finding.fingerprint,
+    )
+
+
+def _match_per_file_rule(rules: list[PerFileRule], finding_key: FindingKey) -> PerFileRule | None:
+    """Return the first per-file rule matching ``finding_key``."""
+    for rule in rules:
+        if rule.matches(finding_key):
+            return rule
+    return None
+
+
 def _match_finding(allowlist: Allowlist, finding: Finding) -> AllowlistEntry | PerFileRule | None:
     """Match a tier_model ``Finding`` against ``allowlist``.
 
@@ -1882,16 +1983,11 @@ def _match_finding(allowlist: Allowlist, finding: Finding) -> AllowlistEntry | P
     rule. We keep the historical order to preserve the production
     ``contracts.yaml`` semantics across this consolidation.
     """
-    finding_key = FindingKey(
-        file_path=finding.file_path,
-        rule_id=finding.rule_id,
-        symbol_context=finding.symbol_context,
-        fingerprint=finding.fingerprint,
-    )
-    for rule in allowlist.per_file_rules:
-        if rule.matches(finding_key):
-            rule.matched_count += 1
-            return rule
+    finding_key = _finding_key_for(finding)
+    matched_rule = _match_per_file_rule(allowlist.per_file_rules, finding_key)
+    if matched_rule is not None:
+        matched_rule.matched_count += 1
+        return matched_rule
     for entry in allowlist.entries:
         if entry.matches(finding_key):
             # C8-3 in-file transplant defence: a quartet copied onto a
@@ -1915,12 +2011,10 @@ def _match_finding(allowlist: Allowlist, finding: Finding) -> AllowlistEntry | P
 def _load_tier_model_allowlist(path: Path, *, source_root: Path | None = None) -> Allowlist:
     """Load the tier-model allowlist via core's loader, then apply local governance.
 
-    Core's ``load_allowlist`` treats a missing file path as an empty mapping
-    (returning an empty ``Allowlist``); we additionally short-circuit for paths
-    that resolve to neither a file nor a directory so we don't attempt to read
-    a ghost path. Governance (banned rules, pattern-tag vocabulary,
-    bugfix-owner discipline, registry coherence on ``allow_hits[].key``) is
-    applied after the generic load.
+    Missing allowlist files are configuration errors, not empty allowlists:
+    the allowlist YAML is Tier-1 audit data and a ghost path must fail closed.
+    Governance (banned rules, pattern-tag vocabulary, bugfix-owner discipline,
+    registry coherence on ``allow_hits[].key``) is applied after the generic load.
 
     ``source_root`` is passed through to the core loader so judge-gated
     entries can have their ``file_fingerprint`` verified against the
@@ -1928,8 +2022,6 @@ def _load_tier_model_allowlist(path: Path, *, source_root: Path | None = None) -
     Cross-file quartet transplants fail at load time; in-file transplants
     are caught at match time in :func:`_match_finding`.
     """
-    if not path.exists():
-        return Allowlist(entries=[])
     allowlist = load_allowlist(path, valid_rule_ids=_ALL_RULE_IDS, source_root=source_root)
     _validate_allowlist_governance(allowlist)
     return allowlist
@@ -1994,6 +2086,7 @@ def report_json(
     violations: list[Finding],
     stale_entries: list[AllowlistEntry],
     expired_entries: list[AllowlistEntry],
+    suppressed_boundary_findings: list[Finding] | None = None,
     expired_file_rules: list[PerFileRule] | None = None,
     unused_file_rules: list[PerFileRule] | None = None,
     layer_warnings: list[Finding] | None = None,
@@ -2022,6 +2115,21 @@ def report_json(
     if expired_file_rules:
         result["expired_file_rules"] = [
             {"pattern": r.pattern, "rules": r.rules, "reason": r.reason, "expires": str(r.expires)} for r in expired_file_rules
+        ]
+    if suppressed_boundary_findings:
+        result["suppressed_trust_boundary_findings"] = [
+            {
+                "rule_id": f.rule_id,
+                "file": f.file_path,
+                "line": f.line,
+                "col": f.col,
+                "context": list(f.symbol_context),
+                "fingerprint": f.fingerprint,
+                "code": f.code_snippet,
+                "message": f.message,
+                "key": f.canonical_key,
+            }
+            for f in suppressed_boundary_findings
         ]
     if unused_file_rules:
         result["unused_file_rules"] = [{"pattern": r.pattern, "rules": r.rules, "reason": r.reason} for r in unused_file_rules]
@@ -2066,6 +2174,7 @@ def collect_check_result(
     files = files or []
 
     all_tc_findings: list[Finding] = []
+    suppressed_boundary_findings: list[Finding] = []
     if files:
         all_findings: list[Finding] = []
         for file_path in files:
@@ -2074,12 +2183,14 @@ def collect_check_result(
                 resolved.relative_to(resolved_root)
             except ValueError:
                 continue
-            all_findings.extend(scan_file(resolved, resolved_root))
+            file_findings, file_suppressed = scan_file_with_observations(resolved, resolved_root)
+            all_findings.extend(file_findings)
+            suppressed_boundary_findings.extend(file_suppressed)
             layer_v, layer_tc = scan_layer_imports_file(resolved, resolved_root)
             all_findings.extend(layer_v)
             all_tc_findings.extend(layer_tc)
     else:
-        all_findings = scan_directory(resolved_root, exclude_patterns)
+        all_findings, suppressed_boundary_findings = scan_directory_with_observations(resolved_root, exclude_patterns)
         layer_v, layer_tc = scan_layer_imports_directory(resolved_root, exclude_patterns)
         all_findings.extend(layer_v)
         all_tc_findings.extend(layer_tc)
@@ -2110,6 +2221,7 @@ def collect_check_result(
     return CheckResult(
         allowlist_path=resolved_allowlist_path,
         violations=violations,
+        suppressed_boundary_findings=suppressed_boundary_findings,
         stale_entries=stale_entries,
         expired_entries=expired_entries,
         expired_file_rules=expired_file_rules,
@@ -2164,7 +2276,7 @@ def _legacy_finding_to_lint(finding: Finding) -> LintFinding:
         column=finding.col,
         message=finding.message,
         fingerprint=finding.fingerprint,
-        severity=RULE_METADATA.severity,
+        severity=Severity.NOTE if finding.rule_id == "R_TB_SUPPRESSED" else RULE_METADATA.severity,
         suggestion=rule.get("remediation"),
     )
 
@@ -2275,10 +2387,12 @@ class TierModelRule:
         if isinstance(tree, ast.Module) and tree.body and file_path.suffix == ".py":
             visitor = TierModelVisitor(_display_rule_file_path(file_path, context.root), _source_lines_for_rule(file_path))
             visitor.visit(tree)
-            return [_legacy_finding_to_lint(finding) for finding in visitor.findings]
+            return [_legacy_finding_to_lint(finding) for finding in [*visitor.findings, *visitor.suppressed_findings]]
 
         result = collect_check_result(context.root, allowlist_path=context.allowlist_dir_override)
-        return [_legacy_finding_to_lint(finding) for finding in result.violations] + _allowlist_diagnostics_to_lints(result)
+        return [
+            _legacy_finding_to_lint(finding) for finding in [*result.violations, *result.suppressed_boundary_findings]
+        ] + _allowlist_diagnostics_to_lints(result)
 
 
 # =============================================================================
@@ -2478,6 +2592,7 @@ def run_check(args: argparse.Namespace) -> int:
                 result.violations,
                 result.stale_entries,
                 result.expired_entries,
+                result.suppressed_boundary_findings,
                 result.expired_file_rules,
                 result.unused_file_rules,
                 result.layer_warnings,
@@ -2503,6 +2618,15 @@ def run_check(args: argparse.Namespace) -> int:
                 print(f"  {w.file_path}:{w.line} — {w.message}")
                 print(f"    Code: {w.code_snippet}")
                 print(f"    Allowlist key: {w.canonical_key}")
+
+        if result.suppressed_boundary_findings:
+            print(f"\n{'=' * 60}")
+            print(f"TRUST BOUNDARY SUPPRESSIONS (observations): {len(result.suppressed_boundary_findings)}")
+            print("(Non-failing audit records for R1/R5 findings suppressed by @trust_boundary)")
+            print("=" * 60)
+            for finding in result.suppressed_boundary_findings:
+                print(f"  {finding.file_path}:{finding.line} — {finding.message}")
+                print(f"    Code: {finding.code_snippet}")
 
         if result.stale_entries:
             print(f"\n{'=' * 60}")

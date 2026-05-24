@@ -4,14 +4,25 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import hmac
+import json
+import os
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
+
+from elspeth_lints.core.source_excerpt import RedactionRecord
+
+_JUDGE_METADATA_SIGNATURE_ENV_VAR = "ELSPETH_JUDGE_METADATA_HMAC_KEY"
+_JUDGE_METADATA_SIGNATURE_PREFIX = "hmac-sha256:v1:"
+_MIN_JUDGE_METADATA_HMAC_KEY_BYTES = 32
+_MAX_ALLOWLIST_YAML_BYTES = 5 * 1024 * 1024
+_MIN_AUDIT_ANCHOR_ALNUM_CHARS = 2
 
 
 class JudgeVerdict(StrEnum):
@@ -39,6 +50,18 @@ class JudgeVerdict(StrEnum):
     OVERRIDDEN_BY_OPERATOR = "OVERRIDDEN_BY_OPERATOR"
 
 
+class AuditReviewVerdict(StrEnum):
+    """Human post-review verdicts for an already persisted judge decision.
+
+    This enum deliberately does not reuse :class:`JudgeVerdict`: the
+    original judge verdict remains the record of what the model decided
+    at write time, while ``audit_review`` records later human evidence
+    about whether that accepted decision was wrong.
+    """
+
+    JUDGE_ACCEPTED_WRONG = "JUDGE_ACCEPTED_WRONG"
+
+
 @dataclass(frozen=True, slots=True)
 class FindingKey:
     """Stable key material for matching a finding against an allowlist."""
@@ -53,6 +76,16 @@ class FindingKey:
         """Return the exact suppression key."""
         symbol_part = ":".join(self.symbol_context) if self.symbol_context else "_module_"
         return f"{self.file_path}:{self.rule_id}:{symbol_part}:fp={self.fingerprint}"
+
+
+@dataclass(frozen=True, slots=True)
+class AuditReview:
+    """Operator review attached after a judge-accepted entry is found wrong."""
+
+    verdict: AuditReviewVerdict
+    reviewer: str
+    reviewed_at: datetime
+    rationale: str
 
 
 @dataclass(slots=True)
@@ -80,6 +113,19 @@ class AllowlistEntry:
     underlying-verdict is queryable" — a downstream aggregator can
     distinguish overrides of ACCEPTED entries (harmless) from
     overrides of BLOCKED entries (the dangerous signal).
+
+    ``judge_metadata_signature`` is the v1 HMAC over the judge verdict,
+    model verdict, recorded_at timestamp, model id, model rationale,
+    source file fingerprint, AST path, excerpt-redaction records, and
+    entry key. It is verified on production source-root loads so in-place
+    edits to the judge quartet or its redaction audit trail do not remain
+    invisible.
+
+    ``audit_review`` is a post-judge human review record. It is nullable:
+    absence means no later falsification has been recorded. Presence is
+    valid only for ``judge_verdict=ACCEPTED`` entries because the review
+    answers one question: "was the prior accepted suppression wrong?"
+    It does not rewrite the original judge verdict.
     """
 
     key: str
@@ -96,7 +142,12 @@ class AllowlistEntry:
     judge_recorded_at: datetime | None = None
     judge_model: str | None = None
     judge_rationale: str | None = None
+    judge_confidence: float | None = None
     judge_model_verdict: JudgeVerdict | None = None
+    judge_policy_hash: str | None = None
+    judge_metadata_signature: str | None = None
+    judge_excerpt_redactions: tuple[RedactionRecord, ...] = ()
+    audit_review: AuditReview | None = None
 
     def matches(self, finding: FindingKey) -> bool:
         """Return whether this exact entry suppresses the finding."""
@@ -154,7 +205,14 @@ class Allowlist:
     max_permanent_total_entries: int | None = None
 
     def match(self, finding: FindingKey) -> AllowlistEntry | PerFileRule | None:
-        """Return the first matching suppression, if any."""
+        """Return the first matching suppression, if any.
+
+        This method mutates match accounting on the returned object:
+        exact entries get ``matched=True`` and per-file rules increment
+        ``matched_count``. An ``Allowlist`` instance is therefore a
+        single analysis-run accumulator, not a thread-safe immutable
+        lookup table shared across concurrent checks.
+        """
         for entry in self.entries:
             if entry.matches(finding):
                 entry.matched = True
@@ -234,9 +292,12 @@ def load_allowlist(
 
     When ``source_root`` is ``None`` the file-fingerprint recompute is
     skipped (call sites that don't know the source root, e.g. some
-    diagnostics loaders, still get co-presence enforcement). Production
-    rule loaders MUST pass ``source_root`` so the load-time gate is
-    live.
+    diagnostics loaders, still get co-presence enforcement). The HMAC
+    over the judge metadata is also verified only on source-root loads:
+    aggregate/report loaders can inspect historical entries without a
+    deployment secret, while production rule loaders MUST pass
+    ``source_root`` so both the source binding and metadata-tamper gate
+    are live.
     """
     if path.is_dir():
         defaults = _load_defaults(path / "_defaults.yaml")
@@ -296,7 +357,12 @@ class _Defaults:
 
 def _load_yaml_file(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {}
+        raise FileNotFoundError(f"{path}: allowlist YAML file is required")
+    size = path.stat().st_size
+    if size > _MAX_ALLOWLIST_YAML_BYTES:
+        raise ValueError(
+            f"{path}: allowlist YAML file is {size} bytes, exceeds maximum allowlist YAML size {_MAX_ALLOWLIST_YAML_BYTES} bytes"
+        )
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: allowlist YAML must be a mapping")
@@ -352,8 +418,8 @@ def _parse_allow_hits(
         ctx = f"allow_hits[{index}]"
         allowlist_entry = AllowlistEntry(
             key=_required_string(entry, "key", context=ctx),
-            owner=_required_string(entry, "owner", context=ctx),
-            reason=_required_string(entry, "reason", context=ctx),
+            owner=_required_audit_anchor_string(entry, "owner", context=ctx),
+            reason=_required_audit_anchor_string(entry, "reason", context=ctx),
             safety=_required_string(entry, "safety", context=ctx),
             expires=_optional_date_alias(entry, "expires", "expires_at", context=ctx),
             file_fingerprint=_optional_string(entry, "file_fingerprint", context=ctx),
@@ -364,13 +430,59 @@ def _parse_allow_hits(
             judge_recorded_at=_optional_datetime(entry, "judge_recorded_at", context=ctx),
             judge_model=_optional_string(entry, "judge_model", context=ctx),
             judge_rationale=_optional_string(entry, "judge_rationale", context=ctx),
-            judge_model_verdict=_optional_judge_verdict(entry, "judge_model_verdict", context=ctx, allow_blocked=True),
+            judge_confidence=_optional_confidence(entry, "judge_confidence", context=ctx),
+            judge_model_verdict=_optional_judge_verdict(
+                entry,
+                "judge_model_verdict",
+                context=ctx,
+                allow_blocked=True,
+                allow_operator_override=False,
+            ),
+            judge_policy_hash=_optional_string(entry, "judge_policy_hash", context=ctx),
+            judge_metadata_signature=_optional_string(entry, "judge_metadata_signature", context=ctx),
+            judge_excerpt_redactions=_parse_judge_excerpt_redactions(entry, context=ctx),
+            audit_review=_parse_audit_review(entry, context=ctx),
         )
         _validate_judge_metadata_atomic(allowlist_entry, context=ctx)
+        _validate_audit_review_context(allowlist_entry, context=ctx)
         if source_root is not None and allowlist_entry.judge_verdict is not None:
             _verify_file_fingerprint_at_load(allowlist_entry, source_root=source_root, context=ctx)
+            _verify_judge_metadata_signature_at_load(allowlist_entry, context=ctx)
         entries.append(allowlist_entry)
     return entries
+
+
+def _parse_audit_review(data: dict[str, Any], *, context: str) -> AuditReview | None:
+    """Parse the optional post-judge audit review block."""
+    if "audit_review" not in data or data["audit_review"] is None:
+        return None
+    item_context = f"{context}.audit_review"
+    item = _mapping_value(data["audit_review"], item_context)
+    return AuditReview(
+        verdict=_required_audit_review_verdict(item, "verdict", context=item_context),
+        reviewer=_required_audit_anchor_string(item, "reviewer", context=item_context),
+        reviewed_at=_required_datetime(item, "reviewed_at", context=item_context),
+        rationale=_required_audit_anchor_string(item, "rationale", context=item_context),
+    )
+
+
+def _parse_judge_excerpt_redactions(data: dict[str, Any], *, context: str) -> tuple[RedactionRecord, ...]:
+    raw_redactions = _list_value(data, "judge_excerpt_redactions")
+    redactions: list[RedactionRecord] = []
+    for index, raw_redaction in enumerate(raw_redactions):
+        item_context = f"{context}.judge_excerpt_redactions[{index}]"
+        item = _mapping_value(raw_redaction, item_context)
+        redacted_hash = _required_string(item, "redacted_hash", context=item_context)
+        if len(redacted_hash) != 16 or any(ch not in "0123456789abcdef" for ch in redacted_hash):
+            raise ValueError(f"{item_context}.redacted_hash must be 16 lowercase hex characters")
+        redactions.append(
+            RedactionRecord(
+                pattern_name=_required_string(item, "pattern", context=item_context),
+                byte_count=_required_positive_int(item, "byte_count", context=item_context),
+                redacted_hash=redacted_hash,
+            )
+        )
+    return tuple(redactions)
 
 
 def _file_path_from_canonical_key(key: str) -> str:
@@ -410,6 +522,150 @@ def _compute_file_fingerprint(source_path: Path) -> str:
     file the judge originally inspected).
     """
     return hashlib.sha256(source_path.read_bytes()).hexdigest()
+
+
+def compute_judge_metadata_signature(
+    *,
+    key: str,
+    file_fingerprint: str,
+    ast_path: str,
+    judge_verdict: JudgeVerdict,
+    judge_recorded_at: datetime,
+    judge_model: str,
+    judge_rationale: str,
+    judge_policy_hash: str,
+    judge_model_verdict: JudgeVerdict | None = None,
+    judge_confidence: float | None = None,
+    judge_excerpt_redactions: tuple[RedactionRecord, ...] = (),
+    hmac_key: bytes | None = None,
+) -> str:
+    """Return the v1 HMAC binding for a post-judge allowlist entry.
+
+    The signature binds the audit-significant judge metadata cluster
+    (verdict/rationale/model/timestamp/policy hash) and excerpt-redaction records to
+    the same source identity primitives C8-3 already records (entry key,
+    file fingerprint, AST path). Operators may still edit administrative
+    fields such as owner/expiry, but changing what the judge supposedly
+    said, which source location it judged, or which secrets were scrubbed
+    requires re-running ``justify`` with the deployment-held HMAC key.
+    """
+    if hmac_key is None:
+        hmac_key = _judge_metadata_hmac_key()
+    payload = {
+        "version": 1,
+        "key": key,
+        "file_fingerprint": file_fingerprint,
+        "ast_path": ast_path,
+        "judge_verdict": judge_verdict.value,
+        "judge_model_verdict": judge_model_verdict.value if judge_model_verdict is not None else None,
+        "judge_recorded_at": judge_recorded_at.isoformat(),
+        "judge_model": judge_model,
+        "judge_rationale": judge_rationale,
+        "judge_policy_hash": judge_policy_hash,
+        "judge_excerpt_redactions": [
+            {
+                "pattern": record.pattern_name,
+                "byte_count": record.byte_count,
+                "redacted_hash": record.redacted_hash,
+            }
+            for record in judge_excerpt_redactions
+        ],
+    }
+    if judge_confidence is not None:
+        payload["judge_confidence"] = judge_confidence
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    digest = hmac.new(hmac_key, canonical, hashlib.sha256).hexdigest()
+    return f"{_JUDGE_METADATA_SIGNATURE_PREFIX}{digest}"
+
+
+def _judge_metadata_hmac_key() -> bytes:
+    """Load the deployment-held key used to sign judge metadata."""
+    raw = os.environ.get(_JUDGE_METADATA_SIGNATURE_ENV_VAR)
+    if raw is None or raw == "":
+        raise ValueError(
+            f"{_JUDGE_METADATA_SIGNATURE_ENV_VAR} is required to verify or write "
+            "judge_metadata_signature for post-judge allowlist entries. This key "
+            "must be held outside the allowlist YAML; without it, verdict metadata "
+            "would be unsigned editable text."
+        )
+    key = raw.encode("utf-8")
+    if len(key) < _MIN_JUDGE_METADATA_HMAC_KEY_BYTES:
+        raise ValueError(
+            f"{_JUDGE_METADATA_SIGNATURE_ENV_VAR} must be at least "
+            f"{_MIN_JUDGE_METADATA_HMAC_KEY_BYTES} bytes when UTF-8 encoded; "
+            "shorter HMAC keys are not acceptable for audit metadata binding."
+        )
+    return key
+
+
+def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: str) -> None:
+    """Assert a post-judge entry's verdict metadata has not been edited."""
+    if entry.judge_metadata_signature is None:
+        raise ValueError(
+            f"{context}: judge_metadata_signature is missing; source-root loads of "
+            "post-judge entries require an HMAC over the judge verdict, rationale, "
+            "model, recorded_at, file_fingerprint, ast_path, key, and excerpt "
+            "redaction records. Unsigned judge metadata is editable plain text and "
+            "cannot be trusted by the gate."
+        )
+    _validate_judge_metadata_signature_shape(entry.judge_metadata_signature, context=context)
+
+    assert entry.file_fingerprint is not None
+    assert entry.ast_path is not None
+    assert entry.judge_verdict is not None
+    assert entry.judge_recorded_at is not None
+    assert entry.judge_model is not None
+    assert entry.judge_rationale is not None
+    assert entry.judge_policy_hash is not None
+    expected = compute_judge_metadata_signature(
+        key=entry.key,
+        file_fingerprint=entry.file_fingerprint,
+        ast_path=entry.ast_path,
+        judge_verdict=entry.judge_verdict,
+        judge_model_verdict=entry.judge_model_verdict,
+        judge_recorded_at=entry.judge_recorded_at,
+        judge_model=entry.judge_model,
+        judge_rationale=entry.judge_rationale,
+        judge_policy_hash=entry.judge_policy_hash,
+        judge_excerpt_redactions=entry.judge_excerpt_redactions,
+        judge_confidence=entry.judge_confidence,
+    )
+    if not hmac.compare_digest(entry.judge_metadata_signature, expected):
+        raise ValueError(
+            f"{context}: judge_metadata_signature mismatch for entry {entry.key!r}; "
+            "the persisted judge verdict/rationale/model/recorded_at or binding "
+            "fields were edited without the deployment HMAC key. Re-run "
+            "`elspeth-lints justify` to produce a fresh signed entry."
+        )
+
+
+def _validate_judge_metadata_signature_shape(signature: str, *, context: str) -> None:
+    if not signature.startswith(_JUDGE_METADATA_SIGNATURE_PREFIX):
+        raise ValueError(f"{context}: judge_metadata_signature must start with {_JUDGE_METADATA_SIGNATURE_PREFIX!r}; got {signature!r}")
+    digest = signature.removeprefix(_JUDGE_METADATA_SIGNATURE_PREFIX)
+    if len(digest) != 64:
+        raise ValueError(f"{context}: judge_metadata_signature digest must be 64 lowercase hex characters")
+    try:
+        bytes.fromhex(digest)
+    except ValueError as exc:
+        raise ValueError(f"{context}: judge_metadata_signature digest must be valid hex") from exc
+    if digest.lower() != digest:
+        raise ValueError(f"{context}: judge_metadata_signature digest must use lowercase hex")
+
+
+def _validate_judge_policy_hash_shape(policy_hash: str, *, context: str) -> None:
+    prefix = "sha256:"
+    if not policy_hash.startswith(prefix):
+        raise ValueError(f"{context}: judge_policy_hash must start with {prefix!r}; got {policy_hash!r}")
+    digest = policy_hash.removeprefix(prefix)
+    if len(digest) != 64:
+        raise ValueError(f"{context}: judge_policy_hash digest must be 64 lowercase hex characters")
+    try:
+        bytes.fromhex(digest)
+    except ValueError as exc:
+        raise ValueError(f"{context}: judge_policy_hash digest must be valid hex") from exc
+    if digest.lower() != digest:
+        raise ValueError(f"{context}: judge_policy_hash digest must use lowercase hex")
 
 
 def _verify_file_fingerprint_at_load(entry: AllowlistEntry, *, source_root: Path, context: str) -> None:
@@ -489,9 +745,10 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
     must be either *all absent* (the pre-judge era representation, where
     ``judge_verdict`` is ``None`` and every other ``judge_*`` field is
     ``None``) or *all present* (a fully-recorded judge interaction, where
-    ``judge_verdict``, ``judge_recorded_at``, ``judge_model``, and
-    ``judge_rationale`` are all set, with ``judge_model_verdict`` set
-    iff the entry's verdict is ``OVERRIDDEN_BY_OPERATOR``).
+    ``judge_verdict``, ``judge_recorded_at``, ``judge_model``,
+    ``judge_policy_hash``, and ``judge_rationale`` are all set, with
+    ``judge_model_verdict`` set iff the entry's verdict is
+    ``OVERRIDDEN_BY_OPERATOR``).
 
     The fields are our own data (Tier 1 in the project's trust model):
     an allowlist on disk was written by ``elspeth-lints justify`` or
@@ -502,7 +759,7 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
     CLAUDE.md Tier-1 doctrine: "wrong type = crash, NULL where
     unexpected = crash, invalid enum value = crash."
 
-    The six invariants enforced:
+    The invariants enforced:
 
     1. ``judge_verdict == OVERRIDDEN_BY_OPERATOR`` implies
        ``judge_model_verdict is not None`` — an override entry must
@@ -515,9 +772,9 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
        model's verdict and the entry's verdict are identical by
        construction; carrying a divergent value fabricates a divergence
        signal that doesn't exist.
-    3. ``judge_verdict is not None`` implies the recorded_at + model +
-       rationale triple is also non-None — these four fields are atomic;
-       a partial write is corruption.
+    3. ``judge_verdict is not None`` implies recorded_at + model +
+       policy hash + rationale are also non-None — these fields are
+       atomic; a partial write is corruption.
     4. ``judge_verdict is None`` implies every other ``judge_*`` field
        is also None — a pre-judge-era entry MUST NOT carry stray model
        metadata; that would be evidence of partial revert / merge
@@ -536,6 +793,11 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
        even if that helper were loosened to accept empty strings, the
        atomic validator must still catch the corrupt shape.
 
+    7. ``judge_policy_hash`` must be a ``sha256:<64 lowercase hex>``
+       digest. The hash records which static judge policy block the
+       verdict interpreted so later CLAUDE.md / policy drift cannot make
+       old verdicts uninterpretable.
+
     Invariant 8 (C8-3 binding co-presence): when ``judge_verdict`` is
     set, ``file_fingerprint`` and ``ast_path`` must both be present.
     These two fields bind the judge quartet to the source bytes + AST
@@ -548,6 +810,13 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
     at match time (catches in-file AST-node transplant). Both
     verifications require the fields' presence, which this invariant
     guarantees.
+
+    ``judge_metadata_signature`` is deliberately verified in
+    ``_parse_allow_hits`` only when ``source_root`` is provided, because
+    report-only loaders do not necessarily have access to the deployment
+    HMAC key. Shape validation still treats it as part of the judge
+    cluster: a pre-judge entry must not carry a stray signature, and a
+    present signature must have the v1 prefix + 64-hex digest shape.
     """
     # Invariant 5 (defense-in-depth vs _optional_judge_verdict): neither
     # judge_verdict nor judge_model_verdict may be BLOCKED on a persisted
@@ -583,12 +852,18 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
             stray.append("judge_model")
         if entry.judge_rationale is not None:
             stray.append("judge_rationale")
+        if entry.judge_confidence is not None:
+            stray.append("judge_confidence")
         if entry.judge_model_verdict is not None:
             stray.append("judge_model_verdict")
+        if entry.judge_policy_hash is not None:
+            stray.append("judge_policy_hash")
         if entry.file_fingerprint is not None:
             stray.append("file_fingerprint")
         if entry.ast_path is not None:
             stray.append("ast_path")
+        if entry.judge_metadata_signature is not None:
+            stray.append("judge_metadata_signature")
         if stray:
             raise ValueError(
                 f"{context}: judge_verdict is absent but other judge metadata is present "
@@ -598,6 +873,11 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
             )
         return
 
+    if entry.judge_metadata_signature is not None:
+        _validate_judge_metadata_signature_shape(entry.judge_metadata_signature, context=context)
+    if entry.judge_policy_hash is not None:
+        _validate_judge_policy_hash_shape(entry.judge_policy_hash, context=context)
+
     # Invariant 3: post-judge entries record the full quartet.
     missing: list[str] = []
     if entry.judge_recorded_at is None:
@@ -606,19 +886,21 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
         missing.append("judge_model")
     if entry.judge_rationale is None:
         missing.append("judge_rationale")
+    if entry.judge_policy_hash is None:
+        missing.append("judge_policy_hash")
     if missing:
         raise ValueError(
             f"{context}: judge_verdict is set ({entry.judge_verdict.value!r}) but the "
             f"required companion fields are missing ({', '.join(missing)}); the judge-"
-            "metadata quartet (judge_verdict + judge_recorded_at + judge_model + "
-            "judge_rationale) is atomic. A partial write is corruption."
+            "metadata cluster (judge_verdict + judge_recorded_at + judge_model + "
+            "judge_rationale + judge_policy_hash) is atomic. A partial write is corruption."
         )
 
     # Invariant 8 (C8-3 binding co-presence): post-judge entries must
     # carry both binding fields. Without them the quartet is
     # transplantable — an attacker can copy the verdict + rationale +
-    # model + recorded_at from a safe entry onto an entry keyed at
-    # dangerous code, and the gate has no way to detect the rebind.
+    # model + policy hash + recorded_at from a safe entry onto an entry
+    # keyed at dangerous code, and the gate has no way to detect the rebind.
     # The load-time and match-time binding checks downstream both
     # require these fields' presence, which this invariant guarantees.
     missing_binding: list[str] = []
@@ -648,6 +930,8 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
             "judge_rationale is empty or whitespace-only; a judge verdict without a "
             "rationale is audit-broken (the 'why' is missing)."
         )
+    if entry.judge_confidence is not None and not 0.0 <= entry.judge_confidence <= 1.0:
+        raise ValueError(f"{context}: judge_confidence must be between 0.0 and 1.0; got {entry.judge_confidence!r}")
 
     # Invariants 1 and 2: judge_model_verdict's presence is gated by
     # whether this is an override entry.
@@ -669,6 +953,20 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
                 "construction, so recording a separate judge_model_verdict "
                 "fabricates a divergence that doesn't exist."
             )
+
+
+def _validate_audit_review_context(entry: AllowlistEntry, *, context: str) -> None:
+    """Crash if a post-judge audit review is attached to the wrong entry shape."""
+    if entry.audit_review is None:
+        return
+    if entry.judge_verdict is not JudgeVerdict.ACCEPTED:
+        actual = "None" if entry.judge_verdict is None else entry.judge_verdict.value
+        raise ValueError(
+            f"{context}.audit_review is present but judge_verdict is {actual!r}; "
+            "audit_review records a human falsification of a prior "
+            "judge_verdict=ACCEPTED decision and is invalid on pre-judge, "
+            "BLOCKED, or OVERRIDDEN_BY_OPERATOR entries."
+        )
 
 
 def _parse_per_file_rules(data: dict[str, Any], *, valid_rule_ids: Collection[str], source_file: str) -> list[PerFileRule]:
@@ -733,6 +1031,34 @@ def _required_string(data: dict[str, Any], key: str, *, context: str) -> str:
     return value
 
 
+def _required_audit_anchor_string(data: dict[str, Any], key: str, *, context: str) -> str:
+    value = _required_string(data, key, context=context)
+    if not is_substantive_audit_anchor(value):
+        raise ValueError(
+            f"{context}.{key} must be a substantive audit discriminator anchor; "
+            f"got {value!r}. Values like 'x', '.', or whitespace cannot safely "
+            "distinguish rotation-grandfathered entries."
+        )
+    return value
+
+
+def is_substantive_audit_anchor(value: str) -> bool:
+    """Return True if ``value`` can distinguish a rotation-grandfathered entry."""
+    alnum_count = sum(1 for char in value if char.isalnum())
+    return alnum_count >= _MIN_AUDIT_ANCHOR_ALNUM_CHARS
+
+
+def _required_positive_int(data: dict[str, Any], key: str, *, context: str) -> int:
+    if key not in data:
+        raise ValueError(f"{context} must include {key!r}")
+    value = data[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{context}.{key} must be a positive integer")
+    if value <= 0:
+        raise ValueError(f"{context}.{key} must be positive")
+    return cast(int, value)
+
+
 def _optional_date(data: dict[str, Any], key: str, *, context: str) -> date | None:
     if key not in data or data[key] is None:
         return None
@@ -762,6 +1088,18 @@ def _optional_string(data: dict[str, Any], key: str, *, context: str) -> str | N
     if isinstance(value, str) and value:
         return value
     raise ValueError(f"{context}.{key} must be a non-empty string, null, or absent")
+
+
+def _optional_confidence(data: dict[str, Any], key: str, *, context: str) -> float | None:
+    if key not in data or data[key] is None:
+        return None
+    value = data[key]
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"{context}.{key} must be a number from 0.0 to 1.0, null, or absent")
+    confidence = float(value)
+    if not 0.0 <= confidence <= 1.0:
+        raise ValueError(f"{context}.{key} must be between 0.0 and 1.0")
+    return confidence
 
 
 def _optional_int(data: dict[str, Any], key: str, *, context: str) -> int | None:
@@ -795,7 +1133,14 @@ def _bool_value(data: dict[str, Any], key: str, *, default: bool) -> bool:
     return value
 
 
-def _optional_judge_verdict(data: dict[str, Any], key: str, *, context: str, allow_blocked: bool) -> JudgeVerdict | None:
+def _optional_judge_verdict(
+    data: dict[str, Any],
+    key: str,
+    *,
+    context: str,
+    allow_blocked: bool,
+    allow_operator_override: bool = True,
+) -> JudgeVerdict | None:
     """Parse an optional judge-verdict field.
 
     Absent / null both yield ``None`` (the "pre-judge era" representation).
@@ -839,7 +1184,32 @@ def _optional_judge_verdict(data: dict[str, Any], key: str, *, context: str, all
             "this field is corruption (botched hand-edit, partial revert, or tampering) "
             "and must not silently propagate into the gate's decision."
         )
+    if verdict is JudgeVerdict.OVERRIDDEN_BY_OPERATOR and not allow_operator_override:
+        raise ValueError(
+            f"{context}.{key} is OVERRIDDEN_BY_OPERATOR; {key} records the model verdict "
+            "only, so it may be ACCEPTED or BLOCKED but never the operator override action."
+        )
     return verdict
+
+
+def _required_audit_review_verdict(data: dict[str, Any], key: str, *, context: str) -> AuditReviewVerdict:
+    if key not in data:
+        raise ValueError(f"{context} must include {key!r}")
+    value = data[key]
+    if not isinstance(value, str):
+        raise ValueError(f"{context}.{key} must be a string")
+    try:
+        return AuditReviewVerdict(value)
+    except ValueError as exc:
+        raise ValueError(f"{context}.{key} must be one of {[m.value for m in AuditReviewVerdict]}; got {value!r}") from exc
+
+
+def _required_datetime(data: dict[str, Any], key: str, *, context: str) -> datetime:
+    if key not in data or data[key] is None:
+        raise ValueError(f"{context} must include {key!r}")
+    parsed = _optional_datetime(data, key, context=context)
+    assert parsed is not None
+    return parsed
 
 
 def _optional_datetime(data: dict[str, Any], key: str, *, context: str) -> datetime | None:

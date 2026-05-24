@@ -25,13 +25,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict
+from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict, compute_judge_metadata_signature
 from elspeth_lints.core.cli import main
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.core.reaudit import (
+    ReauditCause,
     ReauditDivergence,
     ReauditError,
     ReauditOutcome,
     ReauditReport,
+    _apply_filters,
     _parse_entry_key,
     reaudit_entries,
     render_report_json,
@@ -48,6 +51,14 @@ class Widget:
     def lookup(self, payload: dict) -> str:
         return payload.get("name", "anonymous")
 '''
+
+_TEST_JUDGE_METADATA_HMAC_KEY = "test-judge-metadata-hmac-key-2026-05-24"
+
+
+@pytest.fixture(autouse=True)
+def _judge_metadata_hmac_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep source-root allowlist loads able to verify signed fixture rows."""
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
 
 
 # =====================================================================
@@ -74,7 +85,14 @@ def _build_allowlist_dir(tmp_path: Path) -> Path:
     return allowlist_dir
 
 
-def _mock_openrouter_completion(*, verdict: str, rationale: str) -> MagicMock:
+def _mock_openrouter_completion(
+    *,
+    verdict: str,
+    rationale: str,
+    served_model: str | None = DEFAULT_JUDGE_MODEL,
+    prompt_tokens: int = 4000,
+    cached_tokens: int | None = 0,
+) -> MagicMock:
     """OpenAI-shape chat-completion mock for OpenRouter routing.
 
     The judge calls the OpenAI SDK pointed at OpenRouter; this mock
@@ -84,22 +102,36 @@ def _mock_openrouter_completion(*, verdict: str, rationale: str) -> MagicMock:
     the judge reads it offensively for cache-hit telemetry).
     """
     message = MagicMock()
-    message.content = json.dumps({"verdict": verdict, "rationale": rationale, "should_use_decorator": None})
+    message.content = json.dumps({"verdict": verdict, "rationale": rationale, "confidence": 0.91, "should_use_decorator": None})
     choice = MagicMock()
     choice.message = message
     completion = MagicMock()
     completion.choices = [choice]
+    completion.model = served_model
     completion.usage = MagicMock(
-        prompt_tokens=4000,
-        prompt_tokens_details=MagicMock(cached_tokens=0),
+        prompt_tokens=prompt_tokens,
+        prompt_tokens_details=MagicMock(cached_tokens=cached_tokens),
     )
     return completion
 
 
 @contextmanager
-def _mock_judge_call(*, verdict: str, rationale: str) -> Iterator[MagicMock]:
+def _mock_judge_call(
+    *,
+    verdict: str,
+    rationale: str,
+    served_model: str | None = DEFAULT_JUDGE_MODEL,
+    prompt_tokens: int = 4000,
+    cached_tokens: int | None = 0,
+) -> Iterator[MagicMock]:
     """Patch ``openai.OpenAI`` so reaudit's judge call runs offline."""
-    fake_completion = _mock_openrouter_completion(verdict=verdict, rationale=rationale)
+    fake_completion = _mock_openrouter_completion(
+        verdict=verdict,
+        rationale=rationale,
+        served_model=served_model,
+        prompt_tokens=prompt_tokens,
+        cached_tokens=cached_tokens,
+    )
     fake_client = MagicMock()
     fake_client.chat.completions.create.return_value = fake_completion
     with (
@@ -107,6 +139,32 @@ def _mock_judge_call(*, verdict: str, rationale: str) -> Iterator[MagicMock]:
         patch("openai.OpenAI", return_value=fake_client) as client_class,
     ):
         yield client_class
+
+
+def _fixture_judge_metadata_signature(
+    *,
+    key: str,
+    file_fingerprint: str,
+    ast_path: str,
+    judge_verdict: str = "ACCEPTED",
+    judge_model_verdict: str | None = None,
+    judge_recorded_at: str = "2024-01-01T00:00:00+00:00",
+    judge_model: str = "claude-opus-4-7",
+    judge_policy_hash: str = JUDGE_POLICY_HASH,
+    judge_rationale: str = "original judge said the boundary was genuine",
+) -> str:
+    return compute_judge_metadata_signature(
+        key=key,
+        file_fingerprint=file_fingerprint,
+        ast_path=ast_path,
+        judge_verdict=JudgeVerdict(judge_verdict),
+        judge_model_verdict=JudgeVerdict(judge_model_verdict) if judge_model_verdict is not None else None,
+        judge_recorded_at=datetime.fromisoformat(judge_recorded_at),
+        judge_model=judge_model,
+        judge_policy_hash=judge_policy_hash,
+        judge_rationale=judge_rationale,
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
 
 
 def _write_widget_lookup_entry(
@@ -146,6 +204,7 @@ def _write_widget_lookup_entry(
     if judge_recorded_at is not None:
         lines.append(f"  judge_recorded_at: '{judge_recorded_at}'")
         lines.append("  judge_model: claude-opus-4-7")
+        lines.append(f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'")
         lines.append("  judge_rationale: |-")
         lines.append("    original judge said the boundary was genuine")
     # Binding fields (C8-3): required co-presence companions of
@@ -162,9 +221,72 @@ def _write_widget_lookup_entry(
             live_ast_path = "body[0]/body[0]/body[1]/value"
         lines.append(f"  file_fingerprint: '{file_fp}'")
         lines.append(f"  ast_path: '{live_ast_path}'")
+        lines.append(
+            "  judge_metadata_signature: '"
+            + _fixture_judge_metadata_signature(
+                key=key,
+                file_fingerprint=file_fp,
+                ast_path=live_ast_path,
+                judge_verdict=judge_verdict,
+                judge_model_verdict=judge_model_verdict,
+                judge_recorded_at=judge_recorded_at or "2024-01-01T00:00:00+00:00",
+            )
+            + "'"
+        )
     target = allowlist_dir / "plugins.yaml"
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
+
+
+def _write_duplicate_widget_lookup_entries(
+    allowlist_dir: Path,
+    *,
+    source_root: Path,
+    fingerprint: str,
+    count: int,
+) -> None:
+    """Write ``count`` live allowlist entries for Widget.lookup.
+
+    Duplicate canonical keys are unusual but valid YAML rows and let
+    budget tests exercise the orchestration without needing several
+    synthetic source files. Each row has distinct owner/rationale
+    metadata so the loader still constructs separate entries.
+    """
+    import hashlib as _hashlib
+
+    finding = _live_widget_finding(source_root)
+    live_file_fp = _hashlib.sha256((source_root / "plugins/widget.py").read_bytes()).hexdigest()
+    live_ast_path = finding.ast_path
+    entry_key = f"plugins/widget.py:R1:Widget:lookup:fp={fingerprint}"
+    lines: list[str] = ["allow_hits:"]
+    for i in range(count):
+        judge_rationale = f"rationale entry {i}"
+        lines.append(f"- key: {entry_key}")
+        lines.append(f"  owner: agent-{i}")
+        lines.append("  reason: |-")
+        lines.append("    payload is Tier-3 external data")
+        lines.append("  safety: |-")
+        lines.append("    bounded coercion")
+        lines.append("  expires: '2030-01-01'")
+        lines.append("  judge_verdict: ACCEPTED")
+        lines.append("  judge_recorded_at: '2024-01-01T00:00:00+00:00'")
+        lines.append("  judge_model: claude-opus-4-7")
+        lines.append(f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'")
+        lines.append("  judge_rationale: |-")
+        lines.append(f"    {judge_rationale}")
+        lines.append(f"  file_fingerprint: '{live_file_fp}'")
+        lines.append(f"  ast_path: '{live_ast_path}'")
+        lines.append(
+            "  judge_metadata_signature: '"
+            + _fixture_judge_metadata_signature(
+                key=entry_key,
+                file_fingerprint=live_file_fp,
+                ast_path=live_ast_path,
+                judge_rationale=judge_rationale,
+            )
+            + "'"
+        )
+    (allowlist_dir / "plugins.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _live_fingerprint_for_widget(root: Path) -> str:
@@ -274,6 +396,37 @@ def test_was_accepted_now_blocked(tmp_path: Path) -> None:
         )
 
     assert report.outcomes[0].divergence is ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED
+    assert report.outcomes[0].cause is ReauditCause.MODEL_NOISE_OR_POLICY_DRIFT
+
+
+def test_cli_reaudit_exits_1_on_verdict_divergence(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A verdict-change divergence must be CI-gatable by exit status."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-01T00:00:00+00:00",
+    )
+
+    argv = [
+        "reaudit",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--format",
+        "text",
+    ]
+    with _mock_judge_call(verdict="BLOCKED", rationale="code has drifted; boundary no longer applies"):
+        exit_code = main(argv)
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "WAS_ACCEPTED_NOW_BLOCKED" in captured.out
 
 
 def test_override_no_longer_needed(tmp_path: Path) -> None:
@@ -509,6 +662,72 @@ def test_since_filter_passes_old_entries(tmp_path: Path) -> None:
     assert len(report.outcomes) == 1
 
 
+def test_since_filter_surfaces_future_dated_entries(tmp_path: Path) -> None:
+    """Future-dated judge timestamps must not evade a --since sweep."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    reference_time = datetime(2024, 1, 1, tzinfo=UTC)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-02T00:00:00+00:00",
+    )
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="should not be called") as client_class:
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=reference_time - timedelta(days=30),
+            limit=None,
+            include_pre_judge=False,
+            reference_time=reference_time,
+        )
+
+    assert len(report.outcomes) == 1
+    outcome = report.outcomes[0]
+    assert outcome.divergence is ReauditDivergence.FUTURE_DATED_ENTRY
+    assert outcome.fresh_verdict is None
+    assert outcome.fresh_rationale is not None
+    assert "after reaudit reference_time" in outcome.fresh_rationale
+    assert client_class.call_count == 0
+
+
+def test_apply_filters_orders_since_candidates_oldest_first_before_limit() -> None:
+    """Limit applies after deterministic recorded-at ordering, not YAML order."""
+    newer = AllowlistEntry(
+        key="plugins/widget.py:R1:Widget:lookup:fp=newer",
+        owner="test-owner",
+        reason="newer",
+        safety="test safety",
+        expires=None,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime(2023, 1, 1, tzinfo=UTC),
+    )
+    older = AllowlistEntry(
+        key="plugins/widget.py:R1:Widget:lookup:fp=older",
+        owner="test-owner",
+        reason="older",
+        safety="test safety",
+        expires=None,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime(2020, 1, 1, tzinfo=UTC),
+    )
+
+    filtered = _apply_filters(
+        entries=[newer, older],
+        valid_rule_ids=frozenset({"R1"}),
+        include_pre_judge=False,
+        since=datetime(2024, 1, 1, tzinfo=UTC),
+        limit=1,
+    )
+
+    assert [entry.key for entry in filtered] == [older.key]
+
+
 def test_limit_caps_processed_entries(tmp_path: Path) -> None:
     """``--limit N`` processes only the first N entries surviving filters."""
     import hashlib as _hashlib
@@ -525,7 +744,8 @@ def test_limit_caps_processed_entries(tmp_path: Path) -> None:
     # mechanism by writing three.
     lines: list[str] = ["allow_hits:"]
     for i in range(3):
-        lines.append(f"- key: plugins/widget.py:R1:Widget:lookup:fp={fp}")
+        entry_key = f"plugins/widget.py:R1:Widget:lookup:fp={fp}"
+        lines.append(f"- key: {entry_key}")
         lines.append(f"  owner: agent-{i}")
         lines.append("  reason: |-")
         lines.append("    payload is Tier-3 external data")
@@ -535,10 +755,21 @@ def test_limit_caps_processed_entries(tmp_path: Path) -> None:
         lines.append("  judge_verdict: ACCEPTED")
         lines.append("  judge_recorded_at: '2024-01-01T00:00:00+00:00'")
         lines.append("  judge_model: claude-opus-4-7")
+        lines.append(f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'")
         lines.append("  judge_rationale: |-")
         lines.append(f"    rationale entry {i}")
         lines.append(f"  file_fingerprint: '{live_file_fp}'")
         lines.append(f"  ast_path: '{live_ast_path}'")
+        lines.append(
+            "  judge_metadata_signature: '"
+            + _fixture_judge_metadata_signature(
+                key=entry_key,
+                file_fingerprint=live_file_fp,
+                ast_path=live_ast_path,
+                judge_rationale=f"rationale entry {i}",
+            )
+            + "'"
+        )
     (allowlist_dir / "plugins.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
@@ -551,6 +782,85 @@ def test_limit_caps_processed_entries(tmp_path: Path) -> None:
             include_pre_judge=False,
         )
     assert len(report.outcomes) == 2
+
+
+def test_max_calls_caps_actual_judge_calls_and_marks_sweep_incomplete(tmp_path: Path) -> None:
+    """``--max-calls`` is a judge-call budget, distinct from entry filtering."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_duplicate_widget_lookup_entries(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        count=3,
+    )
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok") as client_class:
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            max_calls=1,
+            include_pre_judge=False,
+        )
+
+    client = client_class.return_value
+    assert client.chat.completions.create.call_count == 1
+    assert len(report.outcomes) == 1
+    assert report.entries_dispatched == 1
+    assert report.total_entries == 3
+    assert report.max_judge_calls == 1
+    assert report.judge_calls_attempted == 1
+    assert "INCOMPLETE SWEEP" in render_report_text(report)
+
+
+def test_reaudit_records_structured_cost_telemetry_in_report_and_json(tmp_path: Path) -> None:
+    """Fresh judge token accounting is durable report data, not only CLI chatter."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-01T00:00:00+00:00",
+    )
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="ok", prompt_tokens=5100, cached_tokens=1200):
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            max_calls=None,
+            include_pre_judge=False,
+        )
+
+    assert report.judge_calls_attempted == 1
+    assert report.prompt_tokens_total == 5100
+    assert report.prompt_tokens_cached == 1200
+    assert report.prompt_tokens_uncached == 3900
+    outcome = report.outcomes[0]
+    assert outcome.judge_call_attempted is True
+    assert outcome.fresh_prompt_tokens_total == 5100
+    assert outcome.fresh_prompt_tokens_cached == 1200
+
+    payload = json.loads(render_report_json(report))
+    assert payload["cost_telemetry"] == {
+        "judge_calls_attempted": 1,
+        "max_judge_calls": None,
+        "prompt_tokens_total": 5100,
+        "prompt_tokens_cached": 1200,
+        "prompt_tokens_uncached": 3900,
+    }
+    assert payload["outcomes"][0]["judge_call_attempted"] is True
+    assert payload["outcomes"][0]["fresh_prompt_tokens_total"] == 5100
+    assert payload["outcomes"][0]["fresh_prompt_tokens_cached"] == 1200
 
 
 def test_include_pre_judge_off_skips_pre_judge_entries(tmp_path: Path) -> None:
@@ -596,6 +906,47 @@ def test_unsupported_rule_filter_raises(tmp_path: Path) -> None:
         )
 
 
+def test_reaudit_rule_filter_skips_entries_from_other_rule_package(tmp_path: Path) -> None:
+    """Entries outside the selected rule package are skipped before scanning."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    (allowlist_dir / "plugins.yaml").write_text(
+        "\n".join(
+            [
+                "allow_hits:",
+                f"- key: plugins/widget.py:TBE1:Widget:lookup:fp={fp}",
+                "  owner: test-owner",
+                "  reason: |-",
+                "    trust-boundary tests entry in a mixed allowlist file",
+                "  safety: |-",
+                "    Suppression gated by cicd-judge; see judge_rationale below.",
+                "  expires: '2030-01-01'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="should not be called") as client_class:
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=True,
+        )
+
+    assert report.outcomes == ()
+    assert report.total_entries == 0
+    assert report.entries_skipped_by_rule_filter == 1
+    assert client_class.call_count == 0
+    assert "entries skipped by rule_filter" in render_report_text(report)
+    assert "| _entries skipped by rule_filter_ | 1 |" in render_report_markdown(report)
+    assert json.loads(render_report_json(report))["entries_skipped_by_rule_filter"] == 1
+
+
 def test_missing_allowlist_dir_raises(tmp_path: Path) -> None:
     root, _target = _build_source_tree(tmp_path)
     with pytest.raises(ReauditError, match="not a directory"):
@@ -622,6 +973,7 @@ def _fixed_outcome(
     original_model_verdict: JudgeVerdict | None = None,
     fresh_verdict: JudgeVerdict | None,
     fresh_rationale: str | None,
+    cause: ReauditCause | None = None,
 ) -> ReauditOutcome:
     """Construct a ReauditOutcome with a deterministic timestamp.
 
@@ -640,6 +992,7 @@ def _fixed_outcome(
             judge_model_verdict=original_model_verdict,
             judge_recorded_at=datetime(2024, 1, 1, tzinfo=UTC) if original_verdict is not None else None,
             judge_model="claude-opus-4-7" if original_verdict is not None else None,
+            judge_policy_hash=JUDGE_POLICY_HASH if original_verdict is not None else None,
             judge_rationale="original rationale" if original_verdict is not None else None,
         ),
         original_verdict=original_verdict,
@@ -647,7 +1000,9 @@ def _fixed_outcome(
         fresh_verdict=fresh_verdict,
         fresh_rationale=fresh_rationale,
         fresh_recorded_at=fixed_dt if fresh_verdict is not None else None,
+        fresh_model_id=DEFAULT_JUDGE_MODEL if fresh_verdict is not None else None,
         divergence=divergence,
+        cause=cause or ReauditCause.for_divergence(divergence),
         code_snapshot="  >> 10  example code line",
     )
 
@@ -677,6 +1032,13 @@ def test_render_text_report_lists_outcomes_and_summary() -> None:
     assert "Summary:" in text
 
 
+def test_divergence_order_is_exhaustive() -> None:
+    """Every divergence enum member must have an explicit report ordering."""
+    from elspeth_lints.core.reaudit import _DIVERGENCE_ORDER
+
+    assert set(_DIVERGENCE_ORDER) == set(ReauditDivergence)
+
+
 def test_render_json_report_is_valid_json_with_enum_strings() -> None:
     outcomes = [
         _fixed_outcome(
@@ -692,22 +1054,104 @@ def test_render_json_report_is_valid_json_with_enum_strings() -> None:
     rendered = render_report_json(report)
     payload = json.loads(rendered)
     assert payload["outcomes"][0]["divergence"] == "OVERRIDE_NO_LONGER_NEEDED"
+    assert payload["outcomes"][0]["cause"] == "OPERATOR_OVERRIDE_RECHECK"
     assert payload["outcomes"][0]["original_verdict"] == "OVERRIDDEN_BY_OPERATOR"
     assert payload["outcomes"][0]["original_model_verdict"] == "BLOCKED"
     assert payload["outcomes"][0]["fresh_verdict"] == "ACCEPTED"
+    assert payload["outcomes"][0]["fresh_model_id"] == DEFAULT_JUDGE_MODEL
+    entry_payload = payload["outcomes"][0]["entry"]
+    assert "matched" not in entry_payload
+    assert set(entry_payload) == {
+        "key",
+        "owner",
+        "reason",
+        "safety",
+        "expires",
+        "file_fingerprint",
+        "ast_path",
+        "pattern",
+        "source_file",
+        "judge_verdict",
+        "judge_recorded_at",
+        "judge_model",
+        "judge_rationale",
+        "judge_confidence",
+        "judge_model_verdict",
+        "judge_policy_hash",
+        "judge_metadata_signature",
+        "judge_excerpt_redactions",
+        "audit_review",
+    }
     # Summary is a list of {divergence, count} dicts, ordered by severity.
     # SOURCE_EXCERPT_REJECTED outranks JUDGE_CALL_FAILED because the
     # former is a security signal (forged path / exfiltration attempt)
-    # while the latter is a transient transport signal. JUDGE_CALL_FAILED
-    # outranks WAS_ACCEPTED_NOW_BLOCKED because a data-collection
-    # failure (judge transport rejected the call) is more urgent than
-    # any verdict-change signal — the entry simply wasn't re-judged.
-    # The first verdict-change divergence (the most urgent operator-
-    # actionable verdict signal) is the next slot.
+    # while future-dated entries are timestamp tampering / clock-skew
+    # signals that can evade --since. JUDGE_CALL_FAILED is a transient
+    # transport signal. Classification failure is next because the
+    # judge returned but the stored/fresh verdict tuple could not be
+    # mapped. Ambiguous current finding matches rank before
+    # verdict-change divergences because the sweep did not obtain a
+    # trustworthy current finding to judge.
     summary_names = [s["divergence"] for s in payload["summary"]]
     assert summary_names[0] == "SOURCE_EXCERPT_REJECTED"
-    assert summary_names[1] == "JUDGE_CALL_FAILED"
-    assert summary_names[2] == "WAS_ACCEPTED_NOW_BLOCKED"
+    assert summary_names[1] == "FUTURE_DATED_ENTRY"
+    assert summary_names[2] == "JUDGE_CALL_FAILED"
+    assert summary_names[3] == "JUDGE_CLASSIFICATION_FAILED"
+    assert summary_names[4] == "AMBIGUOUS_FINDING_MATCH"
+    assert summary_names[5] == "WAS_ACCEPTED_NOW_BLOCKED"
+
+
+def test_cause_axis_renders_in_text_markdown_and_json() -> None:
+    outcome = _fixed_outcome(
+        key="plugins/drift.py:R1:Foo:bar:fp=aaa",
+        divergence=ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED,
+        cause=ReauditCause.MODEL_NOISE_OR_POLICY_DRIFT,
+        original_verdict=JudgeVerdict.ACCEPTED,
+        fresh_verdict=JudgeVerdict.BLOCKED,
+        fresh_rationale="fresh model blocked it",
+    )
+    report = ReauditReport.from_outcomes([outcome])
+
+    text = render_report_text(report)
+    assert "cause=MODEL_NOISE_OR_POLICY_DRIFT" in text
+
+    markdown = render_report_markdown(report)
+    assert "| Entry | Original Verdict | Fresh Verdict | Fresh Model | Cause | Notes |" in markdown
+    assert "| MODEL_NOISE_OR_POLICY_DRIFT |" in markdown
+
+    payload = json.loads(render_report_json(report))
+    assert payload["outcomes"][0]["cause"] == "MODEL_NOISE_OR_POLICY_DRIFT"
+
+
+def test_reaudit_report_records_served_model_id(tmp_path: Path) -> None:
+    """Bulk reaudit reports carry the served model id for each fresh verdict."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-01T00:00:00+00:00",
+    )
+
+    served_model = f"{DEFAULT_JUDGE_MODEL}-served-by-fallback"
+    with _mock_judge_call(verdict="ACCEPTED", rationale="still genuine", served_model=served_model):
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert len(report.outcomes) == 1
+    assert report.outcomes[0].fresh_model_id == served_model
+    assert f"model={served_model}" in render_report_text(report)
+    assert f"| {served_model} |" in render_report_markdown(report)
+    assert json.loads(render_report_json(report))["outcomes"][0]["fresh_model_id"] == served_model
 
 
 def test_render_markdown_report_snapshot() -> None:
@@ -763,6 +1207,30 @@ def test_render_markdown_report_snapshot() -> None:
     assert "`plugins/drift.py:R1:Foo:bar:fp=aaa`" in rendered
 
 
+def test_render_markdown_escapes_model_supplied_notes() -> None:
+    """Tier-3 model rationale text must not render as active markdown."""
+    report = ReauditReport.from_outcomes(
+        [
+            _fixed_outcome(
+                key="plugins/injected.py:R1:Widget:lookup:fp=aaa",
+                divergence=ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED,
+                original_verdict=JudgeVerdict.ACCEPTED,
+                fresh_verdict=JudgeVerdict.BLOCKED,
+                fresh_rationale="`code` <script>alert(1)</script> [link](https://evil.example)\x1b[31m | pipe",
+            )
+        ]
+    )
+    rendered = render_report_markdown(report)
+
+    assert "\\`code\\`" in rendered
+    assert "&lt;script&gt;alert\\(1\\)&lt;/script&gt;" in rendered
+    assert "\\[link\\]\\(https://evil.example\\)" in rendered
+    assert "\\| pipe" in rendered
+    assert "\x1b" not in rendered
+    assert "<script>" not in rendered
+    assert "[link](https://evil.example)" not in rendered
+
+
 def test_markdown_report_includes_obsolete_section() -> None:
     outcomes = [
         _fixed_outcome(
@@ -811,6 +1279,40 @@ def test_cli_reaudit_text_output(tmp_path: Path, capsys: pytest.CaptureFixture[s
     captured = capsys.readouterr()
     assert "STILL_AGREES" in captured.out
     assert "Summary:" in captured.out
+
+
+def test_cli_reaudit_emits_running_cost_progress(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-01T00:00:00+00:00",
+    )
+
+    argv = [
+        "reaudit",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--max-calls",
+        "1",
+        "--format",
+        "text",
+    ]
+    with _mock_judge_call(verdict="ACCEPTED", rationale="still good", prompt_tokens=5100, cached_tokens=1200):
+        exit_code = main(argv)
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "reaudit progress:" in captured.err
+    assert "judge_calls=1/1" in captured.err
+    assert "prompt_tokens_total=5100" in captured.err
+    assert "prompt_tokens_cached=1200" in captured.err
+    assert "prompt_tokens_uncached=3900" in captured.err
 
 
 def test_cli_reaudit_writes_output_file(tmp_path: Path) -> None:
@@ -912,6 +1414,29 @@ def test_cli_reaudit_unsupported_rule_exits_2(tmp_path: Path, capsys: pytest.Cap
     assert "not supported" in captured.err
 
 
+def test_cli_reaudit_malformed_allowlist_exits_2_without_traceback(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Allowlist loader failures are configuration diagnostics, not tracebacks."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    (allowlist_dir / "plugins.yaml").write_text("allow_hits: definitely-not-a-list\n", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "reaudit",
+            "--root",
+            str(root),
+            "--allowlist-dir",
+            str(allowlist_dir),
+        ]
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "reaudit error" in captured.err
+    assert "allow_hits must be a list" in captured.err
+    assert "Traceback" not in captured.err
+
+
 # =====================================================================
 # C3-2 / C3-3: per-entry failure isolation + sweep-completeness banner
 # (closes elspeth-9a4e54cc01)
@@ -1011,7 +1536,8 @@ def test_c3_2_sweep_continues_after_transport_failure(tmp_path: Path) -> None:
     # accepts them and reaudit iterates them in YAML order.
     lines: list[str] = ["allow_hits:"]
     for i in range(3):
-        lines.append(f"- key: plugins/widget.py:R1:Widget:lookup:fp={fp}")
+        entry_key = f"plugins/widget.py:R1:Widget:lookup:fp={fp}"
+        lines.append(f"- key: {entry_key}")
         lines.append(f"  owner: agent-{i}")
         lines.append("  reason: |-")
         lines.append("    payload is Tier-3 external data")
@@ -1021,10 +1547,21 @@ def test_c3_2_sweep_continues_after_transport_failure(tmp_path: Path) -> None:
         lines.append("  judge_verdict: ACCEPTED")
         lines.append("  judge_recorded_at: '2024-01-01T00:00:00+00:00'")
         lines.append("  judge_model: claude-opus-4-7")
+        lines.append(f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'")
         lines.append("  judge_rationale: |-")
         lines.append(f"    rationale entry {i}")
         lines.append(f"  file_fingerprint: '{live_file_fp}'")
         lines.append(f"  ast_path: '{live_ast_path}'")
+        lines.append(
+            "  judge_metadata_signature: '"
+            + _fixture_judge_metadata_signature(
+                key=entry_key,
+                file_fingerprint=live_file_fp,
+                ast_path=live_ast_path,
+                judge_rationale=f"rationale entry {i}",
+            )
+            + "'"
+        )
     (allowlist_dir / "plugins.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # Per-call side_effect: entry 1 success, entry 2 raises, entry 3
@@ -1099,6 +1636,84 @@ def test_c3_2_judge_configuration_error_still_aborts_sweep(tmp_path: Path) -> No
         )
 
 
+def test_classification_error_records_outcome_and_continues(tmp_path: Path) -> None:
+    """A per-entry classification exception must not abort the whole sweep."""
+    import elspeth_lints.core.reaudit as reaudit_module
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=2)
+
+    with (
+        _mock_judge_call(verdict="ACCEPTED", rationale="still good"),
+        patch.object(
+            reaudit_module,
+            "_classify_divergence",
+            side_effect=[ReauditError("unexpected stored/fresh verdict tuple"), ReauditDivergence.STILL_AGREES],
+        ),
+    ):
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert len(report.outcomes) == 2
+    assert report.outcomes[0].divergence is ReauditDivergence.JUDGE_CLASSIFICATION_FAILED
+    assert "unexpected stored/fresh verdict tuple" in (report.outcomes[0].fresh_rationale or "")
+    assert report.outcomes[1].divergence is ReauditDivergence.STILL_AGREES
+    assert report.entries_dispatched == report.total_entries == 2
+
+
+def test_duplicate_matching_findings_record_ambiguous_outcome(tmp_path: Path) -> None:
+    """Duplicate canonical_key matches are reported, not silently first-picked."""
+    import elspeth_lints.core.reaudit as reaudit_module
+
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    key = f"plugins/widget.py:R1:Widget:lookup:fp={fp}"
+    (allowlist_dir / "plugins.yaml").write_text(
+        "\n".join(
+            [
+                "allow_hits:",
+                f"- key: {key}",
+                "  owner: test-owner",
+                "  reason: |-",
+                "    duplicate finding ambiguity",
+                "  safety: |-",
+                "    Suppression gated by cicd-judge; see judge_rationale below.",
+                "  expires: '2030-01-01'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    duplicate_a = MagicMock(canonical_key=key, line=5)
+    duplicate_b = MagicMock(canonical_key=key, line=6)
+
+    with (
+        patch.object(reaudit_module, "_scan_findings_for_file", return_value=[duplicate_a, duplicate_b]),
+        _mock_judge_call(verdict="ACCEPTED", rationale="should not be called") as client_class,
+    ):
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=True,
+        )
+
+    assert len(report.outcomes) == 1
+    assert report.outcomes[0].divergence is ReauditDivergence.AMBIGUOUS_FINDING_MATCH
+    assert "2 finding(s)" in (report.outcomes[0].fresh_rationale or "")
+    assert client_class.call_count == 0
+
+
 def test_c3_3_entries_dispatched_equals_count_on_complete_sweep(tmp_path: Path) -> None:
     """A sweep that processes N entries reports entries_dispatched == N.
 
@@ -1116,7 +1731,8 @@ def test_c3_3_entries_dispatched_equals_count_on_complete_sweep(tmp_path: Path) 
     live_ast_path = finding.ast_path
     lines: list[str] = ["allow_hits:"]
     for i in range(5):
-        lines.append(f"- key: plugins/widget.py:R1:Widget:lookup:fp={fp}")
+        entry_key = f"plugins/widget.py:R1:Widget:lookup:fp={fp}"
+        lines.append(f"- key: {entry_key}")
         lines.append(f"  owner: agent-{i}")
         lines.append("  reason: |-")
         lines.append("    payload is Tier-3 external data")
@@ -1126,10 +1742,21 @@ def test_c3_3_entries_dispatched_equals_count_on_complete_sweep(tmp_path: Path) 
         lines.append("  judge_verdict: ACCEPTED")
         lines.append("  judge_recorded_at: '2024-01-01T00:00:00+00:00'")
         lines.append("  judge_model: claude-opus-4-7")
+        lines.append(f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'")
         lines.append("  judge_rationale: |-")
         lines.append(f"    rationale entry {i}")
         lines.append(f"  file_fingerprint: '{live_file_fp}'")
         lines.append(f"  ast_path: '{live_ast_path}'")
+        lines.append(
+            "  judge_metadata_signature: '"
+            + _fixture_judge_metadata_signature(
+                key=entry_key,
+                file_fingerprint=live_file_fp,
+                ast_path=live_ast_path,
+                judge_rationale=f"rationale entry {i}",
+            )
+            + "'"
+        )
     (allowlist_dir / "plugins.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     with _mock_judge_call(verdict="ACCEPTED", rationale="ok"):
@@ -1298,7 +1925,8 @@ def _write_n_duplicate_entries(allowlist_dir: Path, root: Path, count: int) -> P
     live_ast_path = finding.ast_path
     lines: list[str] = ["allow_hits:"]
     for i in range(count):
-        lines.append(f"- key: plugins/widget.py:R1:Widget:lookup:fp={fp}")
+        entry_key = f"plugins/widget.py:R1:Widget:lookup:fp={fp}"
+        lines.append(f"- key: {entry_key}")
         lines.append(f"  owner: agent-{i}")
         lines.append("  reason: |-")
         lines.append("    payload is Tier-3 external data")
@@ -1308,10 +1936,21 @@ def _write_n_duplicate_entries(allowlist_dir: Path, root: Path, count: int) -> P
         lines.append("  judge_verdict: ACCEPTED")
         lines.append("  judge_recorded_at: '2024-01-01T00:00:00+00:00'")
         lines.append("  judge_model: claude-opus-4-7")
+        lines.append(f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'")
         lines.append("  judge_rationale: |-")
         lines.append(f"    rationale entry {i}")
         lines.append(f"  file_fingerprint: '{live_file_fp}'")
         lines.append(f"  ast_path: '{live_ast_path}'")
+        lines.append(
+            "  judge_metadata_signature: '"
+            + _fixture_judge_metadata_signature(
+                key=entry_key,
+                file_fingerprint=live_file_fp,
+                ast_path=live_ast_path,
+                judge_rationale=f"rationale entry {i}",
+            )
+            + "'"
+        )
     target = allowlist_dir / "plugins.yaml"
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return target
@@ -1368,12 +2007,15 @@ def test_t6b_sidecar_happy_path_writes_header_outcomes_trailer(tmp_path: Path, c
     assert lines[0]["type"] == "header"
     assert lines[0]["run_id"] == run_id
     assert lines[0]["total_entries"] == 3
-    assert lines[0]["schema_version"] == 2
+    assert lines[0]["schema_version"] == 5
     assert lines[0]["rule_filter"] == "trust_tier.tier_model"
     outcome_lines = [line for line in lines if line["type"] == "outcome"]
     assert len(outcome_lines) == 3
     for outcome_line in outcome_lines:
         assert outcome_line["divergence"] == "STILL_AGREES"
+        assert outcome_line["judge_call_attempted"] is True
+        assert outcome_line["fresh_prompt_tokens_total"] == 4000
+        assert outcome_line["fresh_prompt_tokens_cached"] == 0
         # The entry payload round-tripped with the canonical key
         # produced by the live scanner.
         assert outcome_line["entry"]["key"].startswith("plugins/widget.py:R1:Widget:lookup:fp=")
@@ -1382,6 +2024,41 @@ def test_t6b_sidecar_happy_path_writes_header_outcomes_trailer(tmp_path: Path, c
     assert lines[-1]["type"] == "trailer"
     assert lines[-1]["outcomes_written"] == 3
     assert lines[-1]["run_id"] == run_id
+
+
+def test_cli_reaudit_max_calls_leaves_resumable_sidecar_without_trailer(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A spent call budget stops cleanly but keeps the sweep resumable."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="boundary still genuine"):
+        exit_code = _run_cli_reaudit(
+            root=root,
+            allowlist_dir=allowlist_dir,
+            extra_args=["--max-calls", "1"],
+        )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+    lines = _read_sidecar_lines(allowlist_dir, run_id)
+    assert sum(1 for line in lines if line["type"] == "outcome") == 1
+    assert not any(line["type"] == "trailer" for line in lines)
+    assert "INCOMPLETE SWEEP" in captured.out
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="boundary still genuine") as client_class:
+        resume_exit = _run_cli_reaudit(
+            root=root,
+            allowlist_dir=allowlist_dir,
+            extra_args=["--resume", run_id],
+        )
+
+    assert resume_exit == 0
+    assert client_class.return_value.chat.completions.create.call_count == 2
+    lines_after_resume = _read_sidecar_lines(allowlist_dir, run_id)
+    assert sum(1 for line in lines_after_resume if line["type"] == "outcome") == 3
+    assert any(line["type"] == "trailer" for line in lines_after_resume)
 
 
 def test_t6b_mid_sweep_keyboard_interrupt_leaves_no_trailer(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1561,9 +2238,9 @@ def test_t6b_fsync_called_per_outcome(tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 def test_t6b_malformed_judge_json_classifies_judge_call_failed(tmp_path: Path) -> None:
-    """A RuntimeError from _parse_judge_payload (malformed JSON) is now classified.
+    """A JudgeContractError from _parse_judge_payload is now classified.
 
-    Pre-T6b this would abort the sweep (RuntimeError propagated). The
+    Pre-T6b this would abort the sweep (contract error propagated). The
     T6b widening makes malformed-model-response a per-entry isolation
     point: the entry records JUDGE_CALL_FAILED and the sweep continues.
     """
@@ -1602,7 +2279,7 @@ def test_t6b_malformed_judge_json_classifies_judge_call_failed(tmp_path: Path) -
     assert len(report.outcomes) == 2
     assert report.outcomes[0].divergence is ReauditDivergence.JUDGE_CALL_FAILED
     rationale_0 = report.outcomes[0].fresh_rationale or ""
-    assert "RuntimeError" in rationale_0
+    assert "JudgeContractError" in rationale_0
     assert report.outcomes[1].divergence is ReauditDivergence.STILL_AGREES
 
 

@@ -20,21 +20,19 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from elspeth.contracts.config.defaults import INTERNAL_DEFAULTS, POLICY_DEFAULTS
+from elspeth.contracts.config.protocols import (
+    CheckpointSettingsProtocol,
+    ConcurrencySettingsProtocol,
+    RateLimitSettingsProtocol,
+    RetrySettingsProtocol,
+    TelemetrySettingsProtocol,
+)
 from elspeth.contracts.engine import RetryPolicy
 from elspeth.contracts.enums import _IMPLEMENTED_BACKPRESSURE_MODES, BackpressureMode, TelemetryGranularity
 from elspeth.contracts.freeze import freeze_fields, require_int
-
-if TYPE_CHECKING:
-    from elspeth.core.config import (
-        CheckpointSettings,
-        ConcurrencySettings,
-        RateLimitSettings,
-        RetrySettings,
-        TelemetrySettings,
-    )
 
 
 def _merge_policy_with_defaults(policy: RetryPolicy) -> dict[str, Any]:
@@ -209,7 +207,7 @@ class RuntimeRetryConfig:
         )
 
     @classmethod
-    def from_settings(cls, settings: "RetrySettings") -> "RuntimeRetryConfig":
+    def from_settings(cls, settings: RetrySettingsProtocol) -> "RuntimeRetryConfig":
         """Factory from RetrySettings config model.
 
         Field Mapping:
@@ -369,7 +367,7 @@ class RuntimeRateLimitConfig:
         )
 
     @classmethod
-    def from_settings(cls, settings: "RateLimitSettings") -> "RuntimeRateLimitConfig":
+    def from_settings(cls, settings: RateLimitSettingsProtocol) -> "RuntimeRateLimitConfig":
         """Factory from RateLimitSettings config model.
 
         Field Mapping (all direct, no renames):
@@ -425,7 +423,7 @@ class RuntimeConcurrencyConfig:
         return cls(max_workers=4)
 
     @classmethod
-    def from_settings(cls, settings: "ConcurrencySettings") -> "RuntimeConcurrencyConfig":
+    def from_settings(cls, settings: ConcurrencySettingsProtocol) -> "RuntimeConcurrencyConfig":
         """Factory from ConcurrencySettings config model.
 
         Field Mapping (direct, no renames):
@@ -494,7 +492,7 @@ class RuntimeCheckpointConfig:
         )
 
     @classmethod
-    def from_settings(cls, settings: "CheckpointSettings") -> "RuntimeCheckpointConfig":
+    def from_settings(cls, settings: CheckpointSettingsProtocol) -> "RuntimeCheckpointConfig":
         """Factory from CheckpointSettings config model.
 
         Field Mapping:
@@ -613,7 +611,7 @@ class RuntimeTelemetryConfig:
         )
 
     @classmethod
-    def from_settings(cls, settings: "TelemetrySettings") -> "RuntimeTelemetryConfig":
+    def from_settings(cls, settings: TelemetrySettingsProtocol) -> "RuntimeTelemetryConfig":
         """Factory from TelemetrySettings config model.
 
         Field Mapping:

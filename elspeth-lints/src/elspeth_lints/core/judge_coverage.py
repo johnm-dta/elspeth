@@ -9,14 +9,17 @@ the loader (both have ``judge_verdict is None``), so an agent who
 appends an entry by editing YAML directly produces an honest-looking
 "pre-judge" entry that erodes the audit trail.
 
-This module closes that loop. On a PR diff against the merge base,
-every new ``allow_hits`` entry MUST carry the atomic judge quartet
-(``judge_verdict + judge_recorded_at + judge_model + judge_rationale``).
-Entries already present in baseline are grandfathered — including
-true pre-judge entries that pre-date the gate. The grandfathering is
-*rotation-stable*: an entry whose fingerprint shifted because of an
-upstream AST refactor still matches its baseline counterpart, so
-refactors are not penalised by demanding fresh judge runs.
+This module closes that loop. On a diff against the PR merge base (or
+the previous commit for protected-branch pushes), every new
+``allow_hits`` entry MUST carry the signed judge metadata cluster
+(``judge_verdict + judge_recorded_at + judge_model + judge_policy_hash
++ judge_rationale + judge_metadata_signature``). Entries already
+present in baseline are grandfathered — including true pre-judge
+entries that pre-date the gate. The grandfathering is *rotation-stable*:
+an entry whose fingerprint shifted because of an upstream AST refactor
+still matches its baseline counterpart, so refactors are not penalised
+by demanding fresh judge runs. Existing judged entries are not allowed
+to mutate their judge metadata under that grandfathering identity.
 
 **Rotation policy (operator-confirmed 2026-05-23):** rotation
 grandfathers. The discriminator is ``(file_path, rule_id,
@@ -27,32 +30,45 @@ entries that happen to share the parsed-key triple (an unusual but
 legal shape that the triple alone cannot disambiguate).
 ``reaudit`` remains the surface for periodic re-judging.
 
-Boundary discipline: this module reads the standard
-``allow_hits:`` YAML shape parsed by
-``elspeth_lints.core.allowlist._parse_allow_hits``. It does NOT
-read the private legacy shapes used by some rules
-(``allow_classes:`` for ``audit_evidence.nominal_base``,
-``entries:`` for ``plugin_contract.options_metadata``,
-``entries: - commit_sha:`` for
-``enforce_telemetry_backfill_trailer``). Those shapes do not carry
-``judge_*`` fields by construction; gating them is out of scope and
-is a separate decision (file a wardline ticket if the migration
-becomes desirable).
+Boundary discipline: this module routes directories into C1 only when
+they contain the standard judge-covered ``allow_hits:`` shape parsed by
+``elspeth_lints.core.allowlist._parse_allow_hits``. Newly-added
+``per_file_rules:`` entries are surfaced as their own coverage category
+because wildcard suppressions cannot carry the judge quartet today; existing
+baseline rules are grandfathered but remain counted. Private legacy entry
+shapes such as ``allow_classes:`` or custom ``entries:`` blocks do not
+route otherwise-standalone directories into C1 because they have no judge
+metadata representation. If such a shape appears inside an already
+judge-covered directory, it is still reported as
+``UNRECOGNIZED_ENTRY_SHAPE`` so it cannot be used as an escape hatch from
+the gate.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from elspeth_lints.core.allowlist import (
     AllowlistEntry,
-    _parse_allow_hits,
 )
+from elspeth_lints.core.allowlist_io import (
+    AllowlistIOError,
+    entry_shape_count,
+    iter_yaml_documents,
+    load_yaml_mapping_text,
+    parse_allow_hits,
+)
+
+UNRECOGNIZED_ENTRY_SHAPE = "UNRECOGNIZED_ENTRY_SHAPE"
+PER_FILE_RULE_REQUIRES_JUDGE = "PER_FILE_RULE_REQUIRES_JUDGE"
+JUDGE_METADATA_MUTATED = "JUDGE_METADATA_MUTATED"
+_ALLOWLIST_ENTRY_KEYS = frozenset({"allow_hits", "allow_classes", "entries", "per_file_rules"})
+_JUDGE_COVERED_ENTRY_KEYS = frozenset({"allow_hits", "per_file_rules"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +86,30 @@ class JudgeCoverageViolation:
     entry_key: str
     source_file: str
     missing_fields: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PerFileRuleCoverageEntry:
+    """One ``per_file_rules`` entry tracked by C1 coverage.
+
+    Per-file wildcard suppressions are valid allowlist records but they cannot
+    carry per-finding judge metadata. C1 therefore diffs them separately from
+    ``allow_hits``: baseline rules are grandfathered, while newly-added or
+    behavior-changing rules are reported with
+    :data:`PER_FILE_RULE_REQUIRES_JUDGE`.
+    """
+
+    source_file: str
+    index: int
+    pattern: str
+    rules: tuple[str, ...]
+    reason: str
+    expires: str | None
+    max_hits: int | None
+
+    @property
+    def label(self) -> str:
+        return _per_file_rule_label(self.index, self.pattern, self.rules)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,13 +143,15 @@ def check_judge_coverage(
     baseline_ref: str,
     repo_root: Path,
 ) -> dict[str, JudgeCoverageReport]:
-    """Diff every ``allow_hits`` allowlist under ``allowlist_root``.
+    """Diff every judge-covered allowlist under ``allowlist_root``.
 
     ``allowlist_root`` is typically ``config/cicd``; every
-    ``enforce_*`` subdirectory whose YAML files carry
-    ``allow_hits:`` blocks is checked. Directories that use the
-    private legacy formats (``allow_classes:``, custom ``entries:``)
-    are silently skipped — see module docstring for the rationale.
+    ``enforce_*`` subdirectory whose YAML files carry judge-covered entry
+    blocks is checked. ``allow_hits:`` entries are diffed against the
+    baseline; newly-added ``per_file_rules:`` entries produce
+    ``PER_FILE_RULE_REQUIRES_JUDGE`` violations. Non-empty legacy entry
+    shapes produce ``UNRECOGNIZED_ENTRY_SHAPE`` violations only inside a
+    directory already routed into this C1 surface.
 
     The returned mapping keys are the enforce-directory names (e.g.
     ``"enforce_tier_model"``). Callers aggregate the per-directory
@@ -127,7 +169,7 @@ def check_judge_coverage(
             continue
         if not entry_dir.name.startswith("enforce_"):
             continue
-        if not _directory_has_allow_hits(entry_dir):
+        if not _directory_has_allowlist_entries(entry_dir):
             continue
         reports[entry_dir.name] = check_one_directory(
             allowlist_dir=entry_dir,
@@ -144,20 +186,33 @@ def check_one_directory(
     repo_root: Path,
 ) -> JudgeCoverageReport:
     """Diff the allow_hits entries in one enforce_* directory."""
-    head_entries = _load_entries_from_disk(allowlist_dir)
-    baseline_entries = _load_entries_from_git(
+    head_entries, head_per_file_rules, shape_violations = _load_head_from_disk(allowlist_dir)
+    baseline_entries, baseline_per_file_rules = _load_entries_from_git(
         allowlist_dir=allowlist_dir,
         baseline_ref=baseline_ref,
         repo_root=repo_root,
     )
 
-    baseline_discriminators = {_discriminator(entry) for entry in baseline_entries}
+    baseline_by_discriminator: dict[tuple[str, str, str, str, str], list[AllowlistEntry]] = {}
+    for entry in baseline_entries:
+        baseline_by_discriminator.setdefault(_discriminator(entry), []).append(entry)
+    baseline_per_file_discriminators = {_per_file_rule_discriminator(entry) for entry in baseline_per_file_rules}
 
-    violations: list[JudgeCoverageViolation] = []
+    violations: list[JudgeCoverageViolation] = list(shape_violations)
     new_count = 0
     grandfathered_count = 0
     for entry in head_entries:
-        if _discriminator(entry) in baseline_discriminators:
+        baseline_matches = baseline_by_discriminator.get(_discriminator(entry))
+        if baseline_matches is not None:
+            if not _judge_metadata_matches_any_baseline(entry, baseline_matches):
+                violations.append(
+                    JudgeCoverageViolation(
+                        entry_key=entry.key,
+                        source_file=entry.source_file,
+                        missing_fields=(JUDGE_METADATA_MUTATED,),
+                    )
+                )
+                continue
             grandfathered_count += 1
             continue
         new_count += 1
@@ -170,11 +225,23 @@ def check_one_directory(
                     missing_fields=missing,
                 )
             )
+    for per_file_entry in head_per_file_rules:
+        if _per_file_rule_discriminator(per_file_entry) in baseline_per_file_discriminators:
+            grandfathered_count += 1
+            continue
+        new_count += 1
+        violations.append(
+            JudgeCoverageViolation(
+                entry_key=per_file_entry.label,
+                source_file=per_file_entry.source_file,
+                missing_fields=(PER_FILE_RULE_REQUIRES_JUDGE,),
+            )
+        )
 
     return JudgeCoverageReport(
-        head_entry_count=len(head_entries),
+        head_entry_count=len(head_entries) + len(head_per_file_rules) + len(shape_violations),
         grandfathered_count=grandfathered_count,
-        new_entry_count=new_count,
+        new_entry_count=new_count + len(shape_violations),
         violations=tuple(violations),
     )
 
@@ -207,12 +274,28 @@ def _discriminator(entry: AllowlistEntry) -> tuple[str, str, str, str, str]:
     file_path = positional[0] if positional else entry.key
     rule_id = positional[1] if len(positional) > 1 else ""
     symbol_part = ":".join(positional[2:]) if len(positional) > 2 else ""
+    owner_norm = _normalize_text(entry.owner)
+    reason_norm = _normalize_text(entry.reason)
+    _require_substantive_discriminator_anchor("owner", owner_norm, entry)
+    _require_substantive_discriminator_anchor("reason", reason_norm, entry)
     return (
         file_path,
         rule_id,
         symbol_part,
-        _normalize_text(entry.owner),
+        owner_norm,
+        reason_norm,
+    )
+
+
+def _per_file_rule_discriminator(entry: PerFileRuleCoverageEntry) -> tuple[str, str, tuple[str, ...], str, str | None, int | None]:
+    """Return the identity tuple for one per-file wildcard suppression."""
+    return (
+        entry.source_file,
+        entry.pattern,
+        entry.rules,
         _normalize_text(entry.reason),
+        entry.expires,
+        entry.max_hits,
     )
 
 
@@ -221,17 +304,68 @@ def _normalize_text(text: str) -> str:
     return " ".join(text.split())
 
 
+def _judge_metadata_matches_any_baseline(entry: AllowlistEntry, baseline_entries: list[AllowlistEntry]) -> bool:
+    """Return whether ``entry`` preserves the judge metadata for its baseline identity."""
+    head_payload = _judge_metadata_payload(entry)
+    return any(head_payload == _judge_metadata_payload(baseline_entry) for baseline_entry in baseline_entries)
+
+
+def _judge_metadata_payload(entry: AllowlistEntry) -> tuple[object, ...] | None:
+    """Return the authenticity-bearing judge metadata for mutation comparison.
+
+    ``None`` means "pre-judge entry": there is no judge metadata to protect,
+    so rotation grandfathering remains keyed only by the discriminator.
+    Once an entry carries any judge metadata, the full binding/signature cluster
+    must remain byte-for-byte equivalent across the baseline identity.
+    """
+    if (
+        entry.judge_verdict is None
+        and entry.judge_recorded_at is None
+        and entry.judge_model is None
+        and entry.judge_policy_hash is None
+        and entry.judge_rationale is None
+        and entry.judge_metadata_signature is None
+    ):
+        return None
+    return (
+        entry.key,
+        entry.file_fingerprint,
+        entry.ast_path,
+        entry.judge_verdict,
+        entry.judge_model_verdict,
+        entry.judge_recorded_at,
+        entry.judge_model,
+        entry.judge_policy_hash,
+        entry.judge_confidence,
+        entry.judge_rationale,
+        entry.judge_excerpt_redactions,
+        entry.judge_metadata_signature,
+    )
+
+
+def _require_substantive_discriminator_anchor(field: str, value: str, entry: AllowlistEntry) -> None:
+    """Fail closed when C1 grandfathering would rely on a spoofable text anchor."""
+    if sum(1 for char in value if char.isalnum()) >= 2:
+        return
+    raise JudgeCoverageError(
+        f"{entry.source_file or '<memory>'}: allowlist entry {entry.key!r} has "
+        f"non-substantive {field} value {value!r}; judge-coverage grandfathering "
+        "relies on owner/reason as discriminator anchors and cannot safely compare "
+        "entries whose anchors are empty or trivial."
+    )
+
+
 def _missing_judge_fields(entry: AllowlistEntry) -> tuple[str, ...]:
     """Return the names of judge-metadata fields absent from ``entry``.
 
-    The atomic quartet (``judge_verdict`` + ``judge_recorded_at`` +
-    ``judge_model`` + ``judge_rationale``) is the C1 contract. The
-    optional fifth field ``judge_model_verdict`` is required only
-    when ``judge_verdict == OVERRIDDEN_BY_OPERATOR``; that invariant
-    is already enforced at load time by
-    ``_validate_judge_metadata_atomic`` (so a partially-filled
-    override entry would have crashed during HEAD parsing and never
-    reach this check). C1 therefore validates only the quartet.
+    The atomic metadata cluster (``judge_verdict`` + ``judge_recorded_at`` +
+    ``judge_model`` + ``judge_policy_hash`` + ``judge_rationale`` +
+    ``judge_metadata_signature``) is the C1 contract. The optional override field
+    ``judge_model_verdict`` is required only when ``judge_verdict ==
+    OVERRIDDEN_BY_OPERATOR``; that invariant is already enforced at load time by
+    ``_validate_judge_metadata_atomic`` (so a partially-filled override entry
+    would have crashed during HEAD parsing and never reach this check). C1
+    therefore validates only the common signed metadata cluster.
 
     A return value of ``()`` means the entry satisfies C1.
     """
@@ -242,8 +376,12 @@ def _missing_judge_fields(entry: AllowlistEntry) -> tuple[str, ...]:
         missing.append("judge_recorded_at")
     if entry.judge_model is None:
         missing.append("judge_model")
+    if entry.judge_policy_hash is None:
+        missing.append("judge_policy_hash")
     if entry.judge_rationale is None:
         missing.append("judge_rationale")
+    if entry.judge_metadata_signature is None:
+        missing.append("judge_metadata_signature")
     return tuple(missing)
 
 
@@ -252,18 +390,17 @@ def _missing_judge_fields(entry: AllowlistEntry) -> tuple[str, ...]:
 # =========================================================================
 
 
-def _directory_has_allow_hits(directory: Path) -> bool:
-    """Structural check: does ANY YAML file here carry a top-level ``allow_hits`` key?
+def _directory_has_allowlist_entries(directory: Path) -> bool:
+    """Structural check: does any YAML file carry a judge-covered entry key?
 
     Avoids the cost of full parsing downstream for directories that
-    exclusively use other shapes (``allow_classes:``,
-    per_file_rules-only).
+    contain only defaults or non-judge custom allowlist formats.
 
     **Fail-closed (C7-4a):** an ``OSError`` while reading a YAML file
     is NOT silently skipped. The gate cannot distinguish "directory
-    has no allow_hits" from "directory has unreadable allow_hits";
-    the second case is the silent-failure mode the gate exists to
-    prevent. We raise ``JudgeCoverageError`` so the CLI surfaces
+    has no allowlist entries" from "directory has unreadable allowlist
+    entries"; the second case is the silent-failure mode the gate exists
+    to prevent. We raise ``JudgeCoverageError`` so the CLI surfaces
     exit-2 (gate-broken) rather than exit-0 (gate-passed).
 
     **Fail-closed (C7-4b):** the routing check used to be a substring
@@ -271,30 +408,27 @@ def _directory_has_allow_hits(directory: Path) -> bool:
     (``"\\r\\nallow_hits:"``) and ``allow_hits:`` at start-of-file
     after a UTF-8 BOM. A missed routing decision silently excludes
     the whole directory from the gate. Replaced with a YAML parse
-    and a structural top-level-key check.
+    and a structural top-level-key check over all known entry shapes.
 
     A YAML parse failure here is *also* a fail-closed condition:
     HEAD content is our data and corruption cannot be silently
     routed away from the gate. We raise ``JudgeCoverageError``.
     """
-    for yaml_file in directory.glob("*.yaml"):
-        if yaml_file.name == "_defaults.yaml":
-            continue
+    try:
+        documents = iter_yaml_documents(directory)
+    except AllowlistIOError as exc:
+        raise JudgeCoverageError(f"while routing for allowlist entries: {exc}") from exc
+    for document in documents:
         try:
-            text = yaml_file.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise JudgeCoverageError(f"could not read {yaml_file} while routing for allow_hits: {exc}") from exc
-        try:
-            data = _load_yaml_strict(text)
-        except (yaml.YAMLError, ValueError) as exc:
-            raise JudgeCoverageError(f"{yaml_file}: failed to parse as YAML mapping while routing for allow_hits: {exc}") from exc
-        if "allow_hits" in data:
-            return True
+            if any(entry_shape_count(document.data, key, source_file=document.source_file) > 0 for key in _JUDGE_COVERED_ENTRY_KEYS):
+                return True
+        except AllowlistIOError as exc:
+            raise JudgeCoverageError(str(exc)) from exc
     return False
 
 
-def _load_entries_from_disk(allowlist_dir: Path) -> list[AllowlistEntry]:
-    """Parse every ``allow_hits`` entry in ``allowlist_dir``.
+def _load_head_from_disk(allowlist_dir: Path) -> tuple[list[AllowlistEntry], list[PerFileRuleCoverageEntry], list[JudgeCoverageViolation]]:
+    """Parse ``allow_hits`` and ``per_file_rules`` entries from HEAD.
 
     Bypasses ``load_allowlist`` to avoid the rule-specific
     ``valid_rule_ids`` coupling: C1 is rule-agnostic at the
@@ -306,33 +440,146 @@ def _load_entries_from_disk(allowlist_dir: Path) -> list[AllowlistEntry]:
     ``JudgeCoverageError`` (HEAD content is our data — bad shape is
     corruption and must crash, not silently skip).
     """
-    return list(_iterate_entries_from_directory(allowlist_dir))
+    return _iterate_head_entries_from_directory(allowlist_dir)
 
 
-def _iterate_entries_from_directory(directory: Path) -> list[AllowlistEntry]:
+def _iterate_head_entries_from_directory(
+    directory: Path,
+) -> tuple[list[AllowlistEntry], list[PerFileRuleCoverageEntry], list[JudgeCoverageViolation]]:
     entries: list[AllowlistEntry] = []
-    for yaml_file in sorted(directory.glob("*.yaml")):
-        if yaml_file.name == "_defaults.yaml":
-            continue
-        # C7-5: ``yaml.safe_load`` raises ``yaml.YAMLError`` (a sibling
-        # of ``Exception``, not a ``ValueError`` subclass). Catching
-        # only ``ValueError`` let malformed YAML escape as an uncaught
-        # traceback (exit 1, "gate broken"), masquerading as the
-        # documented exit-2 ("gate broken — surface to operator") via
-        # different output shape. We catch both so the CLI gets a
-        # ``JudgeCoverageError`` and emits a clean exit-2 with a
-        # structured message.
-        try:
-            data = _load_yaml_strict(yaml_file.read_text(encoding="utf-8"))
-        except (yaml.YAMLError, ValueError) as exc:
-            raise JudgeCoverageError(f"{yaml_file}: failed to parse as YAML mapping: {exc}") from exc
+    per_file_rules: list[PerFileRuleCoverageEntry] = []
+    shape_violations: list[JudgeCoverageViolation] = []
+    try:
+        documents = iter_yaml_documents(directory)
+    except AllowlistIOError as exc:
+        raise JudgeCoverageError(str(exc)) from exc
+    for document in documents:
         # source_root=None: judge_coverage audits the *aggregate* judge-
         # gated-fraction of persisted entries; it does not have access to
         # the source tree and would not benefit from per-entry binding
         # verification. Co-presence invariants still fire from
         # _validate_judge_metadata_atomic.
-        entries.extend(_parse_allow_hits(data, source_file=yaml_file.name, source_root=None))
+        try:
+            entries.extend(parse_allow_hits(document.data, source_file=document.source_file))
+            per_file_rules.extend(_parse_per_file_rules_for_coverage(document.data, source_file=document.source_file))
+        except AllowlistIOError as exc:
+            raise JudgeCoverageError(str(exc)) from exc
+        shape_violations.extend(_unrecognized_shape_violations(document.data, source_file=document.source_file))
+    return entries, per_file_rules, shape_violations
+
+
+def _unrecognized_shape_violations(data: dict[str, Any], *, source_file: str) -> list[JudgeCoverageViolation]:
+    """Return violations for non-empty legacy entry shapes in one YAML mapping."""
+    violations: list[JudgeCoverageViolation] = []
+    for shape_key in sorted(_ALLOWLIST_ENTRY_KEYS - {"allow_hits", "per_file_rules"}):
+        raw_entries = data.get(shape_key, [])
+        if raw_entries is None:
+            continue
+        if not isinstance(raw_entries, list):
+            raise JudgeCoverageError(f"{source_file}: {shape_key} must be a list if present")
+        for index, raw_entry in enumerate(raw_entries):
+            violations.append(
+                JudgeCoverageViolation(
+                    entry_key=_entry_shape_label(shape_key, index, raw_entry),
+                    source_file=source_file,
+                    missing_fields=(UNRECOGNIZED_ENTRY_SHAPE,),
+                )
+            )
+    return violations
+
+
+def _parse_per_file_rules_for_coverage(data: dict[str, Any], *, source_file: str) -> list[PerFileRuleCoverageEntry]:
+    """Parse ``per_file_rules`` enough for judge-coverage diffing."""
+    raw_entries = data.get("per_file_rules", [])
+    if raw_entries is None:
+        return []
+    if not isinstance(raw_entries, list):
+        raise AllowlistIOError(f"{source_file}: per_file_rules must be a list if present")
+
+    entries: list[PerFileRuleCoverageEntry] = []
+    for index, raw_entry in enumerate(raw_entries):
+        context = f"per_file_rules[{index}]"
+        if not isinstance(raw_entry, dict):
+            raise AllowlistIOError(f"{source_file}: {context} must be a mapping")
+        pattern = _required_coverage_string(raw_entry, "pattern", context=context, source_file=source_file)
+        rules = tuple(_required_coverage_string_list(raw_entry, "rules", context=context, source_file=source_file))
+        reason = _required_coverage_string(raw_entry, "reason", context=context, source_file=source_file)
+        expires = _optional_coverage_date(raw_entry, "expires", context=context, source_file=source_file)
+        max_hits = _optional_coverage_int(raw_entry, "max_hits", context=context, source_file=source_file)
+        entries.append(
+            PerFileRuleCoverageEntry(
+                source_file=source_file,
+                index=index,
+                pattern=pattern,
+                rules=rules,
+                reason=reason,
+                expires=expires,
+                max_hits=max_hits,
+            )
+        )
     return entries
+
+
+def _required_coverage_string(data: dict[str, Any], key: str, *, context: str, source_file: str) -> str:
+    if key not in data:
+        raise AllowlistIOError(f"{source_file}: {context} must include {key!r}")
+    value = data[key]
+    if not isinstance(value, str) or not value:
+        raise AllowlistIOError(f"{source_file}: {context}.{key} must be a non-empty string")
+    return value
+
+
+def _required_coverage_string_list(data: dict[str, Any], key: str, *, context: str, source_file: str) -> list[str]:
+    raw_values = data.get(key, [])
+    if not isinstance(raw_values, list):
+        raise AllowlistIOError(f"{source_file}: {context}.{key} must be a list")
+    values: list[str] = []
+    for index, raw_value in enumerate(raw_values):
+        if not isinstance(raw_value, str) or not raw_value:
+            raise AllowlistIOError(f"{source_file}: {context}.{key}[{index}] must be a non-empty string")
+        values.append(raw_value)
+    return values
+
+
+def _optional_coverage_date(data: dict[str, Any], key: str, *, context: str, source_file: str) -> str | None:
+    if key not in data or data[key] is None:
+        return None
+    value = data[key]
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str) and value:
+        try:
+            date.fromisoformat(value)
+        except ValueError as exc:
+            raise AllowlistIOError(f"{source_file}: {context}.{key} must be YYYY-MM-DD, null, or absent") from exc
+        return value
+    raise AllowlistIOError(f"{source_file}: {context}.{key} must be YYYY-MM-DD, null, or absent")
+
+
+def _optional_coverage_int(data: dict[str, Any], key: str, *, context: str, source_file: str) -> int | None:
+    if key not in data or data[key] is None:
+        return None
+    value = data[key]
+    if isinstance(value, bool):
+        raise AllowlistIOError(f"{source_file}: {context}.{key} must be an integer, not a boolean")
+    if isinstance(value, int):
+        return value
+    raise AllowlistIOError(f"{source_file}: {context}.{key} must be an integer, null, or absent")
+
+
+def _per_file_rule_label(index: int, pattern: str, rules: tuple[str, ...]) -> str:
+    return f"per_file_rules[{index}]::pattern={pattern}::rules={','.join(rules)}"
+
+
+def _entry_shape_label(shape_key: str, index: int, raw_entry: Any) -> str:
+    if isinstance(raw_entry, dict):
+        key = raw_entry.get("key")
+        if isinstance(key, str) and key:
+            return f"{shape_key}[{index}]::{key}"
+        commit_sha = raw_entry.get("commit_sha")
+        if isinstance(commit_sha, str) and commit_sha:
+            return f"{shape_key}[{index}]::commit_sha={commit_sha}"
+    return f"{shape_key}[{index}]"
 
 
 def _load_entries_from_git(
@@ -340,7 +587,7 @@ def _load_entries_from_git(
     allowlist_dir: Path,
     baseline_ref: str,
     repo_root: Path,
-) -> list[AllowlistEntry]:
+) -> tuple[list[AllowlistEntry], list[PerFileRuleCoverageEntry]]:
     """Materialise the baseline allowlist files and parse their ``allow_hits``.
 
     Uses ``git ls-tree`` to enumerate YAML files in the baseline tree
@@ -374,6 +621,7 @@ def _load_entries_from_git(
     )
 
     entries: list[AllowlistEntry] = []
+    per_file_rules: list[PerFileRuleCoverageEntry] = []
     for rel_path in file_names:
         if Path(rel_path).name == "_defaults.yaml":
             continue
@@ -390,19 +638,18 @@ def _load_entries_from_git(
         # and raise rather than silently dropping the baseline entries
         # for this file. A silent empty baseline destroys grandfathering.
         try:
-            data = _load_yaml_strict(content)
-        except (yaml.YAMLError, ValueError) as exc:
-            raise JudgeCoverageError(f"baseline {baseline_ref}:{rel_path}: failed to parse as YAML mapping: {exc}") from exc
+            data = load_yaml_mapping_text(content, source_label=f"baseline {baseline_ref}:{rel_path}")
+        except AllowlistIOError as exc:
+            raise JudgeCoverageError(str(exc)) from exc
         try:
             # source_root=None: baseline entries come from a historical
             # git ref where the source tree at that ref isn't on disk —
             # binding verification is meaningless here.
-            entries.extend(_parse_allow_hits(data, source_file=Path(rel_path).name, source_root=None))
-        except (ValueError, TypeError) as exc:
-            raise JudgeCoverageError(
-                f"baseline {baseline_ref}:{rel_path}: allow_hits entry shape violated loader invariants: {exc}"
-            ) from exc
-    return entries
+            entries.extend(parse_allow_hits(data, source_file=Path(rel_path).name))
+            per_file_rules.extend(_parse_per_file_rules_for_coverage(data, source_file=Path(rel_path).name))
+        except AllowlistIOError as exc:
+            raise JudgeCoverageError(f"baseline {baseline_ref}:{rel_path}: {exc}") from exc
+    return entries, per_file_rules
 
 
 def _relative_to_repo(allowlist_dir: Path, repo_root: Path) -> str:
@@ -419,28 +666,9 @@ def _ls_tree_yaml_files(
     repo_root: Path,
 ) -> list[str]:
     """Return baseline YAML file paths under ``rel_dir`` (or ``[]``)."""
-    result = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", baseline_ref, "--", rel_dir],
-        cwd=repo_root,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
+    result = _run_git(["ls-tree", "-r", "--name-only", baseline_ref, "--", rel_dir], repo_root=repo_root)
     if result.returncode != 0:
-        # Baseline ref invalid OR directory absent at baseline.
-        # Distinguish: invalid ref is a CI input error and must
-        # surface as an error; absent directory is legitimate "new
-        # directory in this PR" and yields empty baseline.
-        #
-        # git's stderr taxonomy is unstable across versions; the
-        # robust discriminator is "fatal: ..." which git emits for
-        # ref-resolution failures but not for "path absent from
-        # tree" (the latter produces returncode 0 with empty stdout
-        # in modern git, or a non-fatal stderr in older versions).
-        stderr = (result.stderr or "").strip()
-        if stderr.lower().startswith("fatal:"):
-            raise JudgeCoverageError(f"git ls-tree could not resolve baseline-ref {baseline_ref!r}: {stderr}")
-        return []
+        raise JudgeCoverageError(f"git ls-tree could not inspect baseline-ref {baseline_ref!r}: {_git_failure_detail(result)}")
     return [line for line in result.stdout.splitlines() if line]
 
 
@@ -451,25 +679,49 @@ def _git_show(
     repo_root: Path,
 ) -> str | None:
     """Return file content at ``baseline_ref`` or ``None`` if not in tree."""
-    result = subprocess.run(
-        ["git", "show", f"{baseline_ref}:{rel_path}"],
-        cwd=repo_root,
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    if result.returncode != 0:
+    result = _run_git(["show", f"{baseline_ref}:{rel_path}"], repo_root=repo_root)
+    if result.returncode == 0:
+        return result.stdout
+
+    if not _git_commit_exists(baseline_ref=baseline_ref, repo_root=repo_root):
+        raise JudgeCoverageError(f"git show could not resolve baseline-ref {baseline_ref!r}: {_git_failure_detail(result)}")
+    if not _git_path_exists(baseline_ref=baseline_ref, rel_path=rel_path, repo_root=repo_root):
         return None
-    return result.stdout
+    raise JudgeCoverageError(f"git show failed for baseline {baseline_ref}:{rel_path}: {_git_failure_detail(result)}")
 
 
-def _load_yaml_strict(text: str) -> dict[str, Any]:
-    """Parse a YAML string into a mapping; reject non-mapping shapes.
+def _run_git(args: list[str], *, repo_root: Path) -> subprocess.CompletedProcess[str]:
+    """Run git with a stable C locale so diagnostics are not localized."""
+    env = os.environ.copy()
+    env["LC_ALL"] = "C"
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo_root,
+            capture_output=True,
+            check=False,
+            text=True,
+            env=env,
+        )
+    except OSError as exc:
+        raise JudgeCoverageError(f"git command failed to start: {exc}") from exc
 
-    Mirrors ``elspeth_lints.core.allowlist._load_yaml_file`` but takes
-    text rather than a path, so it composes with ``git show``.
-    """
-    raw = yaml.safe_load(text) or {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"YAML root must be a mapping, got {type(raw).__name__}")
-    return raw
+
+def _git_commit_exists(*, baseline_ref: str, repo_root: Path) -> bool:
+    result = _run_git(["rev-parse", "--verify", "--quiet", f"{baseline_ref}^{{commit}}"], repo_root=repo_root)
+    return result.returncode == 0
+
+
+def _git_path_exists(*, baseline_ref: str, rel_path: str, repo_root: Path) -> bool:
+    result = _run_git(["cat-file", "-e", f"{baseline_ref}:{rel_path}"], repo_root=repo_root)
+    return result.returncode == 0
+
+
+def _git_failure_detail(result: subprocess.CompletedProcess[str]) -> str:
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    if stderr:
+        return stderr
+    if stdout:
+        return stdout
+    return f"git exited with status {result.returncode}"

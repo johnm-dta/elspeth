@@ -20,10 +20,12 @@ underlying durability behaviour is preserved while we count calls.
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,7 @@ from elspeth_lints.core.atomic_io import (
     AtomicWriteShortWriteError,
     _lock_path_for,
     _temp_path_for,
+    atomic_update_text,
     atomic_write_text,
 )
 
@@ -164,6 +167,37 @@ def test_lock_false_skips_locking(tmp_path: Path) -> None:
     assert target.read_text() == "payload\n"
     # No lockfile created on this path.
     assert not _lock_path_for(target).exists()
+
+
+def test_atomic_update_text_serializes_read_modify_write(tmp_path: Path) -> None:
+    """Compound updates see the latest on-disk text while holding the lock."""
+    target = tmp_path / "allowlist.yaml"
+    target.write_text("", encoding="utf-8")
+    labels = ("first", "second")
+    start_barrier = threading.Barrier(len(labels))
+    observed_inputs: list[str | None] = []
+    observed_lock = threading.Lock()
+
+    def append(label: str) -> None:
+        start_barrier.wait(timeout=5)
+
+        def update(current: str | None) -> str:
+            with observed_lock:
+                observed_inputs.append(current)
+            time.sleep(0.05)
+            return (current or "") + f"{label}\n"
+
+        atomic_update_text(target, update)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(labels)) as executor:
+        futures = [executor.submit(append, label) for label in labels]
+        for future in futures:
+            future.result(timeout=10)
+
+    written = target.read_text(encoding="utf-8")
+    assert set(written.splitlines()) == set(labels)
+    assert observed_inputs.count("") == 1
+    assert any(value in {"first\n", "second\n"} for value in observed_inputs)
 
 
 def test_missing_parent_directory_raises(tmp_path: Path) -> None:

@@ -21,12 +21,52 @@ See ``B2`` in the cicd-judge-cli prototype review.
 from __future__ import annotations
 
 import hashlib
+import hmac
+import json
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from elspeth_lints.core.allowlist import JudgeVerdict, load_allowlist
+from elspeth_lints.core.judge import JUDGE_POLICY_HASH
+from elspeth_lints.core.source_excerpt import RedactionRecord
+
+_TEST_JUDGE_METADATA_HMAC_KEY = "test-judge-metadata-hmac-key-2026-05-24"
+
+
+def _expected_judge_metadata_signature(
+    *,
+    key: str,
+    file_fingerprint: str,
+    ast_path: str,
+    judge_verdict: str = "ACCEPTED",
+    judge_model_verdict: str | None = None,
+    judge_recorded_at: str = "2026-05-23T00:00:00+00:00",
+    judge_model: str = "anthropic/claude-opus-4-7",
+    judge_rationale: str = "judge accepted the suppression",
+    judge_policy_hash: str = JUDGE_POLICY_HASH,
+    judge_excerpt_redactions: tuple[dict[str, int | str], ...] = (),
+) -> str:
+    """Return the v1 judge-metadata HMAC used by signed fixture YAML."""
+    payload = {
+        "version": 1,
+        "key": key,
+        "file_fingerprint": file_fingerprint,
+        "ast_path": ast_path,
+        "judge_verdict": judge_verdict,
+        "judge_model_verdict": judge_model_verdict,
+        "judge_recorded_at": judge_recorded_at,
+        "judge_model": judge_model,
+        "judge_rationale": judge_rationale,
+        "judge_policy_hash": judge_policy_hash,
+        "judge_excerpt_redactions": list(judge_excerpt_redactions),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    digest = hmac.new(_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
+    return f"hmac-sha256:v1:{digest}"
+
 
 # ---------------------------------------------------------------------------
 # Invariant 1: OVERRIDDEN_BY_OPERATOR entries must record judge_model_verdict
@@ -50,6 +90,7 @@ def test_override_entry_without_judge_model_verdict_crashes(tmp_path: Path) -> N
             judge_verdict: OVERRIDDEN_BY_OPERATOR
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: model said BLOCKED but we proceed
             file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
             ast_path: "body[0]"
@@ -84,6 +125,7 @@ def test_non_override_entry_with_judge_model_verdict_crashes(tmp_path: Path) -> 
             judge_verdict: ACCEPTED
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: judge agrees
             judge_model_verdict: ACCEPTED  # fabricated divergence on a non-override entry
             file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -104,7 +146,7 @@ def test_non_override_entry_with_judge_model_verdict_crashes(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(
     "missing_field",
-    ["judge_recorded_at", "judge_model", "judge_rationale"],
+    ["judge_recorded_at", "judge_model", "judge_rationale", "judge_policy_hash"],
 )
 def test_partial_post_judge_entry_crashes(tmp_path: Path, missing_field: str) -> None:
     """A ``judge_verdict`` without the full companion-set is corruption.
@@ -120,6 +162,7 @@ def test_partial_post_judge_entry_crashes(tmp_path: Path, missing_field: str) ->
         "judge_recorded_at": "2026-05-01T10:00:00+00:00",
         "judge_model": "claude-opus-4-7",
         "judge_rationale": "judge agrees",
+        "judge_policy_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
     }
     del fields[missing_field]
     body = "\n".join(f"            {key}: {value}" for key, value in fields.items())
@@ -149,6 +192,7 @@ def test_partial_post_judge_entry_crashes(tmp_path: Path, missing_field: str) ->
         ("judge_model", "claude-opus-4-7"),
         ("judge_rationale", "stale rationale text"),
         ("judge_model_verdict", "ACCEPTED"),
+        ("judge_policy_hash", "sha256:0000000000000000000000000000000000000000000000000000000000000000"),
     ],
 )
 def test_pre_judge_entry_with_stray_field_crashes(tmp_path: Path, stray_field: str, stray_value: str) -> None:
@@ -199,6 +243,7 @@ def test_fully_populated_override_entry_round_trips(tmp_path: Path) -> None:
             judge_verdict: OVERRIDDEN_BY_OPERATOR
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: "model said: this should be fixed in code"
             judge_model_verdict: BLOCKED
             file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -255,6 +300,7 @@ def test_fully_populated_non_override_entry_round_trips(tmp_path: Path) -> None:
             judge_verdict: ACCEPTED
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: judge agrees
             file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
             ast_path: "body[0]"
@@ -266,6 +312,123 @@ def test_fully_populated_non_override_entry_round_trips(tmp_path: Path) -> None:
     entry = al.entries[0]
     assert entry.judge_verdict is JudgeVerdict.ACCEPTED
     assert entry.judge_model_verdict is None  # absence is the signal: no divergence
+
+
+def test_non_utc_judge_recorded_at_round_trips_as_timezone_aware(tmp_path: Path) -> None:
+    """The loader accepts aware ISO timestamps with non-UTC offsets."""
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: test-agent
+            reason: tier-3 boundary
+            safety: low
+            judge_verdict: ACCEPTED
+            judge_recorded_at: 2026-05-01T10:00:00+09:30
+            judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+            judge_rationale: judge agrees
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+
+    entry = load_allowlist(path, valid_rule_ids=set()).entries[0]
+
+    assert entry.judge_recorded_at is not None
+    assert entry.judge_recorded_at.isoformat() == "2026-05-01T10:00:00+09:30"
+
+
+def test_naive_judge_recorded_at_crashes(tmp_path: Path) -> None:
+    """Judge timestamps must carry an explicit timezone offset."""
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: test-agent
+            reason: tier-3 boundary
+            safety: low
+            judge_verdict: ACCEPTED
+            judge_recorded_at: '2026-05-01T10:00:00'
+            judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+            judge_rationale: judge agrees
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+
+    with pytest.raises(ValueError, match=r"allow_hits\[0\]\.judge_recorded_at.*timezone offset"):
+        load_allowlist(path, valid_rule_ids=set())
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["judge_verdict", "judge_model_verdict"],
+)
+def test_invalid_judge_verdict_enum_values_crash(tmp_path: Path, field: str) -> None:
+    """Verdict fields are closed enums; unknown values are corruption."""
+    values = {
+        "judge_verdict": "OVERRIDDEN_BY_OPERATOR" if field == "judge_model_verdict" else "NOT_A_VERDICT",
+        "judge_model_verdict": "NOT_A_VERDICT" if field == "judge_model_verdict" else "BLOCKED",
+    }
+    yaml = textwrap.dedent(f"""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: test-agent
+            reason: tier-3 boundary
+            safety: low
+            judge_verdict: {values["judge_verdict"]}
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+            judge_rationale: judge agrees
+            judge_model_verdict: {values["judge_model_verdict"]}
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+
+    with pytest.raises(ValueError, match=rf"allow_hits\[0\]\.{field}.*one of"):
+        load_allowlist(path, valid_rule_ids=set())
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["owner", "reason", "judge_model", "judge_policy_hash", "judge_rationale", "file_fingerprint", "ast_path"],
+)
+def test_empty_string_audit_fields_crash(tmp_path: Path, field: str) -> None:
+    """Required audit anchors and judge binding fields may not be empty strings."""
+    values = {
+        "owner": "test-agent",
+        "reason": "tier-3 boundary",
+        "judge_model": "claude-opus-4-7",
+        "judge_policy_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "judge_rationale": "judge agrees",
+        "file_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+        "ast_path": "body[0]",
+    }
+    values[field] = ""
+    yaml = textwrap.dedent(f"""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: {values["owner"]!r}
+            reason: {values["reason"]!r}
+            safety: low
+            judge_verdict: ACCEPTED
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: {values["judge_model"]!r}
+            judge_policy_hash: {values["judge_policy_hash"]!r}
+            judge_rationale: {values["judge_rationale"]!r}
+            file_fingerprint: {values["file_fingerprint"]!r}
+            ast_path: {values["ast_path"]!r}
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+
+    with pytest.raises(ValueError, match=rf"allow_hits\[0\]\.{field}.*non-empty"):
+        load_allowlist(path, valid_rule_ids=set())
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +456,7 @@ def test_judge_verdict_blocked_on_disk_crashes(tmp_path: Path) -> None:
             judge_verdict: BLOCKED
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: judge said BLOCKED but somebody wrote the entry anyway
     """).strip()
     path = tmp_path / "al.yaml"
@@ -318,6 +482,7 @@ def test_judge_model_verdict_blocked_on_non_override_entry_crashes(tmp_path: Pat
             judge_verdict: ACCEPTED
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: judge agrees
             judge_model_verdict: BLOCKED
     """).strip()
@@ -350,6 +515,7 @@ def test_override_with_judge_model_verdict_blocked_round_trips(tmp_path: Path) -
             judge_verdict: OVERRIDDEN_BY_OPERATOR
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: model said BLOCKED; operator proceeds anyway
             judge_model_verdict: BLOCKED
             file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -362,6 +528,64 @@ def test_override_with_judge_model_verdict_blocked_round_trips(tmp_path: Path) -
     entry = al.entries[0]
     assert entry.judge_verdict is JudgeVerdict.OVERRIDDEN_BY_OPERATOR
     assert entry.judge_model_verdict is JudgeVerdict.BLOCKED
+
+
+def test_judge_model_verdict_rejects_operator_override_value(tmp_path: Path) -> None:
+    """``judge_model_verdict`` records the model's answer, never the operator action."""
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: operator
+            reason: shipping under deadline
+            safety: low
+            judge_verdict: OVERRIDDEN_BY_OPERATOR
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+            judge_rationale: model said BLOCKED but we proceed
+            judge_model_verdict: OVERRIDDEN_BY_OPERATOR
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+
+    with pytest.raises(ValueError, match=r"allow_hits\[0\]\.judge_model_verdict.*model verdict"):
+        load_allowlist(path, valid_rule_ids=set())
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("owner", "x"),
+        ("owner", "."),
+        ("reason", "x"),
+        ("reason", "."),
+    ],
+)
+def test_owner_and_reason_must_be_substantive_discriminator_anchors(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    """The C1 grandfathering discriminator cannot rely on trivial anchors."""
+    values = {
+        "owner": "qa",
+        "reason": "real boundary reason",
+    }
+    values[field] = value
+    yaml = textwrap.dedent(f"""
+        allow_hits:
+          - key: "a:b:c:fp=1"
+            owner: {values["owner"]!r}
+            reason: {values["reason"]!r}
+            safety: low
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+
+    with pytest.raises(ValueError, match=rf"allow_hits\[0\]\.{field}.*substantive"):
+        load_allowlist(path, valid_rule_ids=set())
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +618,7 @@ def test_whitespace_only_rationale_on_post_judge_entry_crashes(tmp_path: Path) -
             judge_verdict: ACCEPTED
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: "   "
             file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
             ast_path: "body[0]"
@@ -439,6 +664,7 @@ def test_post_judge_entry_missing_file_fingerprint_crashes(tmp_path: Path) -> No
             judge_verdict: ACCEPTED
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: judge agrees
             ast_path: "body[0]"
             # file_fingerprint deliberately omitted — quartet is unbound.
@@ -460,6 +686,7 @@ def test_post_judge_entry_missing_ast_path_crashes(tmp_path: Path) -> None:
             judge_verdict: ACCEPTED
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: judge agrees
             file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
             # ast_path deliberately omitted — in-file transplant possible.
@@ -506,26 +733,47 @@ def _write_judge_gated_yaml(
     key: str,
     file_fingerprint: str,
     ast_path: str,
+    signature_key: str | None = _TEST_JUDGE_METADATA_HMAC_KEY,
+    judge_excerpt_redactions: tuple[dict[str, int | str], ...] = (),
 ) -> None:
     """Write one judge-gated allowlist entry to ``yaml_path``."""
-    yaml_path.write_text(
-        textwrap.dedent(f"""\
-            allow_hits:
-              - key: {key}
-                owner: test-agent
-                reason: tier-3 boundary
-                safety: low
-                judge_verdict: ACCEPTED
-                judge_recorded_at: '2026-05-23T00:00:00+00:00'
-                judge_model: anthropic/claude-opus-4
-                judge_rationale: judge accepted the suppression
-                file_fingerprint: '{file_fingerprint}'
-                ast_path: '{ast_path}'
-            """)
-    )
+    lines = [
+        "allow_hits:",
+        f"  - key: {key}",
+        "    owner: test-agent",
+        "    reason: tier-3 boundary",
+        "    safety: low",
+        "    judge_verdict: ACCEPTED",
+        "    judge_recorded_at: '2026-05-23T00:00:00+00:00'",
+        "    judge_model: anthropic/claude-opus-4-7",
+        f"    judge_policy_hash: '{JUDGE_POLICY_HASH}'",
+        "    judge_rationale: judge accepted the suppression",
+        f"    file_fingerprint: '{file_fingerprint}'",
+        f"    ast_path: '{ast_path}'",
+    ]
+    if judge_excerpt_redactions:
+        lines.append("    judge_excerpt_redactions:")
+        for redaction in judge_excerpt_redactions:
+            lines.extend(
+                [
+                    f"      - pattern: {redaction['pattern']}",
+                    f"        byte_count: {redaction['byte_count']}",
+                    f"        redacted_hash: {redaction['redacted_hash']}",
+                ]
+            )
+    if signature_key is not None:
+        assert signature_key == _TEST_JUDGE_METADATA_HMAC_KEY
+        signature = _expected_judge_metadata_signature(
+            key=key,
+            file_fingerprint=file_fingerprint,
+            ast_path=ast_path,
+            judge_excerpt_redactions=judge_excerpt_redactions,
+        )
+        lines.append(f"    judge_metadata_signature: '{signature}'")
+    yaml_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def test_transplanted_quartet_across_files_fails_at_load(tmp_path: Path) -> None:
+def test_transplanted_quartet_across_files_fails_at_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """C8-3 cross-file transplant: copying quartet+binding from file A onto an entry keyed at file B fails.
 
     Setup: two source files (a.py, b.py) with different bytes. A
@@ -545,6 +793,7 @@ def test_transplanted_quartet_across_files_fails_at_load(tmp_path: Path) -> None
     a_fp = hashlib.sha256(a_path.read_bytes()).hexdigest()
     b_fp = hashlib.sha256(b_path.read_bytes()).hexdigest()
     assert a_fp != b_fp  # sanity: the files MUST differ
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
 
     allowlist = tmp_path / "allowlist.yaml"
     # The transplant: key points at b.py, but file_fingerprint is a's.
@@ -566,7 +815,7 @@ def test_transplanted_quartet_across_files_fails_at_load(tmp_path: Path) -> None
     assert b_fp in message  # the live (correct) fingerprint
 
 
-def test_source_drift_after_judge_verdict_fails_at_load(tmp_path: Path) -> None:
+def test_source_drift_after_judge_verdict_fails_at_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """C8-3 source-drift: editing the source after the verdict invalidates the binding.
 
     Scenario: the judge accepted a suppression at a particular file
@@ -579,6 +828,7 @@ def test_source_drift_after_judge_verdict_fails_at_load(tmp_path: Path) -> None:
     source_root = tmp_path / "src"
     src_path = _write_source(source_root, "drifty.py", "# original content\n")
     original_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
 
     allowlist = tmp_path / "allowlist.yaml"
     _write_judge_gated_yaml(
@@ -597,6 +847,175 @@ def test_source_drift_after_judge_verdict_fails_at_load(tmp_path: Path) -> None:
     src_path.write_text("# completely different content with bug\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match=r"file_fingerprint mismatch.*drifty\.py"):
+        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+
+def test_signed_judge_metadata_round_trips_with_source_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A source-root production load accepts a valid HMAC-bound judge record."""
+    source_root = tmp_path / "src"
+    src_path = _write_source(source_root, "signed.py", "payload = {'name': 'Ada'}\n")
+    file_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    key = "signed.py:R1:fn:fp=somehash"
+    ast_path = "body[0]"
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key=key,
+        file_fingerprint=file_fp,
+        ast_path=ast_path,
+    )
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    loaded = load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+    assert len(loaded.entries) == 1
+    assert loaded.entries[0].judge_metadata_signature == _expected_judge_metadata_signature(
+        key=key,
+        file_fingerprint=file_fp,
+        ast_path=ast_path,
+    )
+
+
+def test_judge_excerpt_redactions_round_trip_from_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Writer-emitted redaction records are parsed as structured audit data."""
+    source_root = tmp_path / "src"
+    src_path = _write_source(source_root, "redacted.py", "token = 'AWS_ACCESS_KEY_REDACTED_PLACEHOLDER'\n")
+    file_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    key = "redacted.py:R1:fn:fp=somehash"
+    ast_path = "body[0]"
+    redactions = (
+        {
+            "pattern": "aws_access_key",
+            "byte_count": 20,
+            "redacted_hash": "0123456789abcdef",
+        },
+    )
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key=key,
+        file_fingerprint=file_fp,
+        ast_path=ast_path,
+        judge_excerpt_redactions=redactions,
+    )
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    loaded = load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+    assert loaded.entries[0].judge_excerpt_redactions == (
+        RedactionRecord(pattern_name="aws_access_key", byte_count=20, redacted_hash="0123456789abcdef"),
+    )
+
+
+def test_malformed_judge_excerpt_redactions_fail_closed(tmp_path: Path) -> None:
+    """Malformed redaction metadata must not remain presence-only YAML."""
+    yaml = textwrap.dedent("""
+        allow_hits:
+          - key: "a.py:R1:fn:fp=somehash"
+            owner: agent
+            reason: tier-3 boundary
+            safety: low
+            judge_verdict: ACCEPTED
+            judge_recorded_at: 2026-05-01T10:00:00+00:00
+            judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+            judge_rationale: judge agrees
+            file_fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+            ast_path: "body[0]"
+            judge_excerpt_redactions:
+              - pattern: aws_access_key
+                byte_count: -1
+                redacted_hash: 0123456789abcdef
+    """).strip()
+    path = tmp_path / "al.yaml"
+    path.write_text(yaml)
+
+    with pytest.raises(ValueError, match=r"judge_excerpt_redactions\[0\]\.byte_count.*positive"):
+        load_allowlist(path, valid_rule_ids=set())
+
+
+def test_post_judge_entry_missing_signature_fails_at_source_root_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production loads must reject unsigned post-judge metadata."""
+    source_root = tmp_path / "src"
+    src_path = _write_source(source_root, "unsigned.py", "payload = {'name': 'Ada'}\n")
+    file_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key="unsigned.py:R1:fn:fp=somehash",
+        file_fingerprint=file_fp,
+        ast_path="body[0]",
+        signature_key=None,
+    )
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    with pytest.raises(ValueError, match=r"allow_hits\[0\].*judge_metadata_signature.*missing"):
+        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda text: text.replace("judge_rationale: judge accepted the suppression", "judge_rationale: softened rationale"),
+        lambda text: text.replace("judge_model: anthropic/claude-opus-4-7", "judge_model: anthropic/claude-sonnet-4"),
+        lambda text: text.replace(JUDGE_POLICY_HASH, "sha256:" + "1" * 64),
+        lambda text: text.replace(
+            "judge_recorded_at: '2026-05-23T00:00:00+00:00'",
+            "judge_recorded_at: '2026-05-24T00:00:00+00:00'",
+        ),
+        lambda text: text.replace(
+            "judge_verdict: ACCEPTED",
+            "judge_verdict: OVERRIDDEN_BY_OPERATOR\n    judge_model_verdict: ACCEPTED",
+        ),
+    ],
+)
+def test_tampered_judge_metadata_signature_fails_at_source_root_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutate: Callable[[str], str],
+) -> None:
+    """Editing the verdict quartet without recomputing the HMAC is rejected."""
+    source_root = tmp_path / "src"
+    src_path = _write_source(source_root, "tampered.py", "payload = {'name': 'Ada'}\n")
+    file_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key="tampered.py:R1:fn:fp=somehash",
+        file_fingerprint=file_fp,
+        ast_path="body[0]",
+    )
+    original = allowlist.read_text(encoding="utf-8")
+    tampered = mutate(original)
+    assert tampered != original
+    allowlist.write_text(tampered, encoding="utf-8")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    with pytest.raises(ValueError, match=r"allow_hits\[0\].*judge_metadata_signature.*mismatch"):
+        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+
+def test_signed_judge_metadata_requires_hmac_key_at_source_root_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signature cannot be verified honestly when the deployment key is absent."""
+    source_root = tmp_path / "src"
+    src_path = _write_source(source_root, "needs_key.py", "payload = {'name': 'Ada'}\n")
+    file_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key="needs_key.py:R1:fn:fp=somehash",
+        file_fingerprint=file_fp,
+        ast_path="body[0]",
+    )
+    monkeypatch.delenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", raising=False)
+
+    with pytest.raises(ValueError, match=r"ELSPETH_JUDGE_METADATA_HMAC_KEY"):
         load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
 
 
@@ -619,6 +1038,7 @@ def test_load_without_source_root_skips_recompute_but_still_requires_binding(tmp
             judge_verdict: ACCEPTED
             judge_recorded_at: 2026-05-01T10:00:00+00:00
             judge_model: claude-opus-4-7
+            judge_policy_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
             judge_rationale: judge agrees
     """).strip()
     path = tmp_path / "al.yaml"

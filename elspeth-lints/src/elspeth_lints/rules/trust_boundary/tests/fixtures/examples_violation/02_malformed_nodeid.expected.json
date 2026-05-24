@@ -1,0 +1,12 @@
+[
+  {
+    "column": 1,
+    "file_path": "bad.py",
+    "fingerprint": "17397e419f4c083c",
+    "line": 4,
+    "message": "@trust_boundary test_ref 'tests/test_no_sep.py' is not a pytest nodeid with a file and function segment separated by '::'.",
+    "rule_id": "TBE2",
+    "severity": "error",
+    "suggestion": "test_ref nodeid does not resolve. Verify the file path (relative to the repository root) and the test function name. Format: 'tests/path/to/test_file.py::test_function_name'."
+  }
+]

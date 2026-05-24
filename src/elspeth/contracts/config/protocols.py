@@ -28,11 +28,69 @@ Note on jitter:
     the value is always provided by RuntimeRetryConfig's factory methods.
 """
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from elspeth.contracts.config.runtime import ExporterConfig
     from elspeth.contracts.enums import BackpressureMode, TelemetryGranularity
+
+
+class RetrySettingsProtocol(Protocol):
+    """Settings-side shape needed to build RuntimeRetryConfig."""
+
+    max_attempts: int
+    initial_delay_seconds: float
+    max_delay_seconds: float
+    exponential_base: float
+
+
+class ServiceRateLimitSettingsProtocol(Protocol):
+    """Settings-side shape for one service rate-limit override."""
+
+    requests_per_minute: int
+
+
+class RateLimitSettingsProtocol(Protocol):
+    """Settings-side shape needed to build RuntimeRateLimitConfig."""
+
+    enabled: bool
+    default_requests_per_minute: int
+    persistence_path: str | None
+    services: Mapping[str, ServiceRateLimitSettingsProtocol]
+
+
+class ConcurrencySettingsProtocol(Protocol):
+    """Settings-side shape needed to build RuntimeConcurrencyConfig."""
+
+    max_workers: int
+
+
+class CheckpointSettingsProtocol(Protocol):
+    """Settings-side shape needed to build RuntimeCheckpointConfig."""
+
+    enabled: bool
+    frequency: str
+    checkpoint_interval: int | None
+    aggregation_boundaries: bool
+
+
+class TelemetryExporterSettingsProtocol(Protocol):
+    """Settings-side shape for one telemetry exporter config."""
+
+    name: str
+    options: Mapping[str, Any]
+
+
+class TelemetrySettingsProtocol(Protocol):
+    """Settings-side shape needed to build RuntimeTelemetryConfig."""
+
+    enabled: bool
+    granularity: str
+    backpressure_mode: str
+    fail_on_total_exporter_failure: bool
+    max_consecutive_failures: int
+    exporters: Sequence[TelemetryExporterSettingsProtocol]
 
 
 @runtime_checkable

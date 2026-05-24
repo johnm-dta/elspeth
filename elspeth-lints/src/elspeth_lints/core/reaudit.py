@@ -39,9 +39,10 @@ roles are distinct.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -51,7 +52,7 @@ from elspeth_lints.core.allowlist import (
     JudgeVerdict,
     load_allowlist,
 )
-from elspeth_lints.core.judge import JudgeRequest, call_judge
+from elspeth_lints.core.judge import JudgeContractError, JudgeRequest, JudgeTransportError, call_judge
 
 if TYPE_CHECKING:
     # ``RedactionRecord`` is the audit primitive emitted by the
@@ -98,12 +99,13 @@ class ReauditDivergence(StrEnum):
     finding no longer exists in the source. The judge is *not* called
     for these — there is nothing for the model to evaluate.
 
-    ``JUDGE_CALL_FAILED`` is the transport-failure path: the judge call
-    raised an SDK-level transport error (network, timeout, rate-limit,
-    5xx) and the entry could not be re-judged on this sweep. The entry
+    ``JUDGE_CALL_FAILED`` is the judge-boundary failure path: the judge
+    call raised an SDK-level transport error (network, timeout,
+    rate-limit, 5xx) or the model response violated the output
+    contract. The entry could not be re-judged on this sweep. The entry
     is *not* obsolete and its prior verdict is *not* refreshed — the
-    operator must rerun once the transport problem is resolved. The
-    exception classname + message is captured in ``fresh_rationale``
+    operator must rerun once the transport/contract problem is resolved.
+    The exception classname + message is captured in ``fresh_rationale``
     so the report carries the diagnostic without needing the original
     stderr. Closes elspeth-9a4e54cc01 / C3-2.
     """
@@ -124,16 +126,81 @@ class ReauditDivergence(StrEnum):
     # "investigate the YAML for tampering" and never goes away on a
     # naive rerun. Closes elspeth-ebb2b88753 / C3-4.
     SOURCE_EXCERPT_REJECTED = "SOURCE_EXCERPT_REJECTED"
+    # The judge returned a fresh verdict, but the stored/fresh verdict
+    # tuple could not be mapped by the divergence matrix. This is
+    # per-entry data/schema corruption, not a system-level sweep failure.
+    JUDGE_CLASSIFICATION_FAILED = "JUDGE_CLASSIFICATION_FAILED"
+    # The entry carries a judge_recorded_at later than the reaudit
+    # reference time. A future-dated audit timestamp can evade --since
+    # windows, so it is surfaced as a tampering/clock-skew signal before
+    # the judge is called.
+    FUTURE_DATED_ENTRY = "FUTURE_DATED_ENTRY"
+    # The current scanner returned more than one finding whose canonical key
+    # matches the allowlist entry. Picking one would hide duplicate-key drift.
+    AMBIGUOUS_FINDING_MATCH = "AMBIGUOUS_FINDING_MATCH"
+
+
+class ReauditCause(StrEnum):
+    """Triage cause axis for a reaudit outcome.
+
+    ``ReauditDivergence`` remains the stored/fresh verdict transition.
+    This enum is a separate operator-facing cause class. It is deliberately
+    conservative: a single fresh model response cannot prove whether a verdict
+    flip came from policy drift, model drift, or residual sampling noise, so
+    those cases stay grouped as ``MODEL_NOISE_OR_POLICY_DRIFT`` rather than
+    fabricating a more precise root cause.
+    """
+
+    NO_CHANGE = "NO_CHANGE"
+    MODEL_NOISE_OR_POLICY_DRIFT = "MODEL_NOISE_OR_POLICY_DRIFT"
+    OPERATOR_OVERRIDE_RECHECK = "OPERATOR_OVERRIDE_RECHECK"
+    PRE_JUDGE_BASELINE = "PRE_JUDGE_BASELINE"
+    CODE_DRIFT = "CODE_DRIFT"
+    SOURCE_EVIDENCE_REJECTED = "SOURCE_EVIDENCE_REJECTED"
+    JUDGE_BOUNDARY_FAILURE = "JUDGE_BOUNDARY_FAILURE"
+    AUDIT_METADATA_ANOMALY = "AUDIT_METADATA_ANOMALY"
+    SCANNER_AMBIGUITY = "SCANNER_AMBIGUITY"
+
+    @classmethod
+    def for_divergence(cls, divergence: ReauditDivergence) -> ReauditCause:
+        """Return the conservative cause class for a divergence label."""
+        if divergence is ReauditDivergence.STILL_AGREES:
+            return cls.NO_CHANGE
+        if divergence is ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED:
+            return cls.MODEL_NOISE_OR_POLICY_DRIFT
+        if divergence in {
+            ReauditDivergence.OVERRIDE_NO_LONGER_NEEDED,
+            ReauditDivergence.OVERRIDE_STILL_NEEDED,
+        }:
+            return cls.OPERATOR_OVERRIDE_RECHECK
+        if divergence in {
+            ReauditDivergence.PRE_JUDGE_FRESH_BLOCK,
+            ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT,
+        }:
+            return cls.PRE_JUDGE_BASELINE
+        if divergence is ReauditDivergence.ENTRY_OBSOLETE:
+            return cls.CODE_DRIFT
+        if divergence is ReauditDivergence.SOURCE_EXCERPT_REJECTED:
+            return cls.SOURCE_EVIDENCE_REJECTED
+        if divergence is ReauditDivergence.JUDGE_CALL_FAILED:
+            return cls.JUDGE_BOUNDARY_FAILURE
+        if divergence in {
+            ReauditDivergence.JUDGE_CLASSIFICATION_FAILED,
+            ReauditDivergence.FUTURE_DATED_ENTRY,
+        }:
+            return cls.AUDIT_METADATA_ANOMALY
+        if divergence is ReauditDivergence.AMBIGUOUS_FINDING_MATCH:
+            return cls.SCANNER_AMBIGUITY
+        raise ReauditError(f"no reaudit cause mapping for divergence {divergence!r}")
 
 
 # Operator-actionable severity ranking. Lower values surface first in
 # the markdown report so the most urgent debt is at the top.
 #
-# JUDGE_CALL_FAILED ranks first: the entry was *not* re-judged. Until
-# the operator resolves the transport failure (network, rate-limit, 5xx)
-# and reruns, the entry's decay status is unknown — that ignorance is
-# more urgent than any verdict-change signal below it. Closes
-# elspeth-9a4e54cc01 / C3-2.
+# JUDGE_CALL_FAILED ranks high: the entry was *not* re-judged. Until
+# the operator resolves the transport/contract failure and reruns, the
+# entry's decay status is unknown — that ignorance is more urgent than
+# any verdict-change signal below it. Closes elspeth-9a4e54cc01 / C3-2.
 _DIVERGENCE_ORDER: dict[ReauditDivergence, int] = {
     # SOURCE_EXCERPT_REJECTED ranks first: a forged path is a SECURITY
     # signal (exfiltration attempt). It outranks JUDGE_CALL_FAILED
@@ -142,14 +209,17 @@ _DIVERGENCE_ORDER: dict[ReauditDivergence, int] = {
     # different (investigate the YAML, not the network). Closes
     # elspeth-ebb2b88753 / C3-4.
     ReauditDivergence.SOURCE_EXCERPT_REJECTED: -1,
-    ReauditDivergence.JUDGE_CALL_FAILED: 0,
-    ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED: 1,
-    ReauditDivergence.PRE_JUDGE_FRESH_BLOCK: 2,
-    ReauditDivergence.OVERRIDE_NO_LONGER_NEEDED: 3,
-    ReauditDivergence.ENTRY_OBSOLETE: 4,
-    ReauditDivergence.OVERRIDE_STILL_NEEDED: 5,
-    ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT: 6,
-    ReauditDivergence.STILL_AGREES: 7,
+    ReauditDivergence.FUTURE_DATED_ENTRY: 0,
+    ReauditDivergence.JUDGE_CALL_FAILED: 1,
+    ReauditDivergence.JUDGE_CLASSIFICATION_FAILED: 2,
+    ReauditDivergence.AMBIGUOUS_FINDING_MATCH: 3,
+    ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED: 4,
+    ReauditDivergence.PRE_JUDGE_FRESH_BLOCK: 5,
+    ReauditDivergence.OVERRIDE_NO_LONGER_NEEDED: 6,
+    ReauditDivergence.ENTRY_OBSOLETE: 7,
+    ReauditDivergence.OVERRIDE_STILL_NEEDED: 8,
+    ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT: 9,
+    ReauditDivergence.STILL_AGREES: 10,
 }
 
 
@@ -157,10 +227,11 @@ _DIVERGENCE_ORDER: dict[ReauditDivergence, int] = {
 class ReauditOutcome:
     """One entry's reaudit result.
 
-    ``fresh_verdict`` / ``fresh_recorded_at`` are ``None`` for
-    ``ENTRY_OBSOLETE`` (no judge call was made) and for
+    ``fresh_verdict`` / ``fresh_recorded_at`` / ``fresh_model_id`` are ``None`` for
+    ``ENTRY_OBSOLETE`` (no judge call was made), ``FUTURE_DATED_ENTRY``
+    (the timestamp failed before the judge call), and for
     ``JUDGE_CALL_FAILED`` (judge call was attempted but raised a
-    transport error). ``fresh_rationale`` is ``None`` for
+    transport/contract error). ``fresh_rationale`` is ``None`` for
     ``ENTRY_OBSOLETE`` but carries the captured exception classname +
     message for ``JUDGE_CALL_FAILED`` so the failure diagnostic is
     durable on the report. All other divergence values carry a fully
@@ -181,7 +252,15 @@ class ReauditOutcome:
     fresh_rationale: str | None
     fresh_recorded_at: datetime | None
     divergence: ReauditDivergence
+    cause: ReauditCause
     code_snapshot: str
+    fresh_model_id: str | None = None
+    # Cost telemetry for the fresh judge boundary. ``judge_call_attempted``
+    # is true even when the transport/contract boundary failed before
+    # returning token usage; token fields remain ``None`` in that case.
+    judge_call_attempted: bool = False
+    fresh_prompt_tokens_total: int | None = None
+    fresh_prompt_tokens_cached: int | None = None
     # Secrets-scrubber audit record (closes elspeth-ebb2b88753 / C2-2
     # on the sweep path). Each entry's source excerpt passes through
     # ``source_excerpt.scrub_secrets`` before reaching the judge; any
@@ -222,6 +301,18 @@ class ReauditReport:
     summary: tuple[tuple[str, int], ...] = field(default_factory=tuple)
     entries_dispatched: int = 0
     total_entries: int = 0
+    entries_skipped_by_rule_filter: int = 0
+    judge_calls_attempted: int = 0
+    max_judge_calls: int | None = None
+    prompt_tokens_total: int = 0
+    prompt_tokens_cached: int | None = 0
+
+    @property
+    def prompt_tokens_uncached(self) -> int | None:
+        """Return uncached prompt tokens, or ``None`` when cache telemetry is absent."""
+        if self.prompt_tokens_cached is None:
+            return None
+        return max(self.prompt_tokens_total - self.prompt_tokens_cached, 0)
 
     @classmethod
     def from_outcomes(
@@ -230,6 +321,8 @@ class ReauditReport:
         *,
         entries_dispatched: int | None = None,
         total_entries: int | None = None,
+        entries_skipped_by_rule_filter: int = 0,
+        max_judge_calls: int | None = None,
     ) -> ReauditReport:
         """Build a report from a sequence of outcomes, computing the summary.
 
@@ -253,12 +346,68 @@ class ReauditReport:
         )
         dispatched = len(outcomes) if entries_dispatched is None else entries_dispatched
         total = len(outcomes) if total_entries is None else total_entries
+        judge_calls_attempted = sum(1 for outcome in outcomes if outcome.judge_call_attempted)
+        prompt_tokens_total = sum(outcome.fresh_prompt_tokens_total or 0 for outcome in outcomes)
+        prompt_tokens_cached = _aggregate_cached_prompt_tokens(outcomes)
         return cls(
             outcomes=tuple(outcomes),
             summary=tuple(ordered),
             entries_dispatched=dispatched,
             total_entries=total,
+            entries_skipped_by_rule_filter=entries_skipped_by_rule_filter,
+            judge_calls_attempted=judge_calls_attempted,
+            max_judge_calls=max_judge_calls,
+            prompt_tokens_total=prompt_tokens_total,
+            prompt_tokens_cached=prompt_tokens_cached,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ReauditProgress:
+    """Operator-visible progress snapshot emitted after each durable outcome."""
+
+    entries_dispatched: int
+    total_entries: int
+    judge_calls_attempted: int
+    max_judge_calls: int | None
+    prompt_tokens_total: int
+    prompt_tokens_cached: int | None
+
+    @property
+    def prompt_tokens_uncached(self) -> int | None:
+        if self.prompt_tokens_cached is None:
+            return None
+        return max(self.prompt_tokens_total - self.prompt_tokens_cached, 0)
+
+    @classmethod
+    def from_outcomes(
+        cls,
+        outcomes: Sequence[ReauditOutcome],
+        *,
+        entries_dispatched: int,
+        total_entries: int,
+        max_judge_calls: int | None,
+    ) -> ReauditProgress:
+        return cls(
+            entries_dispatched=entries_dispatched,
+            total_entries=total_entries,
+            judge_calls_attempted=sum(1 for outcome in outcomes if outcome.judge_call_attempted),
+            max_judge_calls=max_judge_calls,
+            prompt_tokens_total=sum(outcome.fresh_prompt_tokens_total or 0 for outcome in outcomes),
+            prompt_tokens_cached=_aggregate_cached_prompt_tokens(outcomes),
+        )
+
+
+def _aggregate_cached_prompt_tokens(outcomes: Sequence[ReauditOutcome]) -> int | None:
+    """Aggregate cached-token telemetry without fabricating unknown values."""
+    total = 0
+    for outcome in outcomes:
+        if outcome.fresh_prompt_tokens_total is None:
+            continue
+        if outcome.fresh_prompt_tokens_cached is None:
+            return None
+        total += outcome.fresh_prompt_tokens_cached
+    return total
 
 
 # =========================================================================
@@ -326,6 +475,110 @@ class ReauditError(RuntimeError):
     """
 
 
+class AmbiguousFindingMatchError(ReauditError):
+    """The current scan produced multiple findings for one allowlist key."""
+
+
+class _JudgeCallBudgetExhausted(RuntimeError):
+    """Internal control-flow signal: this invocation's judge-call budget is spent."""
+
+
+@dataclass(slots=True)
+class _JudgeCallBudget:
+    """Mutable per-invocation budget for expensive judge-boundary calls."""
+
+    max_calls: int | None
+    calls_attempted: int = 0
+
+    def reserve_call(self) -> None:
+        if self.max_calls is not None and self.calls_attempted >= self.max_calls:
+            raise _JudgeCallBudgetExhausted
+        self.calls_attempted += 1
+
+
+@dataclass(frozen=True, slots=True)
+class _VocabularySpec:
+    """Where a rule package exposes the finding ids its allowlist may contain."""
+
+    module_path: str
+    attr_names: tuple[str, ...]
+    use_mapping_keys: bool = False
+
+
+_RULE_VOCABULARY_REGISTRY: dict[str, _VocabularySpec] = {
+    "trust_tier.tier_model": _VocabularySpec(
+        "elspeth_lints.rules.trust_tier.tier_model.rule",
+        ("RULES",),
+        use_mapping_keys=True,
+    ),
+    "immutability.freeze_guards": _VocabularySpec(
+        "elspeth_lints.rules.immutability.freeze_guards.rule",
+        ("RULES",),
+        use_mapping_keys=True,
+    ),
+    "immutability.frozen_annotations": _VocabularySpec(
+        "elspeth_lints.rules.immutability.frozen_annotations.rule",
+        ("RULE_ID",),
+    ),
+    "audit_evidence.guard_symmetry": _VocabularySpec(
+        "elspeth_lints.rules.audit_evidence.guard_symmetry.rule",
+        ("LEGACY_RULE_ID",),
+    ),
+    "audit_evidence.gve_attribution": _VocabularySpec(
+        "elspeth_lints.rules.audit_evidence.gve_attribution.rule",
+        ("LEGACY_RULE_ID",),
+    ),
+    "audit_evidence.tier_1_decoration": _VocabularySpec(
+        "elspeth_lints.rules.audit_evidence.tier_1_decoration.metadata",
+        ("RULE_TDE1", "RULE_TDE2"),
+    ),
+    "plugin_contract.component_type": _VocabularySpec(
+        "elspeth_lints.rules.plugin_contract.component_type.rule",
+        ("LEGACY_RULE_ID",),
+    ),
+    "plugin_contract.options_metadata": _VocabularySpec(
+        "elspeth_lints.rules.plugin_contract.options_metadata.rule",
+        ("RULE_ID",),
+    ),
+    "plugin_contract.plugin_hashes": _VocabularySpec(
+        "elspeth_lints.rules.plugin_contract.plugin_hashes.rule",
+        ("RULE_ID",),
+    ),
+    "composer.catch_order": _VocabularySpec(
+        "elspeth_lints.rules.composer.catch_order.rule",
+        ("LEGACY_RULE_ID",),
+    ),
+    "composer.exception_channel": _VocabularySpec(
+        "elspeth_lints.rules.composer.exception_channel.rule",
+        ("LEGACY_RULE_ID",),
+    ),
+    "manifest.contract_manifest": _VocabularySpec(
+        "elspeth_lints.rules.manifest.contract_manifest.rule",
+        ("RULE_ID",),
+    ),
+    "manifest.symbol_inventory": _VocabularySpec(
+        "elspeth_lints.rules.manifest.symbol_inventory.rule",
+        ("RULE_ID",),
+    ),
+    "manifest.test_to_source_mapping": _VocabularySpec(
+        "elspeth_lints.rules.manifest.test_to_source_mapping.rule",
+        ("RULE_ID",),
+    ),
+    "trust_boundary.tests": _VocabularySpec(
+        "elspeth_lints.rules.trust_boundary.tests.rule",
+        ("RULE_ID",),
+    ),
+    "trust_boundary.scope": _VocabularySpec(
+        "elspeth_lints.rules.trust_boundary.scope.rule",
+        ("RULE_ID",),
+    ),
+    "trust_boundary.tier": _VocabularySpec(
+        "elspeth_lints.rules.trust_boundary.tier.rule",
+        ("RULE_ID",),
+    ),
+}
+
+
 def reaudit_entries(
     *,
     root: Path,
@@ -334,9 +587,12 @@ def reaudit_entries(
     since: datetime | None,
     limit: int | None,
     include_pre_judge: bool,
+    max_calls: int | None = None,
     sidecar_writer: Any = None,
     pre_classified_keys: frozenset[str] | None = None,
     pre_classified_outcomes: Sequence[ReauditOutcome] = (),
+    reference_time: datetime | None = None,
+    progress_callback: Callable[[ReauditProgress], None] | None = None,
 ) -> ReauditReport:
     """Re-judge entries in ``allowlist_dir`` against current source in ``root``.
 
@@ -358,6 +614,14 @@ def reaudit_entries(
        filter because there is no fresh judgment to defer to.
     4. ``limit`` — only the first N entries that survived prior filters
        are reaudited.
+
+    ``max_calls`` is a separate per-invocation spend guard. It caps
+    actual judge-boundary calls, not the filtered entry list. Entries
+    classified before the judge boundary (obsolete, future-dated,
+    unsafe source-excerpt path) do not consume this budget. When the
+    budget is exhausted, the report is intentionally incomplete
+    (``entries_dispatched < total_entries``) so the sidecar remains
+    resumable for another bounded chunk.
 
     Each surviving entry has its underlying finding re-derived from
     the current source. If the finding no longer exists, the entry is
@@ -383,6 +647,12 @@ def reaudit_entries(
     summed across both halves so the report reflects the unified sweep.
     """
     supported = _supported_rules()
+    if reference_time is None:
+        reference_time = datetime.now(UTC)
+    elif reference_time.tzinfo is None:
+        raise ReauditError("reference_time must be timezone-aware")
+    if max_calls is not None and max_calls <= 0:
+        raise ReauditError("--max-calls must be a positive integer when provided")
     if rule_filter not in supported:
         raise ReauditError(
             f"--rule {rule_filter!r} is not supported by reaudit. "
@@ -409,11 +679,14 @@ def reaudit_entries(
     # about to re-judge weren't tampered with since the original verdict.
     allowlist = load_allowlist(allowlist_dir, valid_rule_ids=valid_rule_ids, source_root=root)
 
+    entries_skipped_by_rule_filter = _count_rule_filter_skips(allowlist.entries, valid_rule_ids)
     filtered = _apply_filters(
         entries=allowlist.entries,
+        valid_rule_ids=valid_rule_ids,
         include_pre_judge=include_pre_judge,
         since=since,
         limit=limit,
+        reference_time=reference_time,
     )
 
     # Resume support (T6b): the caller may have already classified some
@@ -447,43 +720,104 @@ def reaudit_entries(
     # report's ratio reflects both halves of the work.
     total_entries = len(filtered)
     entries_dispatched = len(pre_classified_outcomes)
+    judge_call_budget = _JudgeCallBudget(max_calls=max_calls)
     for entry in to_dispatch:
         entries_dispatched += 1
-        outcome = _reaudit_one_entry(
-            entry=entry,
-            root=root,
-            rule_filter=rule_filter,
-            findings_cache=findings_cache,
-        )
+        try:
+            outcome = _reaudit_one_entry(
+                entry=entry,
+                root=root,
+                rule_filter=rule_filter,
+                findings_cache=findings_cache,
+                reference_time=reference_time,
+                judge_call_budget=judge_call_budget,
+            )
+        except _JudgeCallBudgetExhausted:
+            # This is a graceful operator-requested stop, not a
+            # per-entry outcome. Leave the current entry unrecorded so
+            # --resume reprocesses it from the beginning in the next
+            # bounded invocation.
+            entries_dispatched -= 1
+            break
         outcomes.append(outcome)
         if sidecar_writer is not None:
             sidecar_writer.write_outcome(outcome)
+        if progress_callback is not None:
+            progress_callback(
+                ReauditProgress.from_outcomes(
+                    outcomes,
+                    entries_dispatched=entries_dispatched,
+                    total_entries=total_entries,
+                    max_judge_calls=max_calls,
+                )
+            )
 
     return ReauditReport.from_outcomes(
         outcomes,
         entries_dispatched=entries_dispatched,
         total_entries=total_entries,
+        entries_skipped_by_rule_filter=entries_skipped_by_rule_filter,
+        max_judge_calls=max_calls,
     )
 
 
 def _apply_filters(
     *,
     entries: Sequence[AllowlistEntry],
+    valid_rule_ids: frozenset[str],
     include_pre_judge: bool,
     since: datetime | None,
     limit: int | None,
+    reference_time: datetime | None = None,
 ) -> list[AllowlistEntry]:
-    """Apply the reaudit filters in documented order, preserving entry order."""
+    """Apply reaudit filters after deterministic oldest-judgment ordering."""
+    if reference_time is None:
+        reference_time = datetime.now(UTC)
     result: list[AllowlistEntry] = []
-    for entry in entries:
+    for entry in sorted(entries, key=_entry_filter_order):
+        if not _entry_matches_rule_filter(entry, valid_rule_ids):
+            continue
         if entry.judge_verdict is None and not include_pre_judge:
             continue
-        if since is not None and entry.judge_recorded_at is not None and entry.judge_recorded_at >= since:
-            continue
+        if since is not None and entry.judge_recorded_at is not None:
+            if entry.judge_recorded_at > reference_time:
+                # Future-dated entries are tampering/clock-skew signals.
+                # They must survive --since so _reaudit_one_entry can emit
+                # a structured FUTURE_DATED_ENTRY outcome instead of
+                # disappearing from the sweep.
+                pass
+            elif entry.judge_recorded_at >= since:
+                continue
         result.append(entry)
         if limit is not None and len(result) >= limit:
             break
     return result
+
+
+def _entry_filter_order(entry: AllowlistEntry) -> tuple[int, float]:
+    """Sort pre-judge first, then oldest recorded judgment first."""
+    if entry.judge_recorded_at is None:
+        return (0, float("-inf"))
+    return (1, entry.judge_recorded_at.timestamp())
+
+
+def _count_rule_filter_skips(entries: Sequence[AllowlistEntry], valid_rule_ids: frozenset[str]) -> int:
+    """Count entries skipped by the rule-filter phase."""
+    return sum(1 for entry in entries if not _entry_matches_rule_filter(entry, valid_rule_ids))
+
+
+def _entry_matches_rule_filter(entry: AllowlistEntry, valid_rule_ids: frozenset[str]) -> bool:
+    """Return True when ``entry`` belongs to the selected rule package.
+
+    Malformed keys stay in the sweep so the per-entry classifier can surface
+    them as ENTRY_OBSOLETE. Only well-formed keys with a rule id outside the
+    selected package are skipped by the documented rule-filter phase.
+    """
+    parsed = _parse_entry_key(entry.key)
+    if parsed is None:
+        return True
+    _file_path, rule_id, _symbol_context, _fingerprint = parsed
+    return rule_id in valid_rule_ids
 
 
 def _reaudit_one_entry(
@@ -492,8 +826,27 @@ def _reaudit_one_entry(
     root: Path,
     rule_filter: str,
     findings_cache: dict[str, list[Any]],
+    reference_time: datetime,
+    judge_call_budget: _JudgeCallBudget,
 ) -> ReauditOutcome:
     """Classify one entry, calling the judge unless the entry is obsolete."""
+    if entry.judge_recorded_at is not None and entry.judge_recorded_at > reference_time:
+        return ReauditOutcome(
+            entry=entry,
+            original_verdict=entry.judge_verdict,
+            original_model_verdict=entry.judge_model_verdict,
+            fresh_verdict=None,
+            fresh_rationale=(
+                f"judge_recorded_at {entry.judge_recorded_at.isoformat()} is after "
+                f"reaudit reference_time {reference_time.isoformat()}; future-dated judge "
+                "timestamps indicate clock skew or deliberate tampering."
+            ),
+            fresh_recorded_at=None,
+            divergence=ReauditDivergence.FUTURE_DATED_ENTRY,
+            cause=ReauditCause.for_divergence(ReauditDivergence.FUTURE_DATED_ENTRY),
+            code_snapshot="<future-dated judge_recorded_at; judge not called>",
+        )
+
     parsed = _parse_entry_key(entry.key)
     if parsed is None:
         # Malformed key — should never happen for entries written by
@@ -508,6 +861,7 @@ def _reaudit_one_entry(
             fresh_rationale=None,
             fresh_recorded_at=None,
             divergence=ReauditDivergence.ENTRY_OBSOLETE,
+            cause=ReauditCause.for_divergence(ReauditDivergence.ENTRY_OBSOLETE),
             code_snapshot="<entry key could not be parsed; finding cannot be re-located>",
         )
 
@@ -544,6 +898,7 @@ def _reaudit_one_entry(
             fresh_rationale=None,
             fresh_recorded_at=None,
             divergence=ReauditDivergence.ENTRY_OBSOLETE,
+            cause=ReauditCause.for_divergence(ReauditDivergence.ENTRY_OBSOLETE),
             code_snapshot=f"<source file {file_path!r} no longer exists>",
         )
     except SourceExcerptPathOutsideRootError as exc:
@@ -555,6 +910,7 @@ def _reaudit_one_entry(
             fresh_rationale=str(exc),
             fresh_recorded_at=None,
             divergence=ReauditDivergence.SOURCE_EXCERPT_REJECTED,
+            cause=ReauditCause.for_divergence(ReauditDivergence.SOURCE_EXCERPT_REJECTED),
             code_snapshot=f"<source-excerpt path rejected for {entry.key!r}; see fresh_rationale>",
         )
 
@@ -564,7 +920,20 @@ def _reaudit_one_entry(
         rule_filter=rule_filter,
         cache=findings_cache,
     )
-    matching_finding = _find_matching_finding(findings=findings, entry_key=entry.key)
+    try:
+        matching_finding = _find_matching_finding(findings=findings, entry_key=entry.key)
+    except AmbiguousFindingMatchError as exc:
+        return ReauditOutcome(
+            entry=entry,
+            original_verdict=entry.judge_verdict,
+            original_model_verdict=entry.judge_model_verdict,
+            fresh_verdict=None,
+            fresh_rationale=str(exc),
+            fresh_recorded_at=None,
+            divergence=ReauditDivergence.AMBIGUOUS_FINDING_MATCH,
+            cause=ReauditCause.for_divergence(ReauditDivergence.AMBIGUOUS_FINDING_MATCH),
+            code_snapshot=f"<ambiguous current findings match {entry.key!r}; see fresh_rationale>",
+        )
 
     if matching_finding is None:
         return ReauditOutcome(
@@ -575,6 +944,7 @@ def _reaudit_one_entry(
             fresh_rationale=None,
             fresh_recorded_at=None,
             divergence=ReauditDivergence.ENTRY_OBSOLETE,
+            cause=ReauditCause.for_divergence(ReauditDivergence.ENTRY_OBSOLETE),
             code_snapshot=f"<no current finding matches {entry.key!r}>",
         )
 
@@ -599,20 +969,22 @@ def _reaudit_one_entry(
         rationale=entry.reason,
         surrounding_code=surrounding_code,
     )
-    # Per-entry transport-failure isolation (closes elspeth-9a4e54cc01 /
+    # Per-entry judge-boundary isolation (closes elspeth-9a4e54cc01 /
     # C3-2). The judge call is a Tier-3 external boundary: a transient
-    # network failure on entry 423 of 700 must not discard the prior
-    # 422 outcomes. The catch covers two failure classes:
+    # network failure or malformed model response on entry 423 of 700
+    # must not discard the prior 422 outcomes. The catch covers two
+    # failure classes:
     #
-    # 1. ``openai.APIError`` — the SDK umbrella for connection / timeout /
-    #    rate-limit / 5xx. Genuine transport tier.
-    # 2. ``RuntimeError`` raised from inside ``call_judge`` itself —
-    #    today these are emitted by ``_parse_judge_payload`` (malformed
-    #    JSON from the model) and ``_extract_text_block`` (unexpected
-    #    response shape). The model's output is itself a stochastic
-    #    Tier-3 boundary; a single malformed response is the same class
-    #    of failure as a 5xx and must not abort a 700-entry sweep. T6b
-    #    extends T6 commit 6b33ee5b3 to close this gap.
+    # 1. ``JudgeTransportError`` — wraps SDK connection / timeout /
+    #    rate-limit / 5xx errors with a stable project-local type.
+    # 2. ``JudgeContractError`` raised from inside ``call_judge`` itself
+    #    — these are emitted by ``_parse_judge_payload`` (malformed JSON
+    #    from the model), ``_extract_text_block`` (unexpected response
+    #    shape), and related response-contract checks. The model's output
+    #    is itself a stochastic Tier-3 boundary; a single malformed
+    #    response is the same class of failure as a 5xx and must not abort
+    #    a 700-entry sweep. T6b extends T6 commit 6b33ee5b3 to close this
+    #    gap.
     #
     # The catch is scoped to the ``call_judge`` invocation only:
     # ``_classify_divergence`` and friends emit their own ``RuntimeError``
@@ -621,22 +993,17 @@ def _reaudit_one_entry(
     # (missing API key / SDK) is also not caught — it's an operator
     # misconfiguration and remains sweep-fatal.
     #
-    # Lazy import so ``elspeth-lints --help`` doesn't pay the SDK cost
-    # on every invocation (mirrors the pattern in ``call_judge`` itself).
-    from openai import APIError
-
     from elspeth_lints.core.judge import JudgeConfigurationError
 
+    judge_call_budget.reserve_call()
     try:
         response = call_judge(request)
     except JudgeConfigurationError:
-        # JudgeConfigurationError subclasses RuntimeError but is NOT a
-        # transport failure — it's an operator misconfiguration (missing
-        # API key, missing SDK). Re-raise before the broader RuntimeError
-        # branch can swallow it, preserving the sweep-fatal semantics
-        # the T6 commit established.
+        # JudgeConfigurationError is NOT a transport failure — it's an
+        # operator misconfiguration (missing API key, missing SDK). Keep
+        # the sweep-fatal semantics the T6 commit established.
         raise
-    except (APIError, RuntimeError) as exc:
+    except (JudgeTransportError, JudgeContractError) as exc:
         return ReauditOutcome(
             entry=entry,
             original_verdict=entry.judge_verdict,
@@ -645,14 +1012,34 @@ def _reaudit_one_entry(
             fresh_rationale=f"{type(exc).__name__}: {exc}",
             fresh_recorded_at=None,
             divergence=ReauditDivergence.JUDGE_CALL_FAILED,
+            cause=ReauditCause.for_divergence(ReauditDivergence.JUDGE_CALL_FAILED),
+            code_snapshot=surrounding_code,
+            judge_call_attempted=True,
+            excerpt_redactions=safe_excerpt.redactions,
+        )
+    try:
+        divergence = _classify_divergence(
+            entry_verdict=entry.judge_verdict,
+            entry_model_verdict=entry.judge_model_verdict,
+            fresh_verdict=response.verdict,
+        )
+    except ReauditError as exc:
+        return ReauditOutcome(
+            entry=entry,
+            original_verdict=entry.judge_verdict,
+            original_model_verdict=entry.judge_model_verdict,
+            fresh_verdict=response.verdict,
+            fresh_rationale=f"{type(exc).__name__}: {exc}",
+            fresh_recorded_at=response.recorded_at,
+            fresh_model_id=response.model_id,
+            judge_call_attempted=True,
+            fresh_prompt_tokens_total=response.prompt_tokens_total,
+            fresh_prompt_tokens_cached=response.prompt_tokens_cached,
+            divergence=ReauditDivergence.JUDGE_CLASSIFICATION_FAILED,
+            cause=ReauditCause.for_divergence(ReauditDivergence.JUDGE_CLASSIFICATION_FAILED),
             code_snapshot=surrounding_code,
             excerpt_redactions=safe_excerpt.redactions,
         )
-    divergence = _classify_divergence(
-        entry_verdict=entry.judge_verdict,
-        entry_model_verdict=entry.judge_model_verdict,
-        fresh_verdict=response.verdict,
-    )
     return ReauditOutcome(
         entry=entry,
         original_verdict=entry.judge_verdict,
@@ -660,7 +1047,12 @@ def _reaudit_one_entry(
         fresh_verdict=response.verdict,
         fresh_rationale=response.judge_rationale,
         fresh_recorded_at=response.recorded_at,
+        fresh_model_id=response.model_id,
+        judge_call_attempted=True,
+        fresh_prompt_tokens_total=response.prompt_tokens_total,
+        fresh_prompt_tokens_cached=response.prompt_tokens_cached,
         divergence=divergence,
+        cause=ReauditCause.for_divergence(divergence),
         code_snapshot=surrounding_code,
         excerpt_redactions=safe_excerpt.redactions,
     )
@@ -890,10 +1282,22 @@ def _find_matching_finding(*, findings: Sequence[Any], entry_key: str) -> Any | 
     from parts) sidesteps any subtle drift in the formatter — if the
     rule's key shape changes, this comparison still works.
     """
-    for finding in findings:
-        if finding.canonical_key == entry_key:
-            return finding
-    return None
+    matches = [finding for finding in findings if _canonical_key_for_finding(finding) == entry_key]
+    if len(matches) > 1:
+        raise AmbiguousFindingMatchError(f"{len(matches)} finding(s) match allowlist key {entry_key!r}; refusing to pick one silently.")
+    return matches[0] if matches else None
+
+
+def _canonical_key_for_finding(finding: Any) -> str:
+    """Return a finding's canonical key across both finding contract shapes."""
+    canonical_key = finding.canonical_key
+    if callable(canonical_key):
+        canonical_key = canonical_key()
+    if not isinstance(canonical_key, str):
+        raise ReauditError(
+            f"finding.canonical_key must be a string or zero-argument callable returning a string; got {type(canonical_key).__name__}"
+        )
+    return canonical_key
 
 
 def _valid_rule_ids_for(rule_filter: str) -> frozenset[str]:
@@ -905,131 +1309,44 @@ def _valid_rule_ids_for(rule_filter: str) -> frozenset[str]:
     allowlist directory's YAML files commonly carry both shapes
     side-by-side, and the loader fails on unknown sub-rule ids.
 
-    Each branch reads the rule's emission-vocabulary constant lazily
-    via :func:`_lookup_module_attr` (so the import cost of one rule
-    doesn't leak into reaudit invocations targeting a different
-    rule). Constants vary in shape:
+    The registry reads each rule's emission-vocabulary constant lazily
+    via :func:`_lookup_module_attr` so importing one rule's vocabulary
+    does not load every rule package. Constants vary in shape:
 
-    * ``RULES`` — a ``dict[str, ...]`` whose keys are the sub-rule ids
-      (tier_model, freeze_guards, frozen_annotations pattern).
-    * ``RULE_ID`` — a single ``str`` (single-emission rules).
-    * ``LEGACY_RULE_ID`` — single-emission rules ported from the
-      pre-elspeth-lints CI scripts; the shared.py modules expose them.
+    * ``RULES`` — mapping whose keys are sub-rule ids.
+    * ``RULE_ID`` — package id emitted directly as a finding id.
+    * ``LEGACY_RULE_ID`` — finding id emitted by rules ported from
+      earlier bespoke scripts.
 
-    The ``getattr``-based lookup sidesteps strict-``__all__``
-    enforcement in static type checkers — these constants are
-    private-by-convention to each rule package and not all of them
-    are surfaced via ``__all__``. The lookup is offensive: a missing
-    constant raises ``AttributeError`` (clear "you renamed the
-    constant" diagnostic) rather than silently substituting an
-    empty vocabulary.
-
-    Adding a new rule: register a branch here and the rule becomes
-    immediately reaudit-targetable. Forgetting to register means the
-    rule passes ``_supported_rules()`` (which is derived from
-    ``BUILTIN_RULES``) but ``reaudit_entries`` fails with a clear
-    "no vocabulary registered" error, not silent miscounting.
+    Adding a new rule: add one ``_RULE_VOCABULARY_REGISTRY`` entry. The
+    tests assert every supported rule resolves a non-empty vocabulary,
+    so a supported rule with no registry row fails at collection time
+    instead of silently skipping production entries.
     """
-    if rule_filter == "trust_tier.tier_model":
-        rules_dict: dict[str, Any] = _lookup_module_attr("elspeth_lints.rules.trust_tier.tier_model.rule", "RULES")
-        return frozenset(rules_dict.keys())
-    if rule_filter == "immutability.freeze_guards":
-        rules_dict = _lookup_module_attr("elspeth_lints.rules.immutability.freeze_guards.rule", "RULES")
-        return frozenset(rules_dict.keys())
-    if rule_filter == "immutability.frozen_annotations":
-        return frozenset(
-            {
-                _lookup_module_attr(
-                    "elspeth_lints.rules.immutability.frozen_annotations.rule",
-                    "RULE_ID",
-                )
-            }
+    spec = _RULE_VOCABULARY_REGISTRY.get(rule_filter)
+    if spec is None:
+        raise ReauditError(
+            f"No sub-rule vocabulary is registered for rule {rule_filter!r}. "
+            "Add an entry to _RULE_VOCABULARY_REGISTRY so load_allowlist can "
+            "validate per_file_rules entries that reference this rule's "
+            "sub-rule ids."
         )
-    if rule_filter == "audit_evidence.guard_symmetry":
-        return frozenset(
-            {
-                _lookup_module_attr(
-                    "elspeth_lints.rules.audit_evidence.guard_symmetry.rule",
-                    "LEGACY_RULE_ID",
-                )
-            }
-        )
-    if rule_filter == "audit_evidence.gve_attribution":
-        return frozenset(
-            {
-                _lookup_module_attr(
-                    "elspeth_lints.rules.audit_evidence.gve_attribution.rule",
-                    "LEGACY_RULE_ID",
-                )
-            }
-        )
-    if rule_filter == "audit_evidence.tier_1_decoration":
-        # tier_1_decoration emits two sub-rule ids (TDE1, TDE2); the
-        # constants live in the rule's metadata module.
-        module = "elspeth_lints.rules.audit_evidence.tier_1_decoration.metadata"
-        return frozenset(
-            {
-                _lookup_module_attr(module, "RULE_TDE1"),
-                _lookup_module_attr(module, "RULE_TDE2"),
-            }
-        )
-    if rule_filter == "plugin_contract.component_type":
-        return frozenset(
-            {
-                _lookup_module_attr(
-                    "elspeth_lints.rules.plugin_contract.component_type.rule",
-                    "LEGACY_RULE_ID",
-                )
-            }
-        )
-    if rule_filter == "plugin_contract.options_metadata":
-        return frozenset(
-            {
-                _lookup_module_attr(
-                    "elspeth_lints.rules.plugin_contract.options_metadata.rule",
-                    "RULE_ID",
-                )
-            }
-        )
-    if rule_filter == "plugin_contract.plugin_hashes":
-        return frozenset(
-            {
-                _lookup_module_attr(
-                    "elspeth_lints.rules.plugin_contract.plugin_hashes.rule",
-                    "RULE_ID",
-                )
-            }
-        )
-    if rule_filter == "composer.catch_order":
-        return frozenset({_lookup_module_attr("elspeth_lints.rules.composer.catch_order.rule", "RULE_ID")})
-    if rule_filter == "composer.exception_channel":
-        return frozenset({_lookup_module_attr("elspeth_lints.rules.composer.exception_channel.rule", "RULE_ID")})
-    if rule_filter == "manifest.contract_manifest":
-        return frozenset({_lookup_module_attr("elspeth_lints.rules.manifest.contract_manifest.rule", "RULE_ID")})
-    if rule_filter == "manifest.symbol_inventory":
-        return frozenset({_lookup_module_attr("elspeth_lints.rules.manifest.symbol_inventory.rule", "RULE_ID")})
-    if rule_filter == "manifest.test_to_source_mapping":
-        return frozenset(
-            {
-                _lookup_module_attr(
-                    "elspeth_lints.rules.manifest.test_to_source_mapping.rule",
-                    "RULE_ID",
-                )
-            }
-        )
-    if rule_filter == "trust_boundary.tests":
-        return frozenset({_lookup_module_attr("elspeth_lints.rules.trust_boundary.tests.rule", "RULE_ID")})
-    if rule_filter == "trust_boundary.scope":
-        return frozenset({_lookup_module_attr("elspeth_lints.rules.trust_boundary.scope.rule", "RULE_ID")})
-    if rule_filter == "trust_boundary.tier":
-        return frozenset({_lookup_module_attr("elspeth_lints.rules.trust_boundary.tier.rule", "RULE_ID")})
 
-    raise ReauditError(
-        f"No sub-rule vocabulary is registered for rule {rule_filter!r}. "
-        "Add a branch to _valid_rule_ids_for() so load_allowlist can "
-        "validate per_file_rules entries that reference this rule's "
-        "sub-rule ids."
-    )
+    if spec.use_mapping_keys:
+        if len(spec.attr_names) != 1:
+            raise ReauditError(f"{rule_filter}: mapping-key vocabulary specs must name exactly one attribute")
+        rules_mapping = _lookup_module_attr(spec.module_path, spec.attr_names[0])
+        if not isinstance(rules_mapping, Mapping):
+            raise ReauditError(
+                f"{rule_filter}: {spec.module_path}.{spec.attr_names[0]} must be a mapping, got {type(rules_mapping).__name__}"
+            )
+        return frozenset(str(rule_id) for rule_id in rules_mapping)
+
+    values = tuple(_lookup_module_attr(spec.module_path, attr_name) for attr_name in spec.attr_names)
+    if any(not isinstance(value, str) for value in values):
+        bad = [type(value).__name__ for value in values if not isinstance(value, str)]
+        raise ReauditError(f"{rule_filter}: vocabulary constants must be strings, got {bad}")
+    return frozenset(values)
 
 
 def _lookup_module_attr(module_path: str, attr_name: str) -> Any:
@@ -1076,11 +1393,20 @@ def render_report_text(report: ReauditReport) -> str:
     for outcome in report.outcomes:
         symbol = outcome.entry.key
         fresh = outcome.fresh_verdict.value if outcome.fresh_verdict is not None else "<no judge call>"
-        lines.append(f"{symbol}  {outcome.divergence.value}  fresh={fresh}")
+        fresh_model = outcome.fresh_model_id if outcome.fresh_model_id is not None else "<no judge call>"
+        lines.append(f"{symbol}  {outcome.divergence.value}  fresh={fresh}  model={fresh_model}  cause={outcome.cause.value}")
     lines.append("")
     lines.append("Summary:")
     for name, count in report.summary:
         lines.append(f"  {name:<32} {count}")
+    lines.append(f"  {'entries skipped by rule_filter':<32} {report.entries_skipped_by_rule_filter}")
+    lines.append(f"  {'judge calls attempted':<32} {_format_judge_call_count(report.judge_calls_attempted, report.max_judge_calls)}")
+    lines.append(
+        f"  {'prompt tokens':<32} "
+        f"total={report.prompt_tokens_total} "
+        f"cached={_format_optional_int(report.prompt_tokens_cached)} "
+        f"uncached={_format_optional_int(report.prompt_tokens_uncached)}"
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -1105,15 +1431,24 @@ def _incomplete_sweep_banner(report: ReauditReport) -> str | None:
     )
 
 
+def _format_judge_call_count(attempted: int, max_calls: int | None) -> str:
+    if max_calls is None:
+        return str(attempted)
+    return f"{attempted}/{max_calls}"
+
+
+def _format_optional_int(value: int | None) -> str:
+    return str(value) if value is not None else "n/a"
+
+
 def render_report_json(report: ReauditReport) -> str:
     """Full report as JSON.
 
     Uses ``dataclasses.asdict`` then walks the resulting tree to
     encode enums as their string values and datetimes as ISO-8601
-    strings. The ``AllowlistEntry`` field becomes a nested object;
-    the ``matched`` runtime-only field is included for round-trip
-    fidelity even though reaudit never matches entries against
-    findings (we re-scan instead).
+    strings. The ``AllowlistEntry`` field becomes a nested object.
+    The ``matched`` runtime-only field is deliberately omitted: it is
+    loader/scanner state, not part of the report contract.
     """
     import json
 
@@ -1124,9 +1459,14 @@ def render_report_json(report: ReauditReport) -> str:
                 "original_verdict": _verdict_value(outcome.original_verdict),
                 "original_model_verdict": _verdict_value(outcome.original_model_verdict),
                 "fresh_verdict": _verdict_value(outcome.fresh_verdict),
+                "fresh_model_id": outcome.fresh_model_id,
                 "fresh_rationale": outcome.fresh_rationale,
                 "fresh_recorded_at": (outcome.fresh_recorded_at.isoformat() if outcome.fresh_recorded_at is not None else None),
+                "judge_call_attempted": outcome.judge_call_attempted,
+                "fresh_prompt_tokens_total": outcome.fresh_prompt_tokens_total,
+                "fresh_prompt_tokens_cached": outcome.fresh_prompt_tokens_cached,
                 "divergence": outcome.divergence.value,
+                "cause": outcome.cause.value,
                 "code_snapshot": outcome.code_snapshot,
                 "excerpt_redactions": [
                     {
@@ -1146,6 +1486,14 @@ def render_report_json(report: ReauditReport) -> str:
         # markdown renderers emit.
         "entries_dispatched": report.entries_dispatched,
         "total_entries": report.total_entries,
+        "entries_skipped_by_rule_filter": report.entries_skipped_by_rule_filter,
+        "cost_telemetry": {
+            "judge_calls_attempted": report.judge_calls_attempted,
+            "max_judge_calls": report.max_judge_calls,
+            "prompt_tokens_total": report.prompt_tokens_total,
+            "prompt_tokens_cached": report.prompt_tokens_cached,
+            "prompt_tokens_uncached": report.prompt_tokens_uncached,
+        },
     }
     if report.entries_dispatched < report.total_entries:
         payload["incomplete_sweep"] = {
@@ -1158,6 +1506,7 @@ def render_report_json(report: ReauditReport) -> str:
 def _entry_to_json(entry: AllowlistEntry) -> dict[str, Any]:
     """Convert one AllowlistEntry to a JSON-safe dict."""
     raw = dataclasses.asdict(entry)
+    raw.pop("matched", None)
     raw["judge_verdict"] = _verdict_value(entry.judge_verdict)
     raw["judge_model_verdict"] = _verdict_value(entry.judge_model_verdict)
     raw["expires"] = entry.expires.isoformat() if entry.expires is not None else None
@@ -1177,7 +1526,7 @@ def render_report_markdown(report: ReauditReport) -> str:
     * ``# Reaudit report`` header with summary counts as a table.
     * One section per divergence kind, in severity order. Each section
       has a table with columns Entry, Original Verdict, Fresh Verdict,
-      Notes. The "Entry" column is the canonical key (file:rule:symbol
+      Cause, and Notes. The "Entry" column is the canonical key (file:rule:symbol
       :fp=...) — the most useful column for operator triage because it
       grep-matches against the YAML on disk.
 
@@ -1201,6 +1550,13 @@ def render_report_markdown(report: ReauditReport) -> str:
     for name, count in report.summary:
         lines.append(f"| {name} | {count} |")
     lines.append(f"| _entries dispatched_ | {report.entries_dispatched} / {report.total_entries} |")
+    lines.append(f"| _entries skipped by rule_filter_ | {report.entries_skipped_by_rule_filter} |")
+    lines.append(f"| _judge calls attempted_ | {_format_judge_call_count(report.judge_calls_attempted, report.max_judge_calls)} |")
+    lines.append(
+        f"| _prompt tokens_ | total={report.prompt_tokens_total}; "
+        f"cached={_format_optional_int(report.prompt_tokens_cached)}; "
+        f"uncached={_format_optional_int(report.prompt_tokens_uncached)} |"
+    )
     lines.append("")
 
     grouped: dict[ReauditDivergence, list[ReauditOutcome]] = {member: [] for member in ReauditDivergence}
@@ -1213,14 +1569,16 @@ def render_report_markdown(report: ReauditReport) -> str:
             continue
         lines.append(f"## {divergence.value} ({len(bucket)})")
         lines.append("")
-        lines.append("| Entry | Original Verdict | Fresh Verdict | Notes |")
-        lines.append("| --- | --- | --- | --- |")
+        lines.append("| Entry | Original Verdict | Fresh Verdict | Fresh Model | Cause | Notes |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
         for outcome in bucket:
             entry_key = _md_escape(outcome.entry.key)
             original = _format_original_verdict(outcome)
             fresh = outcome.fresh_verdict.value if outcome.fresh_verdict is not None else "<no judge call>"
+            fresh_model = _md_escape(outcome.fresh_model_id if outcome.fresh_model_id is not None else "<no judge call>")
+            cause = outcome.cause.value
             notes = _md_escape(_outcome_notes(outcome))
-            lines.append(f"| `{entry_key}` | {original} | {fresh} | {notes} |")
+            lines.append(f"| `{entry_key}` | {original} | {fresh} | {fresh_model} | {cause} | {notes} |")
         lines.append("")
 
     return "\n".join(lines)
@@ -1260,6 +1618,12 @@ def _outcome_notes(outcome: ReauditOutcome) -> str:
         # the first line) so the operator can diagnose without opening
         # the JSON dump.
         return outcome.fresh_rationale if outcome.fresh_rationale is not None else "<no diagnostic captured>"
+    if outcome.divergence is ReauditDivergence.JUDGE_CLASSIFICATION_FAILED:
+        return outcome.fresh_rationale if outcome.fresh_rationale is not None else "<no diagnostic captured>"
+    if outcome.divergence is ReauditDivergence.FUTURE_DATED_ENTRY:
+        return outcome.fresh_rationale if outcome.fresh_rationale is not None else "<no diagnostic captured>"
+    if outcome.divergence is ReauditDivergence.AMBIGUOUS_FINDING_MATCH:
+        return outcome.fresh_rationale if outcome.fresh_rationale is not None else "<no diagnostic captured>"
     if outcome.divergence is ReauditDivergence.SOURCE_EXCERPT_REJECTED:
         # SOURCE_EXCERPT_REJECTED carries the path-containment error
         # message in fresh_rationale. Surface it verbatim so the
@@ -1271,10 +1635,19 @@ def _outcome_notes(outcome: ReauditOutcome) -> str:
     return outcome.fresh_rationale.splitlines()[0] if outcome.fresh_rationale else ""
 
 
-def _md_escape(text: str) -> str:
-    """Escape pipes and backslashes for markdown table cells.
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
-    Tables break on bare ``|``; backticks in cells are fine because the
-    Entry column is already inline-coded.
+
+def _md_escape(text: str) -> str:
+    """Escape model/operator text for markdown table cells.
+
+    The report is commonly pasted into PR comments and wiki pages. Treat
+    notes as untrusted text: strip terminal controls, HTML-escape tag
+    delimiters, and backslash-escape markdown link/code/table characters.
     """
-    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
+    escaped = _ANSI_ESCAPE_RE.sub("", text)
+    escaped = escaped.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escaped = escaped.replace("\\", "\\\\")
+    for char in ("`", "|", "[", "]", "(", ")"):
+        escaped = escaped.replace(char, f"\\{char}")
+    return escaped.replace("\n", " ")

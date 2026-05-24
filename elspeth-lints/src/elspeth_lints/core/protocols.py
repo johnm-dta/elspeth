@@ -51,9 +51,13 @@ class Finding:
     fingerprint: str
     severity: Severity = Severity.ERROR
     suggestion: str | None = None
+    symbol_context: tuple[str, ...] = ()
+    ast_path: str = ""
 
-    def canonical_key(self, symbol_context: tuple[str, ...] = ()) -> str:
+    def canonical_key(self, symbol_context: tuple[str, ...] | None = None) -> str:
         """Return the allowlist key used for exact finding suppression."""
+        if symbol_context is None:
+            symbol_context = self.symbol_context
         symbol_part = ":".join(symbol_context) if symbol_context else "_module_"
         return f"{self.file_path}:{self.rule_id}:{symbol_part}:fp={self.fingerprint}"
 
@@ -83,11 +87,17 @@ class RuleContext:
     rule's per-rule default. Useful for shadow runs and cross-branch
     comparisons. ``None`` means "use the rule's own default" — the historical
     behaviour.
+
+    ``repo_root`` is an explicit repository root for whole-repository rules
+    whose scan root may be a subdirectory (for example ``src/elspeth``) but
+    whose evidence paths are repository-relative (for example ``tests/...``).
+    ``None`` means "derive from ``root`` using the rule's documented fallback".
     """
 
     root: Path
     allowlist: Allowlist | None = None
     allowlist_dir_override: Path | None = None
+    repo_root: Path | None = None
 
 
 @runtime_checkable

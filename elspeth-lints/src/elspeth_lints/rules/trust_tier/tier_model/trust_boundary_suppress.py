@@ -21,18 +21,20 @@ Auditability
 This rule has no telemetry surface, so the suppression decision IS the audit
 signal: the absence of a finding in the rule's report corresponds to a
 ``@trust_boundary`` decorator that a human reader can locate via the
-function's qualified name. The decorator's ``source``, ``invariant``, and
-``test_ref`` fields stand as the in-source justification — they are the
-permanent record of "why no R1 was emitted here". The companion
-``enforce_trust_boundary_*`` CI gates (separate scripts) verify the
-decorator's claims against runtime behaviour; this module only consumes the
-metadata that those gates also read.
+function's qualified name. The decorator's ``source``, ``invariant``,
+``test_ref``, and ``test_fingerprint`` fields stand as the in-source
+justification — they are the permanent record of "why no R1 was emitted here".
+The companion ``enforce_trust_boundary_*`` CI gates (separate scripts) verify
+the local test and scope claims; ``source`` remains reviewer-facing
+documentation, not a whole-repository external-data graph proof. This module
+only consumes the metadata that those gates also read.
 
 Malformed metadata is **not silently honoured**: a decorator that fails to
-expose literal kwargs (``R_TB_NONLITERAL``) or has wrong-shaped literals
-(``R_TB_MALFORMED``) is treated as inert (no suppression) AND emits a
-finding of its own so the malformed decorator cannot accidentally hide
-real violations.
+expose literal kwargs (``R_TB_NONLITERAL``), has wrong-shaped literals
+(``R_TB_MALFORMED``), contains unknown kwargs (``R_TB_UNKNOWN_KWARG``), or
+appears more than once on a function (``R_TB_STACKED``) is treated as inert
+(no suppression) AND emits a finding of its own so the malformed decorator
+cannot accidentally hide real violations.
 """
 
 from __future__ import annotations
@@ -53,34 +55,50 @@ from elspeth_lints.core.ast_walker import walk_function_own_scope
 # anything) AND an ``R_TB_MALFORMED`` finding is emitted so the malformed
 # decorator cannot quietly hide real violations.
 _ALLOWED_BOUNDARY_RULES: frozenset[str] = frozenset({"R1", "R5"})
+_ALLOWED_TRUST_BOUNDARY_KWARGS: frozenset[str] = frozenset(
+    {
+        "tier",
+        "source",
+        "source_param",
+        "suppresses",
+        "invariant",
+        "test_ref",
+        "test_fingerprint",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
-class _BoundaryMetadata:
+class BoundaryMetadata:
     """Parsed metadata for a ``@trust_boundary``-decorated function.
 
-    Only the fields the suppression walk needs are surfaced; ``tier``,
-    ``source``, ``invariant``, and ``test_ref`` belong to the runtime decorator
-    and the companion ``enforce_trust_boundary_*`` gates, not to this rule's
-    suppression decision.
+    ``source_param`` and ``suppresses`` drive the suppression decision.
+    ``source``, ``invariant``, ``test_ref``, and ``test_fingerprint`` are
+    carried for the non-failing ``R_TB_SUPPRESSED`` observation stream, so an
+    operator can audit which decorator metadata justified the hidden R1/R5
+    finding without re-reading the source file by hand.
     """
 
     suppresses: frozenset[str]
     source_param: str
     decorator_node: ast.Call
+    source: str | None
+    invariant: str | None
+    test_ref: str | None
+    test_fingerprint: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class BoundaryFinding:
     """Diagnostic about a malformed ``@trust_boundary`` decorator.
 
-    Returned alongside ``_BoundaryMetadata`` (or in its place) by
+    Returned alongside ``BoundaryMetadata`` (or in its place) by
     :func:`extract_boundary_metadata`. The caller surfaces these as ordinary
     rule findings via the visitor's ``_add_finding`` helper so they appear in
     the same JSON/text report as R1/R5/etc.
     """
 
-    rule_id: str  # "R_TB_NONLITERAL" or "R_TB_MALFORMED"
+    rule_id: str  # "R_TB_NONLITERAL", "R_TB_MALFORMED", "R_TB_UNKNOWN_KWARG", or "R_TB_STACKED"
     message: str
     node: ast.Call
 
@@ -113,20 +131,21 @@ def _is_trust_boundary_decorator(decorator: ast.expr) -> ast.Call | None:
     return None
 
 
-def find_trust_boundary_call(decorator_list: Iterable[ast.expr]) -> ast.Call | None:
-    """Locate the ``@trust_boundary(...)`` call in a function's decorator list.
+def find_trust_boundary_calls(decorator_list: Iterable[ast.expr]) -> list[ast.Call]:
+    """Locate all ``@trust_boundary(...)`` calls in a function's decorator list.
 
-    Order-independent: the decorator may appear anywhere in the stack (above
-    or below other decorators). Returns the first match. There is no
-    structural reason to forbid stacking, and other decorators (``@staticmethod``,
-    ``@functools.cached_property``, FastAPI routers) compose freely with
-    ``@trust_boundary``.
+    Order-independent: one trust-boundary decorator may appear anywhere in the
+    stack (above or below other decorators). More than one trust-boundary
+    decorator is ambiguous because only one ``source_param`` / ``suppresses``
+    tuple can be the audit signal for the function, so callers must reject
+    duplicate matches.
     """
+    calls: list[ast.Call] = []
     for decorator in decorator_list:
         call = _is_trust_boundary_decorator(decorator)
         if call is not None:
-            return call
-    return None
+            calls.append(call)
+    return calls
 
 
 def _literal_value(node: ast.expr) -> tuple[bool, object]:
@@ -187,7 +206,7 @@ def _literal_value(node: ast.expr) -> tuple[bool, object]:
 
 def extract_boundary_metadata(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> tuple[_BoundaryMetadata | None, list[BoundaryFinding]]:
+) -> tuple[BoundaryMetadata | None, list[BoundaryFinding]]:
     """Parse a function's ``@trust_boundary`` decorator, if any.
 
     Returns ``(metadata, diagnostics)``. ``metadata`` is ``None`` either
@@ -204,10 +223,28 @@ def extract_boundary_metadata(
     * ``R_TB_MALFORMED`` — kwargs are present and literal, but the shape is
       wrong: ``suppresses`` is not a tuple of strings, ``source_param`` is
       not a string, etc.
+    * ``R_TB_UNKNOWN_KWARG`` — kwargs are literal but include names outside
+      the runtime decorator's documented signature.
+    * ``R_TB_STACKED`` — the function carries multiple ``@trust_boundary``
+      decorators, so the analyzer refuses to choose one suppression claim.
     """
-    call = find_trust_boundary_call(func_node.decorator_list)
-    if call is None:
+    calls = find_trust_boundary_calls(func_node.decorator_list)
+    if not calls:
         return None, []
+    if len(calls) > 1:
+        return None, [
+            BoundaryFinding(
+                rule_id="R_TB_STACKED",
+                message=(
+                    "multiple @trust_boundary decorators found on one function; "
+                    "trust-boundary metadata is ambiguous, so static analysis "
+                    "will not suppress findings under this function."
+                ),
+                node=calls[1],
+            )
+        ]
+
+    call = calls[0]
 
     diagnostics: list[BoundaryFinding] = []
     parsed: dict[str, object] = {}
@@ -233,10 +270,7 @@ def extract_boundary_metadata(
             diagnostics.append(
                 BoundaryFinding(
                     rule_id="R_TB_NONLITERAL",
-                    message=(
-                        "@trust_boundary uses **-unpacking for its arguments; "
-                        "static analysis cannot read the metadata."
-                    ),
+                    message=("@trust_boundary uses **-unpacking for its arguments; static analysis cannot read the metadata."),
                     node=call,
                 )
             )
@@ -257,6 +291,22 @@ def extract_boundary_metadata(
             return None, diagnostics
         parsed[keyword.arg] = value
 
+    unknown_kwargs = sorted(set(parsed) - _ALLOWED_TRUST_BOUNDARY_KWARGS)
+    if unknown_kwargs:
+        diagnostics.append(
+            BoundaryFinding(
+                rule_id="R_TB_UNKNOWN_KWARG",
+                message=(
+                    "@trust_boundary received unknown kwarg(s) "
+                    f"{tuple(unknown_kwargs)!r}; static analysis treats the "
+                    "decorator as inert because the metadata does not match "
+                    "the runtime decorator signature."
+                ),
+                node=call,
+            )
+        )
+        return None, diagnostics
+
     # Shape validation of the two fields suppression depends on.
     suppresses_raw = parsed.get("suppresses")
     source_param_raw = parsed.get("source_param")
@@ -265,9 +315,7 @@ def extract_boundary_metadata(
     if suppresses_raw is None:
         shape_errors.append("missing kwarg 'suppresses'")
     elif not isinstance(suppresses_raw, tuple):
-        shape_errors.append(
-            f"'suppresses' must be a tuple of rule IDs, got {type(suppresses_raw).__name__}"
-        )
+        shape_errors.append(f"'suppresses' must be a tuple of rule IDs, got {type(suppresses_raw).__name__}")
     elif not all(isinstance(item, str) for item in suppresses_raw):
         shape_errors.append("'suppresses' tuple contains non-string entries")
     else:
@@ -278,10 +326,7 @@ def extract_boundary_metadata(
         # the authorised set is a malformed metadata signal — the decorator
         # is treated as inert (no suppression) and an R_TB_MALFORMED finding
         # is emitted naming the offending IDs.
-        unauthorised = sorted(
-            str(item) for item in suppresses_raw
-            if str(item) not in _ALLOWED_BOUNDARY_RULES
-        )
+        unauthorised = sorted(str(item) for item in suppresses_raw if str(item) not in _ALLOWED_BOUNDARY_RULES)
         if unauthorised:
             shape_errors.append(
                 "'suppresses' contains unauthorised rule id(s) "
@@ -292,9 +337,7 @@ def extract_boundary_metadata(
     if source_param_raw is None:
         shape_errors.append("missing kwarg 'source_param'")
     elif not isinstance(source_param_raw, str):
-        shape_errors.append(
-            f"'source_param' must be a string, got {type(source_param_raw).__name__}"
-        )
+        shape_errors.append(f"'source_param' must be a string, got {type(source_param_raw).__name__}")
     elif not source_param_raw:
         shape_errors.append("'source_param' is an empty string")
 
@@ -312,10 +355,22 @@ def extract_boundary_metadata(
     assert isinstance(suppresses_raw, tuple)
     assert isinstance(source_param_raw, str)
     suppresses_strs: tuple[str, ...] = tuple(str(item) for item in suppresses_raw)
-    metadata = _BoundaryMetadata(
+    source = parsed.get("source")
+    invariant = parsed.get("invariant")
+    test_ref = parsed.get("test_ref")
+    test_fingerprint = parsed.get("test_fingerprint")
+    source_value = source if isinstance(source, str) else None
+    invariant_value = invariant if isinstance(invariant, str) else None
+    test_ref_value = test_ref if isinstance(test_ref, str) else None
+    test_fingerprint_value = test_fingerprint if isinstance(test_fingerprint, str) else None
+    metadata = BoundaryMetadata(
         suppresses=frozenset(suppresses_strs),
         source_param=source_param_raw,
         decorator_node=call,
+        source=source_value,
+        invariant=invariant_value,
+        test_ref=test_ref_value,
+        test_fingerprint=test_fingerprint_value,
     )
     return metadata, diagnostics
 
@@ -386,10 +441,7 @@ def subject_is_rooted(node: ast.AST, derived_names: frozenset[str]) -> bool:
     if isinstance(node, ast.Starred):
         return subject_is_rooted(node.value, derived_names)
     if isinstance(node, ast.IfExp):
-        return (
-            subject_is_rooted(node.body, derived_names)
-            or subject_is_rooted(node.orelse, derived_names)
-        )
+        return subject_is_rooted(node.body, derived_names) or subject_is_rooted(node.orelse, derived_names)
     if isinstance(node, ast.BoolOp):
         return any(subject_is_rooted(value, derived_names) for value in node.values)
     if isinstance(node, ast.NamedExpr):
@@ -445,13 +497,15 @@ def compute_derived_names(
       in Python 3 have their own scope but we conservatively treat the
       target name as derived if it's later referenced.)
 
-    Function bodies are small and the iteration converges in a handful of
-    passes, so we cap at 32 iterations defensively — far beyond what any
-    realistic function needs — and assert non-convergence loudly if hit.
+    The iteration is monotone over a finite local-name set. Instead of an
+    arbitrary constant cap, the loop is bounded by the number of local names
+    that can be marked derived plus one final no-change pass.
     """
     derived: set[str] = {source_param}
+    local_names = _local_bindable_names(func_node) | {source_param}
+    max_iterations = len(local_names) + 1
 
-    for _iteration in range(32):
+    for _iteration in range(max_iterations):
         before = frozenset(derived)
         snapshot = frozenset(derived)
 
@@ -514,6 +568,27 @@ def compute_derived_names(
     # the suppression analysis (per the project's offensive-programming
     # doctrine, an unconverged fixed-point is a bug, not a recoverable case).
     raise RuntimeError(
-        "compute_derived_names did not converge within 32 iterations for "
+        f"compute_derived_names did not converge within {max_iterations} iterations for "
         f"function {func_node.name!r}; this is a bug in the dataflow walk."
     )
+
+
+def _local_bindable_names(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Return names this function's own scope can bind through supported flows."""
+    names: set[str] = set()
+    for sub in walk_function_own_scope(func_node):
+        if isinstance(sub, ast.Assign):
+            for target in sub.targets:
+                names.update(_assignment_targets(target))
+        elif isinstance(sub, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
+            names.update(_assignment_targets(sub.target))
+        elif isinstance(sub, (ast.With, ast.AsyncWith)):
+            for item in sub.items:
+                if item.optional_vars is not None:
+                    names.update(_assignment_targets(item.optional_vars))
+        elif isinstance(sub, ast.NamedExpr):
+            names.update(_assignment_targets(sub.target))
+        elif isinstance(sub, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            for generator in sub.generators:
+                names.update(_comprehension_target_names(generator))
+    return names

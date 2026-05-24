@@ -638,6 +638,12 @@ interpretation_events_table = Table(
         "kind IS NULL OR kind IN ('vague_term', 'invented_source', 'llm_prompt_template')",
         name="ck_interpretation_events_kind",
     ),
+    # Auto-interpreted rows are born resolved by definition. They never
+    # represent a user acceptance/amendment or an abandoned pending surface.
+    CheckConstraint(
+        "(interpretation_source NOT IN ('auto_interpreted_opt_out', 'auto_interpreted_no_surfaces')) OR choice = 'opted_out'",
+        name="ck_interpretation_events_auto_source_choice",
+    ),
     # F-1/F-12 (source-keyed opt-out shapes): session-level opt-out marker
     # rows have no LLM context and no hash; surface-specific opt-out rows
     # are born resolved with kind, surface/provenance fields, accepted_value,

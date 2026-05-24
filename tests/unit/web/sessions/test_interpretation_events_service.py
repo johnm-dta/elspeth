@@ -215,7 +215,7 @@ async def _seed_state_with_llm_node(
 
 @pytest.mark.asyncio
 async def test_01_create_pending_interpretation_event_inserts_row(service) -> None:
-    """Spec test 1: pending row inserted with all six required fields."""
+    """Spec test 1: pending row inserted with all required fields."""
     session_id = uuid4()
     state = await _seed_state_with_llm_node(service, session_id=session_id)
 
@@ -285,6 +285,7 @@ async def test_02_create_pending_rejects_unknown_node_id(service) -> None:
             affected_node_id="node-does-not-exist",
             tool_call_id="call_42",
             user_term="cool",
+            kind=InterpretationKind.VAGUE_TERM,
             llm_draft="A draft of cool",
             model_identifier="anthropic/claude-opus-4-7",
             model_version="2026-05-01",
@@ -297,6 +298,55 @@ async def test_02_create_pending_rejects_unknown_node_id(service) -> None:
             select(interpretation_events_table).where(interpretation_events_table.c.session_id == str(session_id))
         ).fetchall()
     assert count == [], "interpretation_events must be empty after writer-boundary raise"
+
+
+@pytest.mark.asyncio
+async def test_create_pending_interpretation_event_requires_explicit_kind(service) -> None:
+    """The writer must not silently classify omitted kinds as vague_term."""
+    session_id = uuid4()
+    state = await _seed_state_with_llm_node(service, session_id=session_id)
+
+    with pytest.raises(TypeError, match="kind"):
+        await service.create_pending_interpretation_event(
+            session_id=session_id,
+            composition_state_id=state.id,
+            affected_node_id="llm_transform_1",
+            tool_call_id="call_missing_kind",
+            user_term="cool",
+            llm_draft="A draft of cool",
+            model_identifier="anthropic/claude-opus-4-7",
+            model_version="2026-05-01",
+            provider="anthropic",
+            composer_skill_hash="a" * 64,
+        )
+
+    rows = await service.list_interpretation_events(session_id, status="all")
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_create_pending_interpretation_event_rejects_raw_kind_string(service) -> None:
+    """Raw strings must not be coerced into the vague-term enum."""
+    session_id = uuid4()
+    state = await _seed_state_with_llm_node(service, session_id=session_id)
+
+    with pytest.raises(ValueError, match=r"kind must be InterpretationKind"):
+        await service.create_pending_interpretation_event(
+            session_id=session_id,
+            composition_state_id=state.id,
+            affected_node_id="llm_transform_1",
+            tool_call_id="call_raw_kind",
+            user_term="cool",
+            kind="invented_source",  # type: ignore[arg-type]
+            llm_draft="A draft of cool",
+            model_identifier="anthropic/claude-opus-4-7",
+            model_version="2026-05-01",
+            provider="anthropic",
+            composer_skill_hash="a" * 64,
+        )
+
+    rows = await service.list_interpretation_events(session_id, status="all")
+    assert rows == []
 
 
 # --------------------------------------------------------------------------- #
@@ -315,6 +365,7 @@ async def test_03_resolve_accepted_as_drafted_uses_llm_draft(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_42",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="Innovative and creative",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -381,6 +432,7 @@ async def test_03b_resolve_recomputes_validation_for_patched_live_state(service)
         affected_node_id="llm_transform_1",
         tool_call_id="call_42",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="Innovative and creative",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -421,6 +473,7 @@ async def test_04_resolve_amended_uses_amended_value(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_42",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="Innovative and creative",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -458,6 +511,7 @@ async def test_05_resolve_raises_on_double_resolve(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_42",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="A draft",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -498,6 +552,7 @@ async def test_06_resolve_raises_when_node_removed_since_surfacing(service) -> N
         affected_node_id="llm_transform_1",
         tool_call_id="call_42",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="A draft",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -539,6 +594,7 @@ async def test_07_resolve_raises_when_placeholder_absent(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_42",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="A draft",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -585,6 +641,7 @@ async def test_08_list_status_pending_filters_to_pending_only(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_pending",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="cool def",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -597,6 +654,7 @@ async def test_08_list_status_pending_filters_to_pending_only(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_resolved",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="cool def 2",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -629,6 +687,7 @@ async def test_09_list_status_all_returns_all_rows(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_1",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="d1",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -641,6 +700,7 @@ async def test_09_list_status_all_returns_all_rows(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_2",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="d2",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -754,6 +814,7 @@ async def test_create_pending_after_session_opt_out_returns_opt_out_row(service)
         affected_node_id="llm_transform_1",
         tool_call_id="call_after_opt_out",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="A draft definition",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -793,6 +854,27 @@ async def test_record_auto_interpreted_no_surfaces_carries_kind(service) -> None
     assert event.kind is InterpretationKind.LLM_PROMPT_TEMPLATE
     assert event.arguments_hash is None
     assert event.hash_domain_version is None
+
+
+@pytest.mark.asyncio
+async def test_record_auto_interpreted_no_surfaces_requires_explicit_kind(service) -> None:
+    """Rate-cap audit rows require the caller's explicit interpretation class."""
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+
+    with pytest.raises(TypeError, match="kind"):
+        await service.record_auto_interpreted_no_surfaces_event(
+            session_id=session_id,
+            actor="composer-llm",
+            model_identifier="anthropic/claude-opus-4-7",
+            model_version="2026-05-01",
+            provider="anthropic",
+            composer_skill_hash="a" * 64,
+        )
+
+    rows = await service.list_interpretation_events(session_id, status="all")
+    assert rows == []
 
 
 # --------------------------------------------------------------------------- #
@@ -1080,6 +1162,7 @@ async def test_15_arguments_hash_matches_domain_v2(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_42",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="A draft of cool",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -1141,6 +1224,7 @@ async def test_resolve_after_resolve_classifies_trigger_message_to_valueerror(se
         affected_node_id="llm_transform_1",
         tool_call_id="call_42",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="A draft",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -1232,6 +1316,7 @@ async def test_resolve_round_trips_through_state_from_record_and_yaml(service) -
         affected_node_id="llm_transform_1",
         tool_call_id="call_round_trip",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="modern and clear",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -1282,6 +1367,7 @@ async def test_resolve_structured_requirement_round_trips_without_authoring_meta
         affected_node_id="llm_transform_1",
         tool_call_id="call_structured_round_trip",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="modern and clear",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -1377,6 +1463,7 @@ async def test_16_refresh_pending_rehydrates_orphan_event_without_in_band_notifi
         affected_node_id="llm_transform_1",
         tool_call_id="call_orphan",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="An orphan-scenario draft",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -1425,6 +1512,7 @@ async def test_17_refresh_pending_is_idempotent_across_repeated_calls(service) -
         affected_node_id="llm_transform_1",
         tool_call_id="call_orphan_idem",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="A draft",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -1465,6 +1553,7 @@ async def test_18_refresh_pending_drops_orphan_after_resolution(service) -> None
         affected_node_id="llm_transform_1",
         tool_call_id="call_orphan_resolve",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="Draft to be accepted",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -1518,6 +1607,7 @@ async def test_19_refresh_pending_isolates_orphans_by_session(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_A",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="Draft A",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",
@@ -1530,6 +1620,7 @@ async def test_19_refresh_pending_isolates_orphans_by_session(service) -> None:
         affected_node_id="llm_transform_1",
         tool_call_id="call_B",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="Draft B",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",

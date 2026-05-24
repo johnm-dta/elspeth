@@ -390,6 +390,7 @@ async def test_09_list_status_pending_returns_only_pending_events(
         affected_node_id="llm_transform_1",
         tool_call_id="call_43",
         user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
         llm_draft="Second draft",
         model_identifier="anthropic/claude-opus-4-7",
         model_version="2026-05-01",

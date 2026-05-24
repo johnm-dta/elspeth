@@ -37,6 +37,7 @@ from sqlalchemy import Engine, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.composer_llm_audit import (
     ComposerLLMCall,
     ComposerLLMCallStatus,
@@ -151,6 +152,11 @@ slog = structlog.get_logger()
 _LLM_API_MAX_ATTEMPTS = 3
 _LLM_API_RETRY_BASE_DELAY_SECONDS = 1.0
 _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS: Final[str] = "invalid_tool_arguments"
+
+# Rate-cap rows created for ``request_interpretation_review`` inherit that
+# tool's current vague-term-only contract. Task 4 will make this bridge
+# kind-aware; until then, keep the classification explicit at this call site.
+_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND: Final[InterpretationKind] = InterpretationKind.VAGUE_TERM
 
 # Composer LLM sampling constants. Hardcoded for deterministic tool-call
 # construction (RGR investigation 2026-05-06 §4.4 traced ~33% hard-GREEN
@@ -4450,6 +4456,7 @@ class ComposerServiceImpl:
                     # it is the truthful caller identity for this dispatch
                     # and matches the audit envelope's ``actor`` field.
                     actor=audit.actor,
+                    kind=_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND,
                     model_identifier=self._model,
                     model_version=safe_response_model(response) or self._model,
                     provider=self._availability.provider or "unknown",

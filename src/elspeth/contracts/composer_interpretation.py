@@ -108,6 +108,12 @@ _CHOICES_WITH_ACCEPTED_VALUE: frozenset[InterpretationChoice] = frozenset(
         InterpretationChoice.AMENDED,
     }
 )
+_AUTO_INTERPRETED_SOURCES: frozenset[InterpretationSource] = frozenset(
+    {
+        InterpretationSource.AUTO_INTERPRETED_OPT_OUT,
+        InterpretationSource.AUTO_INTERPRETED_NO_SURFACES,
+    }
+)
 
 
 def _validate_enum_member(value: object, enum_type: type[StrEnum], field_name: str) -> None:
@@ -238,6 +244,8 @@ class InterpretationEventRecord:
         if self.kind is not None:
             _validate_enum_member(self.kind, InterpretationKind, "kind")
         self._validate_source_shape()
+        self._validate_auto_source_choice()
+        self._validate_surface_opt_out_hash_domain_version()
         self._validate_choice_status_fields()
         self._validate_hash_domain_pair()
 
@@ -280,6 +288,18 @@ class InterpretationEventRecord:
                     non_null_fields=non_null_fields,
                 )
             )
+
+    def _validate_auto_source_choice(self) -> None:
+        if self.interpretation_source in _AUTO_INTERPRETED_SOURCES and self.choice is not InterpretationChoice.OPTED_OUT:
+            raise ValueError(f"InterpretationEventRecord {self.interpretation_source.value} rows must use choice='opted_out'")
+
+    def _validate_surface_opt_out_hash_domain_version(self) -> None:
+        if (
+            self.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT
+            and self.kind is not None
+            and self.hash_domain_version != "v2"
+        ):
+            raise ValueError("InterpretationEventRecord surface-specific auto_interpreted_opt_out rows must use hash_domain_version='v2'")
 
     def _validate_choice_status_fields(self) -> None:
         if (self.choice is InterpretationChoice.PENDING) != (self.resolved_at is None):

@@ -37,6 +37,7 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_interpretation import (
     InterpretationChoice,
+    InterpretationKind,
     InterpretationSource,
 )
 from elspeth.web.composer.proposals import build_tool_proposal_summary
@@ -283,6 +284,7 @@ async def test_02_happy_path_produces_success_and_db_row(service: SessionService
     assert rows[0].llm_draft == "Visually appealing."
     assert rows[0].choice is InterpretationChoice.PENDING
     assert rows[0].interpretation_source is InterpretationSource.USER_APPROVED
+    assert rows[0].kind is InterpretationKind.VAGUE_TERM
 
 
 @pytest.mark.asyncio
@@ -614,6 +616,7 @@ async def test_15_per_session_day_rate_cap_resets_at_utc_midnight(service: Sessi
             affected_node_id="rate_node",
             tool_call_id=f"call_pre_{i}",
             user_term=f"term_{i}",
+            kind=InterpretationKind.VAGUE_TERM,
             llm_draft=f"Draft {i}",
             created_at=late_night,
             **_provenance_kwargs(),
@@ -1100,6 +1103,7 @@ async def test_17_auto_interpreted_no_surfaces_writer(service: SessionServiceImp
     event = await service.record_auto_interpreted_no_surfaces_event(
         session_id=session_id,
         actor="composer-llm",
+        kind=InterpretationKind.VAGUE_TERM,
         **_provenance_kwargs(),
     )
     assert event.interpretation_source is InterpretationSource.AUTO_INTERPRETED_NO_SURFACES

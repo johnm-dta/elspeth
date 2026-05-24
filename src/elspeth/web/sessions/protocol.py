@@ -745,7 +745,7 @@ class SessionServiceProtocol(Protocol):
         affected_node_id: str,
         tool_call_id: str,
         user_term: str,
-        kind: InterpretationKind = InterpretationKind.VAGUE_TERM,
+        kind: InterpretationKind,
         llm_draft: str,
         model_identifier: str,
         model_version: str,
@@ -755,8 +755,9 @@ class SessionServiceProtocol(Protocol):
     ) -> InterpretationEventRecord:
         """Insert a PENDING interpretation event.
 
-        ``kind`` defaults to ``vague_term`` for the pre-kind
-        ``request_interpretation_review`` caller. Implementations MUST
+        ``kind`` must be supplied explicitly by the caller; legacy
+        ``request_interpretation_review`` bridges pass ``vague_term`` at
+        the call site while the tool remains vague-term-only. Implementations MUST
         validate ``affected_node_id`` exists in the parent composition
         state's ``nodes`` JSON before INSERT (writer-boundary check per
         CLAUDE.md offensive programming). Raises ``ValueError`` on a
@@ -856,7 +857,7 @@ class SessionServiceProtocol(Protocol):
         *,
         session_id: UUID,
         actor: str,
-        kind: InterpretationKind = InterpretationKind.VAGUE_TERM,
+        kind: InterpretationKind,
         model_identifier: str,
         model_version: str,
         provider: str,

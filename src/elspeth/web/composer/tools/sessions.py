@@ -12,7 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
-from elspeth.contracts.composer_interpretation import InterpretationEventRecord, InterpretationSource
+from elspeth.contracts.composer_interpretation import InterpretationEventRecord, InterpretationKind, InterpretationSource
 from elspeth.contracts.enums import CreationModality
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
@@ -105,6 +105,11 @@ ADVISOR_TRIGGER_VALUES: Final[tuple[str, ...]] = (
     ADVISOR_TRIGGER_PROACTIVE_SECURITY,
     ADVISOR_TRIGGER_PROACTIVE_RED_LISTED,
 )
+
+# Current ``request_interpretation_review`` has no kind argument and remains
+# vague-term-only until Task 4 expands the tool contract. Keep that bridge
+# explicit at the call site so service writers never silently classify rows.
+_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND: Final[InterpretationKind] = InterpretationKind.VAGUE_TERM
 
 
 class _RequestInterpretationReviewArgumentsModel(BaseModel):
@@ -1335,6 +1340,7 @@ async def _handle_request_interpretation_review(
         affected_node_id=parsed.affected_node_id,
         tool_call_id=tool_call_id,
         user_term=parsed.user_term,
+        kind=_REQUEST_INTERPRETATION_REVIEW_CURRENT_KIND,
         llm_draft=parsed.llm_draft,
         model_identifier=model_identifier,
         model_version=model_version,

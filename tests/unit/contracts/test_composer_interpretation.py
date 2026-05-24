@@ -9,6 +9,7 @@ frozen-attribute discipline (FrozenInstanceError on assignment).
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -105,6 +106,24 @@ def _no_surfaces_record_kwargs() -> dict[str, object]:
         "arguments_hash": None,
         "hash_domain_version": None,
         "interpretation_source": InterpretationSource.AUTO_INTERPRETED_NO_SURFACES,
+        "runtime_model_identifier_at_resolve": None,
+        "runtime_model_version_at_resolve": None,
+        "resolved_prompt_template_hash": None,
+    }
+
+
+def _surface_opt_out_record_kwargs() -> dict[str, object]:
+    """Kwargs for a surface-specific auto_interpreted_opt_out row."""
+    return _resolved_record_kwargs() | {
+        "user_term": "inline_source_url_list",
+        "kind": InterpretationKind.INVENTED_SOURCE,
+        "llm_draft": "https://example.gov.au",
+        "accepted_value": "https://example.gov.au",
+        "choice": InterpretationChoice.OPTED_OUT,
+        "actor": "composer-llm",
+        "interpretation_source": InterpretationSource.AUTO_INTERPRETED_OPT_OUT,
+        "arguments_hash": "d" * 64,
+        "hash_domain_version": "v2",
         "runtime_model_identifier_at_resolve": None,
         "runtime_model_version_at_resolve": None,
         "resolved_prompt_template_hash": None,
@@ -280,6 +299,44 @@ def test_no_surfaces_record_constructs_successfully() -> None:
     assert record.model_identifier == "anthropic/claude-opus-4-7"
     assert record.provider == "anthropic"
     assert record.composer_skill_hash == "a" * 64
+
+
+def test_surface_opt_out_record_constructs_successfully() -> None:
+    """Surface-specific opt-out rows carry kind, content, provenance, and V2 hash."""
+    record = InterpretationEventRecord(**_surface_opt_out_record_kwargs())
+    assert record.choice is InterpretationChoice.OPTED_OUT
+    assert record.interpretation_source is InterpretationSource.AUTO_INTERPRETED_OPT_OUT
+    assert record.kind is InterpretationKind.INVENTED_SOURCE
+    assert record.accepted_value == "https://example.gov.au"
+    assert record.hash_domain_version == "v2"
+    assert record.arguments_hash == "d" * 64
+
+
+def test_surface_opt_out_record_rejects_v1_hash_domain() -> None:
+    """Surface-specific opt-out rows are current V2 writes, never legacy V1."""
+    kwargs = _surface_opt_out_record_kwargs()
+    kwargs["hash_domain_version"] = "v1"
+    with pytest.raises(ValueError, match=r"surface-specific auto_interpreted_opt_out.*v2"):
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("kwargs_factory", "source_name"),
+    [
+        (_opted_out_record_kwargs, "auto_interpreted_opt_out"),
+        (_surface_opt_out_record_kwargs, "auto_interpreted_opt_out"),
+        (_no_surfaces_record_kwargs, "auto_interpreted_no_surfaces"),
+    ],
+)
+def test_auto_interpreted_rows_require_opted_out_choice(
+    kwargs_factory: Callable[[], dict[str, object]],
+    source_name: str,
+) -> None:
+    """Auto-interpreted rows are born resolved as opted_out, not accepted/abandoned."""
+    kwargs = kwargs_factory()
+    kwargs["choice"] = InterpretationChoice.ABANDONED
+    with pytest.raises(ValueError, match=rf"{source_name}.*opted_out"):
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
 
 
 def test_user_approved_record_requires_surface_and_provenance_fields() -> None:

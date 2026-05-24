@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
+    SESSION_SCHEMA_EPOCH,
     chat_messages_table,
     composition_states_table,
     interpretation_events_table,
@@ -173,6 +174,30 @@ def _no_surfaces_row(
     }
 
 
+def _surface_opt_out_row(*, row_id: str, session_id: str, state_id: str) -> dict:
+    return _user_approved_row(
+        row_id=row_id,
+        session_id=session_id,
+        state_id=state_id,
+        tool_call_id="call_surface_opt_out",
+        kind="invented_source",
+        choice="opted_out",
+        resolved_at=datetime.now(UTC),
+        accepted_value="https://example.gov.au",
+        hash_domain_version="v2",
+        arguments_hash="b" * 64,
+    ) | {
+        "user_term": "inline_source_url_list",
+        "llm_draft": "https://example.gov.au",
+        "actor": "composer-llm",
+        "interpretation_source": "auto_interpreted_opt_out",
+    }
+
+
+def test_interpretation_kind_schema_cohort_epoch_is_10() -> None:
+    assert SESSION_SCHEMA_EPOCH == 10
+
+
 # Test 1 — table exists with all expected columns -----------------------------
 class TestSchema:
     def test_interpretation_events_columns(self, engine) -> None:
@@ -292,24 +317,7 @@ class TestSourceNullability:
             _seed_composition_state(conn, state_id=state_id, session_id=session_id)
             conn.execute(
                 insert(interpretation_events_table).values(
-                    _user_approved_row(
-                        row_id=str(uuid.uuid4()),
-                        session_id=session_id,
-                        state_id=state_id,
-                        tool_call_id="call_surface_opt_out",
-                        kind="invented_source",
-                        choice="opted_out",
-                        resolved_at=datetime.now(UTC),
-                        accepted_value="https://example.gov.au",
-                        hash_domain_version="v2",
-                        arguments_hash="b" * 64,
-                    )
-                    | {
-                        "user_term": "inline_source_url_list",
-                        "llm_draft": "https://example.gov.au",
-                        "actor": "composer-llm",
-                        "interpretation_source": "auto_interpreted_opt_out",
-                    }
+                    _surface_opt_out_row(row_id=str(uuid.uuid4()), session_id=session_id, state_id=state_id)
                 )
             )
 
@@ -350,6 +358,35 @@ class TestSourceNullability:
                 "actor": "composer-llm",
                 "interpretation_source": "auto_interpreted_opt_out",
             }
+            with pytest.raises(IntegrityError):
+                conn.execute(insert(interpretation_events_table).values(row))
+
+    def test_opt_out_marker_with_non_opted_out_choice_raises(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            row = _opt_out_row(row_id=str(uuid.uuid4()), session_id=session_id)
+            row["choice"] = "abandoned"
+            with pytest.raises(IntegrityError):
+                conn.execute(insert(interpretation_events_table).values(row))
+
+    def test_surface_opt_out_with_non_opted_out_choice_raises(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            _seed_composition_state(conn, state_id=state_id, session_id=session_id)
+            row = _surface_opt_out_row(row_id=str(uuid.uuid4()), session_id=session_id, state_id=state_id)
+            row["choice"] = "accepted_as_drafted"
+            with pytest.raises(IntegrityError):
+                conn.execute(insert(interpretation_events_table).values(row))
+
+    def test_no_surfaces_with_non_opted_out_choice_raises(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            row = _no_surfaces_row(row_id=str(uuid.uuid4()), session_id=session_id)
+            row["choice"] = "abandoned"
             with pytest.raises(IntegrityError):
                 conn.execute(insert(interpretation_events_table).values(row))
 

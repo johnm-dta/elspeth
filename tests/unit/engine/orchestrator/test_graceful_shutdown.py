@@ -258,10 +258,12 @@ class TestCheckpointInterruptedProgress:
             token = Mock(spec=TokenInfo)
             token.token_id = "tok-1"
             callback(token)
+            callback.flush()
 
             orchestrator._checkpoint_manager.create_checkpoint.assert_called_once()
             call_kwargs = orchestrator._checkpoint_manager.create_checkpoint.call_args.kwargs
             assert call_kwargs["coalesce_state"] is coalesce_state
+            mock_processor.mark_sink_bound_scheduler_terminal_many.assert_called_once_with(("tok-1",))
         finally:
             db.close()
 

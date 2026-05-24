@@ -65,6 +65,18 @@ elspeth run --settings examples/rate_limited_llm/settings.yaml --execute
 elspeth run --settings examples/chaosllm_endurance/settings.yaml --execute  # 10K rows, slow
 ```
 
+Do not gate dogfood completion on the full `chaosllm_endurance` workload. It
+expands 10,000 rows into 100,000 mock LLM calls before retries. For ordinary
+examples dogfood, use a bounded smoke input such as:
+
+```bash
+CHAOSLLM_ENDURANCE_ROWS=20 ./examples/chaosllm_endurance/run.sh
+```
+
+Alternatively, a few minutes of successful retry/quarantine/interruption
+behavior against the ChaosLLM server is enough evidence for this endurance
+category.
+
 **Known issue:** The `realistic` preset sets `workers: 4` but errorworks 0.1.1 passes the app as a Python object to uvicorn, which only supports `workers=1` in that mode. Always pass `--workers=1` explicitly. See `docs/bugs/errorworks-workers-bug.md`.
 
 | Example | Rows | Notes |

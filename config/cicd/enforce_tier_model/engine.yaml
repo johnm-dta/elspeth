@@ -210,7 +210,7 @@ allow_hits:
     has already been caught and normalized to structured fields. It does not hide
     primary pipeline work, does not log raw exception text, and is covered by tests/unit/engine/test_best_effort.py::test_best_effort_suppresses_logger_failures.
   expires: null
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=4eab1a7b79b95c85
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=30807d33e4b5599d
   owner: architecture
   reason: Plugin cleanup MUST attempt every hook even when individual hooks fail —
     the broad catch is required by contract (close()/on_complete() are best-effort
@@ -225,7 +225,7 @@ allow_hits:
     with cause chained to the pending exception so the audit trail preserves both.
     No silent drops. Burndown: filigree elspeth-550362f760 (closed).'
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=e3025b6b8f8946d3
+- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=b07a148c9ee3fe81
   owner: bugfix
   pattern: audit-record-fallback
   reason: Tier-3 quarantine boundary — quarantined row data may contain NaN/Infinity
@@ -239,7 +239,7 @@ allow_hits:
     repr_hash is deterministic and recorded as the fallback path; the quarantine audit
     row carries which hash path produced the value.
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_next_source_item_with_idle_timeout_flushes:fetch_next:fp=c044c3f4b168ede3
+- key: engine/orchestrator/core.py:R6:Orchestrator:_next_source_item_with_idle_timeout_flushes:fetch_next:fp=edcb69d4b30ab3af
   owner: architecture
   reason: Worker-thread iterator exhaustion must be translated into an explicit stop
     sentinel so the orchestrator thread can continue flushing idle aggregation windows
@@ -247,7 +247,7 @@ allow_hits:
   safety: The stop sentinel is consumed immediately by the orchestrator thread and
     converted back to StopIteration; no source row or exception is dropped.
   expires: null
-- key: engine/orchestrator/core.py:R4:Orchestrator:_next_source_item_with_idle_timeout_flushes:fetch_next:fp=82e9d5a91869ee3f
+- key: engine/orchestrator/core.py:R4:Orchestrator:_next_source_item_with_idle_timeout_flushes:fetch_next:fp=b004b4080f31a730
   owner: architecture
   reason: Source iterator errors raised on the idle-poll worker thread must be relayed
     through the bounded queue to the orchestrator thread; catching BaseException here
@@ -256,7 +256,7 @@ allow_hits:
   safety: Every caught exception is queued as an error result and re-raised unchanged
     by the orchestrator thread before any row is returned.
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_next_source_item_with_idle_timeout_flushes:fp=55f5a3f63420f9b0
+- key: engine/orchestrator/core.py:R6:Orchestrator:_next_source_item_with_idle_timeout_flushes:fp=de379a7c1e6dd381
   owner: architecture
   reason: queue.Empty is the idle-poll signal for aggregation timeout flushing while
     a source iterator is blocked; the handler runs the explicit flush path and then
@@ -264,7 +264,7 @@ allow_hits:
   safety: Only queue.Empty is caught. Real source exceptions are delivered through
     the error sentinel and re-raised by the orchestrator thread.
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_run_main_processing_loop:fp=6a5258b21b96c993
+- key: engine/orchestrator/core.py:R6:Orchestrator:_run_main_processing_loop:fp=f53fc78d4e344df5
   owner: architecture
   reason: StopIteration is the normal source exhaustion signal for both direct source
     iteration and the idle-poll helper; the main processing loop uses it to leave

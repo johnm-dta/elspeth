@@ -126,12 +126,6 @@ allow_hits:
     purge or duplicate call)
   safety: Returns False on missing file — caller informed, no silent data loss
   expires: null
-- key: core/landscape/query_repository.py:R6:QueryRepository:explain_row:fp=5b5158345e746330
-  owner: architecture
-  reason: PayloadNotFoundError from PayloadStore when payload purged by retention
-    policy — expected, not corruption
-  safety: Logs debug message and continues with source_data=None; payload_available
-    flag set to False
 - key: core/canonical.py:R6:_normalize_value:fp=b26d50562c16f852
   owner: architecture
   reason: TypeError from np.isnan/isinf on non-numeric dtypes is expected — non-numeric
@@ -175,6 +169,12 @@ allow_hits:
     rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
   expires: '2026-11-13'
+- key: core/landscape/execution_repository.py:R6:ExecutionRepository:record_completed_node_state:fp=ae0f3d440e7a3f25
+  owner: bugfix
+  reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash
+    rejects
+  safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
+  expires: '2026-11-13'
 - key: core/security/web.py:R4:validate_url_for_ssrf:_resolve_worker:fp=bdf07052a9f75058
   owner: bugfix
   reason: DNS resolver worker catches BaseException to relay ALL errors through the
@@ -201,30 +201,13 @@ allow_hits:
     (forward reference or optional path)
   safety: Continues to next coalesce point; warning about potential data loss is best-effort
   expires: '2026-11-13'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=561c7495ae328e56
-  owner: architecture
-  reason: Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically
-    serializable
-  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=a29de3eac9a1b093
-  owner: bugfix
-  pattern: audit-record-fallback
-  reason: Tier-3 boundary — error_details from transform results may contain NaN/Infinity
-    that canonical_json rejects
-  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=e4161acafd7c7b5c
-  owner: bugfix
-  pattern: audit-record-fallback
-  reason: Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity
-    that canonical_json rejects
-  safety: Falls back to repr_hash + NonCanonicalMetadata — audit trail preserved
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=697daa2ece69ddeb
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:_prepare_source_row_record:fp=32a70aa50f457644
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash
     rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
   expires: '2026-11-13'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=b24db997031f987c
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:_prepare_source_row_record:fp=8f50b51a915f03b2
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash
     rejects
@@ -239,3 +222,26 @@ allow_hits:
     treats the run as not-resumable and starts from the source. No audit data is lost;
     lineage is preserved by full recompute.
   expires: '2026-08-20'
+- key: core/landscape/query_repository.py:R6:QueryRepository:explain_row:fp=b81f5371dd48636a
+  owner: architecture
+  reason: PayloadNotFoundError from PayloadStore when payload purged by retention
+    policy — expected, not corruption
+  safety: Logs debug message and continues with source_data=None; payload_available
+    flag set to False
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=27150b2092304cba
+  owner: architecture
+  reason: Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically
+    serializable
+  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=835b40202757ed1f
+  owner: bugfix
+  pattern: audit-record-fallback
+  reason: Tier-3 boundary — error_details from transform results may contain NaN/Infinity
+    that canonical_json rejects
+  safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=9c5386b20f102164
+  owner: bugfix
+  pattern: audit-record-fallback
+  reason: Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity
+    that canonical_json rejects
+  safety: Falls back to repr_hash + NonCanonicalMetadata — audit trail preserved

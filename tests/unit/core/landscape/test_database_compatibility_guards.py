@@ -174,8 +174,25 @@ class TestSchemaCompatibilityGuards:
         assert {
             ("token_work_items", "ix_token_work_items_ready"),
             ("token_work_items", "ix_token_work_items_lease"),
+            ("token_work_items", "ix_token_work_items_recovery"),
+            ("token_work_items", "ix_token_work_items_pending_sink_token"),
             ("token_work_items", "uq_token_work_items_terminal_identity"),
         } <= set(database_module._REQUIRED_INDEXES)
+        assert (
+            "token_work_items",
+            "ck_token_work_items_lease_owner_required_when_leased",
+        ) in database_module._REQUIRED_CHECK_CONSTRAINTS
+
+    def test_pending_sink_terminalization_index_covers_token_callback_lookup(self) -> None:
+        """Sink callback terminalization must be token-scoped, not run-scan shaped."""
+        index = next(index for index in token_work_items_table.indexes if index.name == "ix_token_work_items_pending_sink_token")
+
+        assert [column.name for column in index.columns] == [
+            "run_id",
+            "token_id",
+            "status",
+            "pending_sink_name",
+        ]
 
     def test_terminal_scheduler_identity_index_is_partial_on_sqlite_and_postgresql(self) -> None:
         """Terminal identity uniqueness must not constrain ordinary node work."""
@@ -301,6 +318,26 @@ class TestSchemaCompatibilityGuards:
 
         msg = str(exc_info.value)
         assert "token_work_items.uq_token_work_items_terminal_identity" in msg
+        assert "Landscape database schema is outdated" in msg
+        instance.close()
+
+    def test_validate_schema_rejects_missing_scheduler_recovery_index(self, tmp_path: Path) -> None:
+        """Scheduler recovery index is required for stale-DB compatibility checks."""
+        db_path = tmp_path / "missing_scheduler_recovery_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP INDEX ix_token_work_items_recovery"))
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "token_work_items.ix_token_work_items_recovery" in msg
         assert "Landscape database schema is outdated" in msg
         instance.close()
 

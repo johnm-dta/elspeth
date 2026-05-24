@@ -20,7 +20,7 @@ Keep types.py as pure data definitions with minimal dependencies.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
@@ -95,6 +95,10 @@ class RowProcessorHandle(Protocol):
 
     def mark_sink_bound_scheduler_terminal(self, token_id: str) -> None:
         """Mark scheduler sink handoff complete after sink outcome durability."""
+        ...
+
+    def mark_sink_bound_scheduler_terminal_many(self, token_ids: tuple[str, ...]) -> None:
+        """Mark scheduler sink handoffs complete after durable batch sink outcomes."""
         ...
 
     def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
@@ -539,6 +543,8 @@ class ResumeState:
     restored_coalesce_state: CoalesceCheckpointState | None
     unprocessed_rows: Sequence[ResumedRow]
     schema_contracts_by_source: Mapping[NodeID, SchemaContract]
+    source_names_by_source: Mapping[NodeID, str]
+    source_lifecycle_by_source: Mapping[NodeID, str]
 
     def __post_init__(self) -> None:
         # Local import to avoid hoisting OrchestrationInvariantError into the
@@ -547,7 +553,13 @@ class ResumeState:
         # layer-architecture concern.
         from elspeth.contracts.errors import OrchestrationInvariantError
 
-        freeze_fields(self, "restored_aggregation_state", "schema_contracts_by_source")
+        freeze_fields(
+            self,
+            "restored_aggregation_state",
+            "schema_contracts_by_source",
+            "source_names_by_source",
+            "source_lifecycle_by_source",
+        )
         # unprocessed_rows is a Sequence of ResumedRow instances. Each
         # ResumedRow is fully deep-frozen in its own __post_init__ (row_data
         # is MappingProxyType via freeze_fields, not a plain dict). Tuple-
@@ -587,7 +599,26 @@ class ResumeState:
             )
 
 
-# Factory that creates a per-sink checkpoint callback.
-# Takes a sink_node_id (str) and returns a callback invoked after each
-# token is written to that sink.
-type _CheckpointFactory = Callable[[str], Callable[[TokenInfo], None]]
+class CheckpointAfterSinkCallback(Protocol):
+    """Post-sink callback with an explicit batch flush boundary."""
+
+    def __call__(self, token: TokenInfo) -> None:
+        """Record per-token checkpoint progress after durable sink handling."""
+        ...
+
+    def flush(self) -> None:
+        """Flush batched scheduler terminalization after callback use."""
+        ...
+
+
+class _CheckpointFactory(Protocol):
+    """Factory that creates per-sink checkpoint callbacks.
+
+    ``terminalize_scheduler`` is disabled only for source-quarantine sink
+    writes, which have token outcomes but no durable scheduler pending-sink
+    row to terminalize.
+    """
+
+    def __call__(self, sink_node_id: str, *, terminalize_scheduler: bool = True) -> CheckpointAfterSinkCallback:
+        """Return a callback invoked after each token is written to a sink."""
+        ...

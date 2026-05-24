@@ -9,12 +9,20 @@ import pytest
 from sqlalchemy import insert, select
 
 import elspeth.core.landscape.database as database_module
-from elspeth.contracts import NodeType
-from elspeth.contracts.errors import SchedulerLeaseLostError
+from elspeth.contracts import NodeType, TerminalOutcome, TerminalPath
+from elspeth.contracts.errors import AuditIntegrityError, SchedulerLeaseLostError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
 from elspeth.core.landscape.errors import LandscapeRecordError
-from elspeth.core.landscape.schema import metadata, nodes_table, rows_table, runs_table, token_work_items_table, tokens_table
+from elspeth.core.landscape.schema import (
+    metadata,
+    nodes_table,
+    rows_table,
+    runs_table,
+    token_outcomes_table,
+    token_work_items_table,
+    tokens_table,
+)
 from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 
 
@@ -118,6 +126,58 @@ def test_enqueue_ready_records_single_idempotent_scheduler_event() -> None:
     assert event.to_lease_owner is None
     assert event.caller_owner is None
     assert json.loads(event.context_json) == {}
+
+
+def test_enqueue_ready_claimed_records_enqueue_and_claim_events_in_one_operation() -> None:
+    from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+
+    claimed = repo.enqueue_ready_claimed(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+        lease_owner="worker-a",
+        lease_seconds=30,
+        now=now + timedelta(seconds=1),
+    )
+
+    assert claimed.status is TokenWorkStatus.LEASED
+    assert claimed.lease_owner == "worker-a"
+    assert claimed.lease_expires_at == now + timedelta(seconds=31)
+
+    events = _scheduler_events(engine)
+    assert [event.event_type for event in events] == [
+        SchedulerEventType.ENQUEUE.value,
+        SchedulerEventType.CLAIM_READY.value,
+    ]
+    enqueue_event, claim_event = events
+    assert enqueue_event.work_item_id == claimed.work_item_id
+    assert enqueue_event.from_status is None
+    assert enqueue_event.to_status == TokenWorkStatus.READY.value
+    assert enqueue_event.from_attempt is None
+    assert enqueue_event.to_attempt == 1
+    assert enqueue_event.caller_owner is None
+
+    assert claim_event.work_item_id == claimed.work_item_id
+    assert claim_event.from_status == TokenWorkStatus.READY.value
+    assert claim_event.to_status == TokenWorkStatus.LEASED.value
+    assert claim_event.from_lease_owner is None
+    assert claim_event.to_lease_owner == "worker-a"
+    assert claim_event.from_lease_expires_at is None
+    assert claim_event.to_lease_expires_at == _stored_datetime(now + timedelta(seconds=31))
+    assert claim_event.from_attempt == 1
+    assert claim_event.to_attempt == 1
+    assert claim_event.caller_owner == "worker-a"
 
 
 def test_claim_and_terminal_events_record_status_and_lease_ownership() -> None:
@@ -484,6 +544,203 @@ def test_pending_sink_claim_and_terminalization_record_transition_events() -> No
     assert events[-1].caller_owner == "worker-b"
 
 
+def test_pending_sink_batch_terminalization_records_per_token_events() -> None:
+    from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(rows_table).values(
+                row_id="row-2",
+                run_id="run-1",
+                source_node_id="source-0",
+                row_index=1,
+                source_row_index=1,
+                ingest_sequence=1,
+                source_data_hash="hash-row-2",
+                created_at=now,
+            )
+        )
+        conn.execute(
+            insert(tokens_table).values(
+                token_id="token-2",
+                row_id="row-2",
+                run_id="run-1",
+                created_at=now,
+            )
+        )
+
+    first = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+    second = repo.enqueue_ready(
+        run_id="run-1",
+        token_id="token-2",
+        row_id="row-2",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=1,
+        available_at=now,
+        row_payload_json=payload,
+    )
+    assert repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now + timedelta(seconds=1)) is not None
+    repo.mark_pending_sink(
+        work_item_id=first.work_item_id,
+        row_payload_json=payload,
+        sink_name="sink-a",
+        outcome="success",
+        path="completed",
+        error_hash=None,
+        error_message=None,
+        now=now + timedelta(seconds=2),
+        expected_lease_owner="worker-a",
+    )
+    assert repo.claim_ready(run_id="run-1", lease_owner="worker-a", lease_seconds=30, now=now + timedelta(seconds=3)) is not None
+    repo.mark_pending_sink(
+        work_item_id=second.work_item_id,
+        row_payload_json=payload,
+        sink_name="sink-a",
+        outcome="success",
+        path="completed",
+        error_hash=None,
+        error_message=None,
+        now=now + timedelta(seconds=4),
+        expected_lease_owner="worker-a",
+    )
+
+    terminalized = repo.mark_pending_sink_terminal_many(
+        run_id="run-1",
+        token_ids=("token-1", "token-2"),
+        now=now + timedelta(seconds=5),
+        expected_lease_owner="worker-a",
+    )
+
+    events = _scheduler_events(engine)
+    terminal_events = [event for event in events if event.event_type == SchedulerEventType.MARK_PENDING_SINK_TERMINAL.value]
+    assert terminalized == 2
+    assert len(terminal_events) == 2
+    assert {event.token_id for event in terminal_events} == {"token-1", "token-2"}
+    assert {event.from_status for event in terminal_events} == {TokenWorkStatus.PENDING_SINK.value}
+    assert {event.to_status for event in terminal_events} == {TokenWorkStatus.TERMINAL.value}
+    assert {event.caller_owner for event in terminal_events} == {"worker-a"}
+
+
+def test_pending_sink_batch_terminalization_rejects_duplicate_token_ids() -> None:
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    item = _make_pending_sink(repo, run_id="run-1", token_id="token-1", row_id="row-1", payload=payload, now=now)
+
+    with pytest.raises(AuditIntegrityError, match="duplicate token_id"):
+        repo.mark_pending_sink_terminal_many(
+            run_id="run-1",
+            token_ids=(item.token_id, item.token_id),
+            now=now + timedelta(seconds=3),
+            expected_lease_owner="worker-a",
+        )
+
+
+def test_pending_sink_batch_terminalization_requires_every_requested_token() -> None:
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    item = _make_pending_sink(repo, run_id="run-1", token_id="token-1", row_id="row-1", payload=payload, now=now)
+
+    with pytest.raises(AuditIntegrityError, match="missing token_id"):
+        repo.mark_pending_sink_terminal_many(
+            run_id="run-1",
+            token_ids=(item.token_id, "token-missing"),
+            now=now + timedelta(seconds=3),
+            expected_lease_owner="worker-a",
+        )
+
+
+def test_pending_sink_batch_terminalization_rejects_wrong_lease_owner() -> None:
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    _make_pending_sink(repo, run_id="run-1", token_id="token-1", row_id="row-1", payload=payload, now=now)
+    claimed = repo.claim_pending_sink(
+        run_id="run-1",
+        lease_owner="worker-b",
+        lease_seconds=30,
+        now=now + timedelta(seconds=3),
+    )
+    assert claimed is not None
+
+    with pytest.raises(AuditIntegrityError, match="lease_owner"):
+        repo.mark_pending_sink_terminal_many(
+            run_id="run-1",
+            token_ids=("token-1",),
+            now=now + timedelta(seconds=4),
+            expected_lease_owner="worker-a",
+        )
+
+
+def test_pending_sink_with_terminal_outcome_is_repaired_without_reclaiming_sink() -> None:
+    from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    item = _make_pending_sink(repo, run_id="run-1", token_id="token-1", row_id="row-1", payload=payload, now=now)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(token_outcomes_table).values(
+                outcome_id="out-token-1",
+                run_id="run-1",
+                token_id="token-1",
+                outcome=TerminalOutcome.SUCCESS.value,
+                path=TerminalPath.DEFAULT_FLOW.value,
+                completed=1,
+                recorded_at=now + timedelta(seconds=3),
+                sink_name="sink-a",
+            )
+        )
+
+    terminalized = repo.terminalize_pending_sinks_with_terminal_outcomes(
+        run_id="run-1",
+        now=now + timedelta(seconds=4),
+        caller_owner="resume-repair",
+    )
+
+    assert terminalized == 1
+    assert repo.claim_pending_sink(run_id="run-1", lease_owner="worker-b", lease_seconds=30, now=now + timedelta(seconds=5)) is None
+    with engine.connect() as conn:
+        status = conn.execute(
+            select(token_work_items_table.c.status).where(token_work_items_table.c.work_item_id == item.work_item_id)
+        ).scalar_one()
+    assert status == TokenWorkStatus.TERMINAL.value
+    terminal_events = [
+        event for event in _scheduler_events(engine) if event.event_type == SchedulerEventType.MARK_PENDING_SINK_TERMINAL.value
+    ]
+    assert len(terminal_events) == 1
+    assert terminal_events[0].from_status == TokenWorkStatus.PENDING_SINK.value
+    assert terminal_events[0].caller_owner == "resume-repair"
+
+
 def test_blocked_barrier_restore_and_terminalization_record_transition_events() -> None:
     from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
@@ -735,6 +992,40 @@ def _insert_scheduler_prerequisites(engine: Tier1Engine, *, now: datetime) -> st
             )
         )
     return row_payload_json
+
+
+def _make_pending_sink(
+    repo,
+    *,
+    run_id: str,
+    token_id: str,
+    row_id: str,
+    payload: str,
+    now: datetime,
+):
+    item = repo.enqueue_ready(
+        run_id=run_id,
+        token_id=token_id,
+        row_id=row_id,
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        available_at=now,
+        row_payload_json=payload,
+    )
+    assert repo.claim_ready(run_id=run_id, lease_owner="worker-a", lease_seconds=30, now=now + timedelta(seconds=1)) is not None
+    repo.mark_pending_sink(
+        work_item_id=item.work_item_id,
+        row_payload_json=payload,
+        sink_name="sink-a",
+        outcome="success",
+        path="completed",
+        error_hash=None,
+        error_message=None,
+        now=now + timedelta(seconds=2),
+        expected_lease_owner="worker-a",
+    )
+    return item
 
 
 def _scheduler_events(engine: Tier1Engine):

@@ -448,16 +448,30 @@ class SinkExecutor:
         # by sink.write() — so we open states for ALL tokens and partition later.
         all_states: list[tuple[TokenInfo, NodeStateOpen]] = []
         try:
-            for token in tokens:
-                input_dict = token.row_data.to_dict()
-                state = self._execution.begin_node_state(
-                    token_id=token.token_id,
-                    node_id=sink_node_id,
-                    run_id=ctx.run_id,
-                    step_index=step_in_pipeline,
-                    input_data=input_dict,
+            if type(self._execution) is ExecutionRepository:
+                opened_states = self._execution.begin_node_states_many(
+                    tuple(
+                        (
+                            token.token_id,
+                            sink_node_id,
+                            ctx.run_id,
+                            step_in_pipeline,
+                            row,
+                        )
+                        for token, row in zip(tokens, rows, strict=True)
+                    )
                 )
-                all_states.append((token, state))
+                all_states.extend(zip(tokens, opened_states, strict=True))
+            else:
+                for token, input_dict in zip(tokens, rows, strict=True):
+                    state = self._execution.begin_node_state(
+                        token_id=token.token_id,
+                        node_id=sink_node_id,
+                        run_id=ctx.run_id,
+                        step_index=step_in_pipeline,
+                        input_data=input_dict,
+                    )
+                    all_states.append((token, state))
         except contract_errors.TIER_1_ERRORS as e:
             if all_states:
                 self._best_effort_cleanup(all_states, e, "begin_node_state")
@@ -616,19 +630,30 @@ class SinkExecutor:
             # Amortize batch write time across ALL tokens (including diverted)
             # since sink.write() processed the entire batch
             per_token_ms = duration_ms / len(tokens)
+            primary_sink_outputs: list[tuple[str, dict[str, object], float]] = []
             for token, state in primary_states:
                 output_dict = token.row_data.to_dict()
-                sink_output = {
-                    "row": output_dict,
-                    "artifact_path": artifact_info.path_or_uri,
-                    "content_hash": artifact_info.content_hash,
-                }
-                self._execution.complete_node_state(
-                    state_id=state.state_id,
-                    status=NodeStateStatus.COMPLETED,
-                    output_data=sink_output,
-                    duration_ms=per_token_ms,
+                primary_sink_outputs.append(
+                    (
+                        state.state_id,
+                        {
+                            "row": output_dict,
+                            "artifact_path": artifact_info.path_or_uri,
+                            "content_hash": artifact_info.content_hash,
+                        },
+                        per_token_ms,
+                    )
                 )
+            if type(self._execution) is ExecutionRepository:
+                self._execution.complete_node_states_completed_many(tuple(primary_sink_outputs))
+            else:
+                for state_id, sink_output, duration in primary_sink_outputs:
+                    self._execution.complete_node_state(
+                        state_id=state_id,
+                        status=NodeStateStatus.COMPLETED,
+                        output_data=sink_output,
+                        duration_ms=duration,
+                    )
 
             # Register artifact (linked to first primary state)
             first_state = primary_states[0][1]

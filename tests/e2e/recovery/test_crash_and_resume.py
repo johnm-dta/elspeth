@@ -41,7 +41,7 @@ from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.contracts.contract_records import ContractAuditRecord
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
-from elspeth.contracts.errors import GracefulShutdownError
+from elspeth.contracts.errors import GracefulShutdownError, IncompleteSourceResumeError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import NodeID, SinkName
@@ -310,6 +310,14 @@ class _TypedResumeSource(_TestSourceBase):
             yield SourceRow.valid(row, contract=contract)
 
 
+class _FailingBeforeRowsSource(_TypedResumeSource):
+    """Source that fails before yielding any row."""
+
+    def load(self, ctx: Any) -> Iterator[SourceRow]:
+        raise RuntimeError("orders source exploded before yielding rows")
+        yield  # pragma: no cover - keeps this function a generator
+
+
 class _SourceContractAnnotatingTransform(BaseTransform):
     """Annotate rows with the source contract visible to transform execution."""
 
@@ -515,45 +523,115 @@ def _resume_multi_source_run(ctx: _MultiSourceResumeContext) -> Any:
 class TestMultiSourceCrashResume:
     """Production-path crash/resume coverage for mixed-source pipelines."""
 
-    def test_two_sources_partial_completion_resumes_in_ingest_sequence_order(self, tmp_path: Path) -> None:
+    def test_declared_sources_are_recorded_ready_before_source_iteration(self, tmp_path: Path) -> None:
+        """Later declared sources must be visible to resume even if never started."""
+        db = LandscapeDB(f"sqlite:///{tmp_path}/multi_source_ready.db")
+        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+        output_path = tmp_path / "multi_source_ready.jsonl"
+        orders = _FailingBeforeRowsSource(
+            name="orders_source",
+            rows=[],
+            output_schema=_OrderResumeSchema,
+            field_types={"order_id": int, "amount": int},
+            on_success="inbound",
+        )
+        refunds = _TypedResumeSource(
+            name="refunds_source",
+            rows=[{"refund_id": "R-1", "amount": 30}],
+            output_schema=_RefundResumeSchema,
+            field_types={"refund_id": str, "amount": int},
+            on_success="inbound",
+        )
+        transform = _SourceContractAnnotatingTransform()
+        sink = JSONSink(
+            {
+                "path": str(output_path),
+                "format": "jsonl",
+                "mode": "append",
+                "schema": {"mode": "observed"},
+            }
+        )
+        sources = {
+            "orders": as_source(orders),
+            "refunds": as_source(refunds),
+        }
+        sinks = {"output": as_sink(sink)}
+        wired_transforms = wire_transforms(
+            [as_transform(transform)],
+            source_connection="inbound",
+            final_sink="output",
+            names=["annotate_source_contract"],
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            sources=sources,
+            source_settings_map={
+                "orders": SourceSettings(plugin=orders.name, on_success="inbound", options={}),
+                "refunds": SourceSettings(plugin=refunds.name, on_success="inbound", options={}),
+            },
+            transforms=wired_transforms,
+            sinks=sinks,
+            aggregations={},
+            gates=[],
+            queues={"inbound": QueueSettings(description="multi-source resume fan-in")},
+        )
+        config = PipelineConfig(
+            sources=sources,
+            transforms=[as_transform(transform)],
+            sinks=sinks,
+        )
+        run_id = "run-multi-source-ready-before-iteration"
+
+        with pytest.raises(RuntimeError, match="orders source exploded"):
+            Orchestrator(db).run(
+                config,
+                graph=graph,
+                payload_store=payload_store,
+                run_id=run_id,
+            )
+
+        with db.engine.connect() as conn:
+            lifecycle_rows = conn.execute(
+                select(run_sources_table.c.source_name, run_sources_table.c.lifecycle_state)
+                .where(run_sources_table.c.run_id == run_id)
+                .order_by(run_sources_table.c.source_name)
+            ).fetchall()
+
+        assert {str(row.source_name): str(row.lifecycle_state) for row in lifecycle_rows} == {
+            "orders": "loading",
+            "refunds": "ready",
+        }
+        db.close()
+
+    def test_interrupted_source_with_unprocessed_rows_refuses_resume(self, tmp_path: Path) -> None:
         ctx = _start_interrupted_multi_source_run(tmp_path)
         _append_crashed_refund_row(ctx)
 
-        result = _resume_multi_source_run(ctx)
-
-        assert result.status == RunStatus.COMPLETED
-        assert [row["business_id"] for row in _jsonl_rows(ctx.output_path)] == [
-            "order:1",
-            "order:2",
-            "refund:R-1",
-            "refund:R-2",
-        ]
+        with pytest.raises(IncompleteSourceResumeError, match=r"source.*refunds.*interrupted"):
+            _resume_multi_source_run(ctx)
         ctx.db.close()
 
-    def test_one_source_completed_other_partial_resumes_only_partial(self, tmp_path: Path) -> None:
+    def test_interrupted_source_refusal_preserves_persisted_unprocessed_row(self, tmp_path: Path) -> None:
         ctx = _start_interrupted_multi_source_run(tmp_path)
         crashed_row_id = _append_crashed_refund_row(ctx)
 
         assert ctx.recovery_mgr.get_unprocessed_rows(ctx.run_id) == [crashed_row_id]
-        result = _resume_multi_source_run(ctx)
-
-        assert result.rows_processed == 1
-        business_ids = [row["business_id"] for row in _jsonl_rows(ctx.output_path)]
-        assert business_ids.count("order:1") == 1
-        assert business_ids.count("order:2") == 1
-        assert business_ids.count("refund:R-2") == 1
+        with pytest.raises(IncompleteSourceResumeError, match=r"source.*refunds.*interrupted"):
+            _resume_multi_source_run(ctx)
+        assert ctx.recovery_mgr.get_unprocessed_rows(ctx.run_id) == [crashed_row_id]
         ctx.db.close()
 
-    def test_per_source_schema_used_during_resume_replay(self, tmp_path: Path) -> None:
+    def test_interrupted_source_refusal_does_not_append_replayed_rows(self, tmp_path: Path) -> None:
         ctx = _start_interrupted_multi_source_run(tmp_path)
         _append_crashed_refund_row(ctx)
 
-        _resume_multi_source_run(ctx)
+        with pytest.raises(IncompleteSourceResumeError, match=r"source.*refunds.*interrupted"):
+            _resume_multi_source_run(ctx)
 
-        rows_by_id = {row["business_id"]: row for row in _jsonl_rows(ctx.output_path)}
-        assert rows_by_id["order:1"]["schema_fields"] == "amount,order_id"
-        assert rows_by_id["refund:R-2"]["schema_fields"] == "amount,refund_id"
-        assert rows_by_id["refund:R-2"]["schema_fields"] != rows_by_id["order:1"]["schema_fields"]
+        assert [row["business_id"] for row in _jsonl_rows(ctx.output_path)] == [
+            "order:1",
+            "order:2",
+            "refund:R-1",
+        ]
         ctx.db.close()
 
     def test_resume_after_crash_during_source_iteration_records_partial_source_lifecycle(self, tmp_path: Path) -> None:
@@ -571,8 +649,8 @@ class TestMultiSourceCrashResume:
             "orders": "loaded",
             "refunds": "interrupted",
         }
-        result = _resume_multi_source_run(ctx)
-        assert result.status == RunStatus.COMPLETED
+        with pytest.raises(IncompleteSourceResumeError, match=r"source.*refunds.*interrupted"):
+            _resume_multi_source_run(ctx)
         ctx.db.close()
 
 

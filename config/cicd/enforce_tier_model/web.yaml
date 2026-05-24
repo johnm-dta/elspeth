@@ -650,6 +650,160 @@ allow_hits:
   safety: Failures are returned in explicit result fields; programmer bugs and unrelated
     exceptions are not absorbed.
   expires: null
+- key: web/sessions/routes/_helpers.py:R2:_get_session_compose_lock_registry:fp=9a48c566decfe28d
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/_helpers.py:R2:_litellm_error_detail:fp=b4fd62e9a2cdbe87
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/_helpers.py:R1:_extract_runtime_model_snapshot:fp=6d1677fcffef1c09
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/_helpers.py:R1:_extract_runtime_model_snapshot:fp=ac9a77f94449d04a
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/_helpers.py:R6:_handle_convergence_error:fp=c6ee853787c77e21
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/_helpers.py:R6:_handle_plugin_crash:fp=f9a5129ab29f7db2
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/_helpers.py:R6:_handle_runtime_preflight_failure:fp=7d6384e50669f641
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=3f8d5ddf6536da5a
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=c97a9563975ee710
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/messages.py:R6:register_message_routes:send_message:fp=13cbecc303d03758
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/sessions.py:R6:register_session_routes:fork_from_message:fp=149356ae5d7560f0
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/sessions.py:R6:register_session_routes:fork_from_message:fp=16156db6d5b7f3eb
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/service.py:R1:_patch_llm_transform_prompt:fp=1ec37730adecfaaa
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=0e1944654eb249d2
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:_session_write_lock:fp=8b9a7faf40d56535
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=2e3fa7c34e58ec3f
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=29f8ee83276b87db
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=0455bf167593a2c1
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=89cbdc0a5fca54c6
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=ef3701971b270390
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=209190a9043ace94
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
+- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=adbb67a26169ddee
+  owner: web-sessions
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
+  expires: null
 - key: web/sessions/_auto_title.py:R6:maybe_auto_title_session:fp=6eeb90e8c33babf8
   owner: web-sessions
   reason: Best-effort auto-title provider boundary; external/provider exceptions and
@@ -3871,7 +4025,7 @@ allow_hits:
     because select_only=False puts field_mapper into the additive/loose-bound regime
     that Rule C explicitly does not adjudicate
   expires: null
-- key: web/composer/state.py:R6:CompositionState:validate:fp=bcb7318205f2ed8a
+- key: web/composer/state.py:R6:CompositionState:validate:fp=2f89c5bcfd3e451c
   owner: web-composer
   reason: Aggregation trigger PydanticValidationError is intentionally converted into
     a blocking ValidationEntry so composer rejects malformed trigger.condition values

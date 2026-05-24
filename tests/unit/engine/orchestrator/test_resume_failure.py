@@ -133,6 +133,8 @@ class TestResumeFinalizesAsFailed:
         # ``_process_resumed_rows`` and trip the injected RuntimeError.
         mock_factory.run_lifecycle.get_run_source_resume_records.return_value = {
             NodeID("source-node"): SimpleNamespace(
+                source_name="source",
+                lifecycle_state="loaded",
                 source_schema_json='{"properties": {}, "required": []}',
                 schema_contract=MagicMock(name="contract"),
             ),
@@ -663,8 +665,18 @@ class TestResumeFinalizesAsFailed:
         prepare_for_run()
         mock_factory.run_lifecycle.get_runtime_val_manifest.return_value = canonical_json(build_runtime_val_manifest())
         mock_factory.run_lifecycle.get_run_source_resume_records.return_value = {
-            NodeID("source-orders"): SimpleNamespace(source_schema_json='{"title":"Orders"}', schema_contract=orders_contract),
-            NodeID("source-refunds"): SimpleNamespace(source_schema_json='{"title":"Refunds"}', schema_contract=refunds_contract),
+            NodeID("source-orders"): SimpleNamespace(
+                source_name="orders",
+                lifecycle_state="loaded",
+                source_schema_json='{"title":"Orders"}',
+                schema_contract=orders_contract,
+            ),
+            NodeID("source-refunds"): SimpleNamespace(
+                source_name="refunds",
+                lifecycle_state="loaded",
+                source_schema_json='{"title":"Refunds"}',
+                schema_contract=refunds_contract,
+            ),
         }
         mock_recovery = MagicMock()
         mock_recovery.get_unprocessed_row_data_by_source.return_value = (
@@ -750,6 +762,8 @@ class TestResumeFinalizesAsFailed:
             restored_coalesce_state=empty_coalesce_state,
             unprocessed_rows=(),
             schema_contracts_by_source={NodeID("source"): MagicMock()},
+            source_names_by_source={NodeID("source"): "source"},
+            source_lifecycle_by_source={NodeID("source"): "loaded"},
         )
 
         with (

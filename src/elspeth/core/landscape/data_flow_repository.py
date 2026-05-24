@@ -178,6 +178,88 @@ class DataFlowRepository:
             )
         return result.row_id, result.run_id
 
+    def _prepare_source_row_record(
+        self,
+        run_id: str,
+        source_node_id: str,
+        row_index: int,
+        data: Mapping[str, object],
+        *,
+        source_row_index: int | None,
+        ingest_sequence: int | None,
+        row_id: str | None,
+        quarantined: bool,
+    ) -> Row:
+        row_id = row_id or generate_id()
+        missing_identity_fields = []
+        if source_row_index is None:
+            missing_identity_fields.append("source_row_index")
+        if ingest_sequence is None:
+            missing_identity_fields.append("ingest_sequence")
+        if missing_identity_fields:
+            raise AuditIntegrityError(
+                f"create_row requires explicit source-scoped identity for run_id={run_id!r} row_id={row_id!r} "
+                f"source_node_id={source_node_id!r}; missing {', '.join(missing_identity_fields)}. "
+                "Do not fabricate source_row_index or ingest_sequence from row_index."
+            )
+        assert source_row_index is not None
+        assert ingest_sequence is not None
+
+        # Quarantined rows are Tier-3 external data that may contain non-canonical
+        # values (NaN, Infinity). Use repr_hash as a fallback per canonical.py docs.
+        if quarantined:
+            try:
+                data_hash = stable_hash(data)
+            except (ValueError, TypeError):
+                data_hash = repr_hash(data)
+        else:
+            data_hash = stable_hash(data)
+
+        timestamp = now()
+
+        # Landscape owns payload persistence - serialize and store if configured
+        final_payload_ref: str | None = None
+        if self._payload_store is not None:
+            # Canonical JSON handles pandas/numpy/Decimal/datetime types.
+            # For quarantined data, fall back to json.dumps(repr()) if
+            # canonical serialization fails on non-canonical values.
+            if quarantined:
+                try:
+                    payload_bytes = canonical_json(data).encode("utf-8")
+                except (ValueError, TypeError):
+                    payload_bytes = json.dumps({"_repr": repr(data)}, allow_nan=False).encode("utf-8")
+            else:
+                payload_bytes = canonical_json(data).encode("utf-8")
+            final_payload_ref = self._payload_store.store(payload_bytes)
+
+        return Row(
+            row_id=row_id,
+            run_id=run_id,
+            source_node_id=source_node_id,
+            row_index=row_index,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
+            source_data_hash=data_hash,
+            source_data_ref=final_payload_ref,
+            created_at=timestamp,
+        )
+
+    @staticmethod
+    def _row_insert_values(row: Row) -> dict[str, object]:
+        assert row.source_row_index is not None
+        assert row.ingest_sequence is not None
+        return {
+            "row_id": row.row_id,
+            "run_id": row.run_id,
+            "source_node_id": row.source_node_id,
+            "row_index": row.row_index,
+            "source_row_index": row.source_row_index,
+            "ingest_sequence": row.ingest_sequence,
+            "source_data_hash": row.source_data_hash,
+            "source_data_ref": row.source_data_ref,
+            "created_at": row.created_at,
+        }
+
     def _validate_token_run_ownership(self, ref: TokenRef) -> None:
         """Validate that a token belongs to the specified run.
 
@@ -430,75 +512,71 @@ class DataFlowRepository:
 
             This ensures Landscape owns its audit format end-to-end.
         """
-        row_id = row_id or generate_id()
-        missing_identity_fields = []
-        if source_row_index is None:
-            missing_identity_fields.append("source_row_index")
-        if ingest_sequence is None:
-            missing_identity_fields.append("ingest_sequence")
-        if missing_identity_fields:
-            raise AuditIntegrityError(
-                f"create_row requires explicit source-scoped identity for run_id={run_id!r} row_id={row_id!r} "
-                f"source_node_id={source_node_id!r}; missing {', '.join(missing_identity_fields)}. "
-                "Do not fabricate source_row_index or ingest_sequence from row_index."
-            )
-        assert source_row_index is not None
-        assert ingest_sequence is not None
-
-        # Quarantined rows are Tier-3 external data that may contain non-canonical
-        # values (NaN, Infinity). Use repr_hash as a fallback per canonical.py docs.
-        if quarantined:
-            try:
-                data_hash = stable_hash(data)
-            except (ValueError, TypeError):
-                data_hash = repr_hash(data)
-        else:
-            data_hash = stable_hash(data)
-
-        timestamp = now()
-
-        # Landscape owns payload persistence - serialize and store if configured
-        final_payload_ref: str | None = None
-        if self._payload_store is not None:
-            # Canonical JSON handles pandas/numpy/Decimal/datetime types.
-            # For quarantined data, fall back to json.dumps(repr()) if
-            # canonical serialization fails on non-canonical values.
-            if quarantined:
-                try:
-                    payload_bytes = canonical_json(data).encode("utf-8")
-                except (ValueError, TypeError):
-                    payload_bytes = json.dumps({"_repr": repr(data)}, allow_nan=False).encode("utf-8")
-            else:
-                payload_bytes = canonical_json(data).encode("utf-8")
-            final_payload_ref = self._payload_store.store(payload_bytes)
-
-        row = Row(
-            row_id=row_id,
+        row = self._prepare_source_row_record(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
+            data=data,
             source_row_index=source_row_index,
             ingest_sequence=ingest_sequence,
-            source_data_hash=data_hash,
-            source_data_ref=final_payload_ref,
-            created_at=timestamp,
+            row_id=row_id,
+            quarantined=quarantined,
         )
 
-        self._ops.execute_insert(
-            rows_table.insert().values(
-                row_id=row.row_id,
-                run_id=row.run_id,
-                source_node_id=row.source_node_id,
-                row_index=row.row_index,
-                source_row_index=source_row_index,
-                ingest_sequence=ingest_sequence,
-                source_data_hash=row.source_data_hash,
-                source_data_ref=row.source_data_ref,
-                created_at=row.created_at,
-            )
-        )
+        self._ops.execute_insert(rows_table.insert().values(**self._row_insert_values(row)))
 
         return row
+
+    def create_row_with_token(
+        self,
+        run_id: str,
+        source_node_id: str,
+        row_index: int,
+        data: Mapping[str, object],
+        *,
+        source_row_index: int | None = None,
+        ingest_sequence: int | None = None,
+        row_id: str | None = None,
+        token_id: str | None = None,
+        quarantined: bool = False,
+    ) -> tuple[Row, Token]:
+        """Create a source row and its initial token in one audit transaction."""
+        row = self._prepare_source_row_record(
+            run_id=run_id,
+            source_node_id=source_node_id,
+            row_index=row_index,
+            data=data,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
+            row_id=row_id,
+            quarantined=quarantined,
+        )
+        token = Token(
+            token_id=token_id or generate_id(),
+            row_id=row.row_id,
+            run_id=run_id,
+            created_at=row.created_at,
+        )
+
+        with self._db.connection() as conn:
+            result = conn.execute(rows_table.insert().values(**self._row_insert_values(row)))
+            if result.rowcount == 0:
+                raise AuditIntegrityError(f"create_row_with_token: row INSERT affected zero rows (row_id={row.row_id})")
+            result = conn.execute(
+                tokens_table.insert().values(
+                    token_id=token.token_id,
+                    row_id=token.row_id,
+                    run_id=token.run_id,
+                    fork_group_id=token.fork_group_id,
+                    join_group_id=token.join_group_id,
+                    branch_name=token.branch_name,
+                    created_at=token.created_at,
+                )
+            )
+            if result.rowcount == 0:
+                raise AuditIntegrityError(f"create_row_with_token: token INSERT affected zero rows (token_id={token.token_id})")
+
+        return row, token
 
     def create_token(
         self,

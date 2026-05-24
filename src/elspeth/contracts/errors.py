@@ -7,7 +7,7 @@ recording.
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, Required, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, Required, TypedDict, cast
 
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.declaration_contracts import DeclarationContractViolation
@@ -842,6 +842,34 @@ class EmptyResumeStateError(OrchestrationInvariantError):
         )
 
 
+# TIER-2: Operator-interpretable refuse signal — persisted rows can be
+# replayed, but the audit trail proves at least one source was interrupted
+# before it reached lifecycle_state=loaded. The current resume architecture
+# replays persisted row payloads through NullSource; it cannot prove that
+# unread source rows do not exist. Refuse rather than fabricating completion.
+class IncompleteSourceResumeError(Exception):
+    """Raised when resume would falsely complete an interrupted source.
+
+    Carries the affected source names so CLI/API callers can surface a
+    precise "not resumable" outcome without treating the audit trail as
+    corrupt. This is distinct from :class:`EmptyResumeStateError`: here the
+    run did commit rows and source metadata, but the source lifecycle proves
+    source exhaustion was not recorded.
+    """
+
+    def __init__(self, run_id: str, source_states: Mapping[str, str]) -> None:
+        if not source_states:
+            raise ValueError("IncompleteSourceResumeError requires at least one source state")
+        self.run_id = run_id
+        self.source_states = dict(source_states)
+        source_summary = ", ".join(f"{source}={state}" for source, state in sorted(source_states.items()))
+        super().__init__(
+            f"Cannot resume run {run_id!r} to completion: source lifecycle is incomplete "
+            f"({source_summary}). Current resume replays only persisted row payloads; "
+            "unread source rows may exist. Start a fresh run or use a source-aware resume path."
+        )
+
+
 class DeclaredRequiredInputFieldsPayload(TypedDict):
     """Audit payload for ADR-013 declared-input-field mismatches."""
 
@@ -1042,6 +1070,9 @@ class RuntimePreflightFailedError(AuditEvidenceBase, Exception):
         self.plugin_name = plugin_name
         self.provider = provider
         self.cause_type = type(cause).__name__
+        retryable_cause = cast(PluginRetryableError, cause) if issubclass(type(cause), PluginRetryableError) else None
+        self.retryable = retryable_cause.retryable if retryable_cause is not None else False
+        self.status_code = retryable_cause.status_code if retryable_cause is not None else None
         message = (
             f"{self.error_class}: {plugin_name} provider {provider} failed runtime preflight "
             f"before row processing: {self.cause_type}: {cause}"
@@ -1055,6 +1086,7 @@ class RuntimePreflightFailedError(AuditEvidenceBase, Exception):
             "plugin_name": self.plugin_name,
             "provider": self.provider,
             "cause_type": self.cause_type,
+            "retryable": self.retryable,
             "message": str(self),
         }
 

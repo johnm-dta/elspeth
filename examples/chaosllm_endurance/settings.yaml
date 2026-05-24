@@ -3,7 +3,7 @@ sources:
     plugin: csv
     on_success: source_out
     options:
-      path: examples/chaosllm_endurance/input.csv
+      path: ${CHAOSLLM_ENDURANCE_INPUT_PATH:-examples/chaosllm_endurance/input.csv}
       schema:
         mode: flexible
         fields:

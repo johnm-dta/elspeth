@@ -77,7 +77,9 @@ from elspeth.contracts.errors import (
     ExecutionError,
     FrameworkBugError,
     GracefulShutdownError,
+    IncompleteSourceResumeError,
     OrchestrationInvariantError,
+    PluginRetryableError,
     SourceQuarantineReason,
     TelemetryExporterError,
 )
@@ -137,6 +139,7 @@ from elspeth.engine.orchestrator.outcomes import (
 )
 from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
+    CheckpointAfterSinkCallback,
     ExecutionCounters,
     GraphArtifacts,
     LoopContext,
@@ -172,6 +175,14 @@ if TYPE_CHECKING:
     from elspeth.engine.coalesce_executor import CoalesceExecutor
 
 slog = structlog.get_logger(__name__)
+
+
+def _runtime_preflight_is_retryable(exc: BaseException) -> bool:
+    if issubclass(type(exc), PluginRetryableError):
+        return cast(PluginRetryableError, exc).retryable
+    if issubclass(type(exc), contract_errors.RuntimePreflightFailedError):
+        return cast(contract_errors.RuntimePreflightFailedError, exc).retryable
+    return False
 
 
 class _RunFailedWithPartialResultError(Exception):
@@ -726,20 +737,40 @@ class Orchestrator:
         both the normal execution path and the resume path.
         """
 
-        def factory(sink_node_id: str) -> Callable[[TokenInfo], None]:
-            def callback(token: TokenInfo) -> None:
+        orchestrator = self
+
+        class BatchCheckpointCallback:
+            """Checkpoint tokens immediately and terminalize scheduler work in batches."""
+
+            def __init__(self, sink_node_id: str, *, terminalize_scheduler: bool) -> None:
+                self._sink_node_id = sink_node_id
+                self._terminalize_scheduler = terminalize_scheduler
+                self._pending_terminal_tokens: list[str] = []
+
+            def __call__(self, token: TokenInfo) -> None:
                 agg_state = processor.get_aggregation_checkpoint_state()
                 coalesce_state = processor.get_coalesce_checkpoint_state()
-                self._maybe_checkpoint(
+                orchestrator._maybe_checkpoint(
                     run_id=run_id,
                     token_id=token.token_id,
-                    node_id=sink_node_id,
+                    node_id=self._sink_node_id,
                     aggregation_state=agg_state,
                     coalesce_state=coalesce_state if coalesce_state is not None and coalesce_state.has_resumable_state else None,
                 )
-                processor.mark_sink_bound_scheduler_terminal(token.token_id)
+                if self._terminalize_scheduler:
+                    self._pending_terminal_tokens.append(token.token_id)
+                if len(self._pending_terminal_tokens) >= 64:
+                    self.flush()
 
-            return callback
+            def flush(self) -> None:
+                if not self._pending_terminal_tokens:
+                    return
+                token_ids = tuple(self._pending_terminal_tokens)
+                self._pending_terminal_tokens.clear()
+                processor.mark_sink_bound_scheduler_terminal_many(token_ids)
+
+        def factory(sink_node_id: str, *, terminalize_scheduler: bool = True) -> CheckpointAfterSinkCallback:
+            return BatchCheckpointCallback(sink_node_id, terminalize_scheduler=terminalize_scheduler)
 
         return factory
 
@@ -846,7 +877,7 @@ class Orchestrator:
         edge_map: Mapping[tuple[NodeID, str], str],
         sink_step: int,
         *,
-        on_token_written_factory: Callable[[str], Callable[[TokenInfo], None]] | None = None,
+        on_token_written_factory: _CheckpointFactory | None = None,
     ) -> DiversionCounts:
         """Write pending tokens to sinks using SinkExecutor.
 
@@ -923,15 +954,18 @@ class Orchestrator:
 
             sorted_pairs = sorted(token_outcome_pairs, key=pending_sort_key)
 
-            # Build on_token_written callback (or None for resume)
-            on_token_written: Callable[[TokenInfo], None] | None = None
-            if on_token_written_factory is not None:
-                on_token_written = on_token_written_factory(sink_node_id)
-
             for _group_key, group in groupby(sorted_pairs, key=pending_sort_key):
                 group_pairs = list(group)
                 pending_outcome = group_pairs[0][1]
                 group_tokens = [token for token, _pending in group_pairs]
+                # Source-quarantine rows are sink-written for investigation but
+                # never entered the durable scheduler. They still need
+                # post-sink checkpoints; scheduler terminalization would be
+                # fabrication because no PENDING_SINK row exists for them.
+                terminalize_scheduler = pending_outcome is None or pending_outcome.path != TerminalPath.QUARANTINED_AT_SOURCE
+                on_token_written: CheckpointAfterSinkCallback | None = None
+                if on_token_written_factory is not None:
+                    on_token_written = on_token_written_factory(sink_node_id, terminalize_scheduler=terminalize_scheduler)
                 _, diversion_counts = sink_executor.write(
                     sink=sink,
                     tokens=group_tokens,
@@ -944,6 +978,8 @@ class Orchestrator:
                     failsink_edge_id=failsink_edge_id,
                     on_token_written=on_token_written,
                 )
+                if on_token_written is not None:
+                    on_token_written.flush()
                 reconcile_sink_write_diversions(
                     counters=counters,
                     sink_name=sink_name,
@@ -1963,6 +1999,12 @@ class Orchestrator:
                 config_gate_node_ids,
                 coalesce_node_ids,
             )
+            self._record_declared_sources_ready(
+                factory=factory,
+                run_id=run_id,
+                config=config,
+                source_id_map=source_id_map,
+            )
 
             # Register edges from graph - key by (from_node, label) for lookup
             # Gates return route labels, so edge_map is keyed by label
@@ -2050,6 +2092,35 @@ class Orchestrator:
             config_gate_id_map=config_gate_id_map,
             coalesce_id_map=coalesce_id_map,
         )
+
+    def _record_declared_sources_ready(
+        self,
+        *,
+        factory: RecorderFactory,
+        run_id: str,
+        config: PipelineConfig,
+        source_id_map: Mapping[str, NodeID],
+    ) -> None:
+        """Seed run_sources for every declared source before iteration starts.
+
+        A hard kill between source lifecycles must leave audit evidence that
+        later sources were declared but never exhausted. The source-specific
+        loop updates the active source from ready -> loading -> loaded or
+        interrupted; unstarted later sources remain ready and resume refuses
+        rather than fabricating source exhaustion.
+        """
+        for source_name, source_node_id in source_id_map.items():
+            source = config.sources[source_name]
+            factory.run_lifecycle.record_run_source(
+                run_id=run_id,
+                source_node_id=source_node_id,
+                source_name=source_name,
+                plugin_name=source.name,
+                config_hash=stable_hash(source.config),
+                source_schema_json=json.dumps(source.output_schema.model_json_schema()),
+                schema_contract=source.get_schema_contract(),
+                lifecycle_state="ready",
+            )
 
     def _initialize_run_context(
         self,
@@ -2169,6 +2240,9 @@ class Orchestrator:
         run_id: str,
         config: PipelineConfig,
         ctx: PluginContext,
+        *,
+        retry_manager: RetryManager | None = None,
+        shutdown_event: threading.Event | None = None,
     ) -> None:
         """Run transform-declared external readiness checks before source load."""
         for transform in config.transforms:
@@ -2190,7 +2264,18 @@ class Orchestrator:
                     ctx=ctx,
                     input_data={"transform_plugin": transform.name},
                 ):
-                    transform.runtime_preflight(ctx)
+                    if retry_manager is None:
+                        transform.runtime_preflight(ctx)
+                    else:
+
+                        def run_runtime_preflight(active_transform: TransformProtocol = transform) -> None:
+                            active_transform.runtime_preflight(ctx)
+
+                        retry_manager.execute_with_retry(
+                            run_runtime_preflight,
+                            is_retryable=_runtime_preflight_is_retryable,
+                            shutdown_event=shutdown_event,
+                        )
             finally:
                 ctx.node_id = previous_node_id
 
@@ -3420,7 +3505,15 @@ class Orchestrator:
             payload_store,
             shutdown_event=shutdown_event,
         )
-        self._run_transform_runtime_preflights(factory, run_id, config, run_ctx.ctx)
+        preflight_retry_manager = RetryManager(RuntimeRetryConfig.from_settings(settings.retry)) if settings is not None else None
+        self._run_transform_runtime_preflights(
+            factory,
+            run_id,
+            config,
+            run_ctx.ctx,
+            retry_manager=preflight_retry_manager,
+            shutdown_event=shutdown_event,
+        )
 
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),
@@ -3620,17 +3713,27 @@ class Orchestrator:
         # contract record. We still assert the postcondition defensively
         # against future call-path changes: an empty map at resume time is
         # Tier-1 audit corruption.
-        source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
-        if not source_records:
+        source_lifecycle_records = factory.run_lifecycle.get_run_source_lifecycle_records(run_id)
+        if not source_lifecycle_records:
             raise EmptyResumeStateError(run_id=run_id)
+        incomplete_sources = {
+            record.source_name: record.lifecycle_state for record in source_lifecycle_records.values() if record.lifecycle_state != "loaded"
+        }
+        if incomplete_sources:
+            raise IncompleteSourceResumeError(run_id, incomplete_sources)
 
+        source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
         source_schema_classes: dict[NodeID, type[Any]] = {}
         schema_contracts_by_source = {}
+        source_names_by_source: dict[NodeID, str] = {}
+        source_lifecycle_by_source: dict[NodeID, str] = {}
         for raw_source_node_id, source_record in source_records.items():
             source_node_id = NodeID(str(raw_source_node_id))
             schema_dict = json.loads(source_record.source_schema_json)
             source_schema_classes[source_node_id] = reconstruct_schema_from_json(schema_dict)
             schema_contracts_by_source[source_node_id] = source_record.schema_contract
+            source_names_by_source[source_node_id] = str(source_record.source_name)
+            source_lifecycle_by_source[source_node_id] = str(source_record.lifecycle_state)
 
         unprocessed_rows = recovery.get_unprocessed_row_data_by_source(
             run_id,
@@ -3645,6 +3748,8 @@ class Orchestrator:
             restored_coalesce_state=restored_coalesce_state,
             unprocessed_rows=unprocessed_rows,
             schema_contracts_by_source=schema_contracts_by_source,
+            source_names_by_source=source_names_by_source,
+            source_lifecycle_by_source=source_lifecycle_by_source,
         )
 
     def resume(
@@ -3705,6 +3810,14 @@ class Orchestrator:
         shutdown_ctx = nullcontext(shutdown_event) if shutdown_event is not None else self._shutdown_handler_context()
 
         try:
+            incomplete_sources = {
+                state.source_names_by_source[source_node_id]: lifecycle_state
+                for source_node_id, lifecycle_state in state.source_lifecycle_by_source.items()
+                if lifecycle_state != "loaded"
+            }
+            if incomplete_sources:
+                raise IncompleteSourceResumeError(run_id, incomplete_sources)
+
             if not unprocessed_rows and not restored_state and restored_coalesce_state is None:
                 factory.data_flow.sweep_deferred_invariants_or_crash(run_id)
 
@@ -3910,7 +4023,15 @@ class Orchestrator:
         # required — the field carries the prior run's value through
         # nullcontext if no rows are reprocessed, which is irrelevant
         # because the early-exit path skips this method entirely.
-        self._run_transform_runtime_preflights(factory, run_id, config, run_ctx.ctx)
+        preflight_retry_manager = RetryManager(RuntimeRetryConfig.from_settings(settings.retry)) if settings is not None else None
+        self._run_transform_runtime_preflights(
+            factory,
+            run_id,
+            config,
+            run_ctx.ctx,
+            retry_manager=preflight_retry_manager,
+            shutdown_event=shutdown_event,
+        )
 
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),

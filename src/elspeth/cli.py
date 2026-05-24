@@ -27,6 +27,7 @@ from elspeth.contracts.errors import (
     DependencyFailedError,
     EmptyResumeStateError,
     GracefulShutdownError,
+    IncompleteSourceResumeError,
 )
 from elspeth.contracts.types import AggregationName
 from elspeth.core.config import ElspethSettings, SourceSettings, load_settings, resolve_config
@@ -1625,13 +1626,13 @@ def _build_resume_graphs(
     return validation_graph, execution_graph
 
 
-def _emit_not_resumable_event(error: EmptyResumeStateError, output_format: str) -> None:
+def _emit_not_resumable_event(error: EmptyResumeStateError | IncompleteSourceResumeError, output_format: str) -> None:
     """Emit the operator-facing ``not_resumable`` event for an empty-state resume.
 
     Shared by the ``resume`` command's outer and inner exception handlers so
-    the operator surface is identical regardless of where the empty-state
-    raise originated (``can_resume()`` at recovery time vs.
-    ``Orchestrator.resume()`` at execute time).
+    the operator surface is identical regardless of where the clean refuse
+    originated (``can_resume()`` at recovery time vs. ``Orchestrator.resume()``
+    at execute time).
 
     Per ADR-025 §3, empty-state resume is the interpretable "nothing to
     resume, start fresh" outcome — distinct from the broader Tier-1
@@ -1641,13 +1642,14 @@ def _emit_not_resumable_event(error: EmptyResumeStateError, output_format: str) 
     ``OrchestrationInvariantError`` and would otherwise be swallowed by
     the fatal-traceback path.
     """
+    reason = "source_not_exhausted" if type(error) is IncompleteSourceResumeError else "no_recorded_work"
     if output_format == "json":
         typer.echo(
             json.dumps(
                 {
                     "event": "not_resumable",
                     "run_id": error.run_id,
-                    "reason": "no_recorded_work",
+                    "reason": reason,
                     "message": str(error),
                 }
             ),
@@ -2022,7 +2024,7 @@ def resume(
                 typer.echo(f"\nResume interrupted after {e.rows_processed} rows.")
                 typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
             raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
-        except EmptyResumeStateError as e:
+        except (EmptyResumeStateError, IncompleteSourceResumeError) as e:
             # ADR-025 §3: this catch MUST precede the TIER_1_ERRORS
             # handler because EmptyResumeStateError is a subclass of
             # OrchestrationInvariantError. See _emit_not_resumable_event
@@ -2098,7 +2100,7 @@ def resume(
             typer.echo(f"  Rows failed: {result.rows_failed}")
             typer.echo(f"  Status: {result.status.value}")
 
-    except EmptyResumeStateError as e:
+    except (EmptyResumeStateError, IncompleteSourceResumeError) as e:
         # ADR-025 §3: catches the empty-state raise from recovery's
         # ``verify_contract_integrity()`` (reached via ``can_resume``
         # at line 1780 — dry-run and pre-execute paths). The inner

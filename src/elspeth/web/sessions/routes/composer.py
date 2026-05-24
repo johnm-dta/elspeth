@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TypedDict
+
 from ._helpers import (
     _COMPOSER_REQUESTS_INFLIGHT,
     _DATA_ERROR_KEY,
@@ -225,6 +227,11 @@ def _ensure_inline_blob_proposal_context(
     )
 
 
+class StateYamlResponse(TypedDict, total=False):
+    yaml: str
+    source_blob_ids: dict[str, str]
+
+
 def register_composer_routes(router: APIRouter) -> None:
 
     @router.get(
@@ -413,9 +420,11 @@ def register_composer_routes(router: APIRouter) -> None:
             # frontend without revealing the validation errors that were
             # the actual blocker).
             if not result.success:
-                error_summary = (
-                    result.data.get(_DATA_ERROR_KEY) if isinstance(result.data, Mapping) else None
-                ) or "Composer proposal failed validation."
+                error_summary = None
+                if isinstance(result.data, Mapping) and _DATA_ERROR_KEY in result.data:
+                    error_summary = result.data[_DATA_ERROR_KEY]
+                if not error_summary:
+                    error_summary = "Composer proposal failed validation."
                 validation_errors_payload: list[dict[str, Any]] = []
                 if result.validation is not None:
                     for entry in result.validation.errors:
@@ -1122,7 +1131,7 @@ def register_composer_routes(router: APIRouter) -> None:
         session_id: UUID,
         request: Request,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> dict[str, Any]:
+    ) -> StateYamlResponse:
         """Get YAML representation of the current composition state (M1).
 
         Runs runtime preflight on the exact CompositionState reconstructed
@@ -1235,7 +1244,7 @@ def register_composer_routes(router: APIRouter) -> None:
             completion_verb="export_yaml",
         )
 
-        response: dict[str, Any] = {"yaml": yaml_str}
+        response: StateYamlResponse = {"yaml": yaml_str}
         source_blob_ids = {
             source_name: str(source.options["blob_ref"]) for source_name, source in state.sources.items() if "blob_ref" in source.options
         }

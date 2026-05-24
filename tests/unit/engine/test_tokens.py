@@ -3,6 +3,7 @@
 
 import inspect
 from typing import Any, get_type_hints
+from unittest.mock import patch
 
 import pytest
 
@@ -70,6 +71,31 @@ class TestTokenManager:
         assert token_info.token_id is not None
         assert isinstance(token_info.row_data, PipelineRow)
         assert token_info.row_data.to_dict() == {"value": 42}
+
+    def test_create_initial_token_uses_atomic_row_token_creation(self) -> None:
+        from elspeth.engine.tokens import TokenManager
+
+        setup = make_recorder_with_run()
+        factory, run_id, source_node_id = setup.factory, setup.run_id, setup.source_node_id
+        manager = TokenManager(factory.data_flow, step_resolver=_make_step_resolver())
+
+        with (
+            patch.object(factory.data_flow, "create_row_with_token", wraps=factory.data_flow.create_row_with_token) as create_pair,
+            patch.object(factory.data_flow, "create_token", wraps=factory.data_flow.create_token) as create_token,
+        ):
+            token_info = manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node_id,
+                row_index=5,
+                source_row=_make_source_row({"value": 42}),
+                source_row_index=7,
+                ingest_sequence=11,
+            )
+
+        assert token_info.row_id is not None
+        assert token_info.token_id is not None
+        assert create_pair.call_count == 1
+        assert create_token.call_count == 0
 
     def test_fork_token(self) -> None:
         from elspeth.engine.tokens import TokenManager

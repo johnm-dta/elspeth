@@ -6,12 +6,12 @@ Owns thread-safe call index allocation (Lock + per-state and per-operation dicts
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, overload
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import bindparam, func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import (
@@ -199,6 +199,142 @@ class ExecutionRepository:
 
         return state
 
+    def record_completed_node_state(
+        self,
+        token_id: str,
+        node_id: str,
+        run_id: str,
+        step_index: int,
+        input_data: Mapping[str, object],
+        output_data: Mapping[str, object] | list[Mapping[str, object]],
+        duration_ms: float,
+        *,
+        state_id: str | None = None,
+        attempt: int = 0,
+        quarantined: bool = False,
+        success_reason: TransformSuccessReason | None = None,
+        context_after: NodeStateContext | None = None,
+    ) -> NodeStateCompleted:
+        """Insert an immediately completed node state in one audit transaction.
+
+        Source nodes are observed before processor traversal begins, so the
+        common successful source path has no useful OPEN interval. This method
+        preserves the same completed-row invariants as ``complete_node_state``
+        without writing a transient OPEN row first.
+        """
+        state_id = state_id or generate_id()
+        if quarantined:
+            try:
+                input_hash = stable_hash(input_data)
+            except (ValueError, TypeError):
+                input_hash = repr_hash(input_data)
+        else:
+            input_hash = stable_hash(input_data)
+        output_hash = stable_hash(output_data)
+        timestamp = now()
+        success_reason_json = canonical_json(success_reason) if success_reason is not None else None
+        context_json = canonical_json(context_after.to_dict()) if context_after is not None else None
+
+        try:
+            with self._db.connection() as conn:
+                result = conn.execute(
+                    node_states_table.insert().values(
+                        state_id=state_id,
+                        token_id=token_id,
+                        node_id=node_id,
+                        run_id=run_id,
+                        step_index=step_index,
+                        attempt=attempt,
+                        status=NodeStateStatus.COMPLETED.value,
+                        input_hash=input_hash,
+                        output_hash=output_hash,
+                        duration_ms=duration_ms,
+                        error_json=None,
+                        success_reason_json=success_reason_json,
+                        context_after_json=context_json,
+                        started_at=timestamp,
+                        completed_at=timestamp,
+                    )
+                )
+                if result.rowcount == 0:
+                    raise LandscapeRecordError(
+                        f"record_completed_node_state: zero rows affected for state_id={state_id} — audit write failed"
+                    )
+                row = conn.execute(select(node_states_table).where(node_states_table.c.state_id == state_id)).fetchone()
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"record_completed_node_state failed for state_id={state_id} — database rejected audit write: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        if row is None:
+            raise LandscapeRecordError(f"NodeState {state_id} not found after insert — database corruption or transaction failure")
+        try:
+            loaded = self._node_state_loader.load(row)
+        except AuditIntegrityError as exc:
+            raise LandscapePostCommitError(f"NodeState {state_id} became unreadable immediately after insert: {exc}") from exc
+        if loaded.status is not NodeStateStatus.COMPLETED:
+            raise LandscapePostCommitError(f"NodeState {state_id} should be COMPLETED after atomic insert but has status {loaded.status}")
+        return loaded
+
+    def begin_node_states_many(
+        self,
+        entries: Sequence[tuple[str, str, str, int, Mapping[str, object]]],
+    ) -> list[NodeStateOpen]:
+        """Begin many node states in one audit transaction.
+
+        This is intentionally narrower than ``begin_node_state``: it supports
+        the high-volume sink success path where every entry is a normal
+        non-quarantined first attempt. Each token still receives its own
+        node_states row; only the database round trips are batched.
+        """
+        if not entries:
+            return []
+
+        timestamp = now()
+        states: list[NodeStateOpen] = []
+        values: list[dict[str, object]] = []
+        for token_id, node_id, run_id, step_index, input_data in entries:
+            input_hash = stable_hash(input_data)
+            state = NodeStateOpen(
+                state_id=generate_id(),
+                token_id=token_id,
+                node_id=node_id,
+                step_index=step_index,
+                attempt=0,
+                status=NodeStateStatus.OPEN,
+                input_hash=input_hash,
+                context_before_json=None,
+                started_at=timestamp,
+            )
+            states.append(state)
+            values.append(
+                {
+                    "state_id": state.state_id,
+                    "token_id": state.token_id,
+                    "node_id": state.node_id,
+                    "run_id": run_id,
+                    "step_index": state.step_index,
+                    "attempt": state.attempt,
+                    "status": state.status,
+                    "input_hash": state.input_hash,
+                    "started_at": state.started_at,
+                }
+            )
+
+        try:
+            with self._db.connection() as conn:
+                result = conn.execute(node_states_table.insert(), values)
+                if result.rowcount not in (-1, len(values)):
+                    raise LandscapeRecordError(
+                        f"begin_node_states_many affected {result.rowcount} rows for {len(values)} states; "
+                        "expected one audit row per token."
+                    )
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"begin_node_states_many failed for {len(values)} states — database rejected audit write: {type(exc).__name__}: {exc}"
+            ) from exc
+        return states
+
     @overload
     def complete_node_state(
         self,
@@ -352,9 +488,103 @@ class ExecutionRepository:
         except AuditIntegrityError as exc:
             raise LandscapePostCommitError(f"NodeState {state_id} became unreadable immediately after completion: {exc}") from exc
         # Type narrowing: result is guaranteed to be terminal (PENDING/COMPLETED/FAILED)
-        if isinstance(result, NodeStateOpen):
+        if result.status is NodeStateStatus.OPEN:
             raise LandscapePostCommitError(f"NodeState {state_id} should be terminal after completion but has status OPEN")
         return result
+
+    def complete_node_states_completed_many(
+        self,
+        completions: Sequence[tuple[str, Mapping[str, object], float]],
+    ) -> None:
+        """Complete many node states as COMPLETED in one audit transaction.
+
+        The method preserves the single-row immutability and post-write loader
+        validation contract from ``complete_node_state`` while avoiding one
+        transaction per sink token in high-volume writes.
+        """
+        if not completions:
+            return
+
+        timestamp = now()
+        terminal_values = [status.value for status in _TERMINAL_NODE_STATE_STATUSES]
+        state_ids = [state_id for state_id, _output_data, _duration_ms in completions]
+
+        params: list[dict[str, object]] = []
+        for state_id, output_data, duration_ms in completions:
+            if duration_ms is None:
+                raise ValueError("duration_ms is required when completing a node state")
+            if output_data is None:
+                raise ValueError("COMPLETED node state requires output_data (output_hash would be NULL)")
+            params.append(
+                {
+                    "batch_state_id": state_id,
+                    "batch_status": NodeStateStatus.COMPLETED.value,
+                    "batch_output_hash": stable_hash(output_data),
+                    "batch_duration_ms": duration_ms,
+                    "batch_completed_at": timestamp,
+                }
+            )
+
+        stmt = (
+            node_states_table.update()
+            .where(node_states_table.c.state_id == bindparam("batch_state_id"))
+            .where(node_states_table.c.status != NodeStateStatus.COMPLETED.value)
+            .where(node_states_table.c.status != NodeStateStatus.FAILED.value)
+            .values(
+                status=bindparam("batch_status"),
+                output_hash=bindparam("batch_output_hash"),
+                duration_ms=bindparam("batch_duration_ms"),
+                error_json=None,
+                success_reason_json=None,
+                context_after_json=None,
+                completed_at=bindparam("batch_completed_at"),
+            )
+        )
+        try:
+            with self._db.connection() as conn:
+                before_rows = conn.execute(
+                    select(node_states_table.c.state_id, node_states_table.c.status).where(node_states_table.c.state_id.in_(state_ids))
+                ).fetchall()
+                before_by_id = {row.state_id: row.status for row in before_rows}
+                missing = [state_id for state_id in state_ids if state_id not in before_by_id]
+                if missing:
+                    raise LandscapeRecordError(
+                        f"complete_node_states_completed_many: target rows do not exist (state_ids={missing!r}) — audit data corruption"
+                    )
+                terminal = [(state_id, before_by_id[state_id]) for state_id in state_ids if before_by_id[state_id] in terminal_values]
+                if terminal:
+                    first_state_id, first_status = terminal[0]
+                    raise LandscapeRecordError(
+                        f"Cannot complete node state {first_state_id}: current status {first_status!r} is already terminal. "
+                        "Terminal node states are immutable."
+                    )
+
+                result = conn.execute(stmt, params)
+                if result.rowcount not in (-1, len(params)):
+                    raise LandscapeRecordError(
+                        f"complete_node_states_completed_many affected {result.rowcount} rows for {len(params)} states; "
+                        "expected one audit update per token."
+                    )
+                after_rows = conn.execute(select(node_states_table).where(node_states_table.c.state_id.in_(state_ids))).fetchall()
+        except SQLAlchemyError as exc:
+            raise LandscapeRecordError(
+                f"complete_node_states_completed_many failed for {len(params)} states — database rejected audit update: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
+        if len(after_rows) != len(params):
+            raise LandscapePostCommitError(
+                f"complete_node_states_completed_many loaded {len(after_rows)} states after update; expected {len(params)}."
+            )
+        for row in after_rows:
+            try:
+                loaded = self._node_state_loader.load(row)
+            except AuditIntegrityError as exc:
+                raise LandscapePostCommitError(f"NodeState {row.state_id} became unreadable immediately after completion: {exc}") from exc
+            if loaded.status is not NodeStateStatus.COMPLETED:
+                raise LandscapePostCommitError(
+                    f"NodeState {row.state_id} should be COMPLETED after batch completion but has status {loaded.status}"
+                )
 
     def get_node_state(self, state_id: str) -> NodeState | None:
         """Get a node state by ID.

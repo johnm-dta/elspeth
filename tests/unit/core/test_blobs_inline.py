@@ -4,14 +4,29 @@ from __future__ import annotations
 
 import hashlib
 from copy import deepcopy
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
 
-from elspeth.contracts.blobs import BlobContentMissingError, BlobIntegrityError, BlobNotFoundError, BlobStateError
+from elspeth.contracts.blobs import (
+    BlobContentMissingError,
+    BlobIntegrityError,
+    BlobNotFoundError,
+    BlobRecord,
+    BlobStateError,
+)
 from elspeth.contracts.blobs_inline import BlobContentResolutionError, BlobInlineRef, ResolvedBlobContent
-from elspeth.core.blobs_inline import _discover_blob_content_refs, _fetch_blob_contents, _substitute_blob_content_refs
+from elspeth.contracts.enums import CreationModality
+from elspeth.core.blobs_inline import (
+    BlobInlineValidationViolation,
+    _discover_blob_content_refs,
+    _fetch_blob_contents,
+    _substitute_blob_content_refs,
+    _validate_blob_content_refs,
+    _validate_blob_content_refs_sync,
+)
 
 VALID_HASH = "a" * 64
 BLOB1 = "5b7a4e0e-9e4a-4f0b-8d3e-2c0e1f0d3a4b"
@@ -32,6 +47,35 @@ def _ref_with_hash(content: bytes, field_path: str = "source.options.system_prom
         blob_id=UUID(blob_id),
         sha256=hashlib.sha256(content).hexdigest(),
         encoding="utf-8",
+    )
+
+
+def _blob_record(
+    *,
+    blob_id: str = BLOB1,
+    status: str = "ready",
+    content_hash: str | None = VALID_HASH,
+    size_bytes: int = 12,
+) -> BlobRecord:
+    return BlobRecord(
+        id=UUID(blob_id),
+        session_id=UUID("11111111-1111-4111-8111-111111111111"),
+        filename="prompt.txt",
+        mime_type="text/plain",
+        size_bytes=size_bytes,
+        content_hash=content_hash,
+        storage_path="/tmp/prompt.txt",
+        created_at=datetime(2026, 5, 24, tzinfo=UTC),
+        created_by="user",
+        source_description=None,
+        status=status,  # type: ignore[arg-type]
+        creation_modality=CreationModality.VERBATIM,
+        created_from_message_id=None,
+        creating_model_identifier=None,
+        creating_model_version=None,
+        creating_provider=None,
+        creating_composer_skill_hash=None,
+        creating_arguments_hash=None,
     )
 
 
@@ -338,3 +382,98 @@ class TestSubstituteBlobContentRefs:
 
         assert exc_info.value.undecodable == (("source.options.x", "utf-8"),)
         assert config == original
+
+
+class TestValidateBlobContentRefs:
+    @pytest.mark.asyncio
+    async def test_async_returns_missing_violation_without_raising(self) -> None:
+        blob_service = AsyncMock()
+        blob_service.get_blob.side_effect = BlobNotFoundError(BLOB1)
+        config = {"source": {"options": {"x": _marker(BLOB1, VALID_HASH)}}}
+
+        violations = await _validate_blob_content_refs(blob_service, config, user_id="u")
+
+        assert violations == [
+            BlobInlineValidationViolation(
+                category="missing",
+                field_path="source.options.x",
+                detail=f"blob {UUID(BLOB1)} not found",
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_async_returns_malformed_violation_without_lookup(self) -> None:
+        blob_service = AsyncMock()
+        config = {"source": {"options": {"x": {"blob_ref": BLOB1}}}}
+
+        violations = await _validate_blob_content_refs(blob_service, config, user_id="u")
+
+        assert violations == [
+            BlobInlineValidationViolation(
+                category="malformed",
+                field_path="source.options.x",
+                detail="missing mode",
+            )
+        ]
+        blob_service.get_blob.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_returns_hash_and_size_violations(self) -> None:
+        blob_service = AsyncMock()
+        blob_service.get_blob.return_value = _blob_record(content_hash="b" * 64, size_bytes=128)
+        config = {"source": {"options": {"x": _marker(BLOB1, VALID_HASH)}}}
+
+        violations = await _validate_blob_content_refs(
+            blob_service,
+            config,
+            user_id="u",
+            per_ref_byte_cap=64,
+        )
+
+        assert [violation.category for violation in violations] == ["hash_mismatch"]
+        assert violations[0].field_path == "source.options.x"
+
+    def test_sync_returns_missing_violation_without_raising(self) -> None:
+        config = {"source": {"options": {"x": _marker(BLOB1, VALID_HASH)}}}
+
+        violations = _validate_blob_content_refs_sync(
+            blob_get_metadata=lambda _blob_id: None,
+            config=config,
+        )
+
+        assert violations == [
+            BlobInlineValidationViolation(
+                category="missing",
+                field_path="source.options.x",
+                detail=f"blob {UUID(BLOB1)} not found",
+            )
+        ]
+
+    def test_sync_returns_not_ready_and_oversized_violations(self) -> None:
+        pending = _blob_record(status="pending")
+        too_large = _blob_record(blob_id=BLOB2, content_hash=VALID_HASH, size_bytes=128)
+        config = {
+            "source": {"options": {"x": _marker(BLOB1, VALID_HASH)}},
+            "sinks": {"writeback": {"options": {"footer": _marker(BLOB2, VALID_HASH)}}},
+        }
+
+        def get_metadata(blob_id: UUID) -> BlobRecord | None:
+            if blob_id == UUID(BLOB1):
+                return pending
+            if blob_id == UUID(BLOB2):
+                return too_large
+            return None
+
+        violations = _validate_blob_content_refs_sync(
+            blob_get_metadata=get_metadata,
+            config=config,
+            per_ref_byte_cap=64,
+            aggregate_byte_cap=64,
+        )
+
+        assert [violation.category for violation in violations] == ["not_ready", "oversized", "oversized"]
+        assert [violation.field_path for violation in violations] == [
+            "source.options.x",
+            "output:writeback.options.footer",
+            "(aggregate)",
+        ]

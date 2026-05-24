@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-from typing import Any, Final, cast
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Final, Literal, cast
 from uuid import UUID
 
 from elspeth.contracts.blobs import (
@@ -20,6 +22,7 @@ from elspeth.contracts.blobs import (
     BlobContentMissingError,
     BlobIntegrityError,
     BlobNotFoundError,
+    BlobRecord,
     BlobServiceProtocol,
     BlobStateError,
 )
@@ -33,6 +36,17 @@ from elspeth.contracts.blobs_inline import (
 
 _NODE_COLLECTION_KEYS: Final = ("transforms", "gates", "aggregations", "coalesce")
 _OUTPUT_COLLECTION_KEYS: Final = ("outputs", "sinks")
+
+BlobInlineValidationCategory = Literal["missing", "oversized", "not_ready", "hash_mismatch", "malformed"]
+
+
+@dataclass(frozen=True, slots=True)
+class BlobInlineValidationViolation:
+    """Structured validate-path violation for inline blob content refs."""
+
+    category: BlobInlineValidationCategory
+    field_path: str
+    detail: str
 
 
 def _discover_blob_content_refs(config: dict[str, Any]) -> list[BlobInlineRef]:
@@ -52,6 +66,162 @@ def _discover_blob_content_refs(config: dict[str, Any]) -> list[BlobInlineRef]:
     if malformed:
         raise BlobContentResolutionError(malformed=malformed)
     return refs
+
+
+async def _validate_blob_content_refs(
+    blob_service: BlobServiceProtocol,
+    config: dict[str, Any],
+    *,
+    user_id: str,
+    per_ref_byte_cap: int | None = None,
+    aggregate_byte_cap: int | None = None,
+) -> list[BlobInlineValidationViolation]:
+    """Return validate-path violations without raising recoverable errors."""
+    del user_id
+    try:
+        refs = _discover_blob_content_refs(config)
+    except BlobContentResolutionError as exc:
+        return _malformed_validation_violations(exc)
+
+    violations: list[BlobInlineValidationViolation] = []
+    aggregate_bytes = 0
+    for ref in refs:
+        lookup_result = await _get_blob_record_for_validation(blob_service, ref)
+        if type(lookup_result) is BlobInlineValidationViolation:
+            violations.append(lookup_result)
+            continue
+        record = cast(BlobRecord, lookup_result)
+        record_violations, counts_toward_aggregate = _record_validation_violations(
+            ref,
+            record,
+            per_ref_byte_cap=per_ref_byte_cap,
+        )
+        violations.extend(record_violations)
+        if counts_toward_aggregate:
+            aggregate_bytes += record.size_bytes
+
+    _append_aggregate_size_violation(violations, aggregate_bytes, aggregate_byte_cap)
+    return violations
+
+
+def _validate_blob_content_refs_sync(
+    blob_get_metadata: Callable[[UUID], BlobRecord | None],
+    config: dict[str, Any],
+    *,
+    per_ref_byte_cap: int | None = None,
+    aggregate_byte_cap: int | None = None,
+) -> list[BlobInlineValidationViolation]:
+    """Sync validate-path sibling for callers that cannot await metadata lookup."""
+    try:
+        refs = _discover_blob_content_refs(config)
+    except BlobContentResolutionError as exc:
+        return _malformed_validation_violations(exc)
+
+    violations: list[BlobInlineValidationViolation] = []
+    aggregate_bytes = 0
+    for ref in refs:
+        record = blob_get_metadata(ref.blob_id)
+        if record is None:
+            violations.append(_missing_validation_violation(ref))
+            continue
+        record_violations, counts_toward_aggregate = _record_validation_violations(
+            ref,
+            record,
+            per_ref_byte_cap=per_ref_byte_cap,
+        )
+        violations.extend(record_violations)
+        if counts_toward_aggregate:
+            aggregate_bytes += record.size_bytes
+
+    _append_aggregate_size_violation(violations, aggregate_bytes, aggregate_byte_cap)
+    return violations
+
+
+async def _get_blob_record_for_validation(
+    blob_service: BlobServiceProtocol,
+    ref: BlobInlineRef,
+) -> BlobRecord | BlobInlineValidationViolation:
+    try:
+        return await blob_service.get_blob(ref.blob_id)
+    except BlobNotFoundError:
+        return _missing_validation_violation(ref)
+    except BlobStateError as exc:
+        return BlobInlineValidationViolation(
+            category="not_ready",
+            field_path=ref.field_path,
+            detail=str(exc),
+        )
+
+
+def _malformed_validation_violations(exc: BlobContentResolutionError) -> list[BlobInlineValidationViolation]:
+    return [
+        BlobInlineValidationViolation(category="malformed", field_path=field_path, detail=reason) for field_path, reason in exc.malformed
+    ]
+
+
+def _missing_validation_violation(ref: BlobInlineRef) -> BlobInlineValidationViolation:
+    return BlobInlineValidationViolation(
+        category="missing",
+        field_path=ref.field_path,
+        detail=f"blob {ref.blob_id} not found",
+    )
+
+
+def _record_validation_violations(
+    ref: BlobInlineRef,
+    record: BlobRecord,
+    *,
+    per_ref_byte_cap: int | None,
+) -> tuple[list[BlobInlineValidationViolation], bool]:
+    if record.status != "ready":
+        return [
+            BlobInlineValidationViolation(
+                category="not_ready",
+                field_path=ref.field_path,
+                detail=f"blob {ref.blob_id} status is {record.status!r}",
+            )
+        ], False
+    if record.content_hash != ref.sha256:
+        return [
+            BlobInlineValidationViolation(
+                category="hash_mismatch",
+                field_path=ref.field_path,
+                detail=f"composer-pinned hash {ref.sha256[:16]}... != blob hash {_short_hash(record.content_hash)}",
+            )
+        ], False
+
+    violations: list[BlobInlineValidationViolation] = []
+    if per_ref_byte_cap is not None and record.size_bytes > per_ref_byte_cap:
+        violations.append(
+            BlobInlineValidationViolation(
+                category="oversized",
+                field_path=ref.field_path,
+                detail=f"{record.size_bytes} bytes exceeds per-ref cap {per_ref_byte_cap}",
+            )
+        )
+    return violations, True
+
+
+def _short_hash(value: str | None) -> str:
+    if value is None:
+        return "<missing>"
+    return f"{value[:16]}..."
+
+
+def _append_aggregate_size_violation(
+    violations: list[BlobInlineValidationViolation],
+    aggregate_bytes: int,
+    aggregate_byte_cap: int | None,
+) -> None:
+    if aggregate_byte_cap is None or aggregate_bytes <= aggregate_byte_cap:
+        return
+    violations.append(
+        BlobInlineValidationViolation(
+            category="oversized",
+            field_path="(aggregate)",
+            detail=f"total resolved bytes {aggregate_bytes} exceeds aggregate cap {aggregate_byte_cap}",
+        )
+    )
 
 
 async def _fetch_blob_contents(

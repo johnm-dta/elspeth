@@ -32,6 +32,7 @@ from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.core.blobs_inline import _discover_blob_content_refs, _fetch_blob_contents, _substitute_blob_content_refs
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.events import EventBus
 from elspeth.core.landscape.database import LandscapeDB
@@ -41,7 +42,7 @@ from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
-from elspeth.web.blobs.protocol import BlobNotFoundError, BlobQuotaExceededError, BlobServiceProtocol, BlobStateError
+from elspeth.web.blobs.protocol import AllowedMimeType, BlobNotFoundError, BlobQuotaExceededError, BlobServiceProtocol, BlobStateError
 from elspeth.web.composer._semantic_validator import validate_semantic_contracts
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.config import WebSettings
@@ -875,51 +876,110 @@ class ExecutionServiceImpl:
             # Resolved values exist only in this thread's local memory — the
             # original pipeline_yaml (persisted in the Run record) is untouched.
             resolved_yaml = pipeline_yaml
+            resolved_dict: dict[str, Any] | None = None
             secret_resolution_inputs: list[SecretResolutionInput] = []
-            if self._secret_service is not None and user_id is not None:
+            inline_blob_candidate = "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml
+            needs_config_tree = (self._secret_service is not None and user_id is not None) or inline_blob_candidate
+            if needs_config_tree:
                 import yaml as _yaml
 
-                from elspeth.core.secrets import resolve_secret_refs
-
                 config_dict = _yaml.safe_load(pipeline_yaml)
-                if not isinstance(config_dict, dict):
+                if type(config_dict) is not dict:
                     raise TypeError(
                         f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
                     )
-                env_ref_names = {item.name for item in self._secret_service.list_refs(user_id)}
-                resolved_dict, resolutions = resolve_secret_refs(
-                    config_dict,
-                    self._secret_service,
-                    user_id,
-                    env_ref_names=env_ref_names,
-                )
-                resolved_yaml = _yaml.dump(resolved_dict, default_flow_style=False)
+                resolved_dict = cast(dict[str, Any], config_dict)
 
-                # Map ResolvedSecret.scope (web domain) to
-                # SecretResolutionInput.source (audit domain).
-                # "server" secrets are env vars on the host → audit source "env".
-                _SCOPE_TO_AUDIT_SOURCE: dict[str, str] = {
-                    "user": "user",
-                    "server": "env",
-                }
-                for rs in resolutions:
-                    audit_source = _SCOPE_TO_AUDIT_SOURCE.get(rs.scope)
-                    if audit_source is None:
-                        raise ValueError(
-                            f"No audit source mapping for secret scope {rs.scope!r} "
-                            f"(secret: {rs.name!r}) — add mapping to _SCOPE_TO_AUDIT_SOURCE"
+                if self._secret_service is not None and user_id is not None:
+                    from elspeth.core.secrets import resolve_secret_refs
+
+                    env_ref_names = {item.name for item in self._secret_service.list_refs(user_id)}
+                    resolved_dict, resolutions = resolve_secret_refs(
+                        resolved_dict,
+                        self._secret_service,
+                        user_id,
+                        env_ref_names=env_ref_names,
+                    )
+
+                    # Map ResolvedSecret.scope (web domain) to
+                    # SecretResolutionInput.source (audit domain).
+                    # "server" secrets are env vars on the host → audit source "env".
+                    _SCOPE_TO_AUDIT_SOURCE: dict[str, str] = {
+                        "user": "user",
+                        "server": "env",
+                    }
+                    for rs in resolutions:
+                        audit_source = _SCOPE_TO_AUDIT_SOURCE.get(rs.scope)
+                        if audit_source is None:
+                            raise ValueError(
+                                f"No audit source mapping for secret scope {rs.scope!r} "
+                                f"(secret: {rs.name!r}) — add mapping to _SCOPE_TO_AUDIT_SOURCE"
+                            )
+                        secret_resolution_inputs.append(
+                            SecretResolutionInput(
+                                env_var_name=rs.name,
+                                source=audit_source,
+                                vault_url=None,
+                                secret_name=None,
+                                timestamp=time.time(),
+                                resolution_latency_ms=0.0,
+                                fingerprint=rs.fingerprint,
+                            )
                         )
-                    secret_resolution_inputs.append(
-                        SecretResolutionInput(
-                            env_var_name=rs.name,
-                            source=audit_source,
-                            vault_url=None,
-                            secret_name=None,
-                            timestamp=time.time(),
-                            resolution_latency_ms=0.0,
-                            fingerprint=rs.fingerprint,
+
+                inline_refs = _discover_blob_content_refs(resolved_dict) if inline_blob_candidate else []
+                if inline_refs:
+                    if self._blob_service is None:
+                        raise RuntimeError("Inline-content blob refs require BlobServiceProtocol wiring")
+                    blob_service = self._blob_service
+
+                    unique_blob_ids: list[UUID] = []
+                    seen_blob_ids: set[UUID] = set()
+                    for ref in inline_refs:
+                        if ref.blob_id in seen_blob_ids:
+                            continue
+                        seen_blob_ids.add(ref.blob_id)
+                        unique_blob_ids.append(ref.blob_id)
+
+                    async def _link_inline_blobs_to_run() -> None:
+                        await asyncio.gather(
+                            *(
+                                blob_service.link_blob_to_run(
+                                    blob_id=blob_id,
+                                    run_id=run_uuid,
+                                    direction="input",
+                                )
+                                for blob_id in unique_blob_ids
+                            )
+                        )
+
+                    self._call_async(_link_inline_blobs_to_run())
+                    fetched = self._call_async(_fetch_blob_contents(blob_service, inline_refs))
+
+                    async def _gather_inline_blob_metadata() -> list[Any]:
+                        return await asyncio.gather(*(blob_service.get_blob(blob_id) for blob_id in unique_blob_ids))
+
+                    metadata_records = self._call_async(_gather_inline_blob_metadata())
+                    blob_metadata: dict[UUID, tuple[AllowedMimeType, int]] = {
+                        blob_id: (cast(AllowedMimeType, record.mime_type), record.size_bytes)
+                        for blob_id, record in zip(unique_blob_ids, metadata_records, strict=True)
+                    }
+                    resolved_dict, blob_resolutions = _substitute_blob_content_refs(
+                        resolved_dict,
+                        fetched,
+                        refs=inline_refs,
+                        blob_metadata=blob_metadata,
+                    )
+                    self._call_async(
+                        self._session_service.record_blob_inline_resolutions(
+                            run_id=run_uuid,
+                            resolutions=blob_resolutions,
+                            attempt=1,
                         )
                     )
+
+                if secret_resolution_inputs or inline_refs:
+                    resolved_yaml = _yaml.dump(resolved_dict, default_flow_style=False)
 
             # Load settings from YAML string — never write resolved secrets
             # to disk.  load_settings_from_yaml_string() parses in-process,

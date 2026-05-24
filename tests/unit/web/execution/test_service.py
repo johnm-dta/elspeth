@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import hashlib
 import json
 import threading
 from collections.abc import Callable, Coroutine, Iterator
@@ -826,6 +827,127 @@ class TestB3Construction:
         mock_landscape_cls.assert_called_once_with(connection_string="sqlite:///test_audit.db", passphrase=None)
         # B3: PayloadStore constructed from settings path
         mock_payload_cls.assert_called_once_with(base_path=Path("/tmp/test_payloads"))
+
+
+@pytest.mark.usefixtures("mock_pipeline_config_assembly")
+class TestInlineBlobRuntimePreflight:
+    """Inline-content blob refs resolve before plugin construction."""
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.build_validated_runtime_graph")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_run_pipeline_resolves_inline_content_and_records_audit_before_settings_load(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        mock_runtime_graph: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        content = b"You are an audited prompt."
+        blob_id = uuid4()
+        run_id = uuid4()
+        sha256 = hashlib.sha256(content).hexdigest()
+        order: list[str] = []
+
+        blob_record = MagicMock()
+        blob_record.mime_type = "text/plain"
+        blob_record.size_bytes = len(content)
+
+        async def link_blob_to_run(*_args: Any, **_kwargs: Any) -> None:
+            order.append("link")
+
+        async def read_blob_content(_blob_id: UUID) -> bytes:
+            order.append("read")
+            return content
+
+        async def get_blob(_blob_id: UUID) -> Any:
+            order.append("metadata")
+            return blob_record
+
+        async def record_blob_inline_resolutions(*_args: Any, **_kwargs: Any) -> None:
+            order.append("record")
+
+        blob_service = MagicMock()
+        blob_service.link_blob_to_run = AsyncMock(side_effect=link_blob_to_run)
+        blob_service.read_blob_content = AsyncMock(side_effect=read_blob_content)
+        blob_service.get_blob = AsyncMock(side_effect=get_blob)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(errors=[]))
+        cast(Any, service)._blob_service = blob_service
+        mock_session_service.record_blob_inline_resolutions = AsyncMock(side_effect=record_blob_inline_resolutions)
+
+        def load_settings(yaml_text: str) -> MagicMock:
+            assert "record" in order, "audit row must be recorded before settings/plugin construction"
+            assert "You are an audited prompt." in yaml_text
+            assert "blob_ref" not in yaml_text
+            assert "inline_content" not in yaml_text
+            order.append("load")
+            return _mock_pipeline_settings()
+
+        mock_load.side_effect = load_settings
+
+        mock_bundle = MagicMock()
+        mock_bundle.source = MagicMock()
+        mock_bundle.transforms = ()
+        mock_bundle.sinks = {"primary": MagicMock()}
+        mock_bundle.aggregations = {}
+        mock_runtime = MagicMock()
+        mock_runtime.plugin_bundle = mock_bundle
+        mock_runtime.graph = MagicMock()
+        mock_runtime_graph.return_value = mock_runtime
+
+        mock_orch = MagicMock()
+        mock_orch_cls.return_value = mock_orch
+        mock_result = MagicMock()
+        mock_result.run_id = str(run_id)
+        mock_result.status = RunStatus.COMPLETED
+        mock_result.rows_processed = 1
+        mock_result.rows_succeeded = 1
+        mock_result.rows_failed = 0
+        mock_result.rows_routed_success = 0
+        mock_result.rows_routed_failure = 0
+        mock_result.rows_quarantined = 0
+        mock_orch.run.return_value = mock_result
+
+        pipeline_yaml = f"""
+source:
+  plugin: csv
+  options:
+    path: input.csv
+transforms:
+  - name: classify
+    plugin: llm
+    options:
+      system_prompt:
+        blob_ref: {blob_id}
+        mode: inline_content
+        sha256: {sha256}
+sinks:
+  primary:
+    plugin: json
+    options:
+      path: output.jsonl
+"""
+
+        with patch(
+            "elspeth.web.execution.service.load_run_accounting_from_db",
+            return_value=_run_accounting_for_status(RunStatus.COMPLETED),
+        ):
+            service._run_pipeline(str(run_id), pipeline_yaml, threading.Event())
+
+        assert order.index("link") < order.index("read")
+        assert order.index("metadata") < order.index("record") < order.index("load")
+        blob_service.link_blob_to_run.assert_awaited_once_with(blob_id=blob_id, run_id=run_id, direction="input")
+        blob_service.read_blob_content.assert_awaited_once_with(blob_id)
+        mock_session_service.record_blob_inline_resolutions.assert_awaited_once()
+        resolutions = mock_session_service.record_blob_inline_resolutions.await_args.kwargs["resolutions"]
+        assert len(resolutions) == 1
+        assert resolutions[0].field_path == "node:classify.options.system_prompt"
+        assert resolutions[0].content_hash == sha256
 
 
 # ── B7: BaseException + Done Callback ─────────────────────────────────

@@ -337,6 +337,11 @@ class ExecutionGraph:
 
         for node_id_str, node_attrs in self._graph.nodes(data=True):
             node_info = cast(NodeInfo, node_attrs["info"])
+            # QUEUE and COALESCE are structural join primitives. SINK is a
+            # terminal write boundary: ADR-025 Decision 9 allows direct
+            # multi-source fan-in here, with ingest_sequence as the ordering
+            # authority. Ordinary processing nodes must still route through
+            # an explicit QUEUE.
             if node_info.node_type in {NodeType.QUEUE, NodeType.SINK, NodeType.COALESCE}:
                 continue
             incoming_move_predecessors = {

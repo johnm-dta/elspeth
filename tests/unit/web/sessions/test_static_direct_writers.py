@@ -1001,6 +1001,97 @@ _REVIEWED_ALLOWLIST: tuple[ReviewedWriter, ...] = (
             "mechanically close to the simulated commit/advisory-lock failures"
         ),
     ),
+    # ------ tests/unit/web/composer/* — blob-provenance user-message fixtures ------
+    ReviewedWriter(
+        path="tests/unit/web/composer/test_agent_tooling.py",
+        enclosing_symbol="_insert_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "blob-tool harness fixture: seeds the route-level user message "
+            "that create_blob provenance now requires before exercising the "
+            "production execute_tool dispatcher. The fixture owns the in-memory "
+            "SQLite engine and exists only to satisfy fk_blobs_created_from_"
+            "message_session for verbatim content assertions."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/composer/test_promote_create_blob.py",
+        enclosing_symbol="_session_engine_with_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "create_blob provenance fixture: seeds the triggering user message "
+            "so tests can assert verbatim vs LLM-generated blob attribution "
+            "against the real blobs_table composite FK."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/composer/test_promote_set_pipeline.py",
+        enclosing_symbol="_session_engine_with_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "set_pipeline inline-blob provenance fixture: seeds the triggering "
+            "user message so inline source blobs can bind created_from_message_id "
+            "while the tests focus on blob attribution and state mutation."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/composer/test_promote_set_source_from_blob.py",
+        enclosing_symbol="_session_engine_with_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "set_source_from_blob provenance fixture: seeds the triggering user "
+            "message for blob attribution tests without initialising the full "
+            "session route stack."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/composer/test_promote_update_blob.py",
+        enclosing_symbol="_insert_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_insert_call",
+        purpose=(
+            "update_blob functional smoke fixture: bootstraps a create_blob "
+            "row with the required verbatim user-message anchor before "
+            "exercising the production update_blob handler."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/composer/test_service.py",
+        enclosing_symbol="_insert_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_table_insert",
+        purpose=(
+            "composer-service fixture helper: creates a deterministic "
+            "route-level user message anchor for blob provenance tests while "
+            "the service path under test remains the composer loop."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/composer/test_service.py",
+        enclosing_symbol="TestComposerTextOnlyResponse.test_blob_only_success_then_empty_state_reply_returns_no_state_mutation_blocker",
+        table="chat_messages",
+        operation="sqlalchemy_table_insert",
+        purpose=(
+            "composer-service scenario fixture: seeds the exact user-message "
+            "anchor for a blob-only turn so the test can assert the text-only "
+            "response handling rather than the chat-message writer."
+        ),
+    ),
+    ReviewedWriter(
+        path="tests/unit/web/composer/test_tools.py",
+        enclosing_symbol="_insert_user_message",
+        table="chat_messages",
+        operation="sqlalchemy_table_insert",
+        purpose=(
+            "composer tool fixture helper: seeds route-level user-message "
+            "anchors for verbatim blob provenance assertions while exercising "
+            "the production tool handlers."
+        ),
+    ),
     # ------ tests/unit/web/sessions/* — targeted chat transcript fixtures ------
     ReviewedWriter(
         path="tests/unit/web/sessions/test_count_tool_responses_for_assistant.py",

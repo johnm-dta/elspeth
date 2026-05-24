@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy import func, insert, select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.catalog.protocol import CatalogService
@@ -32,7 +33,7 @@ from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_create_blob, _execute_update_blob
 from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import sessions_table
+from elspeth.web.sessions.models import chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 
@@ -72,6 +73,39 @@ def _session_engine_with_session() -> tuple[Any, str]:
             )
         )
     return engine, session_id
+
+
+def _insert_user_message(engine: Any, session_id: str, content: str) -> str:
+    user_message_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        sequence_no = (
+            int(
+                conn.execute(
+                    select(func.coalesce(func.max(chat_messages_table.c.sequence_no), 0)).where(
+                        chat_messages_table.c.session_id == session_id
+                    )
+                ).scalar_one()
+            )
+            + 1
+        )
+        conn.execute(
+            insert(chat_messages_table).values(
+                id=user_message_id,
+                session_id=session_id,
+                role="user",
+                content=content,
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=sequence_no,
+                writer_principal="route_user_message",
+                created_at=now,
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return user_message_id
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +201,8 @@ class TestPromoteUpdateBlobArgErrorRouting:
 
         # Bootstrap an existing blob via create_blob (also a Task 13 promoted
         # tool — exercises the create_blob → update_blob lifecycle together).
+        user_message_content = "Use this exact content:\nold"
+        user_message_id = _insert_user_message(engine, session_id, user_message_content)
         create_result = _execute_create_blob(
             {"filename": "seed.txt", "mime_type": "text/plain", "content": "old"},
             _empty_state(),
@@ -175,6 +211,8 @@ class TestPromoteUpdateBlobArgErrorRouting:
                 data_dir=str(tmp_path),
                 session_engine=engine,
                 session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
             ),
         )
         assert create_result.success is True

@@ -376,7 +376,12 @@ class TestPromoteSetPipelineArgErrorRouting:
             rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
         assert rows == []
 
-    def test_inline_blob_contained_content_without_message_id_fails_closed(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("missing_user_message_id", [None, "", "   "])
+    def test_inline_blob_contained_content_without_message_id_fails_closed(
+        self,
+        tmp_path: Path,
+        missing_user_message_id: str | None,
+    ) -> None:
         """Verbatim inline blobs require both message content and message id."""
         engine, session_id = _session_engine_with_session()
         user_message_content = "Use this exact source text:\ngenerated row"
@@ -409,6 +414,7 @@ class TestPromoteSetPipelineArgErrorRouting:
                     data_dir=str(tmp_path),
                     session_engine=engine,
                     session_id=session_id,
+                    user_message_id=missing_user_message_id,
                     user_message_content=user_message_content,
                 ),
             )

@@ -316,18 +316,21 @@ def _verbatim_blob_creation_provenance() -> _BlobCreationProvenance:
     )
 
 
+def _blob_provenance_message_id(user_message_id: str | None) -> str | None:
+    if user_message_id is None:
+        return None
+    normalized = user_message_id.strip()
+    return normalized if normalized else None
+
+
 def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreationProvenance:
     """Classify composer-created blob content and return DB provenance fields."""
-    if (
-        context.user_message_id is not None
-        and context.user_message_content is not None
-        and content
-        and content in context.user_message_content
-    ):
+    user_message_id = _blob_provenance_message_id(context.user_message_id)
+    if user_message_id is not None and context.user_message_content is not None and content and content in context.user_message_content:
         return _verbatim_blob_creation_provenance()
 
     required = {
-        "user_message_id": context.user_message_id,
+        "user_message_id": user_message_id,
         "composer_model_identifier": context.composer_model_identifier,
         "composer_model_version": context.composer_model_version,
         "composer_provider": context.composer_provider,

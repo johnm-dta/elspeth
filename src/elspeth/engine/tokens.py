@@ -68,29 +68,6 @@ class TokenManager:
         self._data_flow = data_flow
         self._step_resolver = step_resolver
 
-    def _require_source_row_identity(
-        self,
-        *,
-        run_id: str,
-        source_node_id: str,
-        source_row_index: int | None,
-        ingest_sequence: int | None,
-    ) -> tuple[int, int]:
-        missing_identity_fields = []
-        if source_row_index is None:
-            missing_identity_fields.append("source_row_index")
-        if ingest_sequence is None:
-            missing_identity_fields.append("ingest_sequence")
-        if missing_identity_fields:
-            raise OrchestrationInvariantError(
-                f"TokenManager requires explicit source row identity for run_id={run_id!r} "
-                f"source_node_id={source_node_id!r}; missing {', '.join(missing_identity_fields)}. "
-                "Do not fabricate source_row_index or ingest_sequence from row_index."
-            )
-        assert source_row_index is not None
-        assert ingest_sequence is not None
-        return source_row_index, ingest_sequence
-
     def create_initial_token(
         self,
         run_id: str,
@@ -98,8 +75,8 @@ class TokenManager:
         row_index: int,
         source_row: SourceRow,
         *,
-        source_row_index: int | None = None,
-        ingest_sequence: int | None = None,
+        source_row_index: int,
+        ingest_sequence: int,
     ) -> TokenInfo:
         """Create a token for a source row.
 
@@ -124,12 +101,6 @@ class TokenManager:
             raise OrchestrationInvariantError(
                 "SourceRow must have contract to create token. Source plugins must set contract on all valid rows."
             )
-        source_row_index, ingest_sequence = self._require_source_row_identity(
-            run_id=run_id,
-            source_node_id=source_node_id,
-            source_row_index=source_row_index,
-            ingest_sequence=ingest_sequence,
-        )
 
         # Convert to PipelineRow
         pipeline_row = source_row.to_pipeline_row()
@@ -160,8 +131,8 @@ class TokenManager:
         row_index: int,
         source_row: SourceRow,
         *,
-        source_row_index: int | None = None,
-        ingest_sequence: int | None = None,
+        source_row_index: int,
+        ingest_sequence: int,
         validation_error_id: str | None = None,
     ) -> TokenInfo:
         """Create a token for a quarantined row.
@@ -187,12 +158,6 @@ class TokenManager:
         """
         if not source_row.is_quarantined:
             raise OrchestrationInvariantError("create_quarantine_token requires a quarantined SourceRow")
-        source_row_index, ingest_sequence = self._require_source_row_identity(
-            run_id=run_id,
-            source_node_id=source_node_id,
-            source_row_index=source_row_index,
-            ingest_sequence=ingest_sequence,
-        )
 
         # For quarantine rows, row may not be a dict (could be malformed external data).
         # PipelineRow requires exactly builtin dict (type(data) is dict), so normalize

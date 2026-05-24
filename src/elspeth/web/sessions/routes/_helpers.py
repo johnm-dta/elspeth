@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import sys
 from collections.abc import Mapping, Sequence
@@ -40,7 +41,7 @@ from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerP
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.secret_scrub import scrub_text_for_audit
-from elspeth.core.canonical import stable_hash
+from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.dag.models import GraphValidationError
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
@@ -114,7 +115,13 @@ from elspeth.web.composer.protocol import (
     ComposerService,
     ComposerServiceError,
 )
-from elspeth.web.composer.redaction import redact_source_storage_path
+from elspeth.web.composer.redaction import (
+    MANIFEST,
+    redact_source_storage_path,
+    redact_tool_call_arguments,
+    redact_tool_call_response,
+)
+from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
 from elspeth.web.composer.service import _BadRequestLLMError
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
@@ -200,6 +207,7 @@ slog = structlog.get_logger()
 _REDACTED_SECRET_DETAIL = "<redacted-secret>"
 _PROVIDER_DETAIL_REDACTED = "Provider detail redacted because it may contain secrets."
 _MAX_PROVIDER_DETAIL_CHARS = 1_000
+_INVALID_TOOL_ARGUMENTS_REDACTION_STATUS = "invalid_tool_arguments"
 
 
 def _patched_routes_attr(name: str, current: Any) -> Any | None:
@@ -1240,6 +1248,108 @@ async def _persist_tool_invocations(
     )
 
 
+def _hash_canonical_payload(canonical_payload: str) -> str:
+    return hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+
+
+def _load_canonical_mapping(canonical_payload: str | None) -> dict[str, Any] | None:
+    if canonical_payload is None:
+        return None
+    try:
+        decoded = json.loads(canonical_payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    return decoded
+
+
+def _redacted_argument_canonical_for_chat_message(
+    invocation: ComposerToolInvocation,
+    *,
+    telemetry: OtelRedactionTelemetry,
+) -> str:
+    arguments = _load_canonical_mapping(invocation.arguments_canonical)
+    if invocation.tool_name not in MANIFEST or arguments is None:
+        return invocation.arguments_canonical
+    try:
+        redacted = redact_tool_call_arguments(
+            invocation.tool_name,
+            arguments,
+            telemetry=telemetry,
+        )
+    except PydanticValidationError:
+        if invocation.status != ComposerToolStatus.ARG_ERROR:
+            raise
+        redacted = {
+            "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+            "error_class": invocation.error_class,
+        }
+    return canonical_json(redacted)
+
+
+def _redacted_result_canonical_for_chat_message(
+    invocation: ComposerToolInvocation,
+    *,
+    telemetry: OtelRedactionTelemetry,
+) -> str | None:
+    result = _load_canonical_mapping(invocation.result_canonical)
+    if invocation.tool_name not in MANIFEST or result is None:
+        return invocation.result_canonical
+    redacted = redact_tool_call_response(
+        invocation.tool_name,
+        result,
+        telemetry=telemetry,
+    )
+    return canonical_json(redacted)
+
+
+def _redacted_tool_invocation_content_and_envelope(invocation: ComposerToolInvocation) -> tuple[str, dict[str, object]]:
+    """Return chat-message content and tool-call envelope for the legacy drain.
+
+    ``ComposerToolInvocation`` carries the exact arguments/results exchanged
+    inside the compose loop. Some tools intentionally keep raw values there so
+    in-memory convergence logic and dedicated audit buffers can reason about
+    what happened. The legacy route drain writes to ``chat_messages`` instead;
+    that is a persistence boundary, so it stores the redaction-manifest
+    projection rather than mirroring pre-redaction canonical payloads.
+    """
+
+    telemetry = OtelRedactionTelemetry()
+    arguments_canonical = _redacted_argument_canonical_for_chat_message(
+        invocation,
+        telemetry=telemetry,
+    )
+    result_canonical = _redacted_result_canonical_for_chat_message(
+        invocation,
+        telemetry=telemetry,
+    )
+    invocation_payload = invocation.to_dict()
+    invocation_payload["arguments_canonical"] = arguments_canonical
+    invocation_payload["arguments_hash"] = _hash_canonical_payload(arguments_canonical)
+    invocation_payload["result_canonical"] = result_canonical
+    invocation_payload["result_hash"] = _hash_canonical_payload(result_canonical) if result_canonical is not None else None
+
+    if invocation.status == ComposerToolStatus.PLUGIN_CRASH:
+        content = json.dumps(
+            {
+                "error_class": invocation.error_class,
+                "error_message": invocation.error_message,
+            }
+        )
+    elif result_canonical is not None:
+        content = result_canonical
+    else:
+        # ARG_ERROR with no captured payload — fall back to error class.
+        content = json.dumps(
+            {
+                "error_class": invocation.error_class,
+                "error_message": invocation.error_message,
+            }
+        )
+    return content, {"_kind": "audit", "invocation": invocation_payload}
+
+
 async def _persist_tool_invocations_impl(
     service: SessionServiceProtocol,
     session_id: UUID,
@@ -1260,14 +1370,15 @@ async def _persist_tool_invocations_impl(
     ``ck_chat_messages_tool_call_id_role`` biconditional CHECKs.
 
     Each :class:`ComposerToolInvocation` still lands as one chat row whose
-    ``tool_calls`` JSON column carries the audit envelope under a ``_kind``
-    discriminator (see :func:`elspeth.web.composer.audit.audit_envelope`).
+    ``tool_calls`` JSON column carries an ``_kind="audit"`` envelope. Legacy
+    drains pass through the redaction manifest before writing this row so
+    ``chat_messages`` does not double-mirror sensitive tool arguments/results.
 
     ``content`` shape per status:
 
-    - SUCCESS or ARG_ERROR with payload: ``invocation.result_canonical`` —
-      this is what the LLM saw on the tool path. Auditors can replay
-      verbatim.
+    - SUCCESS or ARG_ERROR with payload: the redacted projection of
+      ``invocation.result_canonical`` for manifest-declared tools, or the
+      original canonical payload for tools with no redaction surface.
     - PLUGIN_CRASH (no payload): synthetic JSON with ``error_class`` only.
       The LLM never saw a result on this path; the tool row records that
       a crash occurred at this position in the dispatch sequence.
@@ -1307,30 +1418,14 @@ async def _persist_tool_invocations_impl(
       count vs. ``ComposerResult.tool_invocations`` length.
     """
     for invocation in tool_invocations:
-        if invocation.status == ComposerToolStatus.PLUGIN_CRASH:
-            content = json.dumps(
-                {
-                    "error_class": invocation.error_class,
-                    "error_message": invocation.error_message,
-                }
-            )
-        elif invocation.result_canonical is not None:
-            content = invocation.result_canonical
-        else:
-            # ARG_ERROR with no captured payload — fall back to error class.
-            content = json.dumps(
-                {
-                    "error_class": invocation.error_class,
-                    "error_message": invocation.error_message,
-                }
-            )
+        content, envelope = _redacted_tool_invocation_content_and_envelope(invocation)
         role: ChatMessageRole = "tool" if parent_assistant_id is not None else "audit"
         try:
             await service.add_message(
                 session_id,
                 role,
                 content,
-                tool_calls=[audit_envelope(invocation)],
+                tool_calls=[envelope],
                 composition_state_id=composition_state_id,
                 writer_principal="compose_loop",
                 tool_call_id=invocation.tool_call_id if role == "tool" else None,

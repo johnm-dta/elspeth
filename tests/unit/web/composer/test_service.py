@@ -19,6 +19,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_progress import ComposerProgressEvent
+from elspeth.contracts.hashing import stable_hash
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import (
     ComposerConvergenceError,
@@ -50,7 +51,7 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REVIEW_PENDING_CODE
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import sessions_table
+from elspeth.web.sessions.models import chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -329,6 +330,26 @@ class TestComposerTextOnlyResponse:
         """A blob-side success is not a successful CompositionState mutation."""
         catalog = _mock_catalog()
         engine, session_id = _session_engine_with_session()
+        user_message_id = str(uuid4())
+        user_message_content = "Build a runnable pipeline from this text."
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                chat_messages_table.insert().values(
+                    id=user_message_id,
+                    session_id=session_id,
+                    role="user",
+                    content=user_message_content,
+                    raw_content=None,
+                    tool_calls=None,
+                    tool_call_id=None,
+                    sequence_no=1,
+                    writer_principal="route_user_message",
+                    created_at=now,
+                    composition_state_id=None,
+                    parent_assistant_id=None,
+                )
+            )
         settings = _make_settings(data_dir=tmp_path)
         service = ComposerServiceImpl(
             catalog=catalog,
@@ -355,7 +376,13 @@ class TestComposerTextOnlyResponse:
 
         with patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm:
             mock_llm.side_effect = [create_blob_turn, text_response]
-            result = await service.compose("Build a runnable pipeline from this text.", [], state, session_id=session_id)
+            result = await service.compose(
+                user_message_content,
+                [],
+                state,
+                session_id=session_id,
+                user_message_id=user_message_id,
+            )
 
         assert result.state.version == state.version
         assert result.raw_assistant_content == final_prose
@@ -419,6 +446,71 @@ class TestComposerSingleToolCall:
             await service.compose("Update metadata", [], state)
 
         assert captured_quota == [3]
+
+    @pytest.mark.asyncio
+    async def test_tool_dispatch_receives_composer_source_provenance_context(self) -> None:
+        """Sync tool dispatch receives the user message and audited composer provenance."""
+
+        service = ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=_make_settings(composer_model="gpt-5.5"),
+        )
+        service._availability = ComposerAvailability(  # type: ignore[misc]
+            available=True,
+            model="gpt-5.5",
+            provider="test-provider",
+        )
+        state = _empty_state()
+        captured_kwargs: dict[str, Any] = {}
+        arguments = {"patch": {"name": "captured"}}
+
+        def fake_execute_tool(
+            _tool_name: str,
+            _arguments: dict[str, Any],
+            _state: CompositionState,
+            _catalog: CatalogService,
+            *args: Any,
+            **kwargs: Any,
+        ) -> ToolResult:
+            del args, _arguments, _catalog
+            captured_kwargs.update(kwargs)
+            return ToolResult(
+                success=True,
+                updated_state=_state.with_metadata({"name": "captured"}),
+                validation=ValidationSummary(is_valid=True, errors=()),
+                affected_nodes=("metadata",),
+            )
+
+        turn = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_set_metadata",
+                    "name": "set_metadata",
+                    "arguments": arguments,
+                }
+            ],
+        )
+        done = _make_llm_response(content="Done.")
+
+        with (
+            patch("elspeth.web.composer.service.execute_tool", side_effect=fake_execute_tool),
+            patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        ):
+            mock_llm.side_effect = [turn, done]
+            await service.compose(
+                "Create generated source content.",
+                [],
+                state,
+                user_message_id="11111111-1111-1111-1111-111111111111",
+            )
+
+        assert captured_kwargs["user_message_id"] == "11111111-1111-1111-1111-111111111111"
+        assert captured_kwargs["user_message_content"] == "Create generated source content."
+        assert captured_kwargs["composer_model_identifier"] == "gpt-5.5"
+        assert captured_kwargs["composer_model_version"] == "gpt-5.5"
+        assert captured_kwargs["composer_provider"] == "test-provider"
+        assert captured_kwargs["composer_skill_hash"] == service._composer_skill_hash
+        assert captured_kwargs["tool_arguments_hash"] == stable_hash(arguments)
 
     @pytest.mark.asyncio
     async def test_explicit_approve_mutating_tool_creates_pending_proposal_without_state_mutation(

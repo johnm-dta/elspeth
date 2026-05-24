@@ -37,8 +37,10 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy import insert, select
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.enums import CreationModality
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
@@ -51,8 +53,9 @@ from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_set_pipeline
 from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import sessions_table
+from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 
@@ -98,6 +101,31 @@ def _session_engine_with_session() -> tuple[Any, str]:
             )
         )
     return engine, session_id
+
+
+def _session_engine_with_user_message(content: str) -> tuple[Any, str, str]:
+    """Minimal session DB seeded with the triggering user message."""
+    engine, session_id = _session_engine_with_session()
+    user_message_id = str(uuid4())
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(chat_messages_table).values(
+                id=user_message_id,
+                session_id=session_id,
+                role="user",
+                content=content,
+                raw_content=None,
+                tool_calls=None,
+                tool_call_id=None,
+                sequence_no=1,
+                writer_principal="route_user_message",
+                created_at=now,
+                composition_state_id=None,
+                parent_assistant_id=None,
+            )
+        )
+    return engine, session_id, user_message_id
 
 
 def _minimal_valid_args() -> dict[str, Any]:
@@ -360,6 +388,60 @@ class TestPromoteSetPipelineArgErrorRouting:
         assert result.updated_state.source is not None
         assert result.updated_state.source.plugin == "csv"
         assert result.updated_state.source.options["schema"]["fields"] == ({"name": "url", "field_type": "str"},)
+
+    def test_inline_blob_llm_authored_source_records_authoring_metadata(self, tmp_path: Path) -> None:
+        """LLM-authored inline source blobs must stamp source-level provenance."""
+        user_message_content = "Create a tiny generated CSV for the pipeline."
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"schema": {"mode": "observed"}},
+                "inline_blob": {
+                    "filename": "generated.csv",
+                    "mime_type": "text/csv",
+                    "content": "name,score\nada,42\n",
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [],
+        }
+
+        result = _execute_set_pipeline(
+            args,
+            _empty_state(),
+            ToolContext(
+                catalog=_mock_catalog(),
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
+                composer_model_identifier="openai/gpt-5-mini",
+                composer_model_version="gpt-5-mini-2026-05-01",
+                composer_provider="openai",
+                composer_skill_hash="sha256:composer-skill",
+                tool_arguments_hash="sha256:tool-arguments",
+            ),
+        )
+
+        assert result.success is True, result.data
+        assert result.updated_state.source is not None
+        options = result.updated_state.source.options
+        assert options["blob_ref"] == result.data["inline_blob"]["blob_id"]
+        assert SOURCE_AUTHORING_KEY in options
+        assert options[SOURCE_AUTHORING_KEY] == {
+            "modality": CreationModality.LLM_GENERATED.value,
+            "content_hash": result.data["inline_blob"]["content_hash"],
+            "review_event_id": None,
+            "resolved_kind": None,
+        }
+        with engine.connect() as conn:
+            row = conn.execute(select(blobs_table).where(blobs_table.c.id == options["blob_ref"])).one()
+        assert row.creation_modality == CreationModality.LLM_GENERATED.value
 
     def test_omitted_metadata_validates_at_model_layer(self) -> None:
         """``metadata`` is optional at the top level; absent leaves the field None."""

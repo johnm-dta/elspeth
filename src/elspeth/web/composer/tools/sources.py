@@ -13,6 +13,7 @@ from uuid import UUID
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine, select
 
+from elspeth.contracts.enums import CreationModality, is_llm_authored_creation_modality
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.catalog.protocol import CatalogService
@@ -57,6 +58,7 @@ from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
 )
+from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY, SourceAuthoringMetadata
 from elspeth.web.sessions.models import blobs_table
 
 
@@ -153,6 +155,7 @@ class _ResolvedSourceBlob:
     plugin: str
     options: Mapping[str, Any]
     payload: SourceBlobPayload
+    creation_modality: CreationModality
 
     def __post_init__(self) -> None:
         # ``options`` is the resolved-source pipeline-options mapping; it
@@ -174,6 +177,25 @@ def _source_blob_payload(blob: BlobToolRecord) -> SourceBlobPayload:
         "mime_type": blob["mime_type"],
         "size_bytes": blob["size_bytes"],
         "content_hash": blob["content_hash"],
+    }
+
+
+def _source_authoring_options(
+    creation_modality: CreationModality,
+    content_hash_value: str | None,
+) -> dict[str, SourceAuthoringMetadata]:
+    """Return source authoring metadata for LLM-authored blob-backed sources."""
+    if not is_llm_authored_creation_modality(creation_modality):
+        return {}
+    if content_hash_value is None:
+        raise AuditIntegrityError("LLM-authored blob-backed source requires non-null content_hash for source authoring metadata")
+    return {
+        SOURCE_AUTHORING_KEY: {
+            "modality": creation_modality.value,
+            "content_hash": content_hash_value,
+            "review_event_id": None,
+            "resolved_kind": None,
+        }
     }
 
 
@@ -215,11 +237,13 @@ def _resolve_source_blob(
     except (ValueError, KeyError) as exc:
         return _failure_result(state, f"Unknown source plugin '{plugin}': {exc}")
 
+    creation_modality = CreationModality(blob["creation_modality"])
     merged_options = {
         **caller_options,
         **mime_extra,
         "path": blob["storage_path"],
         "blob_ref": blob["id"],
+        **_source_authoring_options(creation_modality, blob["content_hash"]),
     }
     prevalidation_error = _prevalidate_source(plugin, merged_options, on_validation_failure)
     if prevalidation_error is not None:
@@ -229,6 +253,7 @@ def _resolve_source_blob(
         plugin=plugin,
         options=merged_options,
         payload=_source_blob_payload(blob),
+        creation_modality=creation_modality,
     )
 
 

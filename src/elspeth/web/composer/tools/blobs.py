@@ -295,6 +295,68 @@ class _PreparedBlobCreate:
     creating_arguments_hash: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _BlobCreationProvenance:
+    creation_modality: CreationModality
+    creating_model_identifier: str | None
+    creating_model_version: str | None
+    creating_provider: str | None
+    creating_composer_skill_hash: str | None
+    creating_arguments_hash: str | None
+
+
+def _verbatim_blob_creation_provenance() -> _BlobCreationProvenance:
+    return _BlobCreationProvenance(
+        creation_modality=CreationModality.VERBATIM,
+        creating_model_identifier=None,
+        creating_model_version=None,
+        creating_provider=None,
+        creating_composer_skill_hash=None,
+        creating_arguments_hash=None,
+    )
+
+
+def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreationProvenance:
+    """Classify composer-created blob content and return DB provenance fields."""
+    if context.user_message_content is None:
+        if any(
+            field is not None
+            for field in (
+                context.composer_model_identifier,
+                context.composer_model_version,
+                context.composer_provider,
+                context.composer_skill_hash,
+                context.tool_arguments_hash,
+            )
+        ):
+            raise AuditIntegrityError("Composer-authored blob provenance cannot be classified without user_message_content.")
+        return _verbatim_blob_creation_provenance()
+
+    if content in context.user_message_content:
+        return _verbatim_blob_creation_provenance()
+
+    required = {
+        "user_message_id": context.user_message_id,
+        "composer_model_identifier": context.composer_model_identifier,
+        "composer_model_version": context.composer_model_version,
+        "composer_provider": context.composer_provider,
+        "composer_skill_hash": context.composer_skill_hash,
+        "tool_arguments_hash": context.tool_arguments_hash,
+    }
+    missing = tuple(name for name, value in required.items() if value is None)
+    if missing:
+        raise AuditIntegrityError(f"LLM-authored blob provenance requires complete composer context; missing: {', '.join(missing)}")
+
+    return _BlobCreationProvenance(
+        creation_modality=CreationModality.LLM_GENERATED,
+        creating_model_identifier=context.composer_model_identifier,
+        creating_model_version=context.composer_model_version,
+        creating_provider=context.composer_provider,
+        creating_composer_skill_hash=context.composer_skill_hash,
+        creating_arguments_hash=context.tool_arguments_hash,
+    )
+
+
 def _blob_storage_path(data_dir: str, session_id: str, blob_id: str, filename: str) -> Path:
     """Compute blob storage path matching BlobServiceImpl layout.
 
@@ -562,22 +624,18 @@ def _execute_create_blob(
     # The Pydantic model catches type/shape violations; _prepare_blob_create
     # catches value-domain violations.  Both route via ToolArgumentError
     # to ARG_ERROR (CEC1 channel discipline).
-    # Provenance classification. The ``create_blob``
-    # tool is invoked by the LLM as a self-directed action — the content
-    # the LLM passes is, by construction, content the LLM authored as part
-    # of its tool-call response. However, in this commit we tag every
-    # create_blob payload as VERBATIM with NULL creating_* fields,
-    # matching the set_pipeline.inline_blob path, until the call-loop
-    # context (model identifier, version, provider, prompt hash) can
-    # populate LLM_GENERATED. The
-    # ``created_from_message_id`` still names the user turn that
-    # triggered the LLM's response, so the audit walk works today.
+    provenance = _blob_creation_provenance(validated.content, context)
     prepared = _prepare_blob_create(
         validated.model_dump(),
         data_dir=context.data_dir,
         session_id=session_id,
-        creation_modality=CreationModality.VERBATIM,
+        creation_modality=provenance.creation_modality,
         created_from_message_id=context.user_message_id,
+        creating_model_identifier=provenance.creating_model_identifier,
+        creating_model_version=provenance.creating_model_version,
+        creating_provider=provenance.creating_provider,
+        creating_composer_skill_hash=provenance.creating_composer_skill_hash,
+        creating_arguments_hash=provenance.creating_arguments_hash,
     )
 
     quota_error = _persist_prepared_blob_create(

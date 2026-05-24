@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.composer_interpretation import InterpretationEventRecord, InterpretationKind, InterpretationSource
-from elspeth.contracts.enums import CreationModality
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
     RecipeValidationError,
@@ -67,6 +66,7 @@ from elspeth.web.composer.tools._common import (
 )
 from elspeth.web.composer.tools.blobs import (
     _blob_create_payload,
+    _blob_creation_provenance,
     _persist_prepared_blob_create,
     _prepare_blob_create,
     _PreparedBlobCreate,
@@ -81,6 +81,7 @@ from elspeth.web.composer.tools.sources import (
     _reject_manual_source_blob_ref,
     _resolve_source_blob,
     _ResolvedSourceBlob,
+    _source_authoring_options,
 )
 from elspeth.web.interpretation_state import interpretation_sites
 from elspeth.web.validation import (
@@ -262,26 +263,18 @@ def _execute_set_pipeline(
         # (str/str/str + extra=forbid), so the isinstance guards inside
         # _prepare_blob_create are unreachable from this caller — see
         # the cleanup that removes them.
-        # Provenance classification. We always tag inline-blob
-        # set_pipeline payloads as VERBATIM with
-        # all five creating_* fields = None.  The discriminant that
-        # distinguishes LLM-authored vs verbatim content (substring match
-        # against the triggering chat message body, or a tool-call-loop
-        # tag the LLM emits explicitly) is handled at the call-loop layer:
-        # that layer owns the context (model identifier, version, provider,
-        # prompt hash) required to populate
-        # the LLM-authored variant without violating the
-        # ck_blobs_creating_llm_provenance_nullability CHECK.  Until the
-        # discriminant exists, defaulting VERBATIM keeps the CHECK
-        # satisfied trivially (no creating_* fields) AND preserves the
-        # audit guarantee that ``created_from_message_id`` always names
-        # the user message that triggered the tool call.
+        provenance = _blob_creation_provenance(inline_blob.content, context)
         prepared_inline_blob = _prepare_blob_create(
             inline_blob.model_dump(),
             data_dir=data_dir,
             session_id=session_id,
-            creation_modality=CreationModality.VERBATIM,
+            creation_modality=provenance.creation_modality,
             created_from_message_id=user_message_id,
+            creating_model_identifier=provenance.creating_model_identifier,
+            creating_model_version=provenance.creating_model_version,
+            creating_provider=provenance.creating_provider,
+            creating_composer_skill_hash=provenance.creating_composer_skill_hash,
+            creating_arguments_hash=provenance.creating_arguments_hash,
         )
         header_conflict = _header_only_inline_csv_conflict(
             prepared_inline_blob,
@@ -302,6 +295,7 @@ def _execute_set_pipeline(
             **mime_options,
             "path": str(prepared_inline_blob.storage_path),
             "blob_ref": prepared_inline_blob.blob_id,
+            **_source_authoring_options(prepared_inline_blob.creation_modality, prepared_inline_blob.content_hash),
         }
 
     # S2: Validate source path allowlist (same check as _execute_set_source)

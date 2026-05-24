@@ -2181,6 +2181,7 @@ class ComposerServiceImpl:
         session_id: str | None,
         user_id: str | None,
         user_message_id: str | None,
+        user_message_content: str | None,
         current_state_id: str | None,
         actor: str,
         initial_version: int,
@@ -3100,6 +3101,12 @@ class ComposerServiceImpl:
                 _last_validation: ValidationSummary | None = last_validation,
                 _runtime_preflight_callback: RuntimePreflight | None = runtime_preflight_callback,
                 _user_message_id: str | None = user_message_id,
+                _user_message_content: str | None = user_message_content,
+                _composer_model_identifier: str = self._model,
+                _composer_model_version: str = safe_response_model(response) or self._model,
+                _composer_provider: str = self._availability.provider or "unknown",
+                _composer_skill_hash: str = self._composer_skill_hash,
+                _tool_arguments_hash: str = audit.arguments_hash,
             ) -> Any:
                 return await run_sync_in_worker(
                     execute_tool,
@@ -3116,6 +3123,12 @@ class ComposerServiceImpl:
                     runtime_preflight=_runtime_preflight_callback,
                     max_blob_storage_per_session_bytes=self._settings.max_blob_storage_per_session_bytes,
                     user_message_id=_user_message_id,
+                    user_message_content=_user_message_content,
+                    composer_model_identifier=_composer_model_identifier,
+                    composer_model_version=_composer_model_version,
+                    composer_provider=_composer_provider,
+                    composer_skill_hash=_composer_skill_hash,
+                    tool_arguments_hash=_tool_arguments_hash,
                 )
 
             # ``_arg_error_payload`` is a module-level helper (F2 — testable
@@ -3902,6 +3915,7 @@ class ComposerServiceImpl:
                 session_id=session_id,
                 user_id=user_id,
                 user_message_id=user_message_id,
+                user_message_content=message,
                 current_state_id=current_state_id,
                 actor=actor,
                 initial_version=initial_version,

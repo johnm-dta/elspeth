@@ -14,7 +14,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
 )
 from elspeth.web.composer.yaml_generator import generate_pipeline_dict, generate_yaml
-from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
 
 
 def _make_linear_pipeline() -> CompositionState:
@@ -201,6 +201,33 @@ class TestGenerateYaml:
 
         assert "blob_ref" not in pipeline_dict["source"]["options"]
         assert "blob_ref" not in yaml.safe_load(generate_yaml(state))["source"]["options"]
+
+    def test_generate_pipeline_dict_strips_source_authoring_metadata(self) -> None:
+        state = _make_linear_pipeline().with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="transform_1",
+                options={
+                    "path": "/data/input.csv",
+                    "blob_ref": "web-only",
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": "llm_generated",
+                        "content_hash": "abc123",
+                        "review_event_id": None,
+                        "resolved_kind": None,
+                    },
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="quarantine",
+            )
+        )
+
+        pipeline_dict = generate_pipeline_dict(state)
+        yaml_options = yaml.safe_load(generate_yaml(state))["source"]["options"]
+
+        assert SOURCE_AUTHORING_KEY not in pipeline_dict["source"]["options"]
+        assert SOURCE_AUTHORING_KEY not in yaml_options
+        assert yaml_options["schema"] == {"mode": "observed"}
 
     def test_generate_pipeline_dict_strips_interpretation_authoring_metadata_from_transforms(self) -> None:
         state = _make_linear_pipeline().with_node(

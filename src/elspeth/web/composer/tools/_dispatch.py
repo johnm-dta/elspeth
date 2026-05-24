@@ -360,6 +360,12 @@ def execute_tool(
     runtime_preflight: RuntimePreflight | None = None,
     max_blob_storage_per_session_bytes: int | None = None,
     user_message_id: str | None = None,
+    user_message_content: str | None = None,
+    composer_model_identifier: str | None = None,
+    composer_model_version: str | None = None,
+    composer_provider: str | None = None,
+    composer_skill_hash: str | None = None,
+    tool_arguments_hash: str | None = None,
 ) -> ToolResult:
     """Execute a composition tool by name.
 
@@ -407,6 +413,17 @@ def execute_tool(
             callers.
         user_message_id: Provenance pointer for blob writes that record
             ``created_from_message_id``.
+        user_message_content: Triggering user chat-message content used to
+            classify inline blob content as verbatim vs composer-authored.
+        composer_model_identifier: Requested composer model identifier for
+            LLM-authored blob/source provenance.
+        composer_model_version: Provider-returned model/version when
+            available, otherwise the requested model identifier.
+        composer_provider: Composer LLM provider.
+        composer_skill_hash: Hash of the composer skill markdown used for
+            the request.
+        tool_arguments_hash: Canonical audited arguments hash for this tool
+            call.
     """
     all_handlers: dict[str, ToolHandler] = {
         **_DISCOVERY_TOOLS,
@@ -437,6 +454,12 @@ def execute_tool(
         runtime_preflight=runtime_preflight,
         max_blob_storage_per_session_bytes=max_blob_storage_per_session_bytes,
         user_message_id=user_message_id,
+        user_message_content=user_message_content,
+        composer_model_identifier=composer_model_identifier,
+        composer_model_version=composer_model_version,
+        composer_provider=composer_provider,
+        composer_skill_hash=composer_skill_hash,
+        tool_arguments_hash=tool_arguments_hash,
     )
 
     if tool_name in _ALL_MUTATION_TOOL_NAMES:

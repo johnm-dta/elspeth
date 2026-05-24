@@ -7,6 +7,7 @@ from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetad
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     PROMPT_TEMPLATE_PARTS_KEY,
+    SOURCE_AUTHORING_KEY,
     InterpretationReviewPending,
     interpretation_sites,
     materialize_state_for_authoring,
@@ -111,6 +112,12 @@ def test_strip_authoring_options_removes_metadata_keys() -> None:
         "prompt_template": "Rate {{ row.text }}",
         PROMPT_TEMPLATE_PARTS_KEY: [],
         INTERPRETATION_REQUIREMENTS_KEY: [],
+        SOURCE_AUTHORING_KEY: {
+            "modality": "llm_generated",
+            "content_hash": "abc123",
+            "review_event_id": None,
+            "resolved_kind": None,
+        },
         "resolved_prompt_template_hash": "a" * 64,
     }
 
@@ -118,4 +125,5 @@ def test_strip_authoring_options_removes_metadata_keys() -> None:
 
     assert PROMPT_TEMPLATE_PARTS_KEY not in stripped
     assert INTERPRETATION_REQUIREMENTS_KEY not in stripped
+    assert SOURCE_AUTHORING_KEY not in stripped
     assert stripped["resolved_prompt_template_hash"] == "a" * 64

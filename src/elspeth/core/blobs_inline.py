@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Final, cast
 from uuid import UUID
 
@@ -36,6 +36,9 @@ from elspeth.contracts.blobs_inline import (
 
 _NODE_COLLECTION_KEYS: Final = ("transforms", "gates", "aggregations", "coalesce")
 _OUTPUT_COLLECTION_KEYS: Final = ("outputs", "sinks")
+_VALIDATION_INLINE_CONTENT_PLACEHOLDER: Final = "validated blob-backed inline content placeholder"
+BLOB_INLINE_PER_REF_BYTE_CAP: Final = 256 * 1024
+BLOB_INLINE_AGGREGATE_BYTE_CAP: Final = 1024 * 1024
 
 
 def _discover_blob_content_refs(config: dict[str, Any]) -> list[BlobInlineRef]:
@@ -126,6 +129,21 @@ def _validate_blob_content_refs_sync(
     return violations
 
 
+def _substitute_blob_content_refs_for_validation(config: dict[str, Any]) -> dict[str, Any]:
+    """Replace validated inline-content markers with parseable placeholder text.
+
+    Validate-time metadata checks intentionally do not read blob bytes; runtime
+    remains the only path that links blobs to a run, fetches bytes, verifies the
+    pinned hash against content, and records the audit rows. Once metadata has
+    proven a marker points at a ready blob within caps, plugin construction
+    still needs a field-shaped value rather than the deferred marker dict.
+    """
+    refs = _discover_blob_content_refs(config)
+    for ref in refs:
+        _substitute_at_path(config, ref.field_path, _VALIDATION_INLINE_CONTENT_PLACEHOLDER)
+    return config
+
+
 async def _get_blob_record_for_validation(
     blob_service: BlobServiceProtocol,
     ref: BlobInlineRef,
@@ -189,6 +207,48 @@ def _record_validation_violations(
             )
         )
     return violations, True
+
+
+def _enforce_blob_content_ref_metadata(
+    refs: list[BlobInlineRef],
+    records_by_blob_id: Mapping[UUID, BlobRecord],
+    *,
+    per_ref_byte_cap: int | None = None,
+    aggregate_byte_cap: int | None = None,
+) -> None:
+    """Fail closed on metadata-only inline-content violations before byte reads."""
+    missing: list[str] = []
+    oversized: list[tuple[str, int, int]] = []
+    not_ready: list[tuple[str, str]] = []
+
+    aggregate_bytes = 0
+    for ref in refs:
+        if ref.blob_id not in records_by_blob_id:
+            missing.append(ref.field_path)
+            continue
+        record = records_by_blob_id[ref.blob_id]
+        if record.status != "ready":
+            not_ready.append((ref.field_path, f"blob {ref.blob_id} status is {record.status!r}"))
+            continue
+        if record.content_hash != ref.sha256:
+            raise BlobIntegrityError(
+                str(ref.blob_id),
+                expected=ref.sha256,
+                actual=record.content_hash or "<missing>",
+            )
+        if per_ref_byte_cap is not None and record.size_bytes > per_ref_byte_cap:
+            oversized.append((ref.field_path, record.size_bytes, per_ref_byte_cap))
+        aggregate_bytes += record.size_bytes
+
+    if aggregate_byte_cap is not None and aggregate_bytes > aggregate_byte_cap:
+        oversized.append(("(aggregate)", aggregate_bytes, aggregate_byte_cap))
+
+    if missing or oversized or not_ready:
+        raise BlobContentResolutionError(
+            missing=missing,
+            oversized=oversized,
+            not_ready=not_ready,
+        )
 
 
 def _short_hash(value: str | None) -> str:
@@ -540,8 +600,12 @@ def _malformed_reason(marker: dict[object, object]) -> str:
     if "mode" not in marker:
         return "missing mode"
     mode = marker["mode"]
+    if type(mode) is not str:
+        return "mode must be string"
     if mode not in {"bind_source", "inline_content"}:
         return f"unknown mode {mode!r}"
+    if "encoding" in marker and type(marker["encoding"]) is not str:
+        return "encoding must be string"
     if mode == "inline_content" and "sha256" not in marker:
         return "inline_content requires sha256"
     if mode == "bind_source" and ("sha256" in marker or "encoding" in marker):

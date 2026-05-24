@@ -88,7 +88,10 @@ from sqlalchemy.types import JSON
 #        as missing for blobs and composition proposals.
 #   14 → blobs LLM-authored provenance CHECK constraint requires a non-blank
 #        created_from_message_id anchor alongside the five creating_* fields.
-SESSION_SCHEMA_EPOCH = 14
+#   15 → blob_inline_resolutions.blob_id preserved as historical audit data
+#        without a live blobs.id foreign key, so completed-run audit rows do
+#        not prevent blob deletion.
+SESSION_SCHEMA_EPOCH = 15
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 
@@ -1294,12 +1297,7 @@ blob_inline_resolutions_table = Table(
     ),
     Column("attempt", Integer, nullable=False, server_default="1"),
     Column("field_path", String, nullable=False),
-    Column(
-        "blob_id",
-        String,
-        ForeignKey("blobs.id"),
-        nullable=False,
-    ),
+    Column("blob_id", String, nullable=False),
     Column("content_hash", String, nullable=False),
     Column("byte_length", Integer, nullable=False),
     Column("mime_type", String, nullable=False),

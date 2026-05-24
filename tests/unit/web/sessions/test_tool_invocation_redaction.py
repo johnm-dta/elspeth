@@ -120,3 +120,47 @@ async def test_legacy_tool_invocation_persistence_redacts_advisor_payloads() -> 
     assert "<advisor-attempted-actions:1-entries>" in persisted_blob
     assert "<advisor-schema-excerpt:" in persisted_blob
     assert '"guidance": "<redacted>"' in persisted_blob
+
+
+@pytest.mark.asyncio
+async def test_arg_error_result_for_response_model_tool_persists_without_success_model_validation() -> None:
+    """ARG_ERROR result payloads are failure envelopes, not success responses."""
+
+    arguments = {"blob_id": str(uuid4())}
+    result = {"error": "Tool 'get_blob_content' failed: blob is not ready"}
+    arguments_canonical = canonical_json(arguments)
+    result_canonical = canonical_json(result)
+    invocation = ComposerToolInvocation(
+        tool_call_id="call_blob_error_1",
+        tool_name="get_blob_content",
+        arguments_canonical=arguments_canonical,
+        arguments_hash=_hash_canonical(arguments_canonical),
+        result_canonical=result_canonical,
+        result_hash=_hash_canonical(result_canonical),
+        status=ComposerToolStatus.ARG_ERROR,
+        error_class="ToolArgumentError",
+        error_message="blob is not ready",
+        version_before=3,
+        version_after=None,
+        started_at=datetime(2026, 5, 24, tzinfo=UTC),
+        finished_at=datetime(2026, 5, 24, tzinfo=UTC),
+        latency_ms=12,
+        actor="composer-web:user-test",
+    )
+    service = _CapturingSessionService()
+
+    await _persist_tool_invocations_impl(
+        cast(SessionServiceProtocol, service),
+        uuid4(),
+        (invocation,),
+        composition_state_id=None,
+        parent_assistant_id=None,
+        plugin_crash_pending=False,
+    )
+
+    assert len(service.messages) == 1
+    message = service.messages[0]
+    assert json.loads(message.content) == result
+    envelope = message.kwargs["tool_calls"][0]
+    assert envelope["_kind"] == "audit"
+    assert envelope["invocation"]["result_canonical"] == result_canonical

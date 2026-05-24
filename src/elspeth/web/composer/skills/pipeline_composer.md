@@ -158,6 +158,8 @@ Eleven rules (numbered 0-10) that cover the historical convergence-failure modes
 
 3. **Reject CSV blobs with duplicate headers.** When `inspect_source` warnings include `csv_duplicate_headers`, the underlying CSV reader (`csv.DictReader` and similar) silently collapses duplicate-named columns last-write-wins, fabricating a single column from multiple source columns. The proof step promotes this to blocking with code `csv_duplicate_headers` and forces a repair turn. Resolve before previewing: rename the offending header at the source, declare explicit `columns` in source options, configure `field_mapping` to disambiguate, or route the source to a configured quarantine output via `on_validation_failure`. Do not ignore the warning — silent column collapse is a Tier-1 audit-integrity violation.
 
+   If `preview_pipeline` returns `csv_source_field_resolution_error`, CSVSource-style header normalization or `field_mapping` resolution failed before schema comparison could proceed. Repair the source headers or adjust `field_mapping` keys to the normalized header names shown in the diagnostic, then re-run `preview_pipeline`; do not route around it with a guessed fixed schema.
+
 4. **Declare numeric types before any numeric gate or `value_transform` arithmetic.** A `gate` condition like `row['price'] >= 100` against a CSV-string field will fail at runtime. Either:
    - Declare the field as `int` or `float` in the source schema (`fields: ["price: float"]`), or
    - Insert a `type_coerce` node upstream that converts the field to `float`.

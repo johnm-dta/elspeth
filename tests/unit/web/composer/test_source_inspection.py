@@ -558,6 +558,21 @@ class TestDeriveRequiredHeaderMismatchRisk:
         f = inspect_blob_content(content=b"URL\nhttps://example.com/a\n", filename="x.csv", mime_type="text/csv")
         assert derive_required_header_mismatch_risk(f, ("url: str",)) == ()
 
+    def test_normalized_header_overlap_suppresses_risk(self) -> None:
+        f = inspect_blob_content(content=b"Customer ID\n123\n", filename="x.csv", mime_type="text/csv")
+        assert derive_required_header_mismatch_risk(f, ("customer_id: str",)) == ()
+
+    def test_field_mapping_overlap_suppresses_risk(self) -> None:
+        f = inspect_blob_content(content=b"External ID\n123\n", filename="x.csv", mime_type="text/csv")
+        assert (
+            derive_required_header_mismatch_risk(
+                f,
+                ("customer_id: str",),
+                field_mapping={"external_id": "customer_id"},
+            )
+            == ()
+        )
+
     def test_optional_declared_fields_do_not_require_header_overlap(self) -> None:
         f = inspect_csv_source_content(
             content=b"https://example.com/a\nhttps://example.com/b\n",

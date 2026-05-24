@@ -10279,6 +10279,7 @@ class TestPreviewProofStep:
         from elspeth.web.composer.tools import _BLOCKING_DIAGNOSTIC_CODES
 
         assert "csv_duplicate_headers" in _BLOCKING_DIAGNOSTIC_CODES
+        assert "csv_source_field_resolution_error" in _BLOCKING_DIAGNOSTIC_CODES
 
     # -- missing/unreadable blob --------------------------------------------
 

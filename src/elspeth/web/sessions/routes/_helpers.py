@@ -1299,6 +1299,8 @@ def _redacted_result_canonical_for_chat_message(
     result = _load_canonical_mapping(invocation.result_canonical)
     if invocation.tool_name not in MANIFEST or result is None:
         return invocation.result_canonical
+    if invocation.status == ComposerToolStatus.ARG_ERROR:
+        return invocation.result_canonical
     redacted = redact_tool_call_response(
         invocation.tool_name,
         result,

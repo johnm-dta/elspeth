@@ -33,7 +33,14 @@ from elspeth.contracts.cli import ProgressEvent
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.secrets import WebSecretResolver
-from elspeth.core.blobs_inline import _discover_blob_content_refs, _fetch_blob_contents, _substitute_blob_content_refs
+from elspeth.core.blobs_inline import (
+    BLOB_INLINE_AGGREGATE_BYTE_CAP,
+    BLOB_INLINE_PER_REF_BYTE_CAP,
+    _discover_blob_content_refs,
+    _enforce_blob_content_ref_metadata,
+    _fetch_blob_contents,
+    _substitute_blob_content_refs,
+)
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.events import EventBus
 from elspeth.core.landscape.database import LandscapeDB
@@ -740,14 +747,22 @@ class ExecutionServiceImpl:
             )
 
         composition_state = state_from_record(state_record)
-        return await self.validate_state(composition_state, user_id=user_id)
+        return await self.validate_state(composition_state, user_id=user_id, session_id=session_id)
 
-    async def validate_state(self, state: CompositionState, *, user_id: str | None = None) -> ValidationResult:
+    async def validate_state(
+        self,
+        state: CompositionState,
+        *,
+        user_id: str | None = None,
+        session_id: UUID | None = None,
+    ) -> ValidationResult:
         """Dry-run validation for an already-read composition state.
 
         Snapshot-style callers use this to keep every projected row on the
         same ``CompositionState.version`` instead of re-reading mutable session
-        state between adjacent readiness calculations.
+        state between adjacent readiness calculations. When supplied,
+        ``session_id`` scopes inline-blob metadata lookups to the same session
+        boundary enforced by ``link_blob_to_run()`` at execution time.
         """
         from functools import partial
 
@@ -757,9 +772,12 @@ class ExecutionServiceImpl:
             if self._blob_service is None:
                 return None
             try:
-                return self._call_async(self._blob_service.get_blob(blob_id))
+                record = self._call_async(self._blob_service.get_blob(blob_id))
             except BlobNotFoundError:
                 return None
+            if session_id is not None and record.session_id != session_id:
+                return None
+            return record
 
         return cast(
             ValidationResult,
@@ -981,14 +999,23 @@ class ExecutionServiceImpl:
                             )
                         )
 
-                    self._call_async(_link_inline_blobs_to_run())
                     try:
-                        fetched = self._call_async(_fetch_blob_contents(blob_service, inline_refs))
 
                         async def _gather_inline_blob_metadata() -> list[Any]:
                             return await asyncio.gather(*(blob_service.get_blob(blob_id) for blob_id in unique_blob_ids))
 
                         metadata_records = self._call_async(_gather_inline_blob_metadata())
+                        records_by_blob_id: dict[UUID, BlobRecord] = {
+                            blob_id: cast(BlobRecord, record) for blob_id, record in zip(unique_blob_ids, metadata_records, strict=True)
+                        }
+                        _enforce_blob_content_ref_metadata(
+                            inline_refs,
+                            records_by_blob_id,
+                            per_ref_byte_cap=BLOB_INLINE_PER_REF_BYTE_CAP,
+                            aggregate_byte_cap=BLOB_INLINE_AGGREGATE_BYTE_CAP,
+                        )
+                        self._call_async(_link_inline_blobs_to_run())
+                        fetched = self._call_async(_fetch_blob_contents(blob_service, inline_refs))
                         blob_metadata: dict[UUID, tuple[AllowedMimeType, int]] = {
                             blob_id: (cast(AllowedMimeType, record.mime_type), record.size_bytes)
                             for blob_id, record in zip(unique_blob_ids, metadata_records, strict=True)

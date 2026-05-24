@@ -376,7 +376,11 @@ def test_compute_snapshot_validates_already_read_state():
     )
 
     exec_svc.validate.assert_not_awaited()
-    exec_svc.validate_state.assert_awaited_once_with(state, user_id="alice")
+    exec_svc.validate_state.assert_awaited_once_with(
+        state,
+        user_id="alice",
+        session_id=UUID("11111111-1111-1111-1111-111111111111"),
+    )
 
 
 def test_snapshot_preserves_raw_validation_result():

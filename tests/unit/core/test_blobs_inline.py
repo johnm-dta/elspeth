@@ -187,6 +187,21 @@ class TestDiscoverBlobContentRefs:
 
         assert exc_info.value.malformed == (("source.options.system_prompt", "missing mode"),)
 
+    @pytest.mark.parametrize(
+        ("marker", "reason"),
+        [
+            ({"blob_ref": BLOB1, "mode": []}, "mode must be string"),
+            ({"blob_ref": BLOB1, "mode": "inline_content", "sha256": VALID_HASH, "encoding": []}, "encoding must be string"),
+        ],
+    )
+    def test_non_string_marker_fields_are_malformed(self, marker: dict[str, object], reason: str) -> None:
+        config = {"source": {"plugin": "csv", "options": {"system_prompt": marker}}}
+
+        with pytest.raises(BlobContentResolutionError) as exc_info:
+            _discover_blob_content_refs(config)
+
+        assert exc_info.value.malformed == (("source.options.system_prompt", reason),)
+
     def test_markers_inside_lists_are_malformed_because_paths_would_be_positional(self) -> None:
         config = {"source": {"plugin": "csv", "options": {"prompts": [_marker()]}}}
 
@@ -412,6 +427,22 @@ class TestValidateBlobContentRefs:
                 category="malformed",
                 field_path="source.options.x",
                 detail="missing mode",
+            )
+        ]
+        blob_service.get_blob.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_async_returns_malformed_violation_for_non_string_marker_fields(self) -> None:
+        blob_service = AsyncMock()
+        config = {"source": {"options": {"x": {"blob_ref": BLOB1, "mode": []}}}}
+
+        violations = await _validate_blob_content_refs(blob_service, config, user_id="u")
+
+        assert violations == [
+            BlobInlineValidationViolation(
+                category="malformed",
+                field_path="source.options.x",
+                detail="mode must be string",
             )
         ]
         blob_service.get_blob.assert_not_called()

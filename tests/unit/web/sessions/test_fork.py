@@ -856,6 +856,146 @@ class TestForkEndpoint:
         assert options[source_key] != original_blob.storage_path
 
     @pytest.mark.asyncio
+    async def test_fork_rewrites_inline_content_markers_to_copied_blobs(self, tmp_path) -> None:
+        """Forked inline_content refs must point at copied blobs in the target session."""
+        app, service, blob_service = _make_fork_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Original", "local")
+        original_blob = await blob_service.create_blob(
+            session.id,
+            "prompt.txt",
+            b"Classify this row.",
+            "text/plain",
+        )
+        marker = {
+            "blob_ref": str(original_blob.id),
+            "mode": "inline_content",
+            "sha256": original_blob.content_hash,
+            "encoding": "utf-16",
+        }
+        source_state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={
+                    "plugin": "csv",
+                    "options": {
+                        "path": original_blob.storage_path,
+                    },
+                },
+                nodes=[
+                    {
+                        "id": "classify",
+                        "node_type": "transform",
+                        "plugin": "llm",
+                        "options": {"prompt_template": marker},
+                    }
+                ],
+                outputs=[
+                    {
+                        "name": "results",
+                        "plugin": "json",
+                        "options": {"header": marker},
+                    }
+                ],
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+        msg = await service.add_message(
+            session.id,
+            "user",
+            "Process this",
+            composition_state_id=source_state.id,
+            writer_principal="route_user_message",
+        )
+
+        response = client.post(
+            f"/api/sessions/{session.id}/fork",
+            json={
+                "from_message_id": str(msg.id),
+                "new_message_content": "Process that instead",
+            },
+        )
+
+        assert response.status_code == 201
+        new_session_id = uuid.UUID(response.json()["session"]["id"])
+        copied_blob = (await blob_service.list_blobs(new_session_id))[0]
+
+        copied_state = await service.get_current_state(new_session_id)
+        assert copied_state is not None
+        assert copied_state.nodes is not None
+        assert copied_state.outputs is not None
+        copied_node_marker = copied_state.nodes[0]["options"]["prompt_template"]
+        copied_output_marker = copied_state.outputs[0]["options"]["header"]
+
+        assert copied_node_marker == {
+            "blob_ref": str(copied_blob.id),
+            "mode": "inline_content",
+            "sha256": original_blob.content_hash,
+            "encoding": "utf-16",
+        }
+        assert copied_output_marker == copied_node_marker
+        state_blob_refs = repr((copied_state.source, copied_state.nodes, copied_state.outputs))
+        assert str(original_blob.id) not in state_blob_refs
+
+    @pytest.mark.asyncio
+    async def test_fork_inline_content_marker_without_copied_blob_fails_closed(self, tmp_path) -> None:
+        """Inline-content refs must be audited even when no source blobs are copied."""
+        app, service, _blob_service = _make_fork_app(tmp_path)
+
+        session = await service.create_session("alice", "Original", "local")
+        missing_blob_id = uuid.uuid4()
+        source_state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                nodes=[
+                    {
+                        "id": "classify",
+                        "node_type": "transform",
+                        "plugin": "llm",
+                        "options": {
+                            "prompt_template": {
+                                "blob_ref": str(missing_blob_id),
+                                "mode": "inline_content",
+                                "sha256": "a" * 64,
+                            }
+                        },
+                    }
+                ],
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+        msg = await service.add_message(
+            session.id,
+            "user",
+            "Process this",
+            composition_state_id=source_state.id,
+            writer_principal="route_user_message",
+        )
+
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        client = TestClient(app)
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            client.post(
+                f"/api/sessions/{session.id}/fork",
+                json={
+                    "from_message_id": str(msg.id),
+                    "new_message_content": "Process that instead",
+                },
+            )
+
+        message = str(exc_info.value)
+        assert "Tier 1" in message
+        assert str(missing_blob_id) in message
+        assert "source blob was not copied" in message
+
+        sessions = await service.list_sessions("alice", "local")
+        assert len(sessions) == 1
+
+    @pytest.mark.asyncio
     async def test_fork_preserves_original_messages_status_check(self, tmp_path) -> None:
         """Fork endpoint returns 201 and original session is unchanged."""
         app, service, _ = _make_fork_app(tmp_path)

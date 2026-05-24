@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.errors import AuditIntegrityError
@@ -409,6 +410,82 @@ class TestDeleteBlob:
         # Should succeed — completed run does not block deletion
         await blob_service.delete_blob(record.id)
 
+        with pytest.raises(BlobNotFoundError):
+            await blob_service.get_blob(record.id)
+
+    @pytest.mark.asyncio
+    async def test_delete_blob_preserves_completed_inline_resolution_audit_rows(self, blob_service, session_id, db_engine) -> None:
+        """Completed inline-content audit rows must not turn blob deletion into a 500."""
+        from elspeth.web.sessions.models import (
+            blob_inline_resolutions_table,
+            blob_run_links_table,
+            composition_states_table,
+            runs_table,
+        )
+
+        record = await blob_service.create_blob(
+            session_id=session_id,
+            filename="prompt.txt",
+            content=b"finished prompt",
+            mime_type="text/plain",
+            created_by="user",
+        )
+
+        state_id = str(uuid4())
+        session_id_str = str(session_id)
+        run_id = str(uuid4())
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        with db_engine.begin() as conn:
+            conn.execute(
+                composition_states_table.insert().values(
+                    id=state_id,
+                    session_id=session_id_str,
+                    version=1,
+                    is_valid=True,
+                    provenance="session_seed",
+                    created_at=now,
+                )
+            )
+            conn.execute(
+                runs_table.insert().values(
+                    id=run_id,
+                    session_id=session_id_str,
+                    state_id=state_id,
+                    status="completed",
+                    started_at=now,
+                    rows_processed=10,
+                    rows_failed=0,
+                )
+            )
+            conn.execute(
+                blob_run_links_table.insert().values(
+                    blob_id=str(record.id),
+                    run_id=run_id,
+                    direction="input",
+                )
+            )
+            conn.execute(
+                blob_inline_resolutions_table.insert().values(
+                    run_id=run_id,
+                    attempt=1,
+                    field_path="node:classify.options.system_prompt",
+                    blob_id=str(record.id),
+                    content_hash=record.content_hash,
+                    byte_length=record.size_bytes,
+                    mime_type=record.mime_type,
+                    encoding="utf-8",
+                    resolved_at=now,
+                )
+            )
+
+        await blob_service.delete_blob(record.id)
+
+        with db_engine.connect() as conn:
+            rows = conn.execute(select(blob_inline_resolutions_table)).fetchall()
+
+        assert len(rows) == 1
+        assert rows[0].blob_id == str(record.id)
         with pytest.raises(BlobNotFoundError):
             await blob_service.get_blob(record.id)
 
@@ -2330,6 +2407,24 @@ class TestLinkBlobToRunDirectionGuard:
         links = await blob_service.get_blob_run_links(blob.id)
         directions = sorted(link.direction for link in links)
         assert directions == ["input", "output"]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_same_direction_link_is_idempotent(self, blob_service, session_id, db_engine) -> None:
+        """A source bind and inline-content ref can share the same input blob."""
+        run_id = self._make_run(db_engine, session_id)
+        blob = await blob_service.create_blob(
+            session_id=session_id,
+            filename="prompt.csv",
+            content=b"prompt",
+            mime_type="text/csv",
+            created_by="user",
+        )
+
+        await blob_service.link_blob_to_run(blob.id, run_id, "input")
+        await blob_service.link_blob_to_run(blob.id, run_id, "input")
+
+        links = await blob_service.get_blob_run_links(blob.id)
+        assert [(link.run_id, link.direction) for link in links] == [(run_id, "input")]
 
 
 class TestLinkBlobToRunSessionGuard:

@@ -781,6 +781,14 @@ class BlobServiceImpl:
                     run_id=str(run_id),
                     caller="BlobServiceImpl.link_blob_to_run",
                 )
+                existing = conn.execute(
+                    select(blob_run_links_table.c.blob_id)
+                    .where(blob_run_links_table.c.blob_id == str(blob_id))
+                    .where(blob_run_links_table.c.run_id == str(run_id))
+                    .where(blob_run_links_table.c.direction == direction)
+                ).first()
+                if existing is not None:
+                    return
                 conn.execute(
                     blob_run_links_table.insert().values(
                         blob_id=str(blob_id),

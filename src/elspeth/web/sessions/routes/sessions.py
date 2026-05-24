@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import Any
+
+from elspeth.web.blobs.protocol import BlobRecord
+
 from ._helpers import (
     UUID,
     APIRouter,
@@ -31,6 +35,106 @@ from ._helpers import (
     deep_thaw,
     get_current_user,
 )
+
+
+def _copied_blob_for_inline_marker(
+    marker: dict[str, Any],
+    blob_map: dict[UUID, BlobRecord],
+    *,
+    composition_state_id: UUID,
+    new_session_id: UUID,
+    field_path: str,
+) -> BlobRecord:
+    old_ref = marker["blob_ref"] if "blob_ref" in marker else None
+    if not isinstance(old_ref, str):
+        raise AuditIntegrityError(
+            f"Tier 1 audit anomaly: composition_state {composition_state_id} "
+            f"has inline_content blob_ref type {type(old_ref).__name__} at "
+            f"{field_path} (expected UUID string). Fork aborted to prevent "
+            f"cross-session blob reference in forked session {new_session_id}."
+        )
+    try:
+        old_uuid = UUID(old_ref)
+    except ValueError as exc:
+        raise AuditIntegrityError(
+            f"Tier 1 audit anomaly: composition_state {composition_state_id} "
+            f"has non-UUID inline_content blob_ref {old_ref!r} at {field_path}. "
+            f"Fork aborted to prevent cross-session blob reference in forked "
+            f"session {new_session_id}."
+        ) from exc
+    if old_uuid not in blob_map:
+        raise AuditIntegrityError(
+            f"Tier 1 audit anomaly: composition_state {composition_state_id} "
+            f"has inline_content blob_ref {old_ref!r} at {field_path}, but "
+            f"the source blob was not copied into forked session {new_session_id}."
+        )
+    copied_blob = blob_map[old_uuid]
+    marker_hash = marker["sha256"] if "sha256" in marker else None
+    if not isinstance(marker_hash, str):
+        raise AuditIntegrityError(
+            f"Tier 1 audit anomaly: composition_state {composition_state_id} "
+            f"has inline_content marker at {field_path} without string sha256."
+        )
+    if copied_blob.content_hash != marker_hash:
+        raise AuditIntegrityError(
+            f"Tier 1 audit anomaly: copied blob {copied_blob.id} hash does "
+            f"not match inline_content marker at {field_path} in forked "
+            f"session {new_session_id}."
+        )
+    return copied_blob
+
+
+def _rewrite_inline_content_blob_refs(
+    value: Any,
+    blob_map: dict[UUID, BlobRecord],
+    *,
+    composition_state_id: UUID,
+    new_session_id: UUID,
+    field_path: str,
+) -> bool:
+    if isinstance(value, dict):
+        if value.get("mode") == "inline_content" and "blob_ref" in value:
+            copied_blob = _copied_blob_for_inline_marker(
+                value,
+                blob_map,
+                composition_state_id=composition_state_id,
+                new_session_id=new_session_id,
+                field_path=field_path,
+            )
+            value["blob_ref"] = str(copied_blob.id)
+            return True
+
+        rewritten = False
+        for key, child in value.items():
+            if isinstance(key, str):
+                rewritten = (
+                    _rewrite_inline_content_blob_refs(
+                        child,
+                        blob_map,
+                        composition_state_id=composition_state_id,
+                        new_session_id=new_session_id,
+                        field_path=f"{field_path}.{key}",
+                    )
+                    or rewritten
+                )
+        return rewritten
+
+    if isinstance(value, list):
+        rewritten = False
+        for index, child in enumerate(value):
+            rewritten = (
+                _rewrite_inline_content_blob_refs(
+                    child,
+                    blob_map,
+                    composition_state_id=composition_state_id,
+                    new_session_id=new_session_id,
+                    field_path=f"{field_path}[{index}]",
+                )
+                or rewritten
+            )
+        return rewritten
+
+    return False
 
 
 def register_session_routes(router: APIRouter) -> None:
@@ -213,18 +317,23 @@ def register_session_routes(router: APIRouter) -> None:
             # Rewrite source references in the forked state so the fork is
             # self-contained.  Without this, blob_ref and path in the source
             # options still point at the original session's assets.
-            if copied_state is not None and copied_state.source is not None and blob_map:
-                source_dict = deep_thaw(copied_state.source) if copied_state.source else None
-                if not isinstance(source_dict, dict):
+            if copied_state is not None:
+                source_dict = deep_thaw(copied_state.source) if copied_state.source is not None else None
+                nodes_data = deep_thaw(copied_state.nodes)
+                edges_data = deep_thaw(copied_state.edges)
+                outputs_data = deep_thaw(copied_state.outputs)
+                metadata_data = deep_thaw(copied_state.metadata_)
+                composer_meta_data = deep_thaw(copied_state.composer_meta) if copied_state.composer_meta is not None else None
+                rewritten = False
+
+                if source_dict is not None and not isinstance(source_dict, dict):
                     raise AuditIntegrityError(
                         f"Tier 1 audit anomaly: composition_state {copied_state.id} "
                         f"has source type {type(source_dict).__name__}, expected dict "
                         f"before fork blob rewrite for session {new_session.id}."
                     )
 
-                if "options" not in source_dict or source_dict["options"] is None:
-                    rewritten = False
-                else:
+                if source_dict is not None and "options" in source_dict and source_dict["options"] is not None:
                     options = source_dict["options"]
                     if not isinstance(options, dict):
                         raise AuditIntegrityError(
@@ -233,7 +342,6 @@ def register_session_routes(router: APIRouter) -> None:
                             f"dict before fork blob rewrite for session {new_session.id}."
                         )
 
-                    rewritten = False
                     rewrite_target = None
                     # Remap blob_ref to the new blob's ID.
                     # composition_states.source is Tier 1 ("our data") — the
@@ -276,8 +384,14 @@ def register_session_routes(router: APIRouter) -> None:
                                 f"Fork aborted to prevent cross-session blob "
                                 f"reference in forked session {new_session.id}."
                             ) from exc
-                        if old_uuid in blob_map:
-                            rewrite_target = blob_map[old_uuid]
+                        if old_uuid not in blob_map:
+                            raise AuditIntegrityError(
+                                f"Tier 1 audit anomaly: composition_state "
+                                f"{copied_state.id} has source blob_ref "
+                                f"{old_ref!r}, but the source blob was not "
+                                f"copied into forked session {new_session.id}."
+                            )
+                        rewrite_target = blob_map[old_uuid]
 
                     if rewrite_target is None:
                         for path_key in ("path", "file"):
@@ -296,20 +410,51 @@ def register_session_routes(router: APIRouter) -> None:
                             options["file"] = rewrite_target.storage_path
                         rewritten = True
 
+                if source_dict is not None:
+                    rewritten = (
+                        _rewrite_inline_content_blob_refs(
+                            source_dict,
+                            blob_map,
+                            composition_state_id=copied_state.id,
+                            new_session_id=new_session.id,
+                            field_path="source",
+                        )
+                        or rewritten
+                    )
+                rewritten = (
+                    _rewrite_inline_content_blob_refs(
+                        nodes_data,
+                        blob_map,
+                        composition_state_id=copied_state.id,
+                        new_session_id=new_session.id,
+                        field_path="nodes",
+                    )
+                    or rewritten
+                )
+                rewritten = (
+                    _rewrite_inline_content_blob_refs(
+                        outputs_data,
+                        blob_map,
+                        composition_state_id=copied_state.id,
+                        new_session_id=new_session.id,
+                        field_path="outputs",
+                    )
+                    or rewritten
+                )
+
                 if rewritten:
-                    source_dict["options"] = options
                     # Save updated state with remapped source. Preserve the
                     # source state's composer_meta — fork inherits the
                     # operational provenance of the parent compose.
                     state_data = CompositionStateData(
                         source=source_dict,
-                        nodes=deep_thaw(copied_state.nodes),
-                        edges=deep_thaw(copied_state.edges),
-                        outputs=deep_thaw(copied_state.outputs),
-                        metadata_=deep_thaw(copied_state.metadata_),
+                        nodes=nodes_data,
+                        edges=edges_data,
+                        outputs=outputs_data,
+                        metadata_=metadata_data,
                         is_valid=copied_state.is_valid,
                         validation_errors=list(copied_state.validation_errors) if copied_state.validation_errors else None,
-                        composer_meta=deep_thaw(copied_state.composer_meta) if copied_state.composer_meta is not None else None,
+                        composer_meta=composer_meta_data,
                     )
                     copied_state = await service.save_composition_state(
                         new_session.id,

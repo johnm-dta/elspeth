@@ -150,6 +150,8 @@ def is_widened_blob_ref(value: Any) -> WidenedBlobRefShape | None:
     if "mode" not in marker:
         return None
     mode_value = marker["mode"]
+    if type(mode_value) is not str:
+        return None
     if mode_value not in ALLOWED_BLOB_REF_MODES:
         return None
 
@@ -180,6 +182,8 @@ def is_widened_blob_ref(value: Any) -> WidenedBlobRefShape | None:
     encoding_value: object = "utf-8"
     if "encoding" in marker:
         encoding_value = marker["encoding"]
+    if type(encoding_value) is not str:
+        return None
     if encoding_value not in ALLOWED_CONTENT_ENCODINGS:
         return None
     return WidenedBlobRefShape(

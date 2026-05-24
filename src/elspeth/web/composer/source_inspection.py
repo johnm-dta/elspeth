@@ -31,6 +31,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.plugins.sources.field_normalization import resolve_field_names
 from elspeth.web.composer.guided.errors import InvariantError
 
 _MAX_BYTES: Final[int] = 8 * 1024
@@ -792,6 +793,8 @@ def _declared_field_is_required(field: DeclaredFieldSpec) -> bool:
 def derive_extra_column_risk(
     facts: SourceInspectionFacts,
     declared_fields: tuple[DeclaredFieldSpec, ...] | None,
+    *,
+    field_mapping: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Return observed headers absent from a declared fixed schema.
 
@@ -803,7 +806,8 @@ def derive_extra_column_risk(
     if declared_fields is None or facts.observed_headers is None:
         return ()
     declared_lower = {name.lower() for field in declared_fields if (name := _declared_field_name(field)) is not None}
-    missing = tuple(h for h in facts.observed_headers if h.lower() not in declared_lower)
+    resolved_headers = _csvsource_resolved_observed_headers(facts, field_mapping=field_mapping)
+    missing = tuple(h for h in resolved_headers if h.lower() not in declared_lower)
     return missing
 
 
@@ -812,6 +816,7 @@ def derive_required_header_mismatch_risk(
     declared_fields: tuple[DeclaredFieldSpec, ...] | None,
     *,
     explicit_required_fields: tuple[str, ...] = (),
+    field_mapping: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Return required declared fields when none overlap observed CSV headers."""
     if declared_fields is None or facts.observed_headers is None:
@@ -829,8 +834,25 @@ def derive_required_header_mismatch_risk(
     if not required_names:
         return ()
 
-    observed_lower = {header.lower() for header in facts.observed_headers}
+    observed_lower = {header.lower() for header in _csvsource_resolved_observed_headers(facts, field_mapping=field_mapping)}
     required_lower = {name.lower() for name in required_names}
     if observed_lower & required_lower:
         return ()
     return tuple(required_names)
+
+
+def _csvsource_resolved_observed_headers(
+    facts: SourceInspectionFacts,
+    *,
+    field_mapping: Mapping[str, str] | None,
+) -> tuple[str, ...]:
+    if facts.observed_headers is None:
+        return ()
+    if facts.source_kind != "csv":
+        return facts.observed_headers
+    resolution = resolve_field_names(
+        raw_headers=list(facts.observed_headers),
+        field_mapping=dict(field_mapping) if field_mapping is not None else None,
+        columns=None,
+    )
+    return resolution.final_headers

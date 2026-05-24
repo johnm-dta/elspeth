@@ -45,10 +45,19 @@ def test_blob_inline_resolutions_table_exists_with_expected_columns(engine) -> N
     }
 
 
-def test_blob_inline_resolutions_schema_epoch_is_14(engine) -> None:
-    assert SESSION_SCHEMA_EPOCH == 14
+def test_blob_inline_resolutions_schema_epoch_is_15(engine) -> None:
+    assert SESSION_SCHEMA_EPOCH == 15
     with engine.connect() as conn:
-        assert conn.execute(text("PRAGMA user_version")).scalar_one() == 14
+        assert conn.execute(text("PRAGMA user_version")).scalar_one() == 15
+
+
+def test_blob_inline_resolutions_blob_id_is_historical_without_live_blob_fk(engine) -> None:
+    inspector = inspect(engine)
+
+    foreign_keys = inspector.get_foreign_keys("blob_inline_resolutions")
+    constrained_columns = {column for foreign_key in foreign_keys for column in foreign_key["constrained_columns"]}
+
+    assert "blob_id" not in constrained_columns
 
 
 def test_blob_inline_resolutions_round_trip(engine) -> None:

@@ -862,6 +862,8 @@ class TestInlineBlobRuntimePreflight:
         order: list[str] = []
 
         blob_record = MagicMock(spec=object)
+        blob_record.status = "ready"
+        blob_record.content_hash = sha256
         blob_record.mime_type = "text/plain"
         blob_record.size_bytes = len(content)
 
@@ -978,6 +980,8 @@ sinks:
         sha256 = hashlib.sha256(content).hexdigest()
 
         blob_record = MagicMock(spec=object)
+        blob_record.status = "ready"
+        blob_record.content_hash = sha256
         blob_record.mime_type = "text/plain"
         blob_record.size_bytes = len(content)
 
@@ -1020,6 +1024,150 @@ sinks:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.service.LandscapeDB")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_oversized_inline_content_metadata_fails_before_blob_read(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        mock_runtime_graph: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        from elspeth.contracts.blobs_inline import BlobContentResolutionError
+
+        del mock_payload_cls, mock_landscape_cls, mock_runtime_graph
+        blob_id = uuid4()
+        run_id = uuid4()
+        sha256 = hashlib.sha256(b"small prompt").hexdigest()
+
+        blob_record = MagicMock(spec=object)
+        blob_record.status = "ready"
+        blob_record.content_hash = sha256
+        blob_record.mime_type = "text/plain"
+        blob_record.size_bytes = 256 * 1024 + 1
+
+        blob_service = MagicMock(spec=object)
+        blob_service.link_blob_to_run = AsyncMock(return_value=None)
+        blob_service.read_blob_content = AsyncMock(return_value=b"small prompt")
+        blob_service.get_blob = AsyncMock(return_value=blob_record)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        cast(Any, service)._blob_service = blob_service
+        mock_session_service.record_blob_inline_resolutions = AsyncMock(return_value=None)
+
+        pipeline_yaml = f"""
+source:
+  plugin: csv
+  options:
+    path: input.csv
+transforms:
+  - name: classify
+    plugin: llm
+    options:
+      system_prompt:
+        blob_ref: {blob_id}
+        mode: inline_content
+        sha256: {sha256}
+sinks:
+  primary:
+    plugin: json
+    options:
+      path: output.jsonl
+"""
+
+        with pytest.raises(BlobContentResolutionError) as exc_info:
+            service._run_pipeline(str(run_id), pipeline_yaml, threading.Event())
+
+        assert exc_info.value.oversized == (("node:classify.options.system_prompt", 256 * 1024 + 1, 256 * 1024),)
+        blob_service.read_blob_content.assert_not_awaited()
+        blob_service.link_blob_to_run.assert_not_awaited()
+        mock_session_service.record_blob_inline_resolutions.assert_not_called()
+        mock_load.assert_not_called()
+        mock_orch_cls.assert_not_called()
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.build_validated_runtime_graph")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
+    def test_aggregate_inline_content_metadata_fails_before_blob_read(
+        self,
+        mock_payload_cls: MagicMock,
+        mock_landscape_cls: MagicMock,
+        mock_load: MagicMock,
+        mock_runtime_graph: MagicMock,
+        mock_orch_cls: MagicMock,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+    ) -> None:
+        from elspeth.contracts.blobs_inline import BlobContentResolutionError
+
+        del mock_payload_cls, mock_landscape_cls, mock_runtime_graph
+        blob_ids = [uuid4() for _ in range(5)]
+        run_id = uuid4()
+        hashes = [hashlib.sha256(f"blob-{index}".encode()).hexdigest() for index in range(5)]
+
+        records_by_id: dict[UUID, Any] = {}
+        for blob_id, blob_hash in zip(blob_ids, hashes, strict=True):
+            record = MagicMock(spec=object)
+            record.status = "ready"
+            record.content_hash = blob_hash
+            record.mime_type = "text/plain"
+            record.size_bytes = 220 * 1024
+            records_by_id[blob_id] = record
+
+        async def get_blob(blob_id: UUID) -> Any:
+            if blob_id in records_by_id:
+                return records_by_id[blob_id]
+            raise AssertionError(f"unexpected blob_id {blob_id}")
+
+        blob_service = MagicMock(spec=object)
+        blob_service.link_blob_to_run = AsyncMock(return_value=None)
+        blob_service.read_blob_content = AsyncMock(return_value=b"content")
+        blob_service.get_blob = AsyncMock(side_effect=get_blob)
+        blob_service.finalize_run_output_blobs = AsyncMock(return_value=MagicMock(spec=object, errors=[]))
+        cast(Any, service)._blob_service = blob_service
+        mock_session_service.record_blob_inline_resolutions = AsyncMock(return_value=None)
+
+        inline_options = "\n".join(
+            f"""      prompt_{index}:
+        blob_ref: {blob_id}
+        mode: inline_content
+        sha256: {blob_hash}"""
+            for index, (blob_id, blob_hash) in enumerate(zip(blob_ids, hashes, strict=True))
+        )
+        pipeline_yaml = f"""
+source:
+  plugin: csv
+  options:
+    path: input.csv
+transforms:
+  - name: classify
+    plugin: llm
+    options:
+{inline_options}
+sinks:
+  primary:
+    plugin: json
+    options:
+      path: output.jsonl
+"""
+
+        with pytest.raises(BlobContentResolutionError) as exc_info:
+            service._run_pipeline(str(run_id), pipeline_yaml, threading.Event())
+
+        assert exc_info.value.oversized == (("(aggregate)", 5 * 220 * 1024, 1024 * 1024),)
+        blob_service.read_blob_content.assert_not_awaited()
+        blob_service.link_blob_to_run.assert_not_awaited()
+        mock_session_service.record_blob_inline_resolutions.assert_not_called()
+        mock_load.assert_not_called()
+        mock_orch_cls.assert_not_called()
+
+    @patch("elspeth.web.execution.service.Orchestrator")
+    @patch("elspeth.web.execution.service.build_validated_runtime_graph")
+    @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.service.LandscapeDB")
+    @patch("elspeth.web.execution.service.FilesystemPayloadStore")
     def test_hash_mismatch_increments_zero_threshold_counter(
         self,
         mock_payload_cls: MagicMock,
@@ -1041,6 +1189,8 @@ sinks:
         monkeypatch.setattr(service_module, "_BLOB_INLINE_HASH_MISMATCH_TOTAL", hash_counter)
 
         blob_record = MagicMock(spec=object)
+        blob_record.status = "ready"
+        blob_record.content_hash = hashlib.sha256(content).hexdigest()
         blob_record.mime_type = "text/plain"
         blob_record.size_bytes = len(content)
 

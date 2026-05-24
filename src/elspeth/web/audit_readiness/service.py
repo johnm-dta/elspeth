@@ -136,7 +136,13 @@ class CompositionStateNotFoundError(LookupError):
 
 
 class _ExecutionServiceLike(Protocol):
-    async def validate_state(self, state: CompositionState, *, user_id: str | None = None) -> ValidationResult: ...
+    async def validate_state(
+        self,
+        state: CompositionState,
+        *,
+        user_id: str | None = None,
+        session_id: UUID | None = None,
+    ) -> ValidationResult: ...
 
 
 class _SessionServiceLike(Protocol):
@@ -210,7 +216,7 @@ class ReadinessService:
         # that the llm_interpretations row scopes its event lookup to.
         composition_state_id: UUID = record.id
         state: CompositionState = self._state_from_record(record)
-        validation = await self._execution_service.validate_state(state, user_id=user_id)
+        validation = await self._execution_service.validate_state(state, user_id=user_id, session_id=session_id)
         inventory = await run_sync_in_worker(
             self._scoped_secret_resolver.list_refs,
             user_id,  # scoped_secret_resolver.list_refs takes user_id only

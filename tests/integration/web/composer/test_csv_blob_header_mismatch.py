@@ -21,6 +21,7 @@ from elspeth.web.sessions.models import blobs_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 
 _HEADER_MISMATCH_CODE = "csv_source_blob_header_mismatch"
+_HEADER_RESOLUTION_ERROR_CODE = "csv_source_field_resolution_error"
 
 
 def _catalog() -> CatalogServiceImpl:
@@ -206,6 +207,116 @@ def test_csv_blob_with_matching_header_does_not_block(tmp_path: Path) -> None:
     codes = [item["code"] for item in data["proof_diagnostics"]]
     assert _HEADER_MISMATCH_CODE not in codes
     assert data["is_valid"] is True
+
+
+def test_csv_blob_with_normalized_header_does_not_block(tmp_path: Path) -> None:
+    engine, session_id = _session_engine()
+    blob_id = _insert_blob(
+        engine,
+        session_id,
+        tmp_path,
+        filename="customers.csv",
+        mime_type="text/csv",
+        content=b"Customer ID\n123\n",
+    )
+    state = _state_with_blob_source(
+        engine,
+        session_id,
+        blob_id,
+        plugin="csv",
+        options={"schema": {"mode": "fixed", "fields": ["customer_id: str"]}},
+    )
+
+    data = _preview_data(engine, session_id, state)
+
+    codes = [item["code"] for item in data["proof_diagnostics"]]
+    assert _HEADER_MISMATCH_CODE not in codes
+    assert data["is_valid"] is True
+
+
+def test_csv_blob_with_field_mapping_header_does_not_block(tmp_path: Path) -> None:
+    engine, session_id = _session_engine()
+    blob_id = _insert_blob(
+        engine,
+        session_id,
+        tmp_path,
+        filename="customers.csv",
+        mime_type="text/csv",
+        content=b"External ID\n123\n",
+    )
+    state = _state_with_blob_source(
+        engine,
+        session_id,
+        blob_id,
+        plugin="csv",
+        options={
+            "field_mapping": {"external_id": "customer_id"},
+            "schema": {"mode": "fixed", "fields": ["customer_id: str"]},
+        },
+    )
+
+    data = _preview_data(engine, session_id, state)
+
+    codes = [item["code"] for item in data["proof_diagnostics"]]
+    assert _HEADER_MISMATCH_CODE not in codes
+    assert data["is_valid"] is True
+
+
+def test_csv_blob_with_normalization_collision_returns_blocking_diagnostic(tmp_path: Path) -> None:
+    engine, session_id = _session_engine()
+    blob_id = _insert_blob(
+        engine,
+        session_id,
+        tmp_path,
+        filename="customers.csv",
+        mime_type="text/csv",
+        content=b"Customer ID,customer_id\n123,456\n",
+    )
+    state = _state_with_blob_source(
+        engine,
+        session_id,
+        blob_id,
+        plugin="csv",
+        options={"schema": {"mode": "fixed", "fields": ["customer_id: str"]}},
+    )
+
+    data = _preview_data(engine, session_id, state)
+
+    matching = [item for item in data["proof_diagnostics"] if item["code"] == _HEADER_RESOLUTION_ERROR_CODE]
+    assert matching
+    assert matching[0]["severity"] == "blocking"
+    assert "Field name collision" in matching[0]["message"]
+    assert data["is_valid"] is False
+
+
+def test_csv_blob_with_invalid_field_mapping_returns_blocking_diagnostic(tmp_path: Path) -> None:
+    engine, session_id = _session_engine()
+    blob_id = _insert_blob(
+        engine,
+        session_id,
+        tmp_path,
+        filename="customers.csv",
+        mime_type="text/csv",
+        content=b"External ID\n123\n",
+    )
+    state = _state_with_blob_source(
+        engine,
+        session_id,
+        blob_id,
+        plugin="csv",
+        options={
+            "field_mapping": {"missing_header": "customer_id"},
+            "schema": {"mode": "fixed", "fields": ["customer_id: str"]},
+        },
+    )
+
+    data = _preview_data(engine, session_id, state)
+
+    matching = [item for item in data["proof_diagnostics"] if item["code"] == _HEADER_RESOLUTION_ERROR_CODE]
+    assert matching
+    assert matching[0]["severity"] == "blocking"
+    assert "field_mapping keys not found" in matching[0]["message"]
+    assert data["is_valid"] is False
 
 
 def test_csv_blob_headerless_columns_mode_does_not_block(tmp_path: Path) -> None:

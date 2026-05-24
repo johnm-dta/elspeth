@@ -27,6 +27,7 @@ from elspeth.plugins.transforms.llm.model_catalog import (
 from elspeth.web.catalog.protocol import PluginKind
 from elspeth.web.composer._producer_resolver import ProducerResolver
 from elspeth.web.composer.source_inspection import (
+    SourceInspectionFacts,
     derive_extra_column_risk,
     derive_required_header_mismatch_risk,
     inspect_blob_content,
@@ -99,6 +100,22 @@ def _csv_source_columns(options: Mapping[str, Any]) -> tuple[str, ...] | None:
             raise ValueError(f"csv source columns[{idx}] must be str; got {type(item).__name__}")
         columns.append(item)
     return tuple(columns)
+
+
+def _csv_source_field_mapping(options: Mapping[str, Any]) -> dict[str, str] | None:
+    raw = options.get("field_mapping")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"csv source field_mapping must be a mapping when present; got {type(raw).__name__}")
+    mapping: dict[str, str] = {}
+    for key, value in raw.items():
+        if type(key) is not str:
+            raise ValueError(f"csv source field_mapping keys must be str; got {type(key).__name__}")
+        if type(value) is not str:
+            raise ValueError(f"csv source field_mapping[{key!r}] must be str; got {type(value).__name__}")
+        mapping[key] = value
+    return mapping
 
 
 def _schema_required_fields(schema: Mapping[str, Any]) -> tuple[str, ...]:
@@ -726,6 +743,7 @@ _BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
         "csv_duplicate_headers",
         "csv_fixed_schema_omits_observed_columns",
         "csv_source_blob_header_mismatch",
+        "csv_source_field_resolution_error",
         "gate_expression_type_mismatch_against_source_schema",
         "text_source_url_without_web_scrape",
         "source_inspection_failed",
@@ -761,6 +779,32 @@ def _blocking_diagnostic(
         "suggested_repair": suggested_repair,
         "evidence_locator": evidence_locator,
     }
+
+
+def _csv_source_field_resolution_error_diagnostic(
+    *,
+    blob_id: object,
+    facts: SourceInspectionFacts,
+    exc: ValueError,
+) -> dict[str, Any]:
+    return _blocking_diagnostic(
+        code="csv_source_field_resolution_error",
+        message=(
+            "CSV source header resolution failed before proof diagnostics could compare "
+            f"declared fields to observed headers: {exc}. CSVSource would reject this "
+            "shape at runtime, so preview_pipeline is blocking it for repair."
+        ),
+        suggested_repair=(
+            "Rename colliding or invalid CSV headers, correct field_mapping keys and "
+            "values to match normalized source headers, or declare explicit `columns` "
+            "for headerless input, then re-run preview_pipeline."
+        ),
+        evidence_locator={
+            "source": "blob",
+            "blob_id": str(blob_id),
+            "observed_headers": list(facts.observed_headers or ()),
+        },
+    )
 
 
 def _source_schema_mode(source: SourceSpec) -> str | None:
@@ -1039,6 +1083,9 @@ def compute_proof_diagnostics(
         declared fields but no overlap with the parsed blob header. This
         catches headerless CSV/list inputs before the first row is consumed
         as a header and every data row is discarded.
+      * ``csv_source_field_resolution_error`` — CSVSource-style header
+        normalization or field_mapping resolution failed before schema
+        comparison could proceed.
       * ``text_source_url_without_web_scrape`` — text source whose blob
         content is a single URL but no web_scrape node downstream. The
         URL string itself reaches sinks instead of the URL's content.
@@ -1135,15 +1182,39 @@ def compute_proof_diagnostics(
             declared = schema.get("fields") or ()
             if isinstance(declared, (list, tuple)):
                 headerless_columns = source.plugin == "csv" and source.options.get("columns") is not None
-                missing_declared = (
-                    ()
-                    if headerless_columns or facts.source_kind != "csv"
-                    else derive_required_header_mismatch_risk(
-                        facts,
-                        tuple(declared),
-                        explicit_required_fields=_schema_required_fields(schema),
-                    )
-                )
+                field_mapping: dict[str, str] | None = None
+                field_resolution_failed = False
+                if source.plugin == "csv" and not headerless_columns:
+                    try:
+                        field_mapping = _csv_source_field_mapping(source.options)
+                    except ValueError as exc:
+                        diagnostics.append(
+                            _csv_source_field_resolution_error_diagnostic(
+                                blob_id=blob_id,
+                                facts=facts,
+                                exc=exc,
+                            )
+                        )
+                        field_resolution_failed = True
+
+                missing_declared: tuple[str, ...] = ()
+                if not field_resolution_failed and not headerless_columns and facts.source_kind == "csv":
+                    try:
+                        missing_declared = derive_required_header_mismatch_risk(
+                            facts,
+                            tuple(declared),
+                            explicit_required_fields=_schema_required_fields(schema),
+                            field_mapping=field_mapping,
+                        )
+                    except ValueError as exc:
+                        diagnostics.append(
+                            _csv_source_field_resolution_error_diagnostic(
+                                blob_id=blob_id,
+                                facts=facts,
+                                exc=exc,
+                            )
+                        )
+                        field_resolution_failed = True
                 if missing_declared and source.on_validation_failure == "discard":
                     diagnostics.append(
                         _blocking_diagnostic(
@@ -1171,8 +1242,23 @@ def compute_proof_diagnostics(
                             },
                         )
                     )
-                elif schema.get("mode") == "fixed":
-                    missing = () if headerless_columns else derive_extra_column_risk(facts, tuple(declared))
+                elif schema.get("mode") == "fixed" and not field_resolution_failed:
+                    missing: tuple[str, ...] = ()
+                    if not headerless_columns:
+                        try:
+                            missing = derive_extra_column_risk(
+                                facts,
+                                tuple(declared),
+                                field_mapping=field_mapping if source.plugin == "csv" else None,
+                            )
+                        except ValueError as exc:
+                            diagnostics.append(
+                                _csv_source_field_resolution_error_diagnostic(
+                                    blob_id=blob_id,
+                                    facts=facts,
+                                    exc=exc,
+                                )
+                            )
                     if missing and source.on_validation_failure == "discard":
                         diagnostics.append(
                             _blocking_diagnostic(

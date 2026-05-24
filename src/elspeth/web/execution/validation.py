@@ -34,7 +34,12 @@ from pydantic import ValidationError as PydanticValidationError
 from elspeth.contracts.blobs import BlobRecord
 from elspeth.contracts.blobs_inline import BlobInlineValidationViolation
 from elspeth.contracts.secrets import SecretRefPlacementViolation, WebSecretResolver
-from elspeth.core.blobs_inline import _validate_blob_content_refs_sync
+from elspeth.core.blobs_inline import (
+    BLOB_INLINE_AGGREGATE_BYTE_CAP,
+    BLOB_INLINE_PER_REF_BYTE_CAP,
+    _substitute_blob_content_refs_for_validation,
+    _validate_blob_content_refs_sync,
+)
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.dag.models import EdgeContractError, GraphValidationError
 from elspeth.core.secrets import (
@@ -156,10 +161,10 @@ _CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
 _ALL_CHECKS = [
     _CHECK_PATH_ALLOWLIST,
     _CHECK_SECRET_REFS,
-    _CHECK_BLOB_INLINE_REFS,
     _CHECK_SEMANTIC_CONTRACTS,
     _CHECK_BATCH_TRANSFORM_OPTIONS,
     _CHECK_INTERPRETATION_REVIEW,
+    _CHECK_BLOB_INLINE_REFS,
     _CHECK_SETTINGS,
     _CHECK_PLUGINS,
     _CHECK_VALUE_SOURCE_COMPLIANCE,
@@ -167,9 +172,6 @@ _ALL_CHECKS = [
     _CHECK_ROUTE_TARGETS,
     _CHECK_SCHEMA,
 ]
-
-_BLOB_INLINE_PER_REF_BYTE_CAP = 256 * 1024
-_BLOB_INLINE_AGGREGATE_BYTE_CAP = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -1149,8 +1151,8 @@ def validate_pipeline(
         blob_violations = _validate_blob_content_refs_sync(
             blob_get_metadata,
             config_dict,
-            per_ref_byte_cap=_BLOB_INLINE_PER_REF_BYTE_CAP,
-            aggregate_byte_cap=_BLOB_INLINE_AGGREGATE_BYTE_CAP,
+            per_ref_byte_cap=BLOB_INLINE_PER_REF_BYTE_CAP,
+            aggregate_byte_cap=BLOB_INLINE_AGGREGATE_BYTE_CAP,
         )
         if blob_violations:
             detail = _blob_inline_validation_detail(blob_violations)
@@ -1184,6 +1186,7 @@ def validate_pipeline(
                 outcome_code=None,
             )
         )
+        pipeline_yaml = yaml.dump(_substitute_blob_content_refs_for_validation(config_dict), default_flow_style=False)
     elif blob_get_metadata is None:
         checks.append(
             ValidationCheck(

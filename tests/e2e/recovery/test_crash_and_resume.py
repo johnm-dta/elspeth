@@ -10,12 +10,16 @@ external services.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
+from pydantic import ConfigDict
+from sqlalchemy import select
 
 from elspeth.contracts import (
     ArtifactDescriptor,
@@ -37,17 +41,19 @@ from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 from elspeth.contracts.contract_records import ContractAuditRecord
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+from elspeth.contracts.errors import GracefulShutdownError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import NodeID, SinkName
 from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
-from elspeth.core.config import CheckpointSettings
+from elspeth.core.config import CheckpointSettings, QueueSettings, SourceSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import (
     nodes_table,
     rows_table,
+    run_sources_table,
     runs_table,
     token_outcomes_table,
     tokens_table,
@@ -57,13 +63,16 @@ from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
+from elspeth.plugins.sinks.json_sink import JSONSink
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.base_classes import (
     _TestSinkBase,
     _TestSourceBase,
     as_sink,
     as_source,
+    as_transform,
 )
+from tests.fixtures.factories import wire_transforms
 from tests.fixtures.landscape import make_factory
 
 # ---------------------------------------------------------------------------
@@ -122,7 +131,7 @@ def _build_linear_graph(config: PipelineConfig) -> ExecutionGraph:
         "source",
         node_type=NodeType.SOURCE,
         plugin_name=config.sources["primary"].name,
-        config=schema_config,
+        config={**schema_config, "source_name": "primary"},
     )
 
     transform_ids: dict[int, NodeID] = {}
@@ -232,6 +241,339 @@ class _ResumeSource(_TestSourceBase):
 
     def close(self) -> None:
         pass
+
+
+class _MultiSourceAnySchema(PluginSchema):
+    """Broad schema for mixed-contract multi-source resume tests."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(extra="allow")
+
+
+class _OrderResumeSchema(PluginSchema):
+    """Order source schema for multi-source resume tests."""
+
+    order_id: int
+    amount: int
+
+
+class _RefundResumeSchema(PluginSchema):
+    """Refund source schema for multi-source resume tests."""
+
+    refund_id: str
+    amount: int
+
+
+class _TypedResumeSource(_TestSourceBase):
+    """Source with a fixed per-source schema contract and optional interrupt."""
+
+    determinism = Determinism.IO_READ
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        rows: list[dict[str, Any]],
+        output_schema: type[PluginSchema],
+        field_types: dict[str, type[Any]],
+        on_success: str,
+        interrupt_after: int | None = None,
+        shutdown_event: threading.Event | None = None,
+    ) -> None:
+        super().__init__()
+        self.name = name
+        self.output_schema = output_schema
+        self.on_success = on_success
+        self._rows = rows
+        self._interrupt_after = interrupt_after
+        self._shutdown_event = shutdown_event
+        self._schema_contract = SchemaContract(
+            mode="FIXED",
+            fields=tuple(
+                FieldContract(
+                    normalized_name=field_name,
+                    original_name=field_name,
+                    python_type=field_type,
+                    required=True,
+                    source="declared",
+                )
+                for field_name, field_type in field_types.items()
+            ),
+            locked=True,
+        )
+
+    def load(self, ctx: Any) -> Iterator[SourceRow]:
+        contract = self._schema_contract
+        assert contract is not None
+        for index, row in enumerate(self._rows, start=1):
+            if self._shutdown_event is not None and self._interrupt_after is not None and index >= self._interrupt_after:
+                self._shutdown_event.set()
+            yield SourceRow.valid(row, contract=contract)
+
+
+class _SourceContractAnnotatingTransform(BaseTransform):
+    """Annotate rows with the source contract visible to transform execution."""
+
+    name = "source_contract_annotator"
+    determinism = Determinism.DETERMINISTIC
+    input_schema = _MultiSourceAnySchema
+    output_schema = _MultiSourceAnySchema
+    on_error = "discard"
+
+    def __init__(self) -> None:
+        super().__init__({"schema": {"mode": "observed"}})
+
+    def process(self, row: PipelineRow, ctx: Any) -> TransformResult:
+        data = row.to_dict()
+        contract_fields = ",".join(sorted(field.normalized_name for field in row.contract.fields))
+        if "order_id" in row:
+            source_kind = "orders"
+            business_id = f"order:{row['order_id']}"
+        elif "refund_id" in row:
+            source_kind = "refunds"
+            business_id = f"refund:{row['refund_id']}"
+        else:
+            raise AssertionError(f"Unexpected multi-source row shape: {sorted(data)}")
+
+        return TransformResult.success(
+            make_pipeline_row(
+                {
+                    "source_kind": source_kind,
+                    "business_id": business_id,
+                    "amount": data["amount"],
+                    "schema_fields": contract_fields,
+                }
+            ),
+            success_reason={"action": "annotated_source_contract"},
+        )
+
+
+@dataclass(frozen=True)
+class _MultiSourceResumeContext:
+    """Live run state for production-path multi-source resume tests."""
+
+    db: LandscapeDB
+    checkpoint_mgr: CheckpointManager
+    recovery_mgr: RecoveryManager
+    checkpoint_config: RuntimeCheckpointConfig
+    payload_store: FilesystemPayloadStore
+    run_id: str
+    graph: ExecutionGraph
+    output_path: Path
+    refunds_source_node_id: NodeID
+
+
+def _jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _build_multi_source_resume_pipeline(
+    *,
+    output_path: Path,
+    refund_shutdown_event: threading.Event | None = None,
+) -> tuple[PipelineConfig, ExecutionGraph]:
+    orders = _TypedResumeSource(
+        name="orders_source",
+        rows=[
+            {"order_id": 1, "amount": 100},
+            {"order_id": 2, "amount": 125},
+        ],
+        output_schema=_OrderResumeSchema,
+        field_types={"order_id": int, "amount": int},
+        on_success="inbound",
+    )
+    refunds = _TypedResumeSource(
+        name="refunds_source",
+        rows=[{"refund_id": "R-1", "amount": 30}],
+        output_schema=_RefundResumeSchema,
+        field_types={"refund_id": str, "amount": int},
+        on_success="inbound",
+        interrupt_after=1 if refund_shutdown_event is not None else None,
+        shutdown_event=refund_shutdown_event,
+    )
+    transform = _SourceContractAnnotatingTransform()
+    sink = JSONSink(
+        {
+            "path": str(output_path),
+            "format": "jsonl",
+            "mode": "append",
+            "schema": {"mode": "observed"},
+        }
+    )
+    sources = {
+        "orders": as_source(orders),
+        "refunds": as_source(refunds),
+    }
+    sinks = {"output": as_sink(sink)}
+    wired_transforms = wire_transforms(
+        [as_transform(transform)],
+        source_connection="inbound",
+        final_sink="output",
+        names=["annotate_source_contract"],
+    )
+    graph = ExecutionGraph.from_plugin_instances(
+        sources=sources,
+        source_settings_map={
+            "orders": SourceSettings(plugin=orders.name, on_success="inbound", options={}),
+            "refunds": SourceSettings(plugin=refunds.name, on_success="inbound", options={}),
+        },
+        transforms=wired_transforms,
+        sinks=sinks,
+        aggregations={},
+        gates=[],
+        queues={"inbound": QueueSettings(description="multi-source resume fan-in")},
+    )
+    config = PipelineConfig(
+        sources=sources,
+        transforms=[as_transform(transform)],
+        sinks=sinks,
+    )
+    return config, graph
+
+
+def _start_interrupted_multi_source_run(tmp_path: Path) -> _MultiSourceResumeContext:
+    db = LandscapeDB(f"sqlite:///{tmp_path}/multi_source_resume.db")
+    checkpoint_mgr = CheckpointManager(db)
+    recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+    checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+    payload_store = FilesystemPayloadStore(tmp_path / "payloads")
+    output_path = tmp_path / "multi_source_resume.jsonl"
+    shutdown_event = threading.Event()
+    config, graph = _build_multi_source_resume_pipeline(
+        output_path=output_path,
+        refund_shutdown_event=shutdown_event,
+    )
+
+    orchestrator = Orchestrator(
+        db,
+        checkpoint_manager=checkpoint_mgr,
+        checkpoint_config=checkpoint_config,
+    )
+    with pytest.raises(GracefulShutdownError) as exc_info:
+        orchestrator.run(
+            config,
+            graph=graph,
+            payload_store=payload_store,
+            shutdown_event=shutdown_event,
+        )
+
+    run_id = exc_info.value.run_id
+    assert run_id is not None
+    assert checkpoint_mgr.get_latest_checkpoint(run_id) is not None
+    check = recovery_mgr.can_resume(run_id, graph)
+    assert check.can_resume, f"Expected interrupted multi-source run to be resumable: {check.reason}"
+    with db.engine.connect() as conn:
+        refunds_source_node_id = conn.execute(
+            select(run_sources_table.c.source_node_id).where(
+                run_sources_table.c.run_id == run_id,
+                run_sources_table.c.source_name == "refunds",
+            )
+        ).scalar_one()
+
+    return _MultiSourceResumeContext(
+        db=db,
+        checkpoint_mgr=checkpoint_mgr,
+        recovery_mgr=recovery_mgr,
+        checkpoint_config=checkpoint_config,
+        payload_store=payload_store,
+        run_id=run_id,
+        graph=graph,
+        output_path=output_path,
+        refunds_source_node_id=NodeID(refunds_source_node_id),
+    )
+
+
+def _append_crashed_refund_row(ctx: _MultiSourceResumeContext) -> str:
+    """Simulate hard kill after source row persistence but before token creation."""
+    factory = RecorderFactory(ctx.db, payload_store=ctx.payload_store)
+    row = factory.data_flow.create_row(
+        run_id=ctx.run_id,
+        source_node_id=ctx.refunds_source_node_id,
+        row_index=3,
+        data={"refund_id": "R-2", "amount": 45},
+        source_row_index=1,
+        ingest_sequence=3,
+    )
+    return row.row_id
+
+
+def _resume_multi_source_run(ctx: _MultiSourceResumeContext) -> Any:
+    resume_config, resume_graph = _build_multi_source_resume_pipeline(output_path=ctx.output_path)
+    resume_point = ctx.recovery_mgr.get_resume_point(ctx.run_id, resume_graph)
+    assert resume_point is not None
+    return Orchestrator(
+        ctx.db,
+        checkpoint_manager=ctx.checkpoint_mgr,
+        checkpoint_config=ctx.checkpoint_config,
+    ).resume(
+        resume_point,
+        resume_config,
+        resume_graph,
+        payload_store=ctx.payload_store,
+    )
+
+
+class TestMultiSourceCrashResume:
+    """Production-path crash/resume coverage for mixed-source pipelines."""
+
+    def test_two_sources_partial_completion_resumes_in_ingest_sequence_order(self, tmp_path: Path) -> None:
+        ctx = _start_interrupted_multi_source_run(tmp_path)
+        _append_crashed_refund_row(ctx)
+
+        result = _resume_multi_source_run(ctx)
+
+        assert result.status == RunStatus.COMPLETED
+        assert [row["business_id"] for row in _jsonl_rows(ctx.output_path)] == [
+            "order:1",
+            "order:2",
+            "refund:R-1",
+            "refund:R-2",
+        ]
+        ctx.db.close()
+
+    def test_one_source_completed_other_partial_resumes_only_partial(self, tmp_path: Path) -> None:
+        ctx = _start_interrupted_multi_source_run(tmp_path)
+        crashed_row_id = _append_crashed_refund_row(ctx)
+
+        assert ctx.recovery_mgr.get_unprocessed_rows(ctx.run_id) == [crashed_row_id]
+        result = _resume_multi_source_run(ctx)
+
+        assert result.rows_processed == 1
+        business_ids = [row["business_id"] for row in _jsonl_rows(ctx.output_path)]
+        assert business_ids.count("order:1") == 1
+        assert business_ids.count("order:2") == 1
+        assert business_ids.count("refund:R-2") == 1
+        ctx.db.close()
+
+    def test_per_source_schema_used_during_resume_replay(self, tmp_path: Path) -> None:
+        ctx = _start_interrupted_multi_source_run(tmp_path)
+        _append_crashed_refund_row(ctx)
+
+        _resume_multi_source_run(ctx)
+
+        rows_by_id = {row["business_id"]: row for row in _jsonl_rows(ctx.output_path)}
+        assert rows_by_id["order:1"]["schema_fields"] == "amount,order_id"
+        assert rows_by_id["refund:R-2"]["schema_fields"] == "amount,refund_id"
+        assert rows_by_id["refund:R-2"]["schema_fields"] != rows_by_id["order:1"]["schema_fields"]
+        ctx.db.close()
+
+    def test_resume_after_crash_during_source_iteration_records_partial_source_lifecycle(self, tmp_path: Path) -> None:
+        ctx = _start_interrupted_multi_source_run(tmp_path)
+
+        with ctx.db.engine.connect() as conn:
+            lifecycle_rows = conn.execute(
+                select(run_sources_table.c.source_name, run_sources_table.c.lifecycle_state)
+                .where(run_sources_table.c.run_id == ctx.run_id)
+                .order_by(run_sources_table.c.source_name)
+            ).fetchall()
+
+        lifecycle_by_source = {str(row.source_name): str(row.lifecycle_state) for row in lifecycle_rows}
+        assert lifecycle_by_source == {
+            "orders": "loaded",
+            "refunds": "interrupted",
+        }
+        result = _resume_multi_source_run(ctx)
+        assert result.status == RunStatus.COMPLETED
+        ctx.db.close()
 
 
 class TestResumeIdempotence:
@@ -430,7 +772,7 @@ class TestResumeIdempotence:
             "source",
             node_type=NodeType.SOURCE,
             plugin_name="list_source",
-            config=schema_config_dict,
+            config={**schema_config_dict, "source_name": "primary"},
         )
         graph_b.add_node(
             "transform_0",
@@ -663,7 +1005,7 @@ class TestCheckpointRecovery:
             "source",
             node_type=NodeType.SOURCE,
             plugin_name="test",
-            config=schema_config,
+            config={**schema_config, "source_name": "source"},
         )
         graph.add_node(
             "transform",
@@ -685,6 +1027,9 @@ class TestCheckpointRecovery:
         run_id = "checkpoint-partial-progress-test"
         now = datetime.now(UTC)
         contract_json, contract_hash = _create_test_schema_contract()
+        source_schema_json = json.dumps(
+            {"properties": {"id": {"type": "integer"}, "value": {"type": "integer"}}, "required": ["id", "value"]}
+        )
 
         with db.engine.connect() as conn:
             conn.execute(
@@ -695,8 +1040,7 @@ class TestCheckpointRecovery:
                     settings_json="{}",
                     canonical_version="sha256-rfc8785-v1",
                     status=RunStatus.FAILED,
-                    schema_contract_json=contract_json,
-                    schema_contract_hash=contract_hash,
+                    source_schema_json=source_schema_json,
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
@@ -713,6 +1057,22 @@ class TestCheckpointRecovery:
                     config_hash="test",
                     config_json="{}",
                     registered_at=now,
+                )
+            )
+
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="source",
+                    source_name="source",
+                    plugin_name="test_source",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=contract_json,
+                    schema_contract_hash=contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
                 )
             )
 
@@ -805,6 +1165,9 @@ class TestCheckpointRecovery:
         run_id = "checkpoint-restart-test"
         now = datetime.now(UTC)
         contract_json, contract_hash = _create_test_schema_contract()
+        source_schema_json = json.dumps(
+            {"properties": {"id": {"type": "integer"}, "value": {"type": "integer"}}, "required": ["id", "value"]}
+        )
 
         with db1.engine.connect() as conn:
             conn.execute(
@@ -815,8 +1178,7 @@ class TestCheckpointRecovery:
                     settings_json="{}",
                     canonical_version="sha256-rfc8785-v1",
                     status=RunStatus.FAILED,
-                    schema_contract_json=contract_json,
-                    schema_contract_hash=contract_hash,
+                    source_schema_json=source_schema_json,
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
@@ -833,6 +1195,22 @@ class TestCheckpointRecovery:
                     config_hash="test",
                     config_json="{}",
                     registered_at=now,
+                )
+            )
+
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="source",
+                    source_name="source",
+                    plugin_name="test_source",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=contract_json,
+                    schema_contract_hash=contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
                 )
             )
 
@@ -983,7 +1361,7 @@ class TestAggregationRecovery:
             "source",
             node_type=NodeType.SOURCE,
             plugin_name="test",
-            config=schema_config,
+            config={**schema_config, "source_name": "source"},
         )
         graph.add_node(
             "aggregator",

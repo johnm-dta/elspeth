@@ -820,6 +820,8 @@ class TestComposerSingleToolCall:
             session_engine=engine,
         )
         state = _empty_state()
+        user_message_content = "I want a pipeline that takes the string 'hello' and appends ' world' to it."
+        user_message_id = _insert_user_message(engine, session_id, user_message_content)
         output_path = tmp_path / "outputs" / "append.csv"
         pipeline_args = {
             "source": {
@@ -896,10 +898,11 @@ class TestComposerSingleToolCall:
         ):
             mock_llm.side_effect = [build_turn, preview_turn, final_turn]
             result = await service.compose(
-                "I want a pipeline that takes the string 'hello' and appends ' world' to it.",
+                user_message_content,
                 [],
                 state,
                 session_id=session_id,
+                user_message_id=user_message_id,
             )
 
         assert result.message == "Pipeline configured."
@@ -6510,6 +6513,7 @@ class TestComposeLoopFreeformRecipeIntentRouting:
             "bob,short note\n"
             "charlie,another lengthy customer description that exceeds thirty characters comfortably"
         )
+        user_message_id = _insert_user_message(engine, session_id, prompt)
 
         with patch.object(
             service,
@@ -6523,6 +6527,7 @@ class TestComposeLoopFreeformRecipeIntentRouting:
                 _empty_state(),
                 session_id=session_id,
                 user_id="test-user",
+                user_message_id=user_message_id,
             )
 
         assert mock_llm.call_count == 0

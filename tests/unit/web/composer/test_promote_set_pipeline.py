@@ -376,6 +376,47 @@ class TestPromoteSetPipelineArgErrorRouting:
             rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
         assert rows == []
 
+    def test_inline_blob_contained_content_without_message_id_fails_closed(self, tmp_path: Path) -> None:
+        """Verbatim inline blobs require both message content and message id."""
+        engine, session_id = _session_engine_with_session()
+        user_message_content = "Use this exact source text:\ngenerated row"
+        args = {
+            "source": {
+                "plugin": "text",
+                "on_success": "rows",
+                "options": {
+                    "column": "text",
+                    "schema": {"mode": "observed", "guaranteed_fields": ["text"]},
+                },
+                "inline_blob": {
+                    "filename": "input.txt",
+                    "mime_type": "text/plain",
+                    "content": "generated row",
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [],
+        }
+
+        with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):
+            _execute_set_pipeline(
+                args,
+                _empty_state(),
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    data_dir=str(tmp_path),
+                    session_engine=engine,
+                    session_id=session_id,
+                    user_message_content=user_message_content,
+                ),
+            )
+
+        with engine.connect() as conn:
+            rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
+        assert rows == []
+
     def test_non_blob_source_rejects_manual_source_authoring(self) -> None:
         """source_authoring is reserved for blob provenance, not caller options."""
         args = {

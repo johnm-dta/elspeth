@@ -250,6 +250,32 @@ class TestCreateBlobComposerSourceProvenance:
             rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
         assert rows == []
 
+    def test_contained_content_without_message_id_fails_closed(self, tmp_path: Path) -> None:
+        """Verbatim containment still requires a persisted message anchor."""
+        engine, session_id = _session_engine_with_session()
+        user_message_content = "Use this exact CSV:\npriority,score\nhigh,99\n"
+
+        with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):
+            _execute_create_blob(
+                {
+                    "filename": "verbatim.csv",
+                    "mime_type": "text/csv",
+                    "content": "priority,score\nhigh,99\n",
+                },
+                _empty_state(),
+                ToolContext(
+                    catalog=_mock_catalog(),
+                    data_dir=str(tmp_path),
+                    session_engine=engine,
+                    session_id=session_id,
+                    user_message_content=user_message_content,
+                ),
+            )
+
+        with engine.connect() as conn:
+            rows = conn.execute(select(blobs_table).where(blobs_table.c.session_id == session_id)).fetchall()
+        assert rows == []
+
     def test_empty_content_without_composer_provenance_fails_closed(self) -> None:
         """Empty content is valid locally but can never prove verbatim containment."""
         with pytest.raises(AuditIntegrityError, match="missing: user_message_id"):

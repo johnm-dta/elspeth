@@ -318,7 +318,12 @@ def _verbatim_blob_creation_provenance() -> _BlobCreationProvenance:
 
 def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreationProvenance:
     """Classify composer-created blob content and return DB provenance fields."""
-    if context.user_message_content is not None and content and content in context.user_message_content:
+    if (
+        context.user_message_id is not None
+        and context.user_message_content is not None
+        and content
+        and content in context.user_message_content
+    ):
         return _verbatim_blob_creation_provenance()
 
     required = {

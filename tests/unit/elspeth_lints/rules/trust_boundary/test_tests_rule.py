@@ -709,6 +709,45 @@ def test_subject_call_without_source_param_fires_irrelevant_input(tmp_path: Path
     assert "source_param='data'" in findings[0].message
 
 
+def test_unbound_method_call_does_not_count_receiver_as_source_param(tmp_path: Path) -> None:
+    """``Handler.handle(handler)`` supplies only ``self``, not payload."""
+    test_ref = "tests/test_unbound_method.py::test_rejects_bad_input"
+    _write_test_file(
+        tmp_path,
+        "tests/test_unbound_method.py",
+        """
+        import pytest
+
+        class Handler:
+            pass
+
+        def test_rejects_bad_input():
+            handler = Handler()
+            with pytest.raises(ValueError):
+                Handler.handle(handler)
+        """,
+    )
+    fingerprint = _test_fingerprint(tmp_path, test_ref)
+    findings = _analyze_at(
+        f"""
+        class Handler:
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="payload",
+                suppresses=("R1",),
+                invariant="raises ValueError on malformed payload",
+                test_ref="{test_ref}",
+                test_fingerprint="{fingerprint}",
+            )
+            def handle(self, payload):
+                return payload["x"]
+        """,
+        repo_root=tmp_path,
+    )
+    assert [finding.rule_id for finding in findings] == ["R_TB_TESTS_IRRELEVANT_INPUT"]
+
+
 def test_repurposed_test_that_calls_different_subject_fires_irrelevant_input(tmp_path: Path) -> None:
     test_ref = "tests/test_repurposed.py::test_rejects_bad_input"
     _write_test_file(

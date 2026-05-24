@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -503,6 +503,7 @@ class _VocabularySpec:
     module_path: str
     attr_names: tuple[str, ...]
     use_mapping_keys: bool = False
+    use_collection_values: bool = False
 
 
 _RULE_VOCABULARY_REGISTRY: dict[str, _VocabularySpec] = {
@@ -566,15 +567,18 @@ _RULE_VOCABULARY_REGISTRY: dict[str, _VocabularySpec] = {
     ),
     "trust_boundary.tests": _VocabularySpec(
         "elspeth_lints.rules.trust_boundary.tests.rule",
-        ("RULE_ID",),
+        ("_ALLOWLIST_RULE_IDS",),
+        use_collection_values=True,
     ),
     "trust_boundary.scope": _VocabularySpec(
         "elspeth_lints.rules.trust_boundary.scope.rule",
-        ("RULE_ID",),
+        ("_ALLOWLIST_RULE_IDS",),
+        use_collection_values=True,
     ),
     "trust_boundary.tier": _VocabularySpec(
         "elspeth_lints.rules.trust_boundary.tier.rule",
-        ("RULE_ID",),
+        ("_ALLOWLIST_RULE_IDS",),
+        use_collection_values=True,
     ),
 }
 
@@ -1317,6 +1321,8 @@ def _valid_rule_ids_for(rule_filter: str) -> frozenset[str]:
     * ``RULE_ID`` — package id emitted directly as a finding id.
     * ``LEGACY_RULE_ID`` — finding id emitted by rules ported from
       earlier bespoke scripts.
+    * ``_ALLOWLIST_RULE_IDS`` — scanner-owned collection of exact
+      sub-rule ids accepted by a sibling allowlist loader.
 
     Adding a new rule: add one ``_RULE_VOCABULARY_REGISTRY`` entry. The
     tests assert every supported rule resolves a non-empty vocabulary,
@@ -1332,6 +1338,9 @@ def _valid_rule_ids_for(rule_filter: str) -> frozenset[str]:
             "sub-rule ids."
         )
 
+    if spec.use_mapping_keys and spec.use_collection_values:
+        raise ReauditError(f"{rule_filter}: vocabulary specs cannot use both mapping keys and collection values")
+
     if spec.use_mapping_keys:
         if len(spec.attr_names) != 1:
             raise ReauditError(f"{rule_filter}: mapping-key vocabulary specs must name exactly one attribute")
@@ -1341,6 +1350,20 @@ def _valid_rule_ids_for(rule_filter: str) -> frozenset[str]:
                 f"{rule_filter}: {spec.module_path}.{spec.attr_names[0]} must be a mapping, got {type(rules_mapping).__name__}"
             )
         return frozenset(str(rule_id) for rule_id in rules_mapping)
+
+    if spec.use_collection_values:
+        if len(spec.attr_names) != 1:
+            raise ReauditError(f"{rule_filter}: collection-value vocabulary specs must name exactly one attribute")
+        values_collection = _lookup_module_attr(spec.module_path, spec.attr_names[0])
+        if isinstance(values_collection, str) or not isinstance(values_collection, Collection):
+            raise ReauditError(
+                f"{rule_filter}: {spec.module_path}.{spec.attr_names[0]} must be a non-string collection, "
+                f"got {type(values_collection).__name__}"
+            )
+        if any(not isinstance(value, str) for value in values_collection):
+            bad = [type(value).__name__ for value in values_collection if not isinstance(value, str)]
+            raise ReauditError(f"{rule_filter}: collection vocabulary values must be strings, got {bad}")
+        return frozenset(values_collection)
 
     values = tuple(_lookup_module_attr(spec.module_path, attr_name) for attr_name in spec.attr_names)
     if any(not isinstance(value, str) for value in values):

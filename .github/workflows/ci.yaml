@@ -152,6 +152,8 @@ jobs:
 
       - name: Run trust-tier elspeth-lints rule
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        env:
+          ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules trust_tier.tier_model \
@@ -159,6 +161,8 @@ jobs:
 
       - name: Run trust-boundary honesty-gate elspeth-lints rules
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        env:
+          ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules trust_boundary.tests,trust_boundary.scope,trust_boundary.tier \
@@ -272,6 +276,8 @@ jobs:
       - name: Emit elspeth-lints trust-tier SARIF artifact
         if: always()
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        env:
+          ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \

@@ -43,13 +43,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth_lints.core.allowlist import JudgeVerdict, compute_judge_metadata_signature
+from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict, compute_judge_metadata_signature
 from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.core.reaudit import (
     _EXCLUDED_FROM_REAUDIT,
     _RULE_VOCABULARY_REGISTRY,
     ReauditDivergence,
     ReauditError,
+    _entry_matches_rule_filter,
     _scan_via_rule_analyze,
     _supported_rules,
     _valid_rule_ids_for,
@@ -103,6 +104,33 @@ def test_every_supported_rule_resolves_a_non_empty_vocabulary() -> None:
 def test_vocabulary_registry_covers_every_supported_rule() -> None:
     """The dispatch table is declarative and covers the supported rule set."""
     assert set(_RULE_VOCABULARY_REGISTRY) == set(_supported_rules())
+
+
+@pytest.mark.parametrize(
+    ("rule_filter", "emitted_rule_id"),
+    (
+        ("trust_boundary.tests", "TBE1"),
+        ("trust_boundary.tests", "R_TB_TESTS_IRRELEVANT_INPUT"),
+        ("trust_boundary.scope", "TBS2"),
+        ("trust_boundary.tier", "TBT1"),
+    ),
+)
+def test_trust_boundary_reaudit_vocabulary_includes_emitted_rule_ids(
+    rule_filter: str,
+    emitted_rule_id: str,
+) -> None:
+    """Trust-boundary allowlist entries use sub-rule ids, not package ids."""
+    valid_rule_ids = _valid_rule_ids_for(rule_filter)
+    entry = AllowlistEntry(
+        key=f"src/elspeth/boundary.py:{emitted_rule_id}:handler:fp=abc123",
+        owner="test-owner",
+        reason="Fixture entry for rule-filter matching.",
+        safety="No runtime suppression; vocabulary regression only.",
+        expires=None,
+    )
+
+    assert emitted_rule_id in valid_rule_ids
+    assert _entry_matches_rule_filter(entry, valid_rule_ids)
 
 
 def test_unregistered_rule_filter_raises_reaudit_error() -> None:

@@ -263,6 +263,7 @@ def analyze_tree(tree: ast.AST, file_path: str, *, repo_root: Path) -> list[Find
             subject_name=func_node.name,
             source_param=source_param,
             source_param_index=_source_param_index(func_node, source_param),
+            module_class_names=resolution.module_class_names,
         )
         if not semantics.has_raising_assertion:
             findings.append(
@@ -371,6 +372,7 @@ class _ResolvedTestRef:
     test_function: ast.FunctionDef | ast.AsyncFunctionDef
     file_path: Path
     fingerprint: str
+    module_class_names: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,6 +455,7 @@ def _resolve_test_ref(test_ref: str, repo_root: Path) -> _ResolvedTestRef | _Tes
         test_function=func,
         file_path=file_path,
         fingerprint=_fingerprint_test_function(func),
+        module_class_names=_module_class_names(parsed.tree),
     )
 
 
@@ -460,6 +463,25 @@ def _fingerprint_test_function(func: ast.FunctionDef | ast.AsyncFunctionDef) -> 
     """Return a stable fingerprint for the referenced test function AST."""
     canonical = ast.dump(func, annotate_fields=True, include_attributes=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _module_class_names(tree: ast.Module) -> frozenset[str]:
+    """Return class-like names visible in the referenced test module."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            names.add(node.name)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name.rsplit(".", 1)[-1]
+                if _is_type_name(bound_name):
+                    names.add(bound_name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bound_name = alias.asname or alias.name.split(".", 1)[0]
+                if _is_type_name(bound_name):
+                    names.add(bound_name)
+    return frozenset(names)
 
 
 def _strip_pytest_parametrize_suffix(segment: str) -> str:
@@ -508,6 +530,7 @@ def _test_ref_semantics(
     subject_name: str,
     source_param: str,
     source_param_index: int | None,
+    module_class_names: frozenset[str],
 ) -> _TestRefSemantics:
     """Return the direct raising, exception, and subject-call signals in ``func``.
 
@@ -556,6 +579,7 @@ def _test_ref_semantics(
                     subject_name=subject_name,
                     source_param=source_param,
                     source_param_index=source_param_index,
+                    module_class_names=module_class_names,
                 ):
                     subject_call_uses_source_param = True
             if isinstance(child, (ast.With, ast.AsyncWith)):
@@ -568,6 +592,7 @@ def _test_ref_semantics(
                             subject_name=subject_name,
                             source_param=source_param,
                             source_param_index=source_param_index,
+                            module_class_names=module_class_names,
                         ):
                             subject_call_uses_source_param = True
     return _TestRefSemantics(
@@ -584,6 +609,7 @@ def _has_raising_assertion(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool
         subject_name="",
         source_param="",
         source_param_index=None,
+        module_class_names=frozenset(),
     ).has_raising_assertion
 
 
@@ -641,6 +667,7 @@ def _raising_call_invokes_subject(
     subject_name: str,
     source_param: str,
     source_param_index: int | None,
+    module_class_names: frozenset[str],
 ) -> bool:
     """Return True for ``pytest.raises(ValueError, subject, ...)`` style calls."""
     if len(call.args) < 2:
@@ -656,6 +683,7 @@ def _raising_call_invokes_subject(
         pseudo_call,
         source_param=source_param,
         source_param_index=source_param_index,
+        module_class_names=module_class_names,
     )
 
 
@@ -665,6 +693,7 @@ def _body_calls_subject_with_source_param(
     subject_name: str,
     source_param: str,
     source_param_index: int | None,
+    module_class_names: frozenset[str],
 ) -> bool:
     """Return True if the with-body directly calls the subject through source_param."""
     for statement in body:
@@ -676,6 +705,7 @@ def _body_calls_subject_with_source_param(
                     child,
                     source_param=source_param,
                     source_param_index=source_param_index,
+                    module_class_names=module_class_names,
                 )
             ):
                 return True
@@ -701,15 +731,38 @@ def _call_uses_source_param(
     *,
     source_param: str,
     source_param_index: int | None,
+    module_class_names: frozenset[str],
 ) -> bool:
     """Return True if a call supplies the source parameter by name or position."""
     if any(keyword.arg == source_param for keyword in call.keywords):
         return True
     positional_index = source_param_index
-    if isinstance(call.func, ast.Attribute) and positional_index is not None and positional_index > 0:
+    if (
+        isinstance(call.func, ast.Attribute)
+        and positional_index is not None
+        and positional_index > 0
+        and not _is_unbound_method_call(call.func, module_class_names=module_class_names)
+    ):
         # Bound method call: ``service.foo(payload)`` omits ``self`` / ``cls``.
         positional_index -= 1
     return positional_index is not None and len(call.args) > positional_index
+
+
+def _is_unbound_method_call(func: ast.Attribute, *, module_class_names: frozenset[str]) -> bool:
+    receiver_name = _terminal_attribute_name(func.value)
+    return receiver_name is not None and (receiver_name in module_class_names or _is_type_name(receiver_name))
+
+
+def _terminal_attribute_name(expr: ast.expr) -> str | None:
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        return expr.attr
+    return None
+
+
+def _is_type_name(name: str) -> bool:
+    return bool(name) and name[0].isupper()
 
 
 RULE = TrustBoundaryTestsRule()

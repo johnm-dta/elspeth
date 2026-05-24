@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from elspeth_lints.core.allowlist import JudgeVerdict, compute_judge_metadata_signature
@@ -29,7 +29,13 @@ def _canonical_key(finding: Finding) -> str:
     return key() if callable(key) else key
 
 
-def _write_signed_allowlist(allowlist_dir: Path, *, finding: Finding, source_file: Path) -> None:
+def _write_signed_allowlist(
+    allowlist_dir: Path,
+    *,
+    finding: Finding,
+    source_file: Path,
+    expires: date = date(2099, 1, 1),
+) -> None:
     allowlist_dir.mkdir(parents=True, exist_ok=True)
     key = _canonical_key(finding)
     file_fingerprint = hashlib.sha256(source_file.read_bytes()).hexdigest()
@@ -54,7 +60,7 @@ def _write_signed_allowlist(allowlist_dir: Path, *, finding: Finding, source_fil
                 "  owner: test-owner",
                 "  reason: Synthetic trust-boundary false positive exemption.",
                 "  safety: Exact signed fixture only; no per-file blanket rule.",
-                "  expires: 2099-01-01",
+                f"  expires: {expires.isoformat()}",
                 f"  file_fingerprint: {file_fingerprint}",
                 f"  ast_path: {ast_path}",
                 "  judge_verdict: ACCEPTED",
@@ -203,6 +209,38 @@ def handler(payload):
         assert "judge_verdict" in str(exc)
     else:
         raise AssertionError(f"{source}: unsigned trust-boundary allowlist entry was accepted")
+
+
+def test_trust_boundary_allowlist_does_not_suppress_expired_exact_entry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "src" / "elspeth"
+    source = _write_source(
+        root,
+        "boundary.py",
+        """
+@trust_boundary(
+    tier=3,
+    source="external payload",
+    source_param="payload",
+    suppresses=("R1",),
+    invariant="raises ValueError on malformed payload",
+)
+def handler(payload):
+    return 42
+""",
+    )
+    raw = scope_rule.scan_root(root)
+    assert [finding.rule_id for finding in raw] == ["TBS2"]
+
+    allowlist_dir = tmp_path / "allowlist"
+    _write_signed_allowlist(allowlist_dir, finding=raw[0], source_file=source, expires=date(2020, 1, 1))
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_HMAC_KEY)
+
+    findings = scope_rule.scan_root(root, allowlist_dir_override=allowlist_dir)
+
+    assert [finding.rule_id for finding in findings] == ["TBS2"]
 
 
 def test_trust_boundary_allowlist_rejects_per_file_rules(tmp_path: Path) -> None:

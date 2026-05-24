@@ -28,6 +28,7 @@ import ast
 import hashlib
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from elspeth_lints.core.allowlist import Allowlist, AllowlistEntry, FindingKey, load_allowlist, verify_entry_binding_against_finding
@@ -329,6 +330,9 @@ def _allowlist_match(allowlist: Allowlist, finding: Finding) -> object | None:
             fingerprint=finding.fingerprint,
         )
     )
+    if isinstance(matched, AllowlistEntry) and _is_expired_entry(matched):
+        matched.matched = False
+        return None
     if isinstance(matched, AllowlistEntry) and matched.judge_verdict is not None:
         if not finding.ast_path:
             raise ValueError(
@@ -337,6 +341,10 @@ def _allowlist_match(allowlist: Allowlist, finding: Finding) -> object | None:
             )
         verify_entry_binding_against_finding(matched, file_path=finding.file_path, ast_path=finding.ast_path)
     return matched
+
+
+def _is_expired_entry(entry: AllowlistEntry) -> bool:
+    return entry.expires is not None and entry.expires < datetime.now(UTC).date()
 
 
 def _rule_id_from_canonical_key(key: str) -> str:

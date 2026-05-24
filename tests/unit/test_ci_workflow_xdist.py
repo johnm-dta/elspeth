@@ -27,11 +27,17 @@ def _ci_workflow() -> dict[str, Any]:
 
 
 def _step_run(job: dict[str, Any], step_name: str) -> str:
+    step = _step(job, step_name)
+    run = step.get("run")
+    assert isinstance(run, str), f"{step_name!r} must have a shell run block"
+    return run
+
+
+def _step(job: dict[str, Any], step_name: str) -> dict[str, Any]:
     for step in job["steps"]:
         if step.get("name") == step_name:
-            run = step.get("run")
-            assert isinstance(run, str), f"{step_name!r} must have a shell run block"
-            return run
+            assert isinstance(step, dict), f"{step_name!r} must be a mapping"
+            return step
     raise AssertionError(f"Missing CI step {step_name!r}")
 
 
@@ -223,3 +229,20 @@ def test_static_analysis_runs_composer_skill_inventory_drift_gate() -> None:
     run = _step_run(static_analysis, "Check composer skill tool inventory")
 
     assert "scripts/cicd/generate_skill_inventory.py --check" in run
+
+
+def test_static_analysis_signed_allowlist_steps_receive_hmac_secret() -> None:
+    """Signed allowlist loaders must not crash CI for lack of the HMAC key."""
+    workflow = _ci_workflow()
+    static_analysis = workflow["jobs"]["static-analysis"]
+    expected_secret = "${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}"
+
+    for step_name in (
+        "Run trust-tier elspeth-lints rule",
+        "Run trust-boundary honesty-gate elspeth-lints rules",
+        "Emit elspeth-lints trust-tier SARIF artifact",
+    ):
+        step = _step(static_analysis, step_name)
+        env = step.get("env")
+        assert isinstance(env, dict), f"{step_name!r} must define step env"
+        assert env.get("ELSPETH_JUDGE_METADATA_HMAC_KEY") == expected_secret

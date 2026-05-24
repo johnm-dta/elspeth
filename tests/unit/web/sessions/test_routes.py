@@ -7169,7 +7169,14 @@ def test_recompose_uses_last_conversational_user_before_audit_tool_rows(tmp_path
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(service.add_message(session_id, "user", "Build a CSV pipeline", writer_principal="route_user_message"))
+        user_message = loop.run_until_complete(
+            service.add_message(
+                session_id,
+                "user",
+                "Build a CSV pipeline",
+                writer_principal="route_user_message",
+            )
+        )
         # Rev-4 audit-only breadcrumb (no assistant parent).
         loop.run_until_complete(
             service.add_message(
@@ -7189,6 +7196,7 @@ def test_recompose_uses_last_conversational_user_before_audit_tool_rows(tmp_path
     composer.compose.assert_awaited_once()
     assert composer.compose.call_args.args[0] == "Build a CSV pipeline"
     assert composer.compose.call_args.args[1] == []
+    assert composer.compose.call_args.kwargs["user_message_id"] == str(user_message.id)
 
 
 # ---------------------------------------------------------------------------

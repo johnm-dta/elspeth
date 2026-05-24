@@ -624,6 +624,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         user_id=str(user.user_id),
                         progress=progress_sink,
                         guided_terminal=_guided_terminal_for_compose,
+                        user_message_id=request_id,
                     )
                 except ComposerConvergenceError as exc:
                     terminal_status = "timed_out" if exc.budget_exhausted == "timeout" else "failed"

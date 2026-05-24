@@ -174,7 +174,7 @@ jobs:
             --root . \
             --format sarif > elspeth-lints.sarif
           status=$?
-          if [[ "$status" -gt 1 ]]; then
+          if [ "$status" -gt 1 ]; then
             exit "$status"
           fi
 
@@ -188,7 +188,7 @@ jobs:
             --root src/elspeth \
             --format sarif > elspeth-lints-immutability.sarif
           status=$?
-          if [[ "$status" -gt 1 ]]; then
+          if [ "$status" -gt 1 ]; then
             exit "$status"
           fi
 
@@ -202,7 +202,7 @@ jobs:
             --root src/elspeth \
             --format sarif > elspeth-lints-plugin-contract.sarif
           status=$?
-          if [[ "$status" -gt 1 ]]; then
+          if [ "$status" -gt 1 ]; then
             exit "$status"
           fi
 
@@ -216,7 +216,7 @@ jobs:
             --root src/elspeth \
             --format sarif > elspeth-lints-audit-evidence.sarif
           status=$?
-          if [[ "$status" -gt 1 ]]; then
+          if [ "$status" -gt 1 ]; then
             exit "$status"
           fi
 
@@ -230,7 +230,7 @@ jobs:
             --root src/elspeth \
             --format sarif > elspeth-lints-composer.sarif
           status=$?
-          if [[ "$status" -gt 1 ]]; then
+          if [ "$status" -gt 1 ]; then
             exit "$status"
           fi
 
@@ -244,7 +244,7 @@ jobs:
             --root src/elspeth \
             --format sarif > elspeth-lints-contract-manifest.sarif
           status=$?
-          if [[ "$status" -gt 1 ]]; then
+          if [ "$status" -gt 1 ]; then
             exit "$status"
           fi
 
@@ -258,7 +258,7 @@ jobs:
             --root . \
             --format sarif > elspeth-lints-manifest-inventory.sarif
           status=$?
-          if [[ "$status" -gt 1 ]]; then
+          if [ "$status" -gt 1 ]; then
             exit "$status"
           fi
 
@@ -272,7 +272,7 @@ jobs:
             --root src/elspeth \
             --format sarif > elspeth-lints-trust-tier.sarif
           status=$?
-          if [[ "$status" -gt 1 ]]; then
+          if [ "$status" -gt 1 ]; then
             exit "$status"
           fi
 

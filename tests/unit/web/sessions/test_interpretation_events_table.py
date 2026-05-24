@@ -195,8 +195,8 @@ def _surface_opt_out_row(*, row_id: str, session_id: str, state_id: str) -> dict
     }
 
 
-def test_proposal_provenance_schema_cohort_epoch_is_11() -> None:
-    assert SESSION_SCHEMA_EPOCH == 11
+def test_proposal_provenance_schema_cohort_epoch_is_at_least_11() -> None:
+    assert SESSION_SCHEMA_EPOCH >= 11
 
 
 def test_composition_proposal_composer_provenance_is_all_or_none(engine) -> None:

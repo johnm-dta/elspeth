@@ -1,7 +1,7 @@
 """SQLAlchemy Core table definitions for the session database.
 
 Tables: sessions, chat_messages, composition_states, runs, blobs,
-blob_run_links, user_secrets.
+blob_run_links, blob_inline_resolutions, user_secrets.
 
 Current schema bootstrap lives in ``sessions/schema.py``. Pre-release
 session databases are created from this metadata and stale runtime DBs
@@ -25,6 +25,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     MetaData,
+    PrimaryKeyConstraint,
     String,
     Table,
     Text,
@@ -81,7 +82,9 @@ from sqlalchemy.types import JSON
 #   11 → composition_proposals gains composer provenance fields so deferred
 #        explicit-approval accepts can replay inline-blob writes with the same
 #        model/provider/skill/arguments context as the original compose turn.
-SESSION_SCHEMA_EPOCH = 11
+#   12 → blob_inline_resolutions added for runtime inline-content blob
+#        substitution audit rows.
+SESSION_SCHEMA_EPOCH = 12
 
 # ``SESSION_DB_APPLICATION_ID`` — project-unique SQLite ``application_id``.
 # Stored in ``PRAGMA application_id`` so forensics tooling can confirm a
@@ -1254,6 +1257,55 @@ blob_run_links_table = Table(
 )
 Index("ix_blob_run_links_blob_id", blob_run_links_table.c.blob_id)
 Index("ix_blob_run_links_run_id", blob_run_links_table.c.run_id)
+
+blob_inline_resolutions_table = Table(
+    "blob_inline_resolutions",
+    metadata,
+    Column(
+        "run_id",
+        String,
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("attempt", Integer, nullable=False, server_default="1"),
+    Column("field_path", String, nullable=False),
+    Column(
+        "blob_id",
+        String,
+        ForeignKey("blobs.id"),
+        nullable=False,
+    ),
+    Column("content_hash", String, nullable=False),
+    Column("byte_length", Integer, nullable=False),
+    Column("mime_type", String, nullable=False),
+    Column("encoding", String, nullable=False),
+    Column("resolved_at", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint(
+        "run_id",
+        "field_path",
+        "blob_id",
+        "attempt",
+        name="pk_blob_inline_resolutions",
+    ),
+    CheckConstraint(
+        "length(content_hash) = 64",
+        name="ck_blob_inline_resolutions_hash_format",
+    ),
+    CheckConstraint(
+        "encoding IN ('utf-8', 'utf-8-sig', 'utf-16', 'latin-1')",
+        name="ck_blob_inline_resolutions_encoding",
+    ),
+    CheckConstraint(
+        "field_path LIKE 'source.options.%' OR field_path LIKE 'node:%.options.%' OR field_path LIKE 'output:%.options.%'",
+        name="ck_blob_inline_resolutions_field_path",
+    ),
+    CheckConstraint(
+        "byte_length >= 0",
+        name="ck_blob_inline_resolutions_byte_length",
+    ),
+)
+Index("ix_blob_inline_resolutions_blob_id", blob_inline_resolutions_table.c.blob_id)
+Index("ix_blob_inline_resolutions_run_id", blob_inline_resolutions_table.c.run_id)
 
 run_events_table = Table(
     "run_events",

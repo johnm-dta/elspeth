@@ -2,6 +2,14 @@
 
 Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must reset the session DB and Landscape audit DB together.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
+## Current Session-Only Schema Cutover
+
+P3 of `elspeth-fdebcaa79a` adds `blob_inline_resolutions` to the web
+session DB and bumps `SESSION_SCHEMA_EPOCH` to 12. This is a
+session-only schema cutover: delete/recreate the session DB with this
+runbook before deploying the build, but do not reset the Landscape DB
+unless the same deploy also changes `SQLITE_SCHEMA_EPOCH`.
+
 ## Deployment Scope (Schedule 1A)
 
 Schedule 1A's per-session write discipline (`_session_write_lock`,

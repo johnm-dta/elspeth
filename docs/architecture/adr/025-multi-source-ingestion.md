@@ -216,15 +216,19 @@ by code**. The singular `source` surface is deleted, not deprecated.
 
 ### What this is NOT
 
-- This is not a commitment to *concurrent* multi-source execution.
-  The orchestrator processes sources sequentially within a run (G12 /
-  elspeth-bc81207798 — parallel ingest is downstream RC6 work). The
-  source-iteration axis of ADR-001 — orchestrator pulls one source
-  at a time — is preserved by this ADR. The orthogonal
+- This is not a commitment to *concurrent* multi-source execution. The
+  RC6 contract is **sequential multi-source ingest**: the orchestrator
+  processes sources sequentially within a run. YAML declaration order is
+  the determinism anchor for cross-source `ingest_sequence` assignment,
+  and replay/resume preserve that order rather than attempting
+  producer-order independence. The source-iteration axis of ADR-001 —
+  orchestrator pulls one source at a time — is preserved by this ADR:
+  this is **not concurrent source iteration**. The orthogonal
   worker-execution axis of ADR-001 is amended by ADR-026 (the durable
-  token scheduler), whose `token_work_items` row makes the multi-
-  worker contract sound; that amendment is recorded in ADR-001's
-  *Amendments* section.
+  token scheduler), whose `token_work_items` row makes the multi-worker
+  contract sound; that amendment is recorded in ADR-001's *Amendments*
+  section. Any future parallel source-ingest design would require a
+  separate ADR and a new tracker item.
 - This is not a claim that all sources in a pipeline share a
   schema contract. They explicitly may not. Mixed-contract pipelines
   are a first-class capability; each row's schema is recovered by
@@ -486,13 +490,13 @@ gate — per `project_multi_source_token_scheduler_rc6`)
 
 ## Open questions / future work
 
-- **Concurrent multi-source ingestion.** This ADR does not commit to
-  parallel iteration of N sources. ADR-001's source-iteration axis is
-  not amended by this ADR (it is preserved); the orthogonal
-  worker-execution axis is amended by ADR-026 (companion). G12 /
-  elspeth-bc81207798 (multi-source pipelines run sequentially) is RC6
-  follow-up work along the source-iteration axis and would warrant
-  its own ADR if it changes that axis.
+- **Concurrent multi-source ingestion.** This ADR explicitly does not
+  commit to parallel iteration of N sources. ADR-001's
+  source-iteration axis is not amended by this ADR (it is preserved);
+  the orthogonal worker-execution axis is amended by ADR-026
+  (companion). A future change that makes the orchestrator pull from
+  multiple sources concurrently would amend the source-iteration axis
+  and would warrant its own ADR and tracker item.
 - **Cross-source row identity coalescing.** When two sources happen
   to emit `row_id = "12345"`, the audit trail today treats them as
   distinct because `(source_node_id, row_id)` is the durable
@@ -514,8 +518,8 @@ gate — per `project_multi_source_token_scheduler_rc6`)
   ADR-001's separate worker-execution axis is amended by ADR-026
   (companion); the two axes are orthogonal and ADR-001's *Amendments*
   section records the full trail. Concurrent multi-source iteration
-  would amend the source-iteration axis and is deferred RC6 follow-up
-  (G12 / elspeth-bc81207798) requiring a separate future ADR.
+  would amend the source-iteration axis and requires a separate future
+  ADR and tracker item.
 - **ADR-010** (declaration-trust framework) — preserved; the
   per-source schema contract continues to be a declaration-trust
   artifact, and the runtime VAL manifest drift check at

@@ -21,9 +21,14 @@ unprocessed rows back through the source plugin.
 
 The RC5.2 model has three weaknesses that block the two RC6 outcomes
 the `feat/multi-source-token-scheduler` branch ships: multi-source
-ingestion and **multi-worker concurrent token execution**. Multi-worker
-is not a future possibility the scheduler primitive permits; it is a
-stated RC6 deliverable that the scheduler exists to make sound:
+ingestion and **multi-worker concurrent token execution**. Multi-source
+ingestion here means **sequential multi-source ingest**: source
+iteration remains one source at a time within a run. YAML declaration
+order is the determinism anchor for cross-source `ingest_sequence`
+assignment. The scheduler's concurrency model is worker-token
+concurrency, **not concurrent source iteration**. Multi-worker is not a
+future possibility the scheduler primitive permits; it is a stated RC6
+deliverable that the scheduler exists to make sound:
 
 1. **No durable record of "what was the orchestrator about to do
    next?"** Recovery infers next-token selection from the absence of
@@ -111,12 +116,13 @@ READY → LEASED → (WAITING | BLOCKED | PENDING_SINK) → TERMINAL | FAILED
   (`scheduler_repository.py:955-958`).
 - **`ingest_sequence`** — global ordering primitive across all sources
   (NEW on this branch; replaces `row_index` as the resume sort key).
-  Token construction is offensive: `_require_source_row_identity`
-  crashes with `OrchestrationInvariantError` if either
-  `source_row_index` or `ingest_sequence` is missing, with the
-  institutional-memory message *"Do not fabricate source_row_index or
-  ingest_sequence from row_index"* (G22 / elspeth-7f3ac1ac65 lifts
-  that string into a doc + lint rule).
+  The orchestrator assigns it monotonically while iterating sources in
+  YAML declaration order. Token construction is type-enforced:
+  `TokenManager.create_initial_token()` and
+  `TokenManager.create_quarantine_token()` require
+  `source_row_index` and `ingest_sequence` as keyword-only `int`
+  parameters, so missing identity is a caller type error rather than a
+  runtime defaulting path.
 - **`step_index`** — secondary ordering for tie-breaking within a
   single token's lifetime.
 - **Claim order:** `ORDER BY ingest_sequence, step_index, created_at`
@@ -867,9 +873,10 @@ for the move.
   which worker wins the CAS." The orthogonal source-iteration
   axis of ADR-001 (orchestrator pulls from one source at a
   time within a run) is not amended here and is preserved
-  by ADR-025; concurrent multi-source iteration is deferred
-  RC6 follow-up work (G12 / elspeth-bc81207798) that would
-  require its own ADR.
+  by ADR-025. That preserved model is sequential multi-source
+  ingest: YAML declaration order is the determinism anchor,
+  and this ADR is not concurrent source iteration. Any future
+  concurrent source-iteration design would require its own ADR.
 - **ADR-010** (declaration-trust framework) — preserved. The
   scheduler row carries no declaration-trust state; resume
   precondition (runtime VAL manifest match) is enforced at

@@ -52,6 +52,8 @@ def _insert_checkpoint_prereqs(
             settings_json="{}",
             canonical_version="sha256-rfc8785-v1",
             status=RunStatus.RUNNING,
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
         )
     )
     conn.execute(
@@ -259,6 +261,8 @@ def test_create_checkpoint_rejects_cross_run_token(db: LandscapeDB, checkpoint_m
                 settings_json="{}",
                 canonical_version="sha256-rfc8785-v1",
                 status=RunStatus.RUNNING,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
             )
         )
         conn.execute(

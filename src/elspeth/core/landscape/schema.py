@@ -54,7 +54,10 @@ metadata = MetaData()
 #        to join Landscape LLM calls back to session interpretation_events.
 #   9 → Phase 4 hello-world tutorial audit-story fields:
 #        runs.llm_call_count, runs.seeded_from_cache, and runs.cache_key.
-SQLITE_SCHEMA_EPOCH = 9
+#  10 → OpenRouter catalog snapshot anchor (audit-completeness):
+#        runs.openrouter_catalog_sha256 and runs.openrouter_catalog_source
+#        record which model catalog blessed each run's decisions.
+SQLITE_SCHEMA_EPOCH = 10
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -105,6 +108,25 @@ runs_table = Table(
     Column("llm_call_count", Integer, nullable=True),
     Column("seeded_from_cache", Boolean, nullable=False, default=False, server_default=text("0")),
     Column("cache_key", String(64), nullable=True),
+    # OpenRouter model catalog snapshot anchor (audit-completeness):
+    # records which catalog blessed the run's model decisions.  The sha
+    # is canonical (sorted utf-8 ids joined on '\n') so it is invariant
+    # under prime-order; source ∈ {"live", "bundled"} distinguishes
+    # online-probed snapshots from the bundled litellm fallback.  Both
+    # NOT NULL — see ``read_openrouter_catalog_snapshot_id`` for the
+    # reader the orchestrator uses to populate them.  Per CLAUDE.md
+    # Tier-1 doctrine no ``server_default`` is set: a synthetic
+    # placeholder in the audit trail would be indistinguishable from a
+    # real hash to any downstream reader, violating the fabrication
+    # test.  Production goes through :meth:`RunLifecycleRepository.begin_run`
+    # which validates both fields; direct ``runs_table.insert()`` from
+    # test fixtures must supply them explicitly.
+    Column("openrouter_catalog_sha256", String(64), nullable=False),
+    Column("openrouter_catalog_source", String(8), nullable=False),
+    CheckConstraint(
+        "openrouter_catalog_source IN ('live', 'bundled')",
+        name="ck_runs_openrouter_catalog_source",
+    ),
 )
 
 run_attributions_table = Table(

@@ -7,8 +7,9 @@ schema contracts, secret resolutions, export status, and reproducibility grading
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -68,6 +69,25 @@ _IMMUTABLE_SUCCESS_RUN_STATUSES = frozenset(
 _IMMUTABLE_SUCCESS_RUN_STATUS_VALUES = tuple(status.value for status in _IMMUTABLE_SUCCESS_RUN_STATUSES)
 
 _AUTH_PROVIDER_TYPES = frozenset({"local", "oidc", "entra"})
+_OPENROUTER_CATALOG_SOURCES = frozenset({"live", "bundled"})
+
+# 64 lowercase hex chars — matches the canonical sha256 hex digest format
+# produced by ``hashlib.sha256(...).hexdigest()``. Used by the Tier-1
+# write-side guards in this module, ``write_repository.py``, and
+# ``web/execution/service.py`` to reject malformed snapshot ids that
+# would otherwise corrupt the audit trail without a downstream signal.
+_SHA256_HEX_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
+
+
+def is_valid_sha256_hex(value: str) -> bool:
+    """Return True if ``value`` is exactly 64 lowercase hex chars.
+
+    Canonical home for the sha256-hex shape check; imported by
+    ``write_repository.py`` and ``web/execution/service.py`` so all three
+    write-side guards reject the same out-of-domain values (empty,
+    whitespace-only, non-hex strings, upper-case, wrong length).
+    """
+    return _SHA256_HEX_RE.fullmatch(value) is not None
 
 
 def _validate_run_attribution(*, initiated_by_user_id: str | None, auth_provider_type: str | None) -> None:
@@ -77,6 +97,21 @@ def _validate_run_attribution(*, initiated_by_user_id: str | None, auth_provider
         raise AuditIntegrityError("run attribution requires a non-blank initiated_by_user_id")
     if auth_provider_type not in _AUTH_PROVIDER_TYPES:
         raise AuditIntegrityError(f"run attribution requires auth_provider_type to be one of {sorted(_AUTH_PROVIDER_TYPES)!r}")
+
+
+def _validate_openrouter_catalog_snapshot(*, sha256: str, source: str) -> None:
+    """Tier-1 write-side guard for the OpenRouter catalog snapshot fields.
+
+    Both fields are NOT NULL on the ``runs`` table and define the
+    audit-trail anchor for "which catalog blessed this run's model
+    decisions". A defective caller passing an empty string or an
+    out-of-domain source value would silently corrupt the audit record;
+    catch it here so the failure points at the wiring bug.
+    """
+    if type(sha256) is not str or not is_valid_sha256_hex(sha256):
+        raise AuditIntegrityError(f"openrouter_catalog_sha256 must be 64 lowercase hex chars, got {sha256!r}")
+    if source not in _OPENROUTER_CATALOG_SOURCES:
+        raise AuditIntegrityError(f"openrouter_catalog_source must be one of {sorted(_OPENROUTER_CATALOG_SOURCES)!r}, got {source!r}")
 
 
 class RunLifecycleRepository:
@@ -103,6 +138,8 @@ class RunLifecycleRepository:
         schema_contract: SchemaContract | None = None,
         initiated_by_user_id: str | None = None,
         auth_provider_type: str | None = None,
+        openrouter_catalog_sha256: str,
+        openrouter_catalog_source: str,
     ) -> Run:
         """Begin a new pipeline run.
 
@@ -119,6 +156,14 @@ class RunLifecycleRepository:
                 Stored via ContractAuditRecord for complete field mapping traceability.
             initiated_by_user_id: Optional authenticated user ID that initiated the run.
             auth_provider_type: Optional auth provider namespace for the initiating user.
+            openrouter_catalog_sha256: Canonical sha256 of the OpenRouter
+                model catalog active at run-create time. Required (Tier-1
+                audit completeness): every run records which catalog
+                blessed its model decisions. Resolved at the L3 entry
+                point via :func:`elspeth.plugins.transforms.llm.model_catalog.read_openrouter_catalog_snapshot_id`.
+            openrouter_catalog_source: ``"live"`` if the lifespan probed
+                OpenRouter successfully, ``"bundled"`` if the fallback
+                served the snapshot. Required (NOT NULL on the column).
 
         Returns:
             Run model with generated run_id
@@ -128,6 +173,10 @@ class RunLifecycleRepository:
                 "begin_run() cannot create a COMPLETED run. Use complete_run() so completed_at is recorded in the audit trail."
             )
         _validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
+        _validate_openrouter_catalog_snapshot(
+            sha256=openrouter_catalog_sha256,
+            source=openrouter_catalog_source,
+        )
 
         run_id = run_id or generate_id()
         settings_json = canonical_json(config)
@@ -177,6 +226,8 @@ class RunLifecycleRepository:
                 llm_call_count=None,
                 seeded_from_cache=False,
                 cache_key=None,
+                openrouter_catalog_sha256=openrouter_catalog_sha256,
+                openrouter_catalog_source=openrouter_catalog_source,
             )
         )
         if initiated_by_user_id is not None and auth_provider_type is not None:

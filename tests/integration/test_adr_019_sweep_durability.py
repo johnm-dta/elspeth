@@ -172,6 +172,8 @@ def test_fresh_run_sweep_crash_finalizes_failed_and_preserves_evidence(
         run_id=None,
         initiated_by_user_id=None,
         auth_provider_type=None,
+        openrouter_catalog_sha256: str = "0" * 64,
+        openrouter_catalog_source: str = "bundled",
     ):
         factory, run = original_init(
             self,
@@ -181,6 +183,8 @@ def test_fresh_run_sweep_crash_finalizes_failed_and_preserves_evidence(
             run_id=run_id,
             initiated_by_user_id=initiated_by_user_id,
             auth_provider_type=auth_provider_type,
+            openrouter_catalog_sha256=openrouter_catalog_sha256,
+            openrouter_catalog_source=openrouter_catalog_source,
         )
         captured["run_id"] = run.run_id
         captured["token_id"] = plant(factory, run.run_id)
@@ -254,6 +258,8 @@ def _setup_adr019_failed_resume_run(
                 schema_contract_json=audit_record.to_json(),
                 schema_contract_hash=contract.version_hash(),
                 runtime_val_manifest_json=_runtime_val_manifest_json(),
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
             )
         )
         for node_id, plugin_name, node_type in [

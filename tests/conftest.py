@@ -148,6 +148,8 @@ def _freeze_runtime_val_registries_before_begin_run(monkeypatch: pytest.MonkeyPa
     Empty declaration registries are left unfrozen so ``begin_run()`` still
     fails closed when a test genuinely models the unsafe path.
     """
+    import functools
+
     from elspeth.contracts.declaration_contracts import (
         freeze_declaration_registry,
         registered_declaration_contracts,
@@ -157,14 +159,65 @@ def _freeze_runtime_val_registries_before_begin_run(monkeypatch: pytest.MonkeyPa
 
     original_begin_run = RunLifecycleRepository.begin_run
 
+    @functools.wraps(original_begin_run)
     def wrapped_begin_run(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         if registered_declaration_contracts():
             freeze_declaration_registry()
         if len(_TIER_1_ERRORS_VIEW) > 0:
             freeze_tier_registry()
+        # OpenRouter catalog snapshot is mandatory at the runs row.  In
+        # production, the L3 entry point (web lifespan / CLI bootstrap)
+        # resolves these via ``read_openrouter_catalog_snapshot_id``;
+        # the resulting tuple is non-None by construction (the bundled
+        # fallback is always available).  Unit tests construct repos
+        # directly and bypass that resolution — supply a deterministic
+        # synthetic snapshot so tests don't need to thread the value
+        # through every call site.  Tests that exercise the snapshot
+        # contract supply their own values (or call the real reader).
+        kwargs.setdefault("openrouter_catalog_sha256", "0" * 64)
+        kwargs.setdefault("openrouter_catalog_source", "bundled")
         return original_begin_run(self, *args, **kwargs)
 
     monkeypatch.setattr(RunLifecycleRepository, "begin_run", wrapped_begin_run)
+
+    # Mirror the snapshot defaulting at ``orchestrator.run`` so tests
+    # invoking the orchestrator directly (without the L3 entry-point
+    # wiring that resolves the snapshot in production) don't need to
+    # thread the value through every call site. Production callers
+    # (web/execution/service.py, cli.py, cli_helpers.py) always supply
+    # both fields explicitly.  ``functools.wraps`` preserves
+    # ``inspect.signature(Orchestrator.run)`` so signature-introspection
+    # tests still see the real parameter names.
+    from elspeth.engine.orchestrator.core import Orchestrator
+
+    original_orch_run = Orchestrator.run
+
+    @functools.wraps(original_orch_run)
+    def wrapped_orch_run(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs.setdefault("openrouter_catalog_sha256", "0" * 64)
+        kwargs.setdefault("openrouter_catalog_source", "bundled")
+        return original_orch_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(Orchestrator, "run", wrapped_orch_run)
+
+    # ExecutionServiceImpl: in production the lifespan calls
+    # ``set_openrouter_catalog_snapshot()`` after construction. Tests
+    # construct the service directly and skip that step; auto-prime the
+    # synthetic snapshot in ``__init__`` so ``_run_pipeline`` doesn't
+    # raise on the wiring check. Production ``app.py`` still calls
+    # ``set_openrouter_catalog_snapshot`` explicitly — and the setter
+    # validates inputs — so this wrapper doesn't mask production bugs.
+    from elspeth.web.execution.service import ExecutionServiceImpl
+
+    original_exec_init = ExecutionServiceImpl.__init__
+
+    @functools.wraps(original_exec_init)
+    def wrapped_exec_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        original_exec_init(self, *args, **kwargs)
+        self._openrouter_catalog_sha256 = "0" * 64
+        self._openrouter_catalog_source = "bundled"
+
+    monkeypatch.setattr(ExecutionServiceImpl, "__init__", wrapped_exec_init)
 
 
 @pytest.fixture(autouse=True)

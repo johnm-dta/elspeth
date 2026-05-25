@@ -667,6 +667,8 @@ class TestCheckpointRecovery:
                     status=RunStatus.FAILED,
                     schema_contract_json=contract_json,
                     schema_contract_hash=contract_hash,
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 
@@ -783,6 +785,8 @@ class TestCheckpointRecovery:
                     status=RunStatus.FAILED,
                     schema_contract_json=contract_json,
                     schema_contract_hash=contract_hash,
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 

@@ -62,6 +62,8 @@ def _create_run(
             reproducibility_grade=(
                 reproducibility_grade.value if isinstance(reproducibility_grade, ReproducibilityGrade) else reproducibility_grade
             ),
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
         )
     )
 

@@ -14,6 +14,7 @@ from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.landscape._helpers import generate_id
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
+from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex
 from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table
 
 # Re-export for back-compat with existing import sites (``from
@@ -38,6 +39,8 @@ class LandscapeWriteRepository:
         node_specs: Sequence[SynthesisedNodeSpec],
         started_at: datetime,
         metadata: Mapping[str, Any],
+        openrouter_catalog_sha256: str,
+        openrouter_catalog_source: str,
     ) -> str:
         """Insert a cache-replay run plus row/node audit facts.
 
@@ -56,6 +59,14 @@ class LandscapeWriteRepository:
             raise LandscapeRecordError("record_synthesised_run metadata['seeded_from_cache'] must be bool")
         if type(cache_key) is not str:
             raise LandscapeRecordError("record_synthesised_run metadata['cache_key'] must be str")
+        if type(openrouter_catalog_sha256) is not str or not is_valid_sha256_hex(openrouter_catalog_sha256):
+            raise LandscapeRecordError(
+                f"record_synthesised_run openrouter_catalog_sha256 must be 64 lowercase hex chars, got {openrouter_catalog_sha256!r}"
+            )
+        if openrouter_catalog_source not in ("live", "bundled"):
+            raise LandscapeRecordError(
+                f"record_synthesised_run openrouter_catalog_source must be 'live' or 'bundled', got {openrouter_catalog_source!r}"
+            )
 
         run_id = generate_id()
         config = {
@@ -89,6 +100,8 @@ class LandscapeWriteRepository:
                         llm_call_count=llm_call_count,
                         seeded_from_cache=seeded_from_cache,
                         cache_key=cache_key,
+                        openrouter_catalog_sha256=openrouter_catalog_sha256,
+                        openrouter_catalog_source=openrouter_catalog_source,
                     )
                 )
                 for index, spec in enumerate(node_specs):

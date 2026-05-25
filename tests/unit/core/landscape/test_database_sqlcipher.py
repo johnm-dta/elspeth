@@ -36,6 +36,8 @@ class TestSQLCipherCreateAndRead:
                         config_hash="abc123",
                         settings_json="{}",
                         canonical_version="1.0.0",
+                        openrouter_catalog_sha256="0" * 64,
+                        openrouter_catalog_source="bundled",
                     )
                 )
 
@@ -237,13 +239,13 @@ class TestSQLCipherRejectsNonSQLite:
         from elspeth.core.landscape.database import LandscapeDB
 
         with pytest.raises(ValueError, match="requires a SQLite database URL"):
-            LandscapeDB.from_url("postgresql://user:pass@host/mydb", passphrase="test-key")
+            LandscapeDB.from_url("postgresql://user:pass@host/mydb", passphrase="test-key")  # secret-scan: allow-this-line
 
     def test_sqlcipher_rejects_mysql_url(self) -> None:
         from elspeth.core.landscape.database import LandscapeDB
 
         with pytest.raises(ValueError, match="requires a SQLite database URL"):
-            LandscapeDB.from_url("mysql://user:pass@host/mydb", passphrase="test-key")
+            LandscapeDB.from_url("mysql://user:pass@host/mydb", passphrase="test-key")  # secret-scan: allow-this-line
 
     def test_sqlcipher_rejects_postgresql_with_driver(self) -> None:
         """Driver variants like postgresql+psycopg2 are also rejected."""
@@ -275,7 +277,7 @@ class TestMCPPassphraseGating:
         """Non-SQLite database_url should not pick up ELSPETH_AUDIT_KEY."""
         monkeypatch.setenv("ELSPETH_AUDIT_KEY", "super-secret-key")
 
-        database_url = "postgresql://user:pass@host/mydb"
+        database_url = "postgresql://user:pass@host/mydb"  # secret-scan: allow-this-line
 
         # Reproduce the gating logic from mcp/server.py main()
         import os
@@ -350,6 +352,8 @@ class TestSQLCipherPassphraseEscaping:
                         config_hash="abc",
                         settings_json="{}",
                         canonical_version="1.0.0",
+                        openrouter_catalog_sha256="0" * 64,
+                        openrouter_catalog_source="bundled",
                     )
                 )
             with db.connection() as conn:

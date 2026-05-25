@@ -44,6 +44,7 @@ from elspeth.core.blobs_inline import (
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.events import EventBus
 from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.run_lifecycle_repository import is_valid_sha256_hex
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.core.secrets import SecretResolutionError
 from elspeth.engine.orchestrator.core import Orchestrator
@@ -304,6 +305,36 @@ class ExecutionServiceImpl:
         # Keyed by session_id string; lazily created, cleaned up on session
         # deletion via cleanup_session_lock().
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # OpenRouter catalog snapshot id, populated by the lifespan after
+        # the boot probe via ``set_openrouter_catalog_snapshot()``. Both
+        # fields are required to be present before any pipeline executes
+        # — run-create writes them into the Landscape ``runs`` row.
+        # ``None`` here is a programmer bug (lifespan never set them) and
+        # crashes loudly at ``_run_pipeline`` rather than silently
+        # dropping the audit field.
+        self._openrouter_catalog_sha256: str | None = None
+        self._openrouter_catalog_source: str | None = None
+
+    def set_openrouter_catalog_snapshot(self, *, sha256: str, source: str) -> None:
+        """Record the boot-time OpenRouter catalog snapshot id.
+
+        Called once from the FastAPI lifespan after
+        :func:`prime_openrouter_catalog_from_live` completes (success or
+        bundled fallback). Both arguments are required and concrete
+        (non-empty string) — the lifespan reads them from
+        :func:`elspeth.plugins.transforms.llm.model_catalog.read_openrouter_catalog_snapshot_id`
+        which never returns ``None``.
+
+        Snapshot is invariant for the process lifetime: re-priming is
+        not supported (staging is restarted on deploys, and a restart
+        re-runs the lifespan).
+        """
+        if not isinstance(sha256, str) or not is_valid_sha256_hex(sha256):
+            raise RuntimeError(f"openrouter_catalog_sha256 must be 64 lowercase hex chars, got {sha256!r}")
+        if source not in ("live", "bundled"):
+            raise RuntimeError(f"openrouter_catalog_source must be 'live' or 'bundled', got {source!r}")
+        self._openrouter_catalog_sha256 = sha256
+        self._openrouter_catalog_source = source
 
     def _call_async(self, coro: Coroutine[Any, Any, T]) -> T:
         """Bridge an async call from the background thread to the main event loop.
@@ -1128,6 +1159,20 @@ class ExecutionServiceImpl:
             # signal.signal() from non-main threads)
             from elspeth.cli_helpers import _make_sink_factory
 
+            # Read the boot-time catalog snapshot. Direct attribute access
+            # (offensive programming): if the lifespan never called
+            # ``set_openrouter_catalog_snapshot()`` these are ``None`` and
+            # the assertions below crash loudly, surfacing the wiring bug
+            # rather than silently writing a NULL audit field.
+            catalog_sha = self._openrouter_catalog_sha256
+            catalog_source = self._openrouter_catalog_source
+            if catalog_sha is None or catalog_source is None:
+                raise RuntimeError(
+                    "ExecutionServiceImpl has no OpenRouter catalog snapshot. "
+                    "set_openrouter_catalog_snapshot() must be called from the "
+                    "lifespan before any pipeline executes; this is a wiring bug."
+                )
+
             result = orchestrator.run(
                 pipeline_config,
                 graph=graph,
@@ -1139,6 +1184,8 @@ class ExecutionServiceImpl:
                 run_id=run_id,
                 initiated_by_user_id=user_id,
                 auth_provider_type=auth_provider_type,
+                openrouter_catalog_sha256=catalog_sha,
+                openrouter_catalog_source=catalog_source,
             )
 
             # Orchestrator.run() returns normally ONLY on completion.

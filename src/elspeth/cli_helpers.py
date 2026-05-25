@@ -376,6 +376,9 @@ def bootstrap_and_run(settings_path: Path) -> "RunResult":
             db=db,
             output_format="none",
         ) as ctx:
+            from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
+
+            catalog_sha, catalog_source = read_openrouter_catalog_snapshot_id()
             return ctx.orchestrator.run(
                 ctx.pipeline_config,
                 graph=graph,
@@ -384,6 +387,8 @@ def bootstrap_and_run(settings_path: Path) -> "RunResult":
                 preflight_results=preflight,
                 secret_resolutions=secret_resolutions,
                 sink_factory=_make_sink_factory(config),
+                openrouter_catalog_sha256=catalog_sha,
+                openrouter_catalog_source=catalog_source,
             )
     finally:
         import sys

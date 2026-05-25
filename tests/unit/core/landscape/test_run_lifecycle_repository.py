@@ -33,7 +33,10 @@ from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import RunLoader
-from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from elspeth.core.landscape.run_lifecycle_repository import (
+    RunLifecycleRepository,
+    is_valid_sha256_hex,
+)
 from elspeth.core.landscape.schema import run_attributions_table, runs_table
 from tests.fixtures.landscape import make_factory, make_landscape_db
 
@@ -1118,4 +1121,106 @@ class TestPreflightAuditWriteErrors:
                 reachable=True,
                 count=1,
                 message="ok",
+            )
+
+
+class TestSha256HexValidator:
+    """Pin the shape of the sha256-hex validator used by Tier-1 write guards."""
+
+    def test_canonical_digest_is_accepted(self) -> None:
+        """A real hashlib.sha256 hex digest passes validation."""
+        import hashlib
+
+        digest = hashlib.sha256(b"audit-anchor").hexdigest()
+        assert is_valid_sha256_hex(digest)
+
+    def test_all_zero_hex_is_accepted(self) -> None:
+        """The conftest synthetic snapshot ('0' * 64) must pass — many tests rely on it."""
+        assert is_valid_sha256_hex("0" * 64)
+
+    def test_non_hex_string_is_rejected(self) -> None:
+        """Non-hex characters fail even at the right length."""
+        # 64 chars but with non-hex 'z' — rejected.
+        assert not is_valid_sha256_hex("z" * 64)
+        # The spec's example: a non-empty non-hex string that the old
+        # ``.strip()`` guard would have admitted.
+        assert not is_valid_sha256_hex("not-a-sha")
+
+    def test_wrong_length_is_rejected(self) -> None:
+        """60 chars of hex is still rejected — exact length required."""
+        assert not is_valid_sha256_hex("a" * 60)
+        assert not is_valid_sha256_hex("a" * 65)
+
+    def test_uppercase_hex_is_rejected(self) -> None:
+        """sha256 hexdigest is lowercase by contract; uppercase signals a bug."""
+        assert not is_valid_sha256_hex("A" * 64)
+
+    def test_empty_and_whitespace_rejected(self) -> None:
+        assert not is_valid_sha256_hex("")
+        assert not is_valid_sha256_hex(" " * 64)
+
+
+class TestBeginRunOpenrouterCatalogSnapshotValidation:
+    """Pin the write-side guard for ``openrouter_catalog_sha256``.
+
+    The guard is the audit-trail integrity check: a non-empty but
+    non-hex string must crash rather than corrupting the runs row.
+    """
+
+    def test_begin_run_rejects_non_hex_sha256(self) -> None:
+        """A non-empty non-hex string passes ``.strip()`` but fails hex validation."""
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        with pytest.raises(AuditIntegrityError, match="64 lowercase hex chars"):
+            repo.begin_run(
+                config={"pipeline": "test"},
+                canonical_version="v1",
+                run_id="bad-sha-run",
+                openrouter_catalog_sha256="not-a-sha",
+                openrouter_catalog_source="bundled",
+            )
+
+    def test_begin_run_rejects_none_sha256(self) -> None:
+        """``None`` fails the ``type(...) is not str`` guard inside the validator."""
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        with pytest.raises(AuditIntegrityError, match="64 lowercase hex chars"):
+            repo.begin_run(
+                config={"pipeline": "test"},
+                canonical_version="v1",
+                run_id="none-sha-run",
+                openrouter_catalog_sha256=None,  # type: ignore[arg-type]
+                openrouter_catalog_source="bundled",
+            )
+
+
+class TestWriteRepositoryOpenrouterCatalogSnapshotValidation:
+    """Pin the same hex-shape guard at the synthesised-run write site."""
+
+    def test_record_synthesised_run_rejects_non_hex_sha256(self) -> None:
+        from datetime import UTC, datetime
+
+        from elspeth.contracts import NodeType
+        from elspeth.contracts.synthesised_audit import SynthesisedNodeSpec
+        from elspeth.core.landscape.write_repository import LandscapeWriteRepository
+
+        db = make_landscape_db()
+        repo = LandscapeWriteRepository(db)
+        node_specs = (
+            SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv_file", plugin_version="1.0"),
+            SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="json_file", plugin_version="1.0"),
+        )
+        with pytest.raises(LandscapeRecordError, match="64 lowercase hex chars"):
+            repo.record_synthesised_run(
+                pipeline_yaml="version: 1",
+                rows=(),
+                source_data_hash="0" * 64,
+                llm_call_count=0,
+                node_specs=node_specs,
+                started_at=datetime.now(UTC),
+                metadata={"seeded_from_cache": True, "cache_key": "ck"},
+                openrouter_catalog_sha256="not-a-sha",
+                openrouter_catalog_source="bundled",
             )

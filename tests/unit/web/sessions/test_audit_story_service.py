@@ -29,6 +29,8 @@ def test_audit_story_reads_real_landscape_rows() -> None:
         ],
         started_at=datetime(2026, 5, 15, tzinfo=UTC),
         metadata={"seeded_from_cache": True, "cache_key": "b" * 64},
+        openrouter_catalog_sha256="0" * 64,
+        openrouter_catalog_source="bundled",
     )
 
     story = AuditStoryService(db).get_run_audit_story(
@@ -63,6 +65,8 @@ def test_audit_story_aggregates_multiple_row_source_hashes() -> None:
         ],
         started_at=datetime(2026, 5, 15, tzinfo=UTC),
         metadata={"seeded_from_cache": False, "cache_key": "c" * 64},
+        openrouter_catalog_sha256="0" * 64,
+        openrouter_catalog_source="bundled",
     )
     hashes = ("a" * 64, "b" * 64)
     with db.connection() as conn:

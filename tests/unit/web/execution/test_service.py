@@ -4875,3 +4875,31 @@ class TestPartialCompletionMessage:
         forbidden_substrings = ["row_id=", "key=", "value=", "prompt=", "secret"]
         for forbidden in forbidden_substrings:
             assert forbidden not in msg.lower(), f"_partial_completion_message must not include {forbidden!r} (row-data leak)"
+
+
+class TestSetOpenrouterCatalogSnapshotValidation:
+    """Pin the sha256-hex validator at the snapshot setter site.
+
+    ``set_openrouter_catalog_snapshot()`` is called once by the FastAPI
+    lifespan; a non-hex string passing the old ``not sha256`` guard would
+    propagate into the runs row and corrupt the audit trail. The validator
+    now uses the canonical ``is_valid_sha256_hex`` shared with the
+    Landscape write-side guards.
+    """
+
+    def test_setter_rejects_non_hex_sha256(self, service: ExecutionServiceImpl) -> None:
+        """A non-empty non-hex string fails the hex shape check."""
+        with pytest.raises(RuntimeError, match="64 lowercase hex chars"):
+            service.set_openrouter_catalog_snapshot(sha256="not-a-sha", source="bundled")
+
+    def test_setter_accepts_canonical_digest(self, service: ExecutionServiceImpl) -> None:
+        """A real hashlib.sha256 hex digest passes."""
+        import hashlib
+
+        digest = hashlib.sha256(b"catalog-anchor").hexdigest()
+        service.set_openrouter_catalog_snapshot(sha256=digest, source="bundled")
+        # No exception — the setter accepted the value.
+
+    def test_setter_rejects_bad_source(self, service: ExecutionServiceImpl) -> None:
+        with pytest.raises(RuntimeError, match="must be 'live' or 'bundled'"):
+            service.set_openrouter_catalog_snapshot(sha256="0" * 64, source="oops")

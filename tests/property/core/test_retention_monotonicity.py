@@ -82,6 +82,8 @@ def _create_completed_run(
                 settings_json="{}",
                 canonical_version="sha256-rfc8785-v1",
                 status=RunStatus.COMPLETED,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
             )
         )
         # Create a source node (required FK for rows.source_node_id)

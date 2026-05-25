@@ -175,6 +175,8 @@ class TestResumeComprehensive:
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 
@@ -535,6 +537,8 @@ class TestResumeComprehensive:
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 
@@ -751,6 +755,8 @@ class TestResumeComprehensive:
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 
@@ -953,6 +959,8 @@ class TestResumeComprehensive:
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 
@@ -1157,6 +1165,8 @@ class TestResumeComprehensive:
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 
@@ -1354,6 +1364,8 @@ class TestResumeComprehensive:
                     schema_contract_json=schema_contract_json,
                     schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 

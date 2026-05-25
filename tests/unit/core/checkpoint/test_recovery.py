@@ -113,6 +113,8 @@ def _insert_run(
             status=status,
             schema_contract_json=schema_contract_json,
             schema_contract_hash=schema_contract_hash,
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
         )
     )
 

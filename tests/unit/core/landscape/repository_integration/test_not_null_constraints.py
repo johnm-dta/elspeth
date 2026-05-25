@@ -127,6 +127,8 @@ class TestSchemaNotNullConstraints:
                     settings_json="{}",
                     canonical_version="v1",
                     status=RunStatus.RUNNING,
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 

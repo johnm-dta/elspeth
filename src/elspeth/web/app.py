@@ -8,11 +8,13 @@ import errno
 import json
 import os
 import sys
+import time
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import structlog
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -35,6 +37,10 @@ from elspeth.contracts.secrets import (
     SecretDecryptionError,
 )
 from elspeth.core.payload_store import FilesystemPayloadStore
+from elspeth.plugins.transforms.llm.model_catalog import (
+    prime_openrouter_catalog_from_live,
+    read_openrouter_catalog_snapshot_id,
+)
 from elspeth.web.audit_readiness.routes import create_audit_readiness_router
 from elspeth.web.audit_readiness.service import ReadinessService
 from elspeth.web.auth.audit import AuthAuditRecorder
@@ -235,8 +241,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.oidc_authorization_endpoint:
             app.state.oidc_authorization_endpoint = settings.oidc_authorization_endpoint
         else:
-            import httpx
-
             if settings.oidc_issuer:
                 issuer = settings.oidc_issuer.rstrip("/")
             elif settings.auth_provider == "entra" and settings.entra_tenant_id:
@@ -323,6 +327,62 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # ``telemetry=app.state.sessions_telemetry`` pattern at line 259
         # for the execution service.
         telemetry=app.state.sessions_telemetry,
+    )
+
+    # Prime the OpenRouter model catalog from the live ``/models``
+    # endpoint. Closes the validate/runtime drift bug where the bundled
+    # litellm catalog still listed models OpenRouter has retired (e.g.
+    # ``anthropic/claude-3.5-sonnet``), letting the value-source compliance
+    # walker pass configs that 404 at runtime preflight. Probe is graceful:
+    # on failure we log a warning and the catalog falls back to the bundled
+    # litellm slice — staging must still boot for non-LLM features.
+    probe_start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=5.0)) as _probe_client:
+
+            async def _probe_get(url: str) -> httpx.Response:
+                return await _probe_client.get(url)
+
+            primed = await prime_openrouter_catalog_from_live(http_get=_probe_get)
+    except (httpx.HTTPError, OSError) as probe_exc:
+        # ``prime_openrouter_catalog_from_live`` catches its own
+        # ``httpx.RequestError`` internally; this wrapper covers failures
+        # from ``AsyncClient(...)`` construction or ``__aenter__`` —
+        # ``httpx.HTTPError`` (full httpx hierarchy) or ``OSError``
+        # (socket-level). Programming errors (NameError, TypeError) are
+        # NOT caught: those must crash boot so the bug surfaces.
+        slog.warning(
+            "openrouter_catalog_prime_unexpected_error",
+            exc_class=type(probe_exc).__name__,
+            action="falling back to bundled litellm catalog",
+        )
+        primed = False
+    probe_latency_ms = int((time.monotonic() - probe_start) * 1000)
+    if primed:
+        slog.info(
+            "openrouter_catalog_boot_prime_complete",
+            latency_ms=probe_latency_ms,
+        )
+    else:
+        slog.warning(
+            "openrouter_catalog_boot_prime_failed",
+            latency_ms=probe_latency_ms,
+            action="serving bundled litellm catalog (may include retired models)",
+        )
+
+    # Resolve the catalog snapshot id (always populated — bundled fallback
+    # is always available) and stash on ``app.state``. Run-create writes
+    # this into the Landscape ``runs`` row so an auditor can reconstruct
+    # which catalog blessed any historical decision. Both fields are
+    # invariant for the process lifetime; the orchestrator reads them via
+    # ``ExecutionServiceImpl`` (web path) or directly from the module
+    # reader (CLI path).
+    catalog_sha, catalog_source = read_openrouter_catalog_snapshot_id()
+    app.state.openrouter_catalog_sha256 = catalog_sha
+    app.state.openrouter_catalog_source = catalog_source
+    execution_service.set_openrouter_catalog_snapshot(
+        sha256=catalog_sha,
+        source=catalog_source,
     )
 
     # Periodic orphan cleanup — catches runs orphaned by SIGKILL/OOM

@@ -282,6 +282,14 @@ async def _replay_cache_entry(
     )
     node_specs = _node_specs_from_pipeline_yaml(cache_entry.pipeline_yaml)
 
+    # L3→L3 import: web/composer reads the OpenRouter catalog snapshot id
+    # at synthesis time so the cache-replay run row carries the same
+    # audit-anchor as any live-executed run. Without this the replay row
+    # would have NULL columns and the audit trail would be incomplete.
+    from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
+
+    catalog_sha, catalog_source = read_openrouter_catalog_snapshot_id()
+
     def _write_landscape_run() -> str:
         with LandscapeDB.from_url(
             settings.get_landscape_url(),
@@ -299,6 +307,8 @@ async def _replay_cache_entry(
                     "cache_key": cache_key,
                     "cache_seeding_llm_call_count": cache_entry.llm_call_count,
                 },
+                openrouter_catalog_sha256=catalog_sha,
+                openrouter_catalog_source=catalog_source,
             )
 
     landscape_run_id = await run_sync_in_worker(_write_landscape_run)

@@ -77,6 +77,8 @@ def test_landscape_write_repository_records_synthesised_cache_run() -> None:
         ],
         started_at=datetime(2026, 5, 15, tzinfo=UTC),
         metadata={"seeded_from_cache": True, "cache_key": "a" * 64},
+        openrouter_catalog_sha256="0" * 64,
+        openrouter_catalog_source="bundled",
     )
 
     with db.connection() as conn:
@@ -127,6 +129,8 @@ def test_synthesised_run_records_one_node_per_occurrence_with_plugin_reuse() -> 
         node_specs=node_specs,
         started_at=datetime(2026, 5, 15, tzinfo=UTC),
         metadata={"seeded_from_cache": True, "cache_key": "d" * 64},
+        openrouter_catalog_sha256="0" * 64,
+        openrouter_catalog_source="bundled",
     )
 
     with db.connection() as conn:
@@ -182,6 +186,8 @@ def test_synthesised_run_rejects_misshapen_node_specs() -> None:
         "llm_call_count": 0,
         "started_at": datetime(2026, 5, 15, tzinfo=UTC),
         "metadata": {"seeded_from_cache": True, "cache_key": "e" * 64},
+        "openrouter_catalog_sha256": "0" * 64,
+        "openrouter_catalog_source": "bundled",
     }
 
     with pytest.raises(LandscapeRecordError, match="at least one node"):

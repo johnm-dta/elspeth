@@ -972,6 +972,8 @@ def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
                 settings_json="{}",
                 canonical_version="test",
                 status="completed",
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
             )
         )
         conn.execute(

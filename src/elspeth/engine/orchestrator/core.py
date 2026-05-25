@@ -1336,6 +1336,8 @@ class Orchestrator:
         run_id: str | None = None,
         initiated_by_user_id: str | None = None,
         auth_provider_type: str | None = None,
+        openrouter_catalog_sha256: str,
+        openrouter_catalog_source: str,
     ) -> tuple[RecorderFactory, Any]:
         """Execute the DATABASE phase: create factory, begin run, record secrets.
 
@@ -1376,6 +1378,8 @@ class Orchestrator:
                 run_id=run_id,
                 initiated_by_user_id=initiated_by_user_id,
                 auth_provider_type=auth_provider_type,
+                openrouter_catalog_sha256=openrouter_catalog_sha256,
+                openrouter_catalog_source=openrouter_catalog_source,
             )
 
             # Record secret resolutions in audit trail (deferred from pre-run loading)
@@ -1478,6 +1482,8 @@ class Orchestrator:
         run_id: str | None = None,
         initiated_by_user_id: str | None = None,
         auth_provider_type: str | None = None,
+        openrouter_catalog_sha256: str | None = None,
+        openrouter_catalog_source: str | None = None,
     ) -> RunResult:
         """Execute a pipeline run.
 
@@ -1520,6 +1526,19 @@ class Orchestrator:
         # Schema validation now happens in ExecutionGraph.validate() during graph construction
         self._reset_checkpoint_sequence()
 
+        # OpenRouter catalog snapshot is mandatory for the audit trail —
+        # every run records which model catalog blessed its decisions.
+        # Resolution happens at the L3 entry point (web lifespan, CLI
+        # bootstrap) so the engine (L2) doesn't import from plugins (L3);
+        # arrival here with ``None`` is a programmer bug in the caller
+        # and crashes loudly rather than writing NULL into the audit row.
+        if openrouter_catalog_sha256 is None or openrouter_catalog_source is None:
+            raise OrchestrationInvariantError(
+                "openrouter_catalog_sha256 and openrouter_catalog_source are required. "
+                "Resolve via plugins.transforms.llm.model_catalog.read_openrouter_catalog_snapshot_id() "
+                "at the L3 entry point (web lifespan or CLI bootstrap) and pass through."
+            )
+
         # DATABASE phase - create factory and begin run
         factory, run = self._initialize_database_phase(
             config,
@@ -1528,6 +1547,8 @@ class Orchestrator:
             run_id=run_id,
             initiated_by_user_id=initiated_by_user_id,
             auth_provider_type=auth_provider_type,
+            openrouter_catalog_sha256=openrouter_catalog_sha256,
+            openrouter_catalog_source=openrouter_catalog_source,
         )
 
         # Record pre-flight results (deferred from bootstrap_and_run)

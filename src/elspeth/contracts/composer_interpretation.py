@@ -81,6 +81,7 @@ class InterpretationKind(StrEnum):
     VAGUE_TERM = "vague_term"
     INVENTED_SOURCE = "invented_source"
     LLM_PROMPT_TEMPLATE = "llm_prompt_template"
+    PIPELINE_DECISION = "pipeline_decision"
 
 
 _INTERPRETATION_SURFACE_FIELDS: tuple[str, ...] = (

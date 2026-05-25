@@ -141,7 +141,9 @@ from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     INTERPRETATION_REVIEW_PENDING_CODE,
-    transform_vague_term_site_tuples,
+    RAW_HTML_CLEANUP_REVIEW_DRAFT,
+    RAW_HTML_CLEANUP_USER_TERM,
+    interpretation_sites,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, _ToolOutcome
 from elspeth.web.sessions.models import sessions_table
@@ -632,21 +634,32 @@ def _pre_state_interpretation_review_repair_message(*, next_turn: int) -> str:
 
 
 def _pending_interpretation_review_repair_message(
-    missing_sites: tuple[tuple[str, str], ...],
+    missing_sites: tuple[tuple[str, str, InterpretationKind], ...],
     *,
     next_turn: int,
 ) -> str:
-    sites = ", ".join(f"{node_id}: {{{{interpretation:{term}}}}}" for node_id, term in missing_sites)
+    sites = ", ".join(f"{kind.value}:{component_id}:{term}" for component_id, term, kind in missing_sites)
     return (
-        "[composer-system] The current pipeline contains pending interpretation "
-        "placeholder/event handoff(s) that are missing or unresolvable: "
+        "[composer-system] The current pipeline contains pending assumption-review "
+        "site(s) that are missing a matching pending interpretation event, or a "
+        "vague-term handoff that is unresolvable: "
         f"{sites}. Do not reply to the user yet. For each listed handoff, "
-        "ensure there is exactly one matching {{interpretation:<term>}} token "
-        "in that node's options.prompt_template and exactly one pending "
-        "request_interpretation_review event for the same affected_node_id and "
-        "user_term. If the event is missing, call request_interpretation_review. "
-        "If the prompt has zero or multiple matching tokens, patch the prompt "
-        "so it has exactly one. Do not rewrite the token as a normal Jinja variable. "
+        "call request_interpretation_review with the listed affected_node_id, "
+        "kind, and user_term. If more than one handoff is listed, issue one "
+        "request_interpretation_review tool call per listed handoff in this same "
+        "assistant turn before stopping. For vague_term handoffs, first make sure "
+        "the target LLM node contains exactly one matching pending vague_term "
+        "interpretation_requirements entry or exactly one legacy "
+        "{{interpretation:<term>}} token; if it does not, patch the node before "
+        "calling request_interpretation_review. Use the matching interpretation_requirements "
+        "draft as llm_draft. For llm_prompt_template, llm_draft must equal the current "
+        "options.prompt_template. For invented_source, llm_draft must equal the "
+        "source requirement draft. For pipeline_decision, llm_draft must equal "
+        "the target node's requirement draft. If a pipeline_decision site has no "
+        f"matching requirement and user_term is {RAW_HTML_CLEANUP_USER_TERM!r}, patch "
+        "the target field_mapper node first with an interpretation_requirements "
+        "entry whose kind is 'pipeline_decision', status is 'pending', and draft is "
+        f"{RAW_HTML_CLEANUP_REVIEW_DRAFT!r}. "
         f"This is forced repair turn {next_turn} of {_MAX_REPAIR_TURNS}."
     )
 
@@ -1151,34 +1164,35 @@ class ComposerServiceImpl:
         state: CompositionState,
         *,
         session_id: str | None,
-    ) -> tuple[tuple[str, str], ...]:
+    ) -> tuple[tuple[str, str, InterpretationKind], ...]:
         """Return pending interpretation handoffs that cannot be resolved."""
 
-        sites = transform_vague_term_site_tuples(state.nodes)
+        sites = interpretation_sites(state)
         if session_id is None:
             return ()
         sessions_service = self._require_sessions_service()
         events = await sessions_service.list_interpretation_events(UUID(session_id), status="pending")
         pending_sites = {
-            (event.affected_node_id, event.user_term.strip())
+            (event.affected_node_id, event.user_term.strip(), event.kind)
             for event in events
-            if event.affected_node_id is not None and event.user_term is not None
+            if event.affected_node_id is not None and event.user_term is not None and event.kind is not None
         }
-        missing_or_unresolvable: dict[tuple[str, str], None] = {}
+        missing_or_unresolvable: dict[tuple[str, str, InterpretationKind], None] = {}
         for site in sites:
-            if site not in pending_sites:
-                missing_or_unresolvable[site] = None
+            site_key = (site.component_id, site.user_term, site.kind)
+            if site_key not in pending_sites:
+                missing_or_unresolvable[site_key] = None
         for event in events:
-            if event.affected_node_id is None or event.user_term is None:
+            if event.kind is not InterpretationKind.VAGUE_TERM or event.affected_node_id is None or event.user_term is None:
                 continue
-            site = (event.affected_node_id, event.user_term.strip())
+            event_site_key = (event.affected_node_id, event.user_term.strip(), event.kind)
             placeholder_count = _matching_interpretation_placeholder_count(
                 state,
-                node_id=site[0],
-                term=site[1],
+                node_id=event_site_key[0],
+                term=event_site_key[1],
             )
             if placeholder_count != 1:
-                missing_or_unresolvable[site] = None
+                missing_or_unresolvable[event_site_key] = None
         return tuple(missing_or_unresolvable)
 
     def _new_runtime_preflight_cache(self) -> _RuntimePreflightCache:

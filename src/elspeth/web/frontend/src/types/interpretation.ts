@@ -80,6 +80,7 @@ export const INTERPRETATION_KIND_VALUES = [
   "vague_term",
   "invented_source",
   "llm_prompt_template",
+  "pipeline_decision",
 ] as const;
 
 export type InterpretationKind = (typeof INTERPRETATION_KIND_VALUES)[number];

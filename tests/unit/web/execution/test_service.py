@@ -4071,20 +4071,30 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
         counter = service._telemetry.interpretation_placeholder_unresolved_at_runtime_total
         # Test fixture uses fake counters — type-narrow to access ``calls``.
         assert isinstance(counter, _FakeCounter)
-        assert len(counter.calls) == 1
-        amount, attrs, _context = counter.calls[0]
-        assert amount == 1
-        assert attrs == {
-            "component_id": "rate_node",
-            "component_type": "transform",
-            "kind": "vague_term",
-        }
+        assert len(counter.calls) == 2
+        observed = []
+        for amount, attrs, _context in counter.calls:
+            assert amount == 1
+            observed.append(attrs)
+        assert observed == [
+            {
+                "component_id": "rate_node",
+                "component_type": "transform",
+                "kind": "vague_term",
+            },
+            {
+                "component_id": "rate_node",
+                "component_type": "transform",
+                "kind": "llm_prompt_template",
+            },
+        ]
         # Explicit negative assertion: prompt/user-authored text must
         # never appear in telemetry attributes.
-        assert attrs is not None
-        assert "prompt_template" not in attrs
-        assert "user_term" not in attrs
-        assert "cool" not in attrs.values()
+        for attrs in observed:
+            assert attrs is not None
+            assert "prompt_template" not in attrs
+            assert "user_term" not in attrs
+            assert "cool" not in attrs.values()
 
     @pytest.mark.asyncio
     async def test_execute_passes_when_placeholder_resolved(

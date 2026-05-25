@@ -49,6 +49,7 @@ from elspeth.web.composer.tools._common import (
     _graph_repair_suggestions,
     _missing_output_options_repair_error,
     _mutation_result,
+    _options_with_default_prompt_template_review,
     _prevalidate_sink,
     _prevalidate_source,
     _prevalidate_transform,
@@ -78,6 +79,7 @@ from elspeth.web.composer.tools.declarations import (
 from elspeth.web.composer.tools.sources import (
     _MIME_TO_SOURCE,
     _header_only_inline_csv_conflict,
+    _options_with_source_blob_review,
     _reject_manual_source_authoring,
     _reject_manual_source_blob_ref,
     _resolve_source_blob,
@@ -85,10 +87,13 @@ from elspeth.web.composer.tools.sources import (
     _source_authoring_options,
 )
 from elspeth.web.interpretation_state import (
+    INTERPRETATION_REQUIREMENTS_KEY,
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
     interpretation_sites,
+    raw_html_cleanup_review_contract_error,
     transform_vague_term_site_tuples,
+    validate_pipeline_decision_semantics,
 )
 from elspeth.web.validation import (
     INTERPRETATION_PLACEHOLDER_RE,
@@ -161,6 +166,18 @@ def _validate_source_artifact_review_content(value: str) -> None:
         if len(line) > 1024:
             raise ValueError("source artifact review content has a line exceeding the 1024-character limit")
     _reject_credential_shaped_content(value)
+
+
+def _options_with_inline_blob_source_review(
+    options: Mapping[str, Any],
+    prepared_blob: _PreparedBlobCreate,
+) -> Mapping[str, Any]:
+    """Ensure LLM-authored inline source blobs carry a Class 2 review gate."""
+    return _options_with_source_blob_review(
+        options,
+        mime_type=prepared_blob.mime_type,
+        content=prepared_blob.content_bytes.decode("utf-8"),
+    )
 
 
 def _execute_set_pipeline(
@@ -325,6 +342,7 @@ def _execute_set_pipeline(
             "blob_ref": prepared_inline_blob.blob_id,
             **_source_authoring_options(prepared_inline_blob.creation_modality, prepared_inline_blob.content_hash),
         }
+        src_options = _options_with_inline_blob_source_review(src_options, prepared_inline_blob)
 
     # S2: Validate source path allowlist (same check as _execute_set_source)
     path_error = _validate_source_path(src_options, data_dir)
@@ -360,7 +378,12 @@ def _execute_set_pipeline(
             if batch_required_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {batch_required_error}")
 
-            node_prevalidation = _prevalidate_transform(node_plugin, node_options)
+            review_options = _options_with_default_prompt_template_review(
+                node_id=node_id,
+                plugin=node_plugin,
+                options=node_options,
+            )
+            node_prevalidation = _prevalidate_transform(node_plugin, review_options)
             if node_prevalidation is not None:
                 return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
 
@@ -473,7 +496,11 @@ def _execute_set_pipeline(
                 input=n.input,
                 on_success=n.on_success,
                 on_error=n.on_error or ("discard" if nt in ("transform", "aggregation") else None),
-                options=n.options,
+                options=_options_with_default_prompt_template_review(
+                    node_id=n.id,
+                    plugin=n.plugin,
+                    options=n.options,
+                ),
                 condition=n.condition,
                 routes=n.routes,
                 fork_to=fork_to,
@@ -535,6 +562,9 @@ def _execute_set_pipeline(
         metadata=metadata_spec,
         version=state.version + 1,
     )
+    raw_cleanup_error = raw_html_cleanup_review_contract_error(new_state)
+    if raw_cleanup_error is not None:
+        return _failure_result(state, raw_cleanup_error)
 
     if prepared_inline_blob is not None:
         if session_engine is None or session_id is None:
@@ -1074,10 +1104,11 @@ def _assert_affected_component(
 
     * ``invented_source`` does not target the source component, or the
       source lacks composer-authored source metadata;
-    * transform kinds do not target an existing LLM node;
-    * vague-term and prompt-template review sites do not match the pending
-      structured authoring metadata (with legacy placeholder fallback for
-      vague terms).
+    * prompt and vague-term kinds do not target an existing LLM node;
+    * pipeline decisions do not target an existing node with matching review
+      metadata;
+    * pending review sites do not match the structured authoring metadata
+      (with legacy placeholder fallback for vague terms).
 
     Each branch raises ARG_ERROR (not a Tier-1 crash) because the LLM can
     recover by staging the right source/node metadata and retrying the tool
@@ -1096,6 +1127,12 @@ def _assert_affected_component(
                 expected="source with composer-authored source metadata",
                 actual_type="source without metadata",
             )
+        if INTERPRETATION_REQUIREMENTS_KEY not in state.source.options:
+            raise ToolArgumentError(
+                argument="affected_node_id",
+                expected=f"source to contain a pending {kind.value} requirement for {user_term!r}",
+                actual_type=f"missing pending {kind.value} review site",
+            )
         matched_terms = _matching_interpretation_sites(state, affected_node_id, kind, user_term)
         if not matched_terms:
             raise ToolArgumentError(
@@ -1103,6 +1140,65 @@ def _assert_affected_component(
                 expected=f"source to contain a pending {kind.value} requirement for {user_term!r}",
                 actual_type=f"missing pending {kind.value} review site",
             )
+        if llm_draft is not None:
+            requirements = state.source.options.get(INTERPRETATION_REQUIREMENTS_KEY)
+            draft = None
+            if isinstance(requirements, (list, tuple)):
+                for requirement in requirements:
+                    if (
+                        isinstance(requirement, Mapping)
+                        and requirement.get("kind") == kind.value
+                        and requirement.get("user_term") == user_term
+                        and requirement.get("status") == "pending"
+                    ):
+                        draft_value = requirement.get("draft")
+                        draft = draft_value if isinstance(draft_value, str) else None
+                        break
+            if draft is not None and draft != llm_draft:
+                raise ToolArgumentError(
+                    argument="llm_draft",
+                    expected="the exact source review requirement draft staged in source.options.interpretation_requirements",
+                    actual_type="invented_source event draft does not match the source review requirement draft",
+                )
+        return
+
+    if kind is InterpretationKind.PIPELINE_DECISION:
+        node = _find_node_or_raise(state, affected_node_id)
+        matched_terms = _matching_interpretation_sites(state, affected_node_id, kind, user_term)
+        if not matched_terms:
+            raise ToolArgumentError(
+                argument="affected_node_id",
+                expected=f"node {affected_node_id!r} to contain a pending {kind.value} requirement for {user_term!r}",
+                actual_type=f"missing pending {kind.value} review site",
+            )
+        requirements = node.options.get(INTERPRETATION_REQUIREMENTS_KEY)
+        draft = None
+        if isinstance(requirements, (list, tuple)):
+            for requirement in requirements:
+                if (
+                    isinstance(requirement, Mapping)
+                    and requirement.get("kind") == kind.value
+                    and requirement.get("user_term") == user_term
+                    and requirement.get("status") == "pending"
+                ):
+                    draft_value = requirement.get("draft")
+                    draft = draft_value if isinstance(draft_value, str) else None
+                    break
+        try:
+            validate_pipeline_decision_semantics(
+                node_id=node.id,
+                plugin=node.plugin,
+                options=node.options,
+                user_term=user_term,
+                draft=draft,
+                context="request_interpretation_review",
+            )
+        except ValueError as exc:
+            raise ToolArgumentError(
+                argument="affected_node_id",
+                expected=str(exc),
+                actual_type="pipeline_decision node that does not implement the reviewed decision",
+            ) from exc
         return
 
     node = _find_node_or_raise(state, affected_node_id)
@@ -1382,7 +1478,7 @@ async def _handle_request_interpretation_review(
     # before any DB write. Prompt-template reviews deliberately carry real
     # Jinja such as ``{{ row.html }}``, so they keep the credential prefilter
     # above but skip the accepted-value validator.
-    if parsed.kind is InterpretationKind.VAGUE_TERM:
+    if parsed.kind in {InterpretationKind.VAGUE_TERM, InterpretationKind.PIPELINE_DECISION}:
         try:
             _validate_accepted_value_content(parsed.llm_draft)
         except ValueError as exc:

@@ -37,7 +37,7 @@ from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.composer.tools import _execute_create_blob, _execute_patch_source_options, _execute_set_source_from_blob
 from elspeth.web.composer.tools._common import ToolContext
-from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, SOURCE_AUTHORING_KEY
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -304,6 +304,18 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             "content_hash": create_result.data["content_hash"],
             "review_event_id": None,
             "resolved_kind": None,
+        }
+        requirement = options[INTERPRETATION_REQUIREMENTS_KEY][0]
+        assert requirement == {
+            "id": "source_review:inline_source_data",
+            "kind": "invented_source",
+            "user_term": "inline_source_data",
+            "status": "pending",
+            "draft": "generated row text",
+            "event_id": None,
+            "accepted_value": None,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": None,
         }
 
         forged_authoring_patch = _execute_patch_source_options(

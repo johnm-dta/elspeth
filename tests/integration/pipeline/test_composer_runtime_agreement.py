@@ -3199,6 +3199,8 @@ sinks:
         blob_record = MagicMock(spec=object)
         blob_record.mime_type = "text/plain"
         blob_record.size_bytes = len(content)
+        blob_record.content_hash = hashlib.sha256(content).hexdigest()
+        blob_record.status = "ready"
         blob_service = MagicMock(spec=object)
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)
@@ -3236,6 +3238,8 @@ sinks:
         blob_record = MagicMock(spec=object)
         blob_record.mime_type = "text/plain"
         blob_record.size_bytes = len(content)
+        blob_record.content_hash = sha256
+        blob_record.status = "ready"
         blob_service = MagicMock(spec=object)
         blob_service.link_blob_to_run = AsyncMock(return_value=None)
         blob_service.read_blob_content = AsyncMock(return_value=content)

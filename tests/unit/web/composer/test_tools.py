@@ -7365,7 +7365,6 @@ class TestGetPluginAssistance:
         """plugin_type='source' looks up the plugin via get_source_by_name."""
         state = _empty_state()
         catalog = _mock_catalog()
-        # csv source has no assistance yet — discovery returns explicit None payload
         result = execute_tool(
             "get_plugin_assistance",
             {
@@ -7379,6 +7378,37 @@ class TestGetPluginAssistance:
         payload = result.to_dict()["data"]
         assert payload["plugin_type"] == "source"
         assert payload["plugin_name"] == "csv"
+
+    def test_csv_discovery_explains_generated_source_review_handoff(self) -> None:
+        """CSV guidance should make source-level invented-source review mechanics explicit."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "source",
+                "plugin_name": "csv",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        hints = " ".join(payload["composer_hints"])
+
+        assert "columns tells CSVSource how to parse headerless rows" in hints
+        assert "downstream DAG validation still needs a schema guarantee" in hints
+        assert "schema.guaranteed_fields" in hints
+        assert "CSV source options do not have url_field" in hints
+        assert "set url_field on the web_scrape node" in hints
+        assert "If you authored CSV rows or chose source values" in hints
+        assert "blob-backed source" in hints
+        assert "stage invented_source on source.options.interpretation_requirements" in hints
+        assert "request_interpretation_review" in hints
+        assert "affected_node_id='source'" in hints
+        assert "llm_draft equal to the exact CSV text" in hints
+        assert "source is not a transform node" in hints
+        assert "do not search nodes[] for source" in hints
 
     def test_dispatches_to_sink_family(self) -> None:
         """plugin_type='sink' looks up the plugin via get_sink_by_name."""
@@ -7398,6 +7428,30 @@ class TestGetPluginAssistance:
         assert payload["plugin_type"] == "sink"
         assert payload["plugin_name"] == "json"
 
+    def test_json_sink_discovery_explains_that_sink_names_do_not_clean_rows(self) -> None:
+        """JSON sink guidance should point row cleanup back to field_mapper."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "sink",
+                "plugin_name": "json",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        hints = " ".join(payload["composer_hints"])
+
+        assert "JSON sink writes the row it receives" in hints
+        assert "schema, format, sink name, and output name do not drop fields" in hints
+        assert "Use field_mapper before the sink" in hints
+        assert "web_scrape results saved without raw page bodies" in hints
+        assert "field_mapper(select_only=true)" in hints
+        assert "a sink named cleanup is not a cleanup transform" in hints
+
     def test_omitting_issue_code_returns_discovery_payload(self) -> None:
         """Discovery-time mode: ``issue_code`` may be omitted entirely."""
         state = _empty_state()
@@ -7414,6 +7468,172 @@ class TestGetPluginAssistance:
         assert result.success is True
         payload = result.to_dict()["data"]
         assert payload["issue_code"] is None
+        hints = " ".join(payload["composer_hints"])
+        assert "transform" in hints
+        assert "not a source" in hints
+        assert "url_field" in hints
+        assert "Unknown source plugin: web_scrape" in hints
+        assert "surface prompt-injection shielding as an important recommendation" in hints
+        assert "recommendation is not permission to add a node" in hints
+        assert "do not add passthrough, placeholder, no-op, or renamed utility nodes" in hints
+        assert "do not substitute azure_content_safety" in hints
+        assert "do not insert it automatically" in hints
+        assert "route through azure_content_safety first" not in hints
+
+    def test_web_scrape_discovery_explains_pass_through_url_contract(self) -> None:
+        """web_scrape should guide downstream nodes to use guaranteed URL fields."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "transform",
+                "plugin_name": "web_scrape",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        hints = " ".join(payload["composer_hints"])
+
+        assert "passes through upstream row fields" in hints
+        assert "fetch_url_final" in hints
+        assert "Do not make downstream LLM templates require a URL field" in hints
+        assert "unless the upstream source schema or web_scrape schema guarantees that field" in hints
+        assert "do not patch web_scrape guaranteed_fields by guess" in hints
+        assert "schema is required" in hints
+        assert "For raw HTML, set format to raw" in hints
+        assert "not html" in hints
+        assert "If the user-facing output should exclude raw scraped content" in hints
+        assert "route the final path through field_mapper with select_only: true" in hints
+        assert "a sink name or output name is not cleanup" in hints
+        assert "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete" in hints
+        assert "If scraped public internet content flows into an LLM" in hints
+        assert "azure_prompt_shield" in hints
+        assert "prompt_injection_shield_recommendation" in hints
+
+    def test_field_mapper_discovery_explains_cleanup_whitelist_semantics(self) -> None:
+        """field_mapper hints should make utility-cleanup behavior explicit."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "transform",
+                "plugin_name": "field_mapper",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        assert payload["issue_code"] is None
+        hints = " ".join(payload["composer_hints"])
+
+        assert "Use select_only: true" in hints
+        assert "whitelist exactly the saved output fields" in hints
+        assert "only utility transform that actually removes raw fields" in hints
+        assert "source -> web_scrape -> llm -> field_mapper(cleanup) -> sink" in hints
+        assert "A JSON sink named cleanup is not a cleanup transform" in hints
+        assert "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete" in hints
+        assert "A cleanup stream name is not a cleanup node" in hints
+        assert "do not offer to repair it later" in hints
+        assert "set the upstream LLM or scraper on_success to the cleanup mapper" in hints
+        assert "set the cleanup mapper on_success to the sink" in hints
+        assert "If an LLM routes directly to a JSON sink whose name sounds like cleanup" in hints
+        assert "the LLM passes through raw scrape fields until this field_mapper whitelists them" in hints
+        assert "route the mapper directly to the existing sink" in hints
+        assert "Do not remove the cleanup mapper or output" in hints
+        assert "before raw scraped fields exist cannot satisfy scraped-content cleanup" in hints
+        assert "preserve requested enrichment, extraction, scoring, or LLM response fields" in hints
+        assert "stage a pipeline_decision interpretation requirement" in hints
+        assert "request its review after mutation succeeds" in hints
+        assert "naming a sink or output" in hints
+        assert "does not clean data" in hints
+        assert "If the user already asked to remove, drop, exclude, or avoid saving raw scrape fields" in hints
+        assert "that request is the authorization and requirement to add the cleanup field_mapper" in hints
+        assert "do not ask whether to add cleanup later" in hints
+        assert "use user_term 'drop_raw_html_fields'" in hints
+        assert "not permission to omit the cleanup node" in hints
+
+    def test_llm_discovery_recommends_prompt_shield_for_internet_content(self) -> None:
+        """LLM plugin hints recommend prompt shield without silently changing topology."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "get_plugin_assistance",
+            {
+                "plugin_type": "transform",
+                "plugin_name": "llm",
+            },
+            state,
+            catalog,
+        )
+        assert result.success is True
+        payload = result.to_dict()["data"]
+        assert payload["issue_code"] is None
+        hints = " ".join(payload["composer_hints"])
+        assert "internet content" in hints
+        assert "prompt-injection shielding is important" in hints
+        assert "azure_prompt_shield" in hints
+        assert "surface this to the user as a strong recommendation" in hints
+        assert "recommendation is not permission to add a node" in hints
+        assert "do not add passthrough, placeholder, no-op, or renamed utility nodes" in hints
+        assert "copying it verbatim" in hints
+        assert "llm_prompt_template" in hints
+        assert "scoring scale" in hints
+        assert "Measurable adjectives are not exempt" in hints
+        assert "over 6 ft" in hints
+        assert "top quartile" in hints
+        assert "Prompt-template review is not enough" in hints
+        assert "put both interpretation_requirements in the LLM node options before set_pipeline" in hints
+        assert "When repairing or upserting an LLM node, repeat the review preflight" in hints
+        assert (
+            "carry forward existing pending LLM interpretation requirements and add missing vague_term or prompt shield requirements"
+            in hints
+        )
+        assert "If the prompt asks the model to return a score, rating, rank, class, or pass/fail result" in hints
+        assert "that output shape is authored judgement semantics when you chose the scale" in hints
+        assert "stable user_term preserving the user's criterion phrase" in hints
+        assert "not the whole task phrase" in hints
+        assert "use the adjective or noun phrase that names the criterion" in hints
+        assert "For how <adjective> phrasing, use the adjective itself as user_term" in hints
+        assert "only an llm_prompt_template review is incomplete" in hints
+        assert "Do not stop by saying the rubric is part of the reviewed prompt" in hints
+        assert "downstream cleanup, sink, mapper, or transform needs the LLM response" in hints
+        assert "guarantee the response_field by name" in hints
+        assert "also guarantee pass-through fields" in hints
+        assert "Single-query LLM output is written to response_field" in hints
+        assert "Prompt-requested JSON keys are not separate pipeline fields unless another transform parses them" in hints
+        assert "preserve response_field through cleanup" in hints
+        assert "preserves upstream row fields while adding response_field" in hints
+        assert "does not remove raw scrape fields" in hints
+        assert "put a field_mapper cleanup node between the LLM and the sink" in hints
+        assert "rate how cool they are" not in hints
+        assert "vague_term" in hints
+        assert "good, bad" not in hints
+        assert "Subjective user terms" not in hints
+        assert "do not insert it automatically" in hints
+        assert "prompt_injection_shield_recommendation" in hints
+        assert "LLM-node reviews stack" in hints
+        assert "Interpretation reviews are not transform stages" in hints
+        assert "Do not create passthrough, review, recommendation, or placeholder nodes" in hints
+        assert "route through azure_content_safety first" not in hints
+
+    def test_llm_post_call_hints_do_not_keyword_scan_subjective_terms(self) -> None:
+        """Plugin hints must not decide arbitrary/vague terms by backend word list."""
+        from elspeth.plugins.transforms.llm.transform import LLMTransform
+
+        hints = LLMTransform.get_post_call_hints(
+            tool_name="upsert_node",
+            config_snapshot={
+                "prompt_template": "Rate how cool this public web page is on a 1-10 scale.",
+                "response_field": "cool_assessment",
+            },
+        )
+
+        assert hints == ()
 
 
 # ---------------------------------------------------------------------------

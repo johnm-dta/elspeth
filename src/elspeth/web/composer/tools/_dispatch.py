@@ -194,16 +194,26 @@ _REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[Mapping[str, Any]] = _validate_
         "description": (
             "Ask the user to review an LLM-authored assumption before it is "
             "finalised into the pipeline. This session-aware, kind-tagged "
-            "review surface handles vague terms, invented source data, and "
-            "LLM prompt templates. Use affected_node_id='source' for "
+            "review surface handles vague terms, invented source data, "
+            "LLM prompt templates, and pipeline-shaping decisions. Use "
+            "affected_node_id='source' for "
             "invented_source; use the LLM node id for vague_term and "
-            "llm_prompt_template. Surface ONE assumption per call. The user "
-            "will see your draft and either accept it or amend it. Do not ask "
+            "llm_prompt_template; use the implementing node id for "
+            "pipeline_decision. Surface ONE assumption per call. The user "
+            "will see your draft and resolve it in the review surface. Do not ask "
             "the user in assistant prose; this tool is the review surface. If "
-            "no composition state exists yet, stage the affected source or LLM "
-            "transform first, wait for that tool result, then call this tool. "
-            "Do not call this for concrete operators (e.g., 'rate 1-10') or "
-            "for terms the user already defined in the conversation."
+            "no composition state exists yet, stage the affected source or node "
+            "first, wait for that tool result, then call this tool. "
+            "Do not call this merely because a concrete operator is present "
+            "(e.g., 'rate 1-10'), but do call it when you authored the scale "
+            "semantics, rubric, thresholds, category meaning, or subjective "
+            "criterion definition behind that operator. Prompt-template review "
+            "is not a substitute for an authored rubric/definition review. "
+            "For LLM prompt templates, copying the user's supplied prompt "
+            "verbatim is user-authored; creating a prompt template from the "
+            "user's goal, data, or prose is LLM-authored and must be reviewed. "
+            "Do not call this for terms the user already defined in the "
+            "conversation."
         ),
         "parameters": {
             "type": "object",
@@ -216,7 +226,7 @@ _REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[Mapping[str, Any]] = _validate_
                 },
                 "kind": {
                     "type": "string",
-                    "enum": ["vague_term", "invented_source", "llm_prompt_template"],
+                    "enum": ["vague_term", "invented_source", "llm_prompt_template", "pipeline_decision"],
                     "description": "Class of assumption being surfaced for review.",
                 },
                 "user_term": {

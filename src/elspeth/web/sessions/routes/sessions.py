@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from elspeth.web.blobs.protocol import BlobRecord
@@ -38,7 +39,7 @@ from ._helpers import (
 
 
 def _copied_blob_for_inline_marker(
-    marker: dict[str, Any],
+    marker: Mapping[str, Any],
     blob_map: dict[UUID, BlobRecord],
     *,
     composition_state_id: UUID,

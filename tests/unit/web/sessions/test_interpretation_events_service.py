@@ -46,6 +46,7 @@ from elspeth.web.interpretation_state import (
     PROMPT_TEMPLATE_PARTS_KEY,
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
+    InterpretationReviewPending,
     materialize_state_for_execution,
 )
 from elspeth.web.sessions.converters import state_from_record
@@ -216,6 +217,54 @@ def _prompt_template_review_node(*, node_id: str = "identify_colour") -> dict:
                             "user_term": f"llm_prompt_template:{node_id}",
                             "status": "pending",
                             "draft": prompt_template,
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Test", description=""),
+        version=1,
+    )
+    return state.to_dict()["nodes"][0]
+
+
+def _pipeline_decision_review_node(*, node_id: str = "drop_raw_html") -> dict:
+    state = CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id=node_id,
+                node_type="transform",
+                plugin="field_mapper",
+                input="scored_rows",
+                on_success="clean_rows",
+                on_error="quarantine",
+                options={
+                    "mapping": {
+                        "url": "url",
+                        "agency": "agency",
+                        "primary_colours": "primary_colours",
+                    },
+                    "select_only": True,
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "drop_raw_html_review",
+                            "kind": InterpretationKind.PIPELINE_DECISION.value,
+                            "user_term": "drop_raw_html_fields",
+                            "status": "pending",
+                            "draft": "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
                             "event_id": None,
                             "accepted_value": None,
                             "accepted_artifact_hash": None,
@@ -1166,6 +1215,7 @@ async def test_create_pending_after_session_opt_out_writes_surface_specific_audi
             nodes=[
                 _llm_node(node_id="rate_node", user_term="cool"),
                 _prompt_template_review_node(node_id="identify_colour"),
+                _pipeline_decision_review_node(node_id="drop_raw_html"),
             ],
             metadata_={"name": "Phase 5b Test", "description": ""},
             is_valid=True,
@@ -1185,6 +1235,12 @@ async def test_create_pending_after_session_opt_out_writes_surface_specific_audi
             "identify_colour",
             "llm_prompt_template:identify_colour",
             "Read {{ row.html }} and return JSON.",
+        ),
+        (
+            InterpretationKind.PIPELINE_DECISION,
+            "drop_raw_html",
+            "drop_raw_html_fields",
+            "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
         ),
     ]
     for index, (kind, affected_node_id, user_term, llm_draft) in enumerate(requests):
@@ -1222,6 +1278,7 @@ async def test_create_pending_after_session_opt_out_writes_surface_specific_audi
         InterpretationKind.INVENTED_SOURCE,
         InterpretationKind.VAGUE_TERM,
         InterpretationKind.LLM_PROMPT_TEMPLATE,
+        InterpretationKind.PIPELINE_DECISION,
     ]
 
     with service._engine.begin() as conn:
@@ -1234,19 +1291,166 @@ async def test_create_pending_after_session_opt_out_writes_surface_specific_audi
     latest_state = state_from_record(service._row_to_state_record(latest_state_row))
     materialized = materialize_state_for_execution(latest_state)
 
-    assert isinstance(materialized, CompositionState)
-    assert materialized.source is not None
-    source_options = materialized.source.options
+    assert isinstance(materialized, InterpretationReviewPending)
+    assert len(materialized.sites) == 1
+    assert materialized.sites[0].component_id == "rate_node"
+    assert materialized.sites[0].kind is InterpretationKind.LLM_PROMPT_TEMPLATE
+    assert latest_state.source is not None
+    source_options = latest_state.source.options
     source_requirement = source_options[INTERPRETATION_REQUIREMENTS_KEY][0]
     assert source_requirement["status"] == "resolved"
     assert source_requirement["accepted_value"] == "https://example.gov.au"
     assert source_options[SOURCE_AUTHORING_KEY]["review_event_id"] == str(surface_rows[0].id)
 
-    prompt_node = next(node for node in materialized.nodes if node.id == "identify_colour")
+    prompt_node = next(node for node in latest_state.nodes if node.id == "identify_colour")
     prompt_requirement = prompt_node.options[INTERPRETATION_REQUIREMENTS_KEY][0]
     assert prompt_requirement["status"] == "resolved"
     assert prompt_requirement["accepted_value"] == "Read {{ row.html }} and return JSON."
     assert prompt_node.options["resolved_prompt_template_hash"] == stable_hash("Read {{ row.html }} and return JSON.")
+
+    cleanup_node = next(node for node in latest_state.nodes if node.id == "drop_raw_html")
+    cleanup_requirement = cleanup_node.options[INTERPRETATION_REQUIREMENTS_KEY][0]
+    assert cleanup_requirement["status"] == "resolved"
+    assert cleanup_requirement["accepted_value"] == "Drop the scraped raw HTML and fingerprint fields before saving the JSON output."
+    assert cleanup_requirement["accepted_artifact_hash"] is not None
+
+
+@pytest.mark.asyncio
+async def test_create_pending_pipeline_decision_rejects_raw_html_mapping_preservation(service) -> None:
+    """The review card cannot claim raw-HTML cleanup while preserving raw fields."""
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    cleanup_node = _pipeline_decision_review_node(node_id="drop_raw_html")
+    cleanup_node["options"]["mapping"] = {
+        "url": "url",
+        "content": "content",
+        "content_fingerprint": "content_fingerprint",
+        "primary_colours": "primary_colours",
+    }
+    state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            source=None,
+            nodes=[cleanup_node],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+
+    with pytest.raises(ValueError, match="preserves raw HTML/fingerprint field"):
+        await service.create_pending_interpretation_event(
+            session_id=session_id,
+            composition_state_id=state.id,
+            affected_node_id="drop_raw_html",
+            tool_call_id="call_bad_raw_cleanup",
+            user_term="drop_raw_html_fields",
+            kind=InterpretationKind.PIPELINE_DECISION,
+            llm_draft="Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+            model_identifier="anthropic/claude-opus-4-7",
+            model_version="2026-05-01",
+            provider="anthropic",
+            composer_skill_hash="a" * 64,
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_pending_interpretation_event_is_idempotent_for_same_pending_site(service) -> None:
+    """Repeated review-tool calls for the same pending site return the existing row."""
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            source=None,
+            nodes=[_pipeline_decision_review_node(node_id="drop_raw_html")],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+
+    kwargs = {
+        "session_id": session_id,
+        "composition_state_id": state.id,
+        "affected_node_id": "drop_raw_html",
+        "user_term": "drop_raw_html_fields",
+        "kind": InterpretationKind.PIPELINE_DECISION,
+        "llm_draft": "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+        "model_identifier": "anthropic/claude-opus-4-7",
+        "model_version": "2026-05-01",
+        "provider": "anthropic",
+        "composer_skill_hash": "a" * 64,
+    }
+
+    first = await service.create_pending_interpretation_event(tool_call_id="call_first", **kwargs)
+    second = await service.create_pending_interpretation_event(tool_call_id="call_second", **kwargs)
+
+    assert second.id == first.id
+    assert second.tool_call_id == "call_first"
+    rows = await service.list_interpretation_events(session_id, status="all")
+    assert len(rows) == 1
+    assert rows[0].id == first.id
+
+
+@pytest.mark.asyncio
+async def test_create_pending_pipeline_decision_is_idempotent_across_state_versions(service) -> None:
+    """A later state version must not create a duplicate card for the same pending decision."""
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    first_state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            source=None,
+            nodes=[_pipeline_decision_review_node(node_id="drop_raw_html")],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+    second_state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            source=None,
+            nodes=[_pipeline_decision_review_node(node_id="drop_raw_html")],
+            outputs=[{"name": "clean_rows", "plugin": "json", "options": {"schema": {"mode": "observed"}}}],
+            metadata_={"name": "Phase 5b Test", "description": "second version"},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+
+    kwargs = {
+        "session_id": session_id,
+        "affected_node_id": "drop_raw_html",
+        "user_term": "drop_raw_html_fields",
+        "kind": InterpretationKind.PIPELINE_DECISION,
+        "llm_draft": "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+        "model_identifier": "anthropic/claude-opus-4-7",
+        "model_version": "2026-05-01",
+        "provider": "anthropic",
+        "composer_skill_hash": "a" * 64,
+    }
+
+    first = await service.create_pending_interpretation_event(
+        composition_state_id=first_state.id,
+        tool_call_id="call_first",
+        **kwargs,
+    )
+    second = await service.create_pending_interpretation_event(
+        composition_state_id=second_state.id,
+        tool_call_id="call_second",
+        **kwargs,
+    )
+
+    assert second.id == first.id
+    assert second.composition_state_id == first_state.id
+    rows = await service.list_interpretation_events(session_id, status="all")
+    assert len(rows) == 1
+    assert rows[0].id == first.id
 
 
 @pytest.mark.asyncio

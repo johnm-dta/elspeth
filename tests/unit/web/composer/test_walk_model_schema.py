@@ -352,6 +352,38 @@ def test_walk_three_arm_union() -> None:
     assert not any(p in paths for p in ("field[str]", "field[bool]"))
 
 
+def test_value_provider_treats_missing_union_arm_leaf_as_unreachable() -> None:
+    """Union[ModelA, ModelB] paths are unreachable when the active arm lacks the leaf."""
+
+    class _SuccessPayload(BaseModel):
+        content: Annotated[str, Sensitive()]
+
+    class _FailurePayload(BaseModel):
+        error: str
+
+    class _Envelope(BaseModel):
+        data: _SuccessPayload | _FailurePayload
+
+    nodes = list(walk_model_schema(_Envelope, with_values=True))
+    content_node = next(n for n in nodes if n.path == "data.content")
+    assert content_node.value_provider is not None
+    assert content_node.substitute_provider is not None
+
+    failure_root: dict[str, Any] = {"data": {"error": "not found"}}
+    assert content_node.value_provider(failure_root) is None
+
+    def _must_not_be_called(_value: Any) -> Any:
+        raise AssertionError("missing union-arm leaf should not be substituted")
+
+    content_node.substitute_provider(failure_root, _must_not_be_called)
+    assert failure_root == {"data": {"error": "not found"}}
+
+    success_root: dict[str, Any] = {"data": {"content": "secret"}}
+    assert content_node.value_provider(success_root) == "secret"
+    content_node.substitute_provider(success_root, lambda value: f"<{value}>")
+    assert success_root == {"data": {"content": "<secret>"}}
+
+
 def test_walk_bare_list_raises_value_error() -> None:
     """Bare list (no element type) raises ValueError mentioning the field path."""
 

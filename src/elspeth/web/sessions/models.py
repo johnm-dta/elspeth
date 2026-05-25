@@ -94,7 +94,9 @@ from sqlalchemy.types import JSON
 #   16 → blobs LLM-authored provenance CHECK constraint now rejects any
 #        creating_* field on verbatim rows; whitespace strings can no longer
 #        bypass the verbatim-side nullability invariant.
-SESSION_SCHEMA_EPOCH = 16
+#   17 → interpretation_events.kind CHECK gains pipeline_decision for
+#        LLM-authored cleanup/shape decisions that gate execution.
+SESSION_SCHEMA_EPOCH = 17
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 
@@ -689,7 +691,7 @@ interpretation_events_table = Table(
     # InterpretationKind contract enum: contract amendment, schema update,
     # closed-enum tests, and writer-path audit.
     CheckConstraint(
-        "kind IS NULL OR kind IN ('vague_term', 'invented_source', 'llm_prompt_template')",
+        "kind IS NULL OR kind IN ('vague_term', 'invented_source', 'llm_prompt_template', 'pipeline_decision')",
         name="ck_interpretation_events_kind",
     ),
     # Auto-interpreted rows are born resolved by definition. They never

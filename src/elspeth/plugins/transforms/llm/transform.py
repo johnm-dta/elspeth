@@ -1580,9 +1580,25 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 summary="Call an LLM provider (Azure OpenAI or OpenRouter) on each row and write the response into a field. Tracks model identity, token usage, and finish reason in the audit trail.",
                 composer_hints=(
                     "Call list_models before pinning 'model:' — deployments don't all ship the same providers.",
-                    "Subjective user terms (cool, risky, relevant, good) MUST trigger request_interpretation_review before the build is final.",
+                    "If you create a prompt template from the user's goal, data, or prose instead of copying it verbatim, stage an llm_prompt_template review for the authored prompt text.",
+                    "When you author LLM judgment semantics — a scoring scale, rubric, category meaning, threshold, signal weighting, cutoff, comparison set, or subjective criterion definition — stage a vague_term review on the LLM node before set_pipeline.",
+                    "Measurable adjectives are not exempt: if the user gives the metric/cutoff, use it; if you choose a cutoff such as 'over 6 ft' or a ranking rule such as 'top quartile', review that authored threshold semantics.",
+                    "Prompt-template review is not enough for authored judgment semantics: put both interpretation_requirements in the LLM node options before set_pipeline — one vague_term for the rubric/definition/threshold/category semantics and one llm_prompt_template for the raw prompt. Use a stable user_term preserving the user's criterion phrase, not the whole task phrase; for an adjective embedded in prose, use the adjective or noun phrase that names the criterion. llm_draft must equal the semantics you wrote; only an llm_prompt_template review is incomplete.",
+                    "When repairing or upserting an LLM node, repeat the review preflight; carry forward existing pending LLM interpretation requirements and add missing vague_term or prompt shield requirements before stopping.",
+                    "Do not stop by saying the rubric is part of the reviewed prompt. If you wrote the scale, label meanings, thresholds, cutoff, comparison rule, tie break, or signals, add the separate vague_term requirement and request its review.",
+                    "If the prompt asks the model to return a score, rating, rank, class, or pass/fail result, that output shape is authored judgement semantics when you chose the scale, class meaning, threshold, or ranking rule.",
+                    "Objective extraction such as identifying primary colours used does not by itself need a vague_term review unless you add subjective scoring, ranking, thresholds, or category semantics.",
+                    "For how <adjective> phrasing, use the adjective itself as user_term unless the user supplied a more specific criterion phrase; do not use the whole how-phrase.",
                     "Token-usage and model-ID fields are appended automatically as <response_field>_usage / _model — don't hand-add them.",
-                    "If the input came from web_scrape or any external source, route through azure_content_safety first.",
+                    "If downstream cleanup, sink, mapper, or transform needs the LLM response, guarantee the response_field by name in the LLM node schema. If downstream also needs source or scrape fields that pass through the LLM, also guarantee pass-through fields such as URL or identifier fields.",
+                    "Single-query LLM output is written to response_field. Prompt-requested JSON keys are not separate pipeline fields unless another transform parses them; preserve response_field through cleanup instead of invented prompt-internal keys.",
+                    "The LLM transform preserves upstream row fields while adding response_field; it does not remove raw scrape fields. If a web_scrape-to-LLM workflow must save results without raw HTML or fingerprints, put a field_mapper cleanup node between the LLM and the sink.",
+                    "If internet content, public web content, search results, crawled pages, or other untrusted remote text will flow into this LLM, prompt-injection shielding is important: surface this to the user as a strong recommendation. Recommend azure_prompt_shield or the deployment's equivalent before the LLM; recommendation is not permission to add a node, so do not insert it automatically unless requested, policy-required, or explicitly high-risk.",
+                    "If the workflow proceeds without an authorized prompt shield, stage a pipeline_decision review on the LLM node with user_term prompt_injection_shield_recommendation and a draft recommending azure_prompt_shield while stating that internet-controlled text will otherwise flow directly to the LLM.",
+                    "LLM-node reviews stack: an authored web-content scoring prompt can need llm_prompt_template, vague_term, and prompt_injection_shield_recommendation requirements on the same LLM node.",
+                    "Interpretation reviews are not transform stages. Do not create passthrough, review, recommendation, or placeholder nodes for LLM reviews; put the review objects in this LLM node's interpretation_requirements list.",
+                    "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
+                    "This is prompt-injection defense; do not substitute azure_content_safety. Use azure_content_safety only for harmful-content moderation or safety classification.",
                     "max_concurrency and per_minute_rate_limit interact — neither bounds the other; set both when the provider has hard rate caps.",
                 ),
             )
@@ -1596,17 +1612,6 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         config_snapshot: Mapping[str, object],
     ) -> tuple[str, ...]:
         hints: list[str] = []
-        # Subjective term in prompt → flag interpretation review.
-        if "prompt_template" in config_snapshot:
-            prompt_template = config_snapshot["prompt_template"]
-            if isinstance(prompt_template, str):
-                subjective_terms = ("cool", "good", "bad", "risky", "interesting", "relevant", "appropriate")
-                text = prompt_template.lower()
-                triggered = [term for term in subjective_terms if term in text]
-                if triggered:
-                    hints.append(
-                        f"Your prompt contains subjective term(s) {triggered!r}. Call request_interpretation_review before finalising — operators need to confirm the LLM's interpretation matches their intent."
-                    )
         # Manual _usage / _model field declared by hand → tell them it's automatic.
         if "response_field" in config_snapshot and "output_schema" in config_snapshot:
             response_field = config_snapshot["response_field"]

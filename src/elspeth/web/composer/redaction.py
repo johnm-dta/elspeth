@@ -200,15 +200,18 @@ def _build_value_provider(
             kind = step[0]
             if kind == "attr":
                 name = step[1]
-                # Optional-intermediate disposition: skip frontier entries
-                # whose ``current`` is None.  The walker emits inner paths
-                # through Optional sub-models; at runtime those intermediates
-                # may be None for a given example, making the inner path
-                # unreachable.  Sibling parity with _build_substitute_provider
-                # (rev-4 sibling-API alignment).
+                # Optional / union-arm disposition: skip frontier entries
+                # whose ``current`` is None, and mapping entries where the
+                # active runtime arm lacks this field. The walker emits inner
+                # paths through Optional and Union sub-models so schema
+                # completeness holds; at runtime a particular example may
+                # select a different union arm, making the path unreachable.
+                # Sibling parity with _build_substitute_provider.
                 next_frontier: list[tuple[tuple[Any, ...], Any]] = []
                 for keys, current in frontier:
                     if current is None:
+                        continue
+                    if isinstance(current, Mapping) and name not in current:
                         continue
                     next_frontier.append((keys, current[name]))
                 frontier = next_frontier
@@ -311,6 +314,8 @@ def _build_substitute_provider(
                 raise AssertionError(f"unknown path step kind: {kind!r}")
         for container in frontier:
             if container is None:
+                continue
+            if isinstance(container, Mapping) and leaf_name not in container:
                 continue
             container[leaf_name] = transform(container[leaf_name])
 
@@ -2244,35 +2249,8 @@ class GetBlobContentArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class GetBlobContentResponseModel(BaseModel):
-    """Redaction-bearing response model for the ``get_blob_content`` tool.
-
-    Mirrors the handler's ``_discovery_result`` payload shape at
-    ``tools.py:3695-3705`` — the dict passed as ``ToolResult.data`` contains
-    exactly the keys ``blob_id``, ``filename``, ``mime_type``, ``content``,
-    ``truncated``, ``size_bytes``.
-
-    ``content`` carries :class:`Sensitive` with :func:`_summarize_blob_content`
-    so the audit-side ``chat_messages.tool_calls`` record substitutes a
-    fixed-form ``<blob-content:N-bytes>`` scalar in place of the raw payload
-    text — disclosing size only, which is also visible via
-    :attr:`size_bytes` independently (a structural fact about the blob).
-
-    ``filename`` and ``mime_type`` are operator-supplied at blob upload time
-    and reach this response from the blobs table; they are NOT marked
-    Sensitive because they appear unredacted in the create_blob/update_blob
-    argument surfaces and in the list_blobs/get_blob_metadata responses,
-    and demoting them here without demoting them everywhere would produce a
-    misleading audit signal (the value is visible to the auditor through
-    other tools and the redaction would not actually conceal it).
-
-    ``extra="forbid"`` is required (rev-2 M.1) and matches the closed-set
-    handler shape: any future addition of a content-bearing key (e.g.,
-    ``preview``) MUST be declared here so the walker visits it and the
-    adequacy guard's per-entry shape walk surfaces the need for a Sensitive
-    marker.  Without ``extra="forbid"`` a new key would silently slip past
-    the walker into the audit trail unredacted.
-    """
+class GetBlobContentDataModel(BaseModel):
+    """Redaction-bearing success payload for ``get_blob_content``."""
 
     blob_id: str
     filename: str
@@ -2280,6 +2258,32 @@ class GetBlobContentResponseModel(BaseModel):
     content: Annotated[str, Sensitive(summarizer=_summarize_blob_content)]
     truncated: bool
     size_bytes: int
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GetBlobContentFailureDataModel(BaseModel):
+    """Recoverable ``get_blob_content`` failure payload."""
+
+    error: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GetBlobContentResponseModel(BaseModel):
+    """Redaction-bearing ``ToolResult`` envelope for ``get_blob_content``.
+
+    The handler returns a normal composer ``ToolResult`` envelope. Its success
+    branch stores sensitive blob bytes under ``data.content``; failure branches
+    store only ``data.error``. Keep both shapes closed so audit persistence
+    redacts content without crashing on recoverable failures.
+    """
+
+    success: bool
+    validation: dict[str, Any]
+    affected_nodes: list[str]
+    version: int
+    data: GetBlobContentDataModel | GetBlobContentFailureDataModel
 
     model_config = ConfigDict(extra="forbid")
 

@@ -43,6 +43,7 @@ from elspeth.web.composer.tools import (
     _execute_patch_source_options,
 )
 from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -103,6 +104,96 @@ def _state_with_node(node_id: str = "t1", options: dict[str, Any] | None = None)
                 on_success="main",
                 on_error="discard",
                 options=options or {},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _state_with_llm_node(node_id: str = "llm1", options: dict[str, Any] | None = None) -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id=node_id,
+                node_type="transform",
+                plugin="llm",
+                input="source_out",
+                on_success="main",
+                on_error="discard",
+                options=options
+                or {
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-haiku-4.5",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Summarise {{ row.text }}.",
+                    "schema": {"mode": "observed"},
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _state_with_web_scrape_and_mapper() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="rows",
+                on_success="scraped_rows",
+                on_error="discard",
+                options={
+                    "schema": {"mode": "observed"},
+                    "url_field": "url",
+                    "content_field": "content",
+                    "fingerprint_field": "content_fingerprint",
+                    "http": {
+                        "abuse_contact": "noreply@dta.gov.au",
+                        "scraping_reason": "DTA technical demonstration",
+                        "allowed_hosts": "public_only",
+                    },
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="drop_raw_html",
+                node_type="transform",
+                plugin="field_mapper",
+                input="scraped_rows",
+                on_success="clean_rows",
+                on_error="discard",
+                options={
+                    "schema": {"mode": "observed"},
+                    "mapping": {"url": "url", "content": "content"},
+                    "select_only": False,
+                },
                 condition=None,
                 routes=None,
                 fork_to=None,
@@ -285,6 +376,137 @@ class TestPromotePatchNodeOptionsArgErrorRouting:
         state = _state_with_node("t1", {"field": "old"})
         result = _execute_patch_node_options({"node_id": "t1", "patch": {"field": "new"}}, state, _ctx())
         assert isinstance(result, ToolResult)
+
+    def test_llm_patch_restores_prompt_template_review_requirement(self) -> None:
+        """Patching LLM options must not remove the Class 3 prompt gate."""
+        state = _state_with_llm_node(
+            options={
+                "provider": "openrouter",
+                "model": "anthropic/claude-haiku-4.5",
+                "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                "prompt_template": "Old {{ row.text }}.",
+                "schema": {"mode": "observed"},
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "vague",
+                        "kind": "vague_term",
+                        "user_term": "summary",
+                        "status": "pending",
+                        "draft": "short summary",
+                        "event_id": None,
+                        "accepted_value": None,
+                        "accepted_artifact_hash": None,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            }
+        )
+
+        result = _execute_patch_node_options(
+            {"node_id": "llm1", "patch": {"prompt_template": "New {{ row.text }}."}},
+            state,
+            _ctx(),
+        )
+
+        assert result.success is True, result.data
+        requirements = result.updated_state.nodes[0].options[INTERPRETATION_REQUIREMENTS_KEY]
+        assert [requirement["kind"] for requirement in requirements] == ["vague_term", "llm_prompt_template"]
+        assert requirements[1]["user_term"] == "llm_prompt_template:llm1"
+        assert requirements[1]["draft"] == "New {{ row.text }}."
+
+    def test_patch_rejects_unreviewed_drop_of_web_scrape_raw_fields(self) -> None:
+        """A patch cannot create raw-field cleanup without the pipeline decision gate."""
+        result = _execute_patch_node_options(
+            {
+                "node_id": "drop_raw_html",
+                "patch": {
+                    "mapping": {"url": "url"},
+                    "select_only": True,
+                },
+            },
+            _state_with_web_scrape_and_mapper(),
+            _ctx(),
+        )
+
+        assert result.success is False
+        assert "drop_raw_html_fields" in result.data["error"]
+        assert "pipeline_decision" in result.data["error"]
+
+    def test_patch_rejects_raw_cleanup_review_on_non_cleanup_node(self) -> None:
+        """A raw-cleanup review belongs on the mapper that implements the drop."""
+        state = CompositionState(
+            source=None,
+            nodes=(
+                NodeSpec(
+                    id="fetch_pages",
+                    node_type="transform",
+                    plugin="web_scrape",
+                    input="rows",
+                    on_success="scraped_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "url_field": "url",
+                        "content_field": "content",
+                        "fingerprint_field": "content_fingerprint",
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+                NodeSpec(
+                    id="identify_primary_colours",
+                    node_type="transform",
+                    plugin="llm",
+                    input="scraped_rows",
+                    on_success="coloured_rows",
+                    on_error="discard",
+                    options={
+                        "provider": "openrouter",
+                        "model": "anthropic/claude-haiku-4.5",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                        "prompt_template": "Read {{ row.content }}.",
+                        "schema": {"mode": "observed"},
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = _execute_patch_node_options(
+            {
+                "node_id": "identify_primary_colours",
+                "patch": {
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "drop_raw_html_review",
+                            "kind": "pipeline_decision",
+                            "user_term": "drop_raw_html_fields",
+                            "status": "pending",
+                            "draft": "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+                        }
+                    ]
+                },
+            },
+            state,
+            _ctx(),
+        )
+
+        assert result.success is False
+        assert "raw-html cleanup decision" in result.data["error"]
+        assert "must be implemented by a field_mapper" in result.data["error"]
 
     def test_manifest_entry_is_type_driven(self) -> None:
         assert "patch_node_options" in MANIFEST

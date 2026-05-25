@@ -448,17 +448,21 @@ class TestValidatePipelinePendingInterpretationPlaceholders:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is False
-        assert len(result.errors) == 1
+        assert len(result.errors) == 2
         assert result.errors[0].error_code == "interpretation_review_pending"
+        assert result.errors[1].error_code == "interpretation_review_pending"
         assert "Invalid Jinja2 template" not in result.errors[0].message
         assert result.readiness.authoring_valid is True
         assert result.readiness.execution_ready is False
         assert result.readiness.completion_ready is True
         assert result.readiness.blockers[0].code == "interpretation_review_pending"
-        assert result.readiness.blockers[0].component_id == "test_node"
-        assert result.readiness.blockers[0].component_type == "transform"
+        assert result.readiness.blockers[0].component_id is None
+        assert result.readiness.blockers[0].component_type is None
+        assert "llm_prompt_template:test_node" in result.readiness.blockers[0].detail
         assert "vague_term" in result.errors[0].message
         assert "transform 'test_node'" in result.errors[0].message
+        assert "llm_prompt_template" in result.errors[1].message
+        assert "llm_prompt_template:test_node" in result.errors[1].message
         mock_yaml_gen.generate_yaml.assert_not_called()
 
     def test_pending_invented_source_review_returns_source_readiness(self) -> None:

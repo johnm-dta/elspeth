@@ -52,7 +52,7 @@ from elspeth.web.composer.redaction import (
 )
 from elspeth.web.composer.redaction_telemetry import NoopRedactionTelemetry
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
-from elspeth.web.composer.tools import _execute_set_pipeline
+from elspeth.web.composer.tools import _execute_create_blob, _execute_set_pipeline
 from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, SOURCE_AUTHORING_KEY
 from elspeth.web.sessions.engine import create_session_engine
@@ -565,9 +565,371 @@ class TestPromoteSetPipelineArgErrorRouting:
             "review_event_id": None,
             "resolved_kind": None,
         }
+        requirements = options[INTERPRETATION_REQUIREMENTS_KEY]
+        assert len(requirements) == 1
+        assert requirements[0] == {
+            "id": "source_review:inline_source_data",
+            "kind": "invented_source",
+            "user_term": "inline_source_data",
+            "status": "pending",
+            "draft": "name,score\nada,42\n",
+            "event_id": None,
+            "accepted_value": None,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": None,
+        }
         with engine.connect() as conn:
             row = conn.execute(select(blobs_table).where(blobs_table.c.id == options["blob_ref"])).one()
         assert row.creation_modality == CreationModality.LLM_GENERATED.value
+
+    def test_inline_blob_llm_authored_url_source_records_url_list_review_requirement(self, tmp_path: Path) -> None:
+        """Headered URL CSVs get the tutorial-stable invented-source user_term."""
+        user_message_content = "Create a generated URL CSV for the pipeline."
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
+        url_csv = "url\nhttps://example.test\nhttps://example.gov.au\n"
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"schema": {"mode": "observed"}},
+                "inline_blob": {
+                    "filename": "generated.csv",
+                    "mime_type": "text/csv",
+                    "content": url_csv,
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [],
+        }
+
+        result = _execute_set_pipeline(
+            args,
+            _empty_state(),
+            ToolContext(
+                catalog=_mock_catalog(),
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
+                composer_model_identifier="openai/gpt-5-mini",
+                composer_model_version="gpt-5-mini-2026-05-01",
+                composer_provider="openai",
+                composer_skill_hash="sha256:composer-skill",
+                tool_arguments_hash="sha256:tool-arguments",
+            ),
+        )
+
+        assert result.success is True, result.data
+        assert result.updated_state.source is not None
+        requirement = result.updated_state.source.options[INTERPRETATION_REQUIREMENTS_KEY][0]
+        assert requirement["kind"] == "invented_source"
+        assert requirement["user_term"] == "inline_source_url_list"
+        assert requirement["draft"] == url_csv
+
+    def test_set_pipeline_rejects_unreviewed_drop_of_web_scrape_raw_fields(self) -> None:
+        """Dropping web-scrape raw fields is a user-visible pipeline decision."""
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"path": "/data/urls.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            "nodes": [
+                {
+                    "id": "fetch_pages",
+                    "node_type": "transform",
+                    "plugin": "web_scrape",
+                    "input": "rows",
+                    "on_success": "scraped_rows",
+                    "on_error": "discard",
+                    "options": {
+                        "schema": {"mode": "observed"},
+                        "url_field": "url",
+                        "content_field": "content",
+                        "fingerprint_field": "content_fingerprint",
+                        "http": {
+                            "abuse_contact": "noreply@dta.gov.au",
+                            "scraping_reason": "DTA technical demonstration",
+                            "allowed_hosts": "public_only",
+                        },
+                    },
+                },
+                {
+                    "id": "drop_raw_html",
+                    "node_type": "transform",
+                    "plugin": "field_mapper",
+                    "input": "scraped_rows",
+                    "on_success": "clean_rows",
+                    "on_error": "discard",
+                    "options": {
+                        "schema": {"mode": "observed"},
+                        "mapping": {"url": "url"},
+                        "select_only": True,
+                    },
+                },
+            ],
+            "edges": [],
+            "outputs": [],
+        }
+
+        result = _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
+
+        assert result.success is False
+        assert "drop_raw_html_fields" in result.data["error"]
+        assert "pipeline_decision" in result.data["error"]
+
+    def test_set_pipeline_rejects_cleanup_named_mapper_that_preserves_web_scrape_raw_fields(self) -> None:
+        """A node named as cleanup cannot preserve the exact raw fields it claims to drop."""
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"path": "/data/urls.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            "nodes": [
+                {
+                    "id": "fetch_pages",
+                    "node_type": "transform",
+                    "plugin": "web_scrape",
+                    "input": "rows",
+                    "on_success": "scraped_rows",
+                    "on_error": "discard",
+                    "options": {
+                        "schema": {"mode": "observed"},
+                        "url_field": "url",
+                        "content_field": "content",
+                        "fingerprint_field": "content_fingerprint",
+                        "http": {
+                            "abuse_contact": "noreply@dta.gov.au",
+                            "scraping_reason": "DTA technical demonstration",
+                            "allowed_hosts": "public_only",
+                        },
+                    },
+                },
+                {
+                    "id": "drop_raw_html_fields",
+                    "node_type": "transform",
+                    "plugin": "field_mapper",
+                    "input": "scraped_rows",
+                    "on_success": "clean_rows",
+                    "on_error": "discard",
+                    "options": {
+                        "schema": {"mode": "observed"},
+                        "mapping": {
+                            "url": "url",
+                            "content": "content",
+                        },
+                        "select_only": True,
+                    },
+                },
+            ],
+            "edges": [],
+            "outputs": [],
+        }
+
+        result = _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
+
+        assert result.success is False
+        assert "preserves web-scrape raw field" in result.data["error"]
+        assert "content" in result.data["error"]
+
+    def test_set_pipeline_rejects_malformed_interpretation_requirements_without_crashing(self) -> None:
+        """Malformed review metadata is Tier-3 tool input and must be a clean rejection."""
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"path": "/data/urls.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            "nodes": [
+                {
+                    "id": "fetch_pages",
+                    "node_type": "transform",
+                    "plugin": "web_scrape",
+                    "input": "rows",
+                    "on_success": "scraped_rows",
+                    "on_error": "discard",
+                    "options": {
+                        "schema": {"mode": "observed"},
+                        "url_field": "url",
+                        "content_field": "html",
+                        "fingerprint_field": "page_fingerprint",
+                        "http": {
+                            "abuse_contact": "noreply@dta.gov.au",
+                            "scraping_reason": "DTA technical demonstration",
+                            "allowed_hosts": "public_only",
+                        },
+                    },
+                },
+                {
+                    "id": "drop_raw_html",
+                    "node_type": "transform",
+                    "plugin": "field_mapper",
+                    "input": "scraped_rows",
+                    "on_success": "clean_rows",
+                    "on_error": "discard",
+                    "options": {
+                        "schema": {"mode": "observed"},
+                        "mapping": {"url": "url"},
+                        "select_only": True,
+                        INTERPRETATION_REQUIREMENTS_KEY: {
+                            "id": "drop_raw_html_review",
+                            "kind": "pipeline_decision",
+                            "user_term": "drop_raw_html_fields",
+                            "status": "pending",
+                            "draft": "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+                        },
+                    },
+                },
+            ],
+            "edges": [],
+            "outputs": [],
+        }
+
+        result = _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
+
+        assert result.success is False
+        assert "interpretation_requirements must be a list" in result.data["error"]
+
+    def test_set_pipeline_rejects_raw_cleanup_review_on_llm_node(self) -> None:
+        """A raw-cleanup review must be attached to the field_mapper doing the cleanup."""
+        cleanup_requirement = {
+            "id": "drop_raw_html_review",
+            "kind": "pipeline_decision",
+            "user_term": "drop_raw_html_fields",
+            "status": "pending",
+            "draft": "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+        }
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"path": "/data/urls.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            "nodes": [
+                {
+                    "id": "fetch_pages",
+                    "node_type": "transform",
+                    "plugin": "web_scrape",
+                    "input": "rows",
+                    "on_success": "scraped_rows",
+                    "on_error": "discard",
+                    "options": {
+                        "schema": {"mode": "observed"},
+                        "url_field": "url",
+                        "content_field": "content",
+                        "fingerprint_field": "content_fingerprint",
+                        "http": {
+                            "abuse_contact": "noreply@dta.gov.au",
+                            "scraping_reason": "DTA technical demonstration",
+                            "allowed_hosts": "public_only",
+                        },
+                    },
+                },
+                {
+                    "id": "identify_primary_colours",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "scraped_rows",
+                    "on_success": "coloured_rows",
+                    "on_error": "discard",
+                    "options": {
+                        "provider": "openrouter",
+                        "model": "anthropic/claude-haiku-4.5",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                        "prompt_template": "Read {{ row.content }}.",
+                        "schema": {"mode": "observed"},
+                        INTERPRETATION_REQUIREMENTS_KEY: [cleanup_requirement],
+                    },
+                },
+                {
+                    "id": "drop_raw_html",
+                    "node_type": "transform",
+                    "plugin": "field_mapper",
+                    "input": "coloured_rows",
+                    "on_success": "clean_rows",
+                    "on_error": "discard",
+                    "options": {
+                        "schema": {"mode": "observed"},
+                        "mapping": {"url": "url", "primary_colour_result": "primary_colour_result"},
+                        "select_only": True,
+                        INTERPRETATION_REQUIREMENTS_KEY: [cleanup_requirement],
+                    },
+                },
+            ],
+            "edges": [],
+            "outputs": [],
+        }
+
+        result = _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
+
+        assert result.success is False
+        assert "identify_primary_colours" in result.data["error"]
+        assert "must be implemented by a field_mapper" in result.data["error"]
+
+    def test_existing_llm_blob_url_source_records_url_list_review_requirement(self, tmp_path: Path) -> None:
+        """source.blob_id preserves the same source-review gate as inline_blob."""
+        user_message_content = "Create a generated URL CSV for the pipeline."
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
+        url_csv = "url\nhttps://example.test\nhttps://example.gov.au\n"
+        context = ToolContext(
+            catalog=_mock_catalog(),
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+            user_message_id=user_message_id,
+            user_message_content=user_message_content,
+            composer_model_identifier="openai/gpt-5-mini",
+            composer_model_version="gpt-5-mini-2026-05-01",
+            composer_provider="openai",
+            composer_skill_hash="sha256:composer-skill",
+            tool_arguments_hash="sha256:tool-arguments",
+        )
+        create_result = _execute_create_blob(
+            {
+                "filename": "generated.csv",
+                "mime_type": "text/csv",
+                "content": url_csv,
+            },
+            _empty_state(),
+            context,
+        )
+        assert create_result.success is True, create_result.data
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"schema": {"mode": "observed"}},
+                "blob_id": create_result.data["blob_id"],
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [],
+        }
+
+        result = _execute_set_pipeline(args, _empty_state(), context)
+
+        assert result.success is True, result.data
+        assert result.updated_state.source is not None
+        options = result.updated_state.source.options
+        assert options[SOURCE_AUTHORING_KEY] == {
+            "modality": CreationModality.LLM_GENERATED.value,
+            "content_hash": create_result.data["content_hash"],
+            "review_event_id": None,
+            "resolved_kind": None,
+        }
+        requirement = options[INTERPRETATION_REQUIREMENTS_KEY][0]
+        assert requirement["kind"] == "invented_source"
+        assert requirement["user_term"] == "inline_source_url_list"
+        assert requirement["draft"] == url_csv
 
     def test_inline_blob_llm_authored_source_prevalidation_ignores_review_metadata(self, tmp_path: Path) -> None:
         """Plugin prevalidation strips web-only interpretation metadata but preserves it in state."""
@@ -628,6 +990,55 @@ class TestPromoteSetPipelineArgErrorRouting:
         options = result.updated_state.source.options
         assert INTERPRETATION_REQUIREMENTS_KEY in options
         assert SOURCE_AUTHORING_KEY in options
+        assert len(options[INTERPRETATION_REQUIREMENTS_KEY]) == 1
+        assert options[INTERPRETATION_REQUIREMENTS_KEY][0]["user_term"] == "inline_source_url_list"
+
+    def test_llm_node_records_pending_prompt_template_review_requirement(self) -> None:
+        """Every LLM prompt template authored by set_pipeline carries a Class 3 gate."""
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            "nodes": [
+                {
+                    "id": "summarise",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "rows",
+                    "on_success": "out",
+                    "options": {
+                        "provider": "openrouter",
+                        "model": "anthropic/claude-haiku-4.5",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                        "prompt_template": "Summarise {{ row.text }}.",
+                        "schema": {"mode": "observed"},
+                    },
+                }
+            ],
+            "edges": [],
+            "outputs": [],
+        }
+
+        result = _execute_set_pipeline(args, _empty_state(), ToolContext(catalog=_mock_catalog()))
+
+        assert result.success is True, result.data
+        node = result.updated_state.nodes[0]
+        requirements = node.options[INTERPRETATION_REQUIREMENTS_KEY]
+        assert len(requirements) == 1
+        assert requirements[0] == {
+            "id": "prompt_template_review:summarise",
+            "kind": "llm_prompt_template",
+            "user_term": "llm_prompt_template:summarise",
+            "status": "pending",
+            "draft": "Summarise {{ row.text }}.",
+            "event_id": None,
+            "accepted_value": None,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": None,
+        }
 
     def test_omitted_metadata_validates_at_model_layer(self) -> None:
         """``metadata`` is optional at the top level; absent leaves the field None."""

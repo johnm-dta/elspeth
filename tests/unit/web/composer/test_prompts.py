@@ -294,6 +294,287 @@ class TestBuildSystemPrompt:
         result = build_system_prompt("")
         assert result == SYSTEM_PROMPT
 
+    def test_core_skill_recommends_prompt_shield_for_internet_content_to_llm(self) -> None:
+        """The general skill treats internet-controlled text entering an LLM as a cyber risk."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "### Internet content flowing into LLMs" in result
+        assert "public internet content" in result
+        assert "prompt-injection defence" in result
+        assert "azure_prompt_shield" in result
+        assert 'user_term="prompt_injection_shield_recommendation"' in result
+        assert "stage that direct-routing choice" in result
+        assert 'pending `kind="pipeline_decision"` requirement on the LLM node' in result
+        assert "Do not insert the shield automatically" in result
+        assert "A recommendation is not permission to add a node" in result
+        assert "Do not add `azure_prompt_shield` merely because content is public internet" in result
+        assert "Do not add passthrough, placeholder, no-op, or renamed utility nodes to imply prompt-injection shielding" in flattened
+        assert "A recommendation is prose, not a fake topology step" in flattened
+        assert "If the user declines" in result
+        assert "Do not substitute `azure_content_safety`" in result
+        assert "For intranet or controlled internal pages" in result
+
+    def test_core_skill_flags_delegated_source_generation(self) -> None:
+        """User-delegated source choice must create an invented-source review site."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "create, choose, draft, generate, or otherwise supply source rows" in result
+        assert "stage an `invented_source` interpretation requirement on the source" in flattened
+        assert 'request_interpretation_review(kind="invented_source")' in result
+        assert 'use `affected_node_id="source"`' in result
+        assert "the source is not listed in `nodes[]`, and that is expected" in flattened
+        assert "A pending source requirement lives under" in flattened
+        assert "source.options.interpretation_requirements" in result
+        assert "Use a stable `user_term` that names the generated source artifact" in flattened
+        assert "derive it from the user's source description" in flattened
+        assert "Do not leave the source review with an empty or generic `user_term`" in flattened
+        assert "llm_draft` must be the exact staged source artifact text" in flattened
+        assert "If the exact source artifact text is not in your immediate context" in flattened
+        assert "use the staged requirement's exact `draft`" in flattened
+        assert 'A draft-mismatch error from `request_interpretation_review(kind="invented_source")` is repairable' in flattened
+        assert "Do not report a source-review handoff mismatch merely because there is no transform node named `source`" in flattened
+        assert "Never summarize, reformat, or describe it as" in flattened
+        assert "Do not treat a missing or mismatched review handoff as a product blocker" in flattened
+        assert "Before stopping, enumerate pending `interpretation_requirements` from the source and from every node" in flattened
+        assert 'Use `affected_node_id="source"` for requirements stored on `source.options.interpretation_requirements`' in flattened
+        assert "If review handoff fails for a staged requirement" in flattened
+        assert "do not describe the workflow as otherwise complete and ask whether to keep repairing" in flattened
+        assert "For source rows or URLs you generated yourself, create a session blob first" in flattened
+        assert "never put a guessed future file path such as `data/...` or `inputs/...`" in flattened
+        assert "If a generated-source mutation is rejected because `source.options.path` is outside the allowed blob directory" in flattened
+        assert "call `create_blob` with the generated artifact, then retry the full requested topology" in flattened
+        assert "If a generated-source mutation is rejected before the source blob is created or bound" in flattened
+        assert "the generated artifact is still yours to use" in flattened
+        assert "Do not ask the user for a source blob id" in flattened
+        assert "do not claim the blob no longer exists" in flattened
+        assert "retry the complete workflow" in flattened
+        assert "`columns` controls how a headerless CSV is parsed; it is not by itself a DAG contract" in flattened
+        assert "the source schema must guarantee that field by name" in flattened
+        assert "`schema.guaranteed_fields`" in result
+        assert "the artifact you wrote is authoritative for its header/column names" in flattened
+        assert "Do not stop by saying the source contract is incomplete" in flattened
+
+    def test_core_skill_treats_authored_rubrics_as_reviewable(self) -> None:
+        """LLM-authored scoring semantics must create vague-term review cards."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "### Subjective LLM Terms" in result
+        assert "copied the user's supplied prompt template verbatim" in result
+        assert "created a prompt template from the user's goal, data, or prose" in result
+        assert "that prompt template is LLM-authored" in result
+        assert "Did I choose a scoring scale?" in result
+        assert "Did I define how a subjective user criterion will be operationalized?" in result
+        assert "Before any mutation that creates or updates an LLM prompt you wrote" in result
+        assert "the LLM node options must already contain a pending" in flattened
+        assert "Do not stop with prose saying the rubric is part of the reviewed prompt" in flattened
+        assert "LLM node preflight has three independent review checks" in result
+        assert "Every create, update, upsert, or patch of an LLM node with a `prompt_template` must repeat this preflight" in flattened
+        assert "carry forward existing pending LLM interpretation requirements and add any missing ones" in flattened
+        assert "These checks stack" in result
+        assert "may need all three LLM-node review requirements" in flattened
+        assert "Interpretation reviews are not pipeline stages" in result
+        assert "Never create a transform, passthrough node, sink, output, edge, or placeholder plugin" in flattened
+        assert "rejected mutations do not persist partial nodes to remove" in flattened
+        assert "Measurable adjectives and subjective adjectives both follow" in result
+        assert "same authorship" in result
+        assert "cutoff, comparison set, units" in result
+        assert "rank rule, or" in result
+        assert "category boundary" in result
+        assert '"tall" can be objective when the user gives "over 190 cm"' in result
+        assert 'choose "over 6 ft" or "top quartile"' in result
+        assert "Prompt-template review is not a substitute" in result
+        assert "Construction pattern for an LLM-authored scoring prompt" in result
+        assert '"id": "<criterion>_semantics_review"' in result
+        assert '"kind": "vague_term"' in result
+        assert '"id": "prompt_template_review:<llm_node_id>"' in result
+        assert "the exact scale/rubric/cutoff/ranking/category semantics you authored" in result
+        assert "Do not omit the `vague_term` entry" in result
+        assert "the authored rubric, scale, threshold, category, or" in result
+        assert "If your prompt asks the model to return a score, rating, rank, class, or pass/fail result" in flattened
+        assert "that output shape is authored judgement semantics when you chose the scale" in flattened
+        assert "decide eligibility for `vague_term` independently" in result
+        assert "did I author separate judgement semantics" in result
+        assert "Preserve the user's shortest" in result
+        assert "meaningful criterion phrase as the `user_term`" in result
+        assert '`kind="vague_term"`' in result
+        assert "`llm_prompt_template`" in result
+        assert "rate how cool they are" not in result
+        assert "government web pages" not in result
+        assert 'This includes terms such as "cool", "good", "bad"' not in result
+        assert "Subjective user terms (cool, risky, relevant, good)" not in result
+
+    def test_core_skill_does_not_treat_primary_colours_as_inherently_vague(self) -> None:
+        """Objective design extraction is not automatically a vague-term review."""
+        result = build_system_prompt(None)
+
+        assert '"primary colours used"' in result
+        assert "does not by itself require a `vague_term` review" in result
+
+    def test_core_skill_requires_cleanup_mapper_before_sink_for_scraped_results(self) -> None:
+        """Saved web-scrape enrichments must route through cleanup before the sink."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "### Raw Scraped-Content Cleanup" in result
+        assert "must include a cleanup step immediately before the sink" in result
+        assert "Do not wire `web_scrape` or a downstream `llm` node directly to the sink" in result
+        assert "Insert `field_mapper` between the last enrichment node and the sink" in result
+        assert "`source -> web_scrape -> llm -> field_mapper(cleanup) -> sink`" in result
+        assert "That `field_mapper` is a real transform node" in result
+        assert "Even if the graph validator accepts an LLM directly routed to a sink" in flattened
+        assert "Do not call interpretation-review tools or stop in pending-review state until the cleanup mapper exists" in flattened
+        assert "A validator-valid direct route from `web_scrape` or `llm` to a user-facing sink is still skill-incomplete" in flattened
+        assert "A common incomplete shape is:" in result
+        assert "`source -> web_scrape -> llm -> json sink`" in result
+        assert "even when the LLM `on_success`, sink name, or output name contains words like" in flattened
+        assert "The `llm` transform writes its response field and passes through upstream row fields" in flattened
+        assert "A JSON sink writes the row it receives" in flattened
+        assert "does not select or remove fields" in flattened
+        assert "add a real `field_mapper` with `select_only: true` immediately before the sink" in flattened
+        assert "`select_only: true`" in result
+        assert '`user_term="drop_raw_html_fields"`' in result
+        assert "Raw HTML cleanup is a pipeline decision" in result
+        assert "A sink name, output name, node id, or metadata description that says cleanup" in flattened
+        assert "A stream or connection name that says cleanup is not cleanup" in flattened
+        assert "Only a transform node whose `plugin` is `field_mapper` counts as cleanup" in flattened
+        assert "A direct edge from the LLM or scraper to a JSON sink means cleanup is missing" in flattened
+        assert "If a producer points at a cleanup stream but no `field_mapper` consumes that stream" in flattened
+        assert "create the `field_mapper` in the next full `set_pipeline`" in flattened
+        assert "Do not end with an offer to repair this next" in flattened
+        assert "Before stopping, inspect the final edge into each user-facing sink" in flattened
+        assert "its predecessor must be the cleanup `field_mapper`" in flattened
+        assert "If the cleanup mapper exists but its `on_success` points to an intermediate stream" in flattened
+        assert "Removing the cleanup mapper or the output is not a repair" in flattened
+        assert "A mapper before `web_scrape` or before raw scraped fields exist cannot satisfy scraped-content cleanup" in flattened
+        assert "cleanup drops raw scrape artifacts, not the requested analysis" in flattened
+        assert "Preserve requested enrichment, extraction, scoring, or LLM response fields" in flattened
+        assert "If the user already asked to remove, drop, exclude, or avoid saving raw scrape fields" in flattened
+        assert "that request is the authorization and requirement to add the cleanup `field_mapper`" in flattened
+        assert "do not ask whether to add cleanup later" in flattened
+        assert "The `pipeline_decision` review records the exact row-shaping decision for audit" in flattened
+        assert "not permission to omit the cleanup node" in flattened
+        assert 'use the stable `user_term="drop_raw_html_fields"`' in flattened
+
+    def test_core_skill_preserves_requested_workflow_during_repairs(self) -> None:
+        """Validation repairs must not shrink away user-requested behavior."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "## Requested Workflow Integrity" in result
+        assert "Do not remove a user-requested source, transform, sink, output, or cleanup step" in flattened
+        assert "If a requested LLM scoring, extraction, classification, ranking, or summarisation step fails" in flattened
+        assert "repair that node, its credentials, its input fields, or its wiring" in flattened
+        assert "If validation says an `on_success` value is neither a sink nor a known connection" in flattened
+        assert "set the final producer's `on_success` to the existing sink name" in flattened
+        assert "Do not remove the sink, output, cleanup node, or LLM node" in flattened
+        assert "Rejected pipeline included a fake review, recommendation, or placeholder node" in flattened
+        assert "Do not call `remove_node`; rejected mutations did not persist that node" in flattened
+        assert "Generated source path is outside the allowed blob directory" in flattened
+        assert "create a blob from the generated rows, bind it as the source, and retry the complete workflow" in flattened
+        assert "Source or node options rejected with extra/unknown fields" in flattened
+        assert "Remove the rejected fields from that component's options" in flattened
+        assert "Consumer requires a generated or inspected CSV column but source guarantees are empty" in flattened
+        assert "Patch the source schema to guarantee that known column" in flattened
+        assert "do not ask the user to confirm a column you authored or inspected" in flattened
+        assert "Rejected `set_pipeline` used `source.inline_blob` and the source blob is absent afterward" in flattened
+        assert "Failed mutations do not create reusable blobs" in flattened
+        assert "do not ask for a blob id" in flattened
+        assert "Pending interpretation reviews do not block mechanical repair" in flattened
+        assert "carry the same pending interpretation requirements forward" in flattened
+        assert "A malformed `set_pipeline` call is not a named gap" in flattened
+        assert "Malformed tool arguments are repairable composer output" in flattened
+        assert "If a `set_pipeline` attempt with `source.inline_blob` is rejected" in flattened
+        assert "do not assume the inline blob was bound" in flattened
+        assert "Do not call `list_blobs` and stop because a blob from a failed mutation is absent" in flattened
+        assert "When a mutation fails with validation errors and the tool response includes `plugin_schemas`" in flattened
+        assert "apply the required fields, enum values, and option names from that tool result" in flattened
+        assert "Do not ask whether to repair a schema/options error when the requested topology is known" in flattened
+        assert 'Do not end with "If you want, I can repair this"' in flattened
+
+    def test_core_skill_requires_complete_topology_before_pending_review_stop(self) -> None:
+        """Pending review cards are terminal only for a complete requested topology."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "Pending review terminal state is valid only when" in flattened
+        assert "every user-requested workflow capability is still present" in flattened
+        assert "Surface every staged assumption with `request_interpretation_review`" in flattened
+        assert "This includes source requirements such as `invented_source`" in flattened
+        assert "the raw-content cleanup requirement is staged when required" in flattened
+        assert (
+            "the prompt-injection shield recommendation review is staged when untrusted internet content flows directly into an LLM"
+            in flattened
+        )
+        assert "no non-review validation errors remain" in flattened
+        assert "Do not stop in pending-review state when schema contract, missing field, or unreferenced output errors remain" in flattened
+        assert "Do not tell the user review cards are waiting for a partial pipeline" in flattened
+        assert "Do not stop in pending-review state when raw scraped content cleanup is implemented only by a sink name" in flattened
+        assert (
+            "Do not call `request_interpretation_review` or tell the user review cards are waiting while the latest mutation reports non-review validation errors"
+            in flattened
+        )
+        assert "repair the topology first, then surface the review cards" in flattened
+        assert "Review acceptance is not required before adding a missing cleanup `field_mapper`" in flattened
+        assert "Do not treat a subset of pending review cards as enough" in flattened
+        assert "missing `vague_term` or prompt-injection recommendation review is still non-terminal" in flattened
+
+    def test_core_skill_preserves_user_criterion_phrase_for_review_terms(self) -> None:
+        """Review user_term should preserve the user's criterion instead of a model-invented label."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "Preserve the user's shortest meaningful criterion phrase" in flattened
+        assert "For an adjective embedded in a phrase, use the adjective or noun phrase" in flattened
+        assert "not the whole task phrase" in flattened
+        assert "Do not nominalize or rewrite a user-supplied adjective into your own derived noun" in flattened
+        assert "Do not replace the criterion with a derived label" in flattened
+        assert "Use an invented label only when the user did not name the criterion" in flattened
+        assert 'For a criterion phrase shaped like "how <adjective> ..."' in flattened
+        assert "the stable `user_term` is the adjective" in flattened
+        assert "Do not use the whole phrase `how <adjective> ...`" in flattened
+        assert "strip the framing and keep the adjective itself" in flattened
+        assert "rate how cool they are" not in result
+        assert "government web pages" not in result
+
+    def test_core_skill_requires_explicit_field_wiring(self) -> None:
+        """Any downstream field dependency must be guaranteed or explicitly preserved."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "### Field Wiring" in result
+        assert "Every downstream field dependency must be backed by an upstream schema guarantee" in flattened
+        assert "Do not make an LLM prompt template, cleanup mapping, sink, or transform require a field" in flattened
+        assert "If the exact value matters to the output or audit trail, preserve it explicitly" in flattened
+        assert "Do not repair a missing-field validation error by guessing `guaranteed_fields`" in flattened
+        assert "wire the required field through the graph" in flattened
+        assert "When a downstream cleanup, sink, mapper, or transform needs an LLM response field" in flattened
+        assert "the LLM node must guarantee that `response_field` by name" in flattened
+        assert "also guarantee any pass-through fields the downstream node requires" in flattened
+        assert "Single-query LLM output is written to `response_field`" in flattened
+        assert "JSON keys requested inside the prompt are not separate pipeline fields unless another transform parses them" in flattened
+        assert "Preserve `response_field` through cleanup rather than invented prompt-internal keys" in flattened
+        assert "If `web_scrape` output feeds an LLM prompt that needs the original URL" in flattened
+        assert "Do not require `url` from a scrape node whose schema does not guarantee `url`" in flattened
+        assert "The final producer's `on_success` must exactly match the JSON sink name" in flattened
+        assert "Edge objects alone do not make a sink receive rows" in flattened
+        assert "set the LLM `on_success` to the cleanup mapper's input stream" in flattened
+        assert "set the cleanup mapper's `on_success` to the sink name" in flattened
+
+    def test_core_skill_treats_utility_transforms_as_planned_plugins(self) -> None:
+        """Utility transforms must be planned even when the user names only the end effect."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "### Utility Transforms" in result
+        assert "Users often describe the effect, not the utility plugin" in flattened
+        assert "Plan utility transforms explicitly when the requested workflow needs row shaping" in flattened
+        assert "field_mapper" in flattened
+        assert "load its schema before `set_pipeline`" in flattened
+        assert "Do not skip utility transforms just because the user did not name them" in flattened
+
 
 class TestBuildRunDiagnosticsMessages:
     """Message construction for run diagnostics explanations."""

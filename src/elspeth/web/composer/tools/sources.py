@@ -13,6 +13,7 @@ from uuid import UUID
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine, select
 
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.enums import CreationModality, is_llm_authored_creation_modality
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import freeze_fields
@@ -42,6 +43,8 @@ from elspeth.web.composer.tools._common import (
     _discovery_result,
     _failure_result,
     _mutation_result,
+    _options_with_pending_requirement,
+    _pending_interpretation_requirement,
     _prevalidate_source,
     _validate_plugin_name,
     _validate_source_path,
@@ -199,6 +202,40 @@ def _source_authoring_options(
     }
 
 
+def _source_blob_review_user_term(*, mime_type: str, content: str) -> str:
+    """Choose the stable Class 2 review term for an LLM-authored source blob."""
+    if mime_type != "text/csv":
+        return "inline_source_data"
+    rows = csv.reader(io.StringIO(content))
+    header = next(rows, ())
+    if len(header) == 1 and header[0].strip().lower() == "url":
+        return "inline_source_url_list"
+    return "inline_source_data"
+
+
+def _options_with_source_blob_review(
+    options: Mapping[str, Any],
+    *,
+    mime_type: str,
+    content: str,
+) -> Mapping[str, Any]:
+    """Ensure LLM-authored blob-backed sources carry a Class 2 review gate."""
+    if SOURCE_AUTHORING_KEY not in options:
+        return options
+    user_term = _source_blob_review_user_term(mime_type=mime_type, content=content)
+    requirement = _pending_interpretation_requirement(
+        requirement_id=f"source_review:{user_term}",
+        kind=InterpretationKind.INVENTED_SOURCE,
+        user_term=user_term,
+        draft=content,
+    )
+    return _options_with_pending_requirement(
+        options,
+        requirement=requirement,
+        replace_kind=InterpretationKind.INVENTED_SOURCE,
+    )
+
+
 def _manual_source_authoring_error(*, tool_name: str) -> str:
     """Return the source-options error for caller-supplied source_authoring."""
     return (
@@ -262,7 +299,7 @@ def _resolve_source_blob(
         return _failure_result(state, f"Unknown source plugin '{plugin}': {exc}")
 
     creation_modality = CreationModality(blob["creation_modality"])
-    merged_options = {
+    merged_options: Mapping[str, Any] = {
         **caller_options,
         **mime_extra,
         "path": blob["storage_path"],
@@ -270,6 +307,24 @@ def _resolve_source_blob(
         "mode": "bind_source",
         **_source_authoring_options(creation_modality, blob["content_hash"]),
     }
+    if SOURCE_AUTHORING_KEY in merged_options:
+        storage_path = Path(blob["storage_path"])
+        if not storage_path.exists():
+            return _failure_result(state, f"Blob storage file missing for '{blob_id}'.")
+        data = storage_path.read_bytes()
+        _verify_blob_content_integrity(blob, data)
+        try:
+            content = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            return _failure_result(
+                state,
+                f"Blob '{blob_id}' is not valid UTF-8 text ({exc.reason} at byte offset {exc.start}).",
+            )
+        merged_options = _options_with_source_blob_review(
+            merged_options,
+            mime_type=blob["mime_type"],
+            content=content,
+        )
     prevalidation_error = _prevalidate_source(plugin, merged_options, on_validation_failure)
     if prevalidation_error is not None:
         return _failure_result(state, prevalidation_error)

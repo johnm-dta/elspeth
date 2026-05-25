@@ -309,6 +309,28 @@ describe("InterpretationReviewTurn — kind-aware surfaces", () => {
     });
   });
 
+  it("renders pipeline-decision copy and hides amendment", () => {
+    const event = makeEvent({
+      kind: "pipeline_decision",
+      affected_node_id: "drop_raw_html",
+      user_term: "drop_raw_html_fields",
+      llm_draft:
+        "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+    });
+    render(<InterpretationReviewTurn event={event} sessionId="sess-1" />);
+
+    expect(
+      screen.getByRole("region", { name: /pipeline decision/i }),
+    ).toBeTruthy();
+    expect(screen.getByText(/drop the scraped raw html/i)).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: /edit the interpretation/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /accept pipeline decision/i }),
+    ).toBeTruthy();
+  });
+
   it("hides session opt-out when showOptOut is false", () => {
     const event = makeEvent();
     render(

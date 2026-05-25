@@ -33,6 +33,7 @@ from elspeth.web.composer.tools._common import (
     _discovery_result,
     _failure_result,
     _mutation_result,
+    _options_with_default_prompt_template_review,
     _prevalidate_transform,
     _validate_aggregation_trigger,
     _validate_mutation_arguments,
@@ -42,6 +43,7 @@ from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
 )
+from elspeth.web.interpretation_state import raw_html_cleanup_review_contract_error
 
 _NODE_ROUTING_OPTION_PATCH_KEYS: Final[frozenset[str]] = frozenset({"input", "on_success", "on_error", "routes", "fork_to"})
 
@@ -432,7 +434,12 @@ def _execute_upsert_node(
         if batch_required_error is not None:
             return _failure_result(state, batch_required_error)
 
-        prevalidation_error = _prevalidate_transform(plugin, node_options)
+        review_options = _options_with_default_prompt_template_review(
+            node_id=node_id,
+            plugin=plugin,
+            options=node_options,
+        )
+        prevalidation_error = _prevalidate_transform(plugin, review_options)
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
@@ -461,7 +468,11 @@ def _execute_upsert_node(
         input=validated.input,
         on_success=validated.on_success,
         on_error=validated.on_error or ("discard" if node_type in ("transform", "aggregation") else None),
-        options=node_options,
+        options=_options_with_default_prompt_template_review(
+            node_id=node_id,
+            plugin=plugin,
+            options=node_options,
+        ),
         condition=validated.condition,
         routes=validated.routes,
         fork_to=fork_to,
@@ -474,6 +485,9 @@ def _execute_upsert_node(
     )
 
     new_state = state.with_node(node)
+    raw_cleanup_error = raw_html_cleanup_review_contract_error(new_state)
+    if raw_cleanup_error is not None:
+        return _failure_result(state, raw_cleanup_error)
 
     # Affected: the node itself plus nodes with edges referencing it
     affected = {node_id}
@@ -688,7 +702,12 @@ def _execute_patch_node_options(
     routing_patch_error = _node_routing_option_patch_error(patch)
     if routing_patch_error is not None:
         return _failure_result(state, routing_patch_error)
-    new_options = _apply_merge_patch(current.options, patch)
+    new_options: Mapping[str, Any] = _apply_merge_patch(current.options, patch)
+    new_options = _options_with_default_prompt_template_review(
+        node_id=node_id,
+        plugin=current.plugin,
+        options=new_options,
+    )
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id=node_id,
@@ -705,6 +724,9 @@ def _execute_patch_node_options(
 
     new_node = replace(current, options=new_options)
     new_state = state.with_node(new_node)
+    raw_cleanup_error = raw_html_cleanup_review_contract_error(new_state)
+    if raw_cleanup_error is not None:
+        return _failure_result(state, raw_cleanup_error)
     return _mutation_result(new_state, (node_id,))
 
 

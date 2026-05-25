@@ -464,13 +464,21 @@ class WebScrapeTransform(BaseTransform):
             return PluginAssistance(
                 plugin_name="web_scrape",
                 issue_code=None,
-                summary="Fetch a URL over HTTP(S) with SSRF protection, audit recording, and content-fingerprinting for change detection. Output formats: html, text, markdown.",
+                summary="Fetch a URL over HTTP(S) with SSRF protection, audit recording, and content-fingerprinting for change detection. Output formats: raw HTML, text, markdown.",
                 composer_hints=(
+                    "web_scrape is a transform, not a source: it consumes URL rows from csv/json/text/blob via url_field and writes content_field.",
+                    "If you saw Unknown source plugin: web_scrape, use a URL row source first, then add web_scrape as a transform.",
                     "URLs MUST include explicit scheme (http:// or https://). Bare hostnames are rejected by the SSRF guard at fetch time.",
+                    "schema is required; use schema: {mode: observed} unless you need fixed/flexible field contracts. For raw HTML, set format to raw, not html.",
+                    "web_scrape passes through upstream row fields that the input schema guarantees, and also guarantees content_field, fingerprint_field, fetch_status, fetch_url_final, and fetch_url_final_ip.",
+                    "Do not make downstream LLM templates require a URL field unless the upstream source schema or web_scrape schema guarantees that field. If the final fetched URL is acceptable, use fetch_url_final; if the original URL is required, preserve and guarantee that source field upstream.",
+                    "If validation says a downstream URL field is missing, do not patch web_scrape guaranteed_fields by guess; repair the producer schema, add an explicit mapper, or narrow the downstream template requirements.",
                     "http.abuse_contact and http.scraping_reason are mandatory and recorded in the audit trail — operator must declare them, not the model.",
-                    "If the scraped content feeds an LLM, route through azure_content_safety first — external content is Tier 3.",
-                    "format: 'markdown' preserves line structure for downstream line_explode; 'text' with non-newline separator collapses lines (issue web_scrape.content.compact_text).",
-                    "The plugin records fingerprint, status, and timing per fetch — verify these surface in audit before declaring success.",
+                    "If the user-facing output should exclude raw scraped content, route the final path through field_mapper with select_only: true before the sink; a sink name or output name is not cleanup.",
+                    "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete when raw scraped-content cleanup is required; insert or restore the final field_mapper before the sink.",
+                    "If scraped public internet content flows into an LLM, surface prompt-injection shielding as an important recommendation. Use azure_prompt_shield or the deployment's equivalent; recommendation is not permission to add a node; do not substitute azure_content_safety; do not insert it automatically unless requested or policy-required.",
+                    "If no prompt shield is authorized, make the direct public-content-to-LLM routing reviewable with a pipeline_decision requirement on the LLM node using user_term prompt_injection_shield_recommendation.",
+                    "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
                 ),
             )
         if issue_code != "web_scrape.content.compact_text":

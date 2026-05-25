@@ -207,6 +207,44 @@ def _prompt_template_review_node(*, node_id: str = "identify_colour") -> NodeSpe
     )
 
 
+def _pipeline_decision_review_node(*, node_id: str = "drop_raw_html") -> NodeSpec:
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="field_mapper",
+        input="scored_rows",
+        on_success="clean_rows",
+        on_error=None,
+        options={
+            "mapping": {
+                "url": "url",
+                "agency": "agency",
+                "primary_colours": "primary_colours",
+            },
+            "select_only": True,
+            INTERPRETATION_REQUIREMENTS_KEY: [
+                {
+                    "id": "drop_raw_html_review",
+                    "kind": InterpretationKind.PIPELINE_DECISION.value,
+                    "user_term": "drop_raw_html_fields",
+                    "status": "pending",
+                    "draft": "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+                    "event_id": None,
+                    "accepted_value": None,
+                    "accepted_artifact_hash": None,
+                    "resolved_prompt_template_hash": None,
+                }
+            ],
+        },
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
 def _state_with(node: NodeSpec) -> CompositionState:
     return CompositionState(
         source=None,
@@ -321,6 +359,31 @@ async def _seed_session(service: SessionServiceImpl, session_id: UUID) -> UUID:
     return state.id
 
 
+async def _seed_node_session(service: SessionServiceImpl, session_id: UUID, *, node: NodeSpec) -> UUID:
+    with service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Phase 5b Task 5 Node Test",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+    state_dict = _state_with(node).to_dict()
+    state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            nodes=state_dict["nodes"],
+            metadata_=state_dict["metadata"],
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+    return state.id
+
+
 async def _seed_source_session(service: SessionServiceImpl, session_id: UUID, *, source: SourceSpec | None = None) -> UUID:
     with service._engine.begin() as conn:
         conn.execute(
@@ -378,7 +441,12 @@ def test_01_tool_registered_in_get_tool_definitions() -> None:
     assert set(params["required"]) == {"affected_node_id", "kind", "user_term", "llm_draft"}
     assert set(params["properties"]) == {"affected_node_id", "kind", "user_term", "llm_draft"}
     assert all(params["properties"][k]["type"] == "string" for k in params["properties"])
-    assert params["properties"]["kind"]["enum"] == ["vague_term", "invented_source", "llm_prompt_template"]
+    assert params["properties"]["kind"]["enum"] == [
+        "vague_term",
+        "invented_source",
+        "llm_prompt_template",
+        "pipeline_decision",
+    ]
     assert "Do not ask the user in assistant prose" in tool["description"]
     assert "review surface" in tool["description"]
 
@@ -582,6 +650,35 @@ def test_05e_legacy_structured_pending_requirement_without_kind_defaults_to_vagu
     _assert_affected_component(state, "rate_node", InterpretationKind.VAGUE_TERM, "cool")
 
 
+def test_pipeline_decision_boundary_accepts_non_llm_transform_with_matching_requirement() -> None:
+    state = _state_with(_pipeline_decision_review_node())
+
+    _assert_affected_component(state, "drop_raw_html", InterpretationKind.PIPELINE_DECISION, "drop_raw_html_fields")
+
+
+def test_pipeline_decision_boundary_rejects_missing_requirement() -> None:
+    node = replace(_pipeline_decision_review_node(), options={"mapping": {"url": "url"}, "select_only": True})
+    state = _state_with(node)
+
+    with pytest.raises(ToolArgumentError, match=r"pending pipeline_decision"):
+        _assert_affected_component(state, "drop_raw_html", InterpretationKind.PIPELINE_DECISION, "drop_raw_html_fields")
+
+
+def test_pipeline_decision_boundary_rejects_raw_html_mapping_preservation() -> None:
+    node = _pipeline_decision_review_node()
+    options = dict(node.options)
+    options["mapping"] = {
+        "url": "url",
+        "content": "content",
+        "content_fingerprint": "content_fingerprint",
+        "primary_colours": "primary_colours",
+    }
+    state = _state_with(replace(node, options=options))
+
+    with pytest.raises(ToolArgumentError, match=r"preserves raw HTML/fingerprint field"):
+        _assert_affected_component(state, "drop_raw_html", InterpretationKind.PIPELINE_DECISION, "drop_raw_html_fields")
+
+
 @pytest.mark.asyncio
 async def test_request_interpretation_review_accepts_prompt_template_kind() -> None:
     state = _state_with(_prompt_template_review_node())
@@ -733,6 +830,39 @@ async def test_request_interpretation_review_accepts_multiline_source_artifact_w
 
 
 @pytest.mark.asyncio
+async def test_request_interpretation_review_invented_source_rejects_stale_draft_as_arg_error(
+    service: SessionServiceImpl,
+) -> None:
+    """A source-review draft must match the staged source artifact exactly."""
+    session_id = uuid4()
+    source = _llm_generated_source(draft="url\nhttps://example.gov.au/a\n")
+    state_id = await _seed_source_session(service, session_id, source=source)
+    state = _state_with_source(source)
+
+    with pytest.raises(ToolArgumentError, match=r"llm_draft|source review requirement draft"):
+        await _handle_request_interpretation_review(
+            {
+                "affected_node_id": SOURCE_COMPONENT_ID,
+                "kind": "invented_source",
+                "user_term": "inline_source_url_list",
+                "llm_draft": "https://example.gov.au/a",
+            },
+            state,
+            session_id=session_id,
+            composition_state_id=state_id,
+            tool_call_id="call_source_review_stale_draft",
+            now=_now(),
+            per_term_cap=3,
+            per_session_day_cap=10,
+            create_pending_interpretation_event=service.create_pending_interpretation_event,
+            list_interpretation_events=service.list_interpretation_events,
+            **_provenance_kwargs(),
+        )
+
+    assert await service.list_interpretation_events(session_id, status="pending") == []
+
+
+@pytest.mark.asyncio
 async def test_request_interpretation_review_invented_source_rejects_mismatched_user_term_with_metadata() -> None:
     state = _state_with_source(_llm_generated_source())
 
@@ -821,6 +951,40 @@ async def test_request_interpretation_review_invented_source_persists_with_real_
     assert len(rows) == 1
     assert rows[0].kind is InterpretationKind.INVENTED_SOURCE
     assert rows[0].affected_node_id == SOURCE_COMPONENT_ID
+
+
+@pytest.mark.asyncio
+async def test_request_interpretation_review_accepts_pipeline_decision_kind(service: SessionServiceImpl) -> None:
+    session_id = uuid4()
+    state_id = await _seed_node_session(service, session_id, node=_pipeline_decision_review_node())
+    state = _state_with(_pipeline_decision_review_node())
+
+    result = await _handle_request_interpretation_review(
+        {
+            "affected_node_id": "drop_raw_html",
+            "kind": "pipeline_decision",
+            "user_term": "drop_raw_html_fields",
+            "llm_draft": "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+        },
+        state,
+        session_id=session_id,
+        composition_state_id=state_id,
+        tool_call_id="call_pipeline_decision",
+        now=_now(),
+        per_term_cap=3,
+        per_session_day_cap=10,
+        create_pending_interpretation_event=service.create_pending_interpretation_event,
+        list_interpretation_events=service.list_interpretation_events,
+        **_provenance_kwargs(),
+    )
+
+    assert result.success is True
+    assert result.data["_kind"] == "interpretation_review_pending"
+    assert result.data["affected_node_id"] == "drop_raw_html"
+    assert result.data["kind"] == "pipeline_decision"
+    rows = await service.list_interpretation_events(session_id, status="pending")
+    assert len(rows) == 1
+    assert rows[0].kind is InterpretationKind.PIPELINE_DECISION
 
 
 def test_request_interpretation_review_wrong_component_kind_combinations_fail_closed() -> None:

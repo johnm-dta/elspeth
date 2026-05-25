@@ -780,8 +780,10 @@ class SessionServiceProtocol(Protocol):
         MUST validate the affected component in the parent composition state
         before INSERT (writer-boundary check per CLAUDE.md offensive
         programming): ``invented_source`` targets the synthetic ``source``
-        component and requires persisted source-authoring metadata; transform
-        kinds target real LLM nodes in ``composition_states.nodes``. Raises
+        component and requires persisted source-authoring metadata;
+        ``pipeline_decision`` targets the node that implements the reviewed
+        shape decision; prompt/vague transform kinds target real LLM nodes in
+        ``composition_states.nodes``. Raises
         ``ValueError`` on a missing state, malformed target, unknown node, or
         non-``InterpretationKind`` kind.
         """

@@ -46,6 +46,106 @@ def _state_with_llm(options: dict[str, object]) -> CompositionState:
     )
 
 
+def _state_with_cleanup_node(options: dict[str, object]) -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="drop_raw_html",
+                node_type="transform",
+                plugin="field_mapper",
+                input="scored_rows",
+                on_success="clean_rows",
+                on_error="stop",
+                options=options,
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _state_with_web_scrape_cleanup_node(options: dict[str, object]) -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="rows",
+                on_success="scraped_rows",
+                on_error="stop",
+                options={
+                    "url_field": "url",
+                    "content_field": "content",
+                    "fingerprint_field": "content_fingerprint",
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="drop_raw_html",
+                node_type="transform",
+                plugin="field_mapper",
+                input="coloured_rows",
+                on_success="clean_rows",
+                on_error="stop",
+                options=options,
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _pipeline_decision_options(*, status: str = "pending", artifact_hash: str | None = None) -> dict[str, object]:
+    options: dict[str, object] = {
+        "mapping": {
+            "url": "url",
+            "agency": "agency",
+            "primary_colours": "primary_colours",
+        },
+        "select_only": True,
+    }
+    options[INTERPRETATION_REQUIREMENTS_KEY] = [
+        {
+            "id": "drop_raw_html_review",
+            "kind": "pipeline_decision",
+            "user_term": "drop_raw_html_fields",
+            "status": status,
+            "draft": "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+            "event_id": "event-raw-html-drop" if status == "resolved" else None,
+            "accepted_value": (
+                "Drop the scraped raw HTML and fingerprint fields before saving the JSON output." if status == "resolved" else None
+            ),
+            "accepted_artifact_hash": artifact_hash,
+            "resolved_prompt_template_hash": None,
+        }
+    ]
+    return options
+
+
 def _pending_options() -> dict[str, object]:
     return {
         "prompt_template": "Rate pending interpretation: {{ row.text }}",
@@ -99,16 +199,24 @@ def test_interpretation_sites_reports_legacy_and_structured_pending_sites() -> N
     legacy_sites = interpretation_sites(legacy)
     structured_sites = interpretation_sites(structured)
 
-    assert len(legacy_sites) == 1
+    assert len(legacy_sites) == 2
     assert legacy_sites[0].component_id == "rate_coolness"
     assert legacy_sites[0].component_type == "transform"
     assert legacy_sites[0].user_term == "coolness"
     assert legacy_sites[0].kind is InterpretationKind.VAGUE_TERM
+    assert legacy_sites[1].component_id == "rate_coolness"
+    assert legacy_sites[1].component_type == "transform"
+    assert legacy_sites[1].user_term == "llm_prompt_template:rate_coolness"
+    assert legacy_sites[1].kind is InterpretationKind.LLM_PROMPT_TEMPLATE
 
     assert structured_sites[0].component_id == "rate_coolness"
     assert structured_sites[0].component_type == "transform"
     assert structured_sites[0].user_term == "coolness"
     assert structured_sites[0].kind is InterpretationKind.VAGUE_TERM
+    assert structured_sites[1].component_id == "rate_coolness"
+    assert structured_sites[1].component_type == "transform"
+    assert structured_sites[1].user_term == "llm_prompt_template:rate_coolness"
+    assert structured_sites[1].kind is InterpretationKind.LLM_PROMPT_TEMPLATE
 
 
 def test_legacy_interpretation_requirement_missing_kind_defaults_to_vague_term() -> None:
@@ -235,6 +343,118 @@ def test_pending_llm_prompt_template_requirement_blocks_execution() -> None:
     assert result.sites[0].kind is InterpretationKind.LLM_PROMPT_TEMPLATE
 
 
+def test_pending_pipeline_decision_requirement_blocks_execution_on_non_llm_transform() -> None:
+    state = _state_with_cleanup_node(_pipeline_decision_options())
+
+    result = materialize_state_for_execution(state)
+
+    assert isinstance(result, InterpretationReviewPending)
+    assert result.sites[0].component_id == "drop_raw_html"
+    assert result.sites[0].component_type == "transform"
+    assert result.sites[0].user_term == "drop_raw_html_fields"
+    assert result.sites[0].kind is InterpretationKind.PIPELINE_DECISION
+
+
+def test_unreviewed_field_mapper_drop_of_web_scrape_raw_fields_blocks_execution() -> None:
+    state = _state_with_web_scrape_cleanup_node(
+        {
+            "mapping": {
+                "url": "url",
+                "primary_colours": "primary_colours",
+            },
+            "select_only": True,
+        }
+    )
+
+    result = materialize_state_for_execution(state)
+
+    assert isinstance(result, InterpretationReviewPending)
+    assert result.sites[0].component_id == "drop_raw_html"
+    assert result.sites[0].component_type == "transform"
+    assert result.sites[0].user_term == "drop_raw_html_fields"
+    assert result.sites[0].kind is InterpretationKind.PIPELINE_DECISION
+
+
+def test_field_mapper_projection_without_web_scrape_raw_fields_does_not_create_cleanup_review_site() -> None:
+    state = _state_with_cleanup_node(
+        {
+            "mapping": {
+                "url": "url",
+                "primary_colours": "primary_colours",
+            },
+            "select_only": True,
+        }
+    )
+
+    result = materialize_state_for_execution(state)
+
+    assert isinstance(result, CompositionState)
+
+
+def test_resolved_pipeline_decision_requires_matching_node_hash() -> None:
+    reviewed = _state_with_cleanup_node(_pipeline_decision_options())
+    clean_options = strip_authoring_options(reviewed.nodes[0].options)
+    artifact_hash = stable_hash(
+        {
+            "id": "drop_raw_html",
+            "node_type": "transform",
+            "plugin": "field_mapper",
+            "input": "scored_rows",
+            "on_success": "clean_rows",
+            "on_error": "stop",
+            "options": clean_options,
+        }
+    )
+    state = _state_with_cleanup_node(_pipeline_decision_options(status="resolved", artifact_hash=artifact_hash))
+
+    materialized = materialize_state_for_execution(state)
+
+    assert isinstance(materialized, CompositionState)
+    assert materialized.nodes[0].options["mapping"] == clean_options["mapping"]
+
+
+def test_resolved_pipeline_decision_hash_drift_fails_closed() -> None:
+    state = _state_with_cleanup_node(_pipeline_decision_options(status="resolved", artifact_hash=stable_hash("old node shape")))
+
+    with pytest.raises(ValueError, match="pipeline-decision review hash drifted"):
+        materialize_state_for_execution(state)
+
+
+def test_resolved_raw_html_cleanup_decision_rejects_mapping_that_preserves_raw_fields() -> None:
+    reviewed = _state_with_cleanup_node(_pipeline_decision_options())
+    bad_options = dict(reviewed.nodes[0].options)
+    bad_options["mapping"] = {
+        "url": "url",
+        "content": "content",
+        "content_fingerprint": "content_fingerprint",
+        "primary_colours": "primary_colours",
+    }
+    clean_options = strip_authoring_options(bad_options)
+    artifact_hash = stable_hash(
+        {
+            "id": "drop_raw_html",
+            "node_type": "transform",
+            "plugin": "field_mapper",
+            "input": "scored_rows",
+            "on_success": "clean_rows",
+            "on_error": "stop",
+            "options": clean_options,
+        }
+    )
+    state = _state_with_cleanup_node(bad_options)
+    requirement = dict(state.nodes[0].options[INTERPRETATION_REQUIREMENTS_KEY][0])  # type: ignore[index]
+    requirement["status"] = "resolved"
+    requirement["event_id"] = "event-raw-html-drop"
+    requirement["accepted_value"] = requirement["draft"]
+    requirement["accepted_artifact_hash"] = artifact_hash
+    patched_options = dict(state.nodes[0].options)
+    patched_options[INTERPRETATION_REQUIREMENTS_KEY] = [requirement]
+    state = _state_with_cleanup_node(patched_options)
+
+    with pytest.raises(ValueError, match="preserves raw HTML/fingerprint field"):
+        materialize_state_for_execution(state)
+
+
 def test_resolved_llm_prompt_template_requires_matching_hash() -> None:
     prompt = "Rate {{ row.text }}"
     state = _state_with_llm(
@@ -260,14 +480,16 @@ def test_resolved_llm_prompt_template_requires_matching_hash() -> None:
         materialize_state_for_execution(state)
 
 
-def test_plain_llm_prompt_template_without_review_metadata_remains_executable() -> None:
+def test_plain_llm_prompt_template_without_review_metadata_blocks_execution() -> None:
     state = _state_with_llm({"prompt_template": "Summarize {{ row.text }}"})
 
     result = materialize_state_for_execution(state)
 
-    assert isinstance(result, CompositionState)
-    assert result.nodes[0].options["prompt_template"] == "Summarize {{ row.text }}"
-    assert "resolved_prompt_template_hash" not in result.nodes[0].options
+    assert isinstance(result, InterpretationReviewPending)
+    assert result.sites[0].component_id == "rate_coolness"
+    assert result.sites[0].component_type == "transform"
+    assert result.sites[0].user_term == "llm_prompt_template:rate_coolness"
+    assert result.sites[0].kind is InterpretationKind.LLM_PROMPT_TEMPLATE
 
 
 def test_resolved_llm_prompt_template_requirement_without_hash_fails_closed() -> None:
@@ -295,7 +517,7 @@ def test_resolved_llm_prompt_template_requirement_without_hash_fails_closed() ->
         materialize_state_for_execution(state)
 
 
-def test_llm_generated_source_metadata_without_requirement_is_not_review_site() -> None:
+def test_llm_generated_source_metadata_without_requirement_is_review_site() -> None:
     state = CompositionState(
         source=SourceSpec(
             plugin="json",
@@ -317,10 +539,15 @@ def test_llm_generated_source_metadata_without_requirement_is_not_review_site() 
         version=1,
     )
 
-    assert interpretation_sites(state) == ()
+    sites = interpretation_sites(state)
+    assert len(sites) == 1
+    assert sites[0].component_id == "source"
+    assert sites[0].component_type == "source"
+    assert sites[0].user_term == "llm_generated_source"
+    assert sites[0].kind is InterpretationKind.INVENTED_SOURCE
 
 
-def test_llm_generated_source_metadata_without_resolved_requirement_fails_closed() -> None:
+def test_llm_generated_source_metadata_without_resolved_requirement_blocks_execution() -> None:
     state = CompositionState(
         source=SourceSpec(
             plugin="json",
@@ -342,8 +569,13 @@ def test_llm_generated_source_metadata_without_resolved_requirement_fails_closed
         version=1,
     )
 
-    with pytest.raises(ValueError, match="invented source review requirement"):
-        materialize_state_for_execution(state)
+    result = materialize_state_for_execution(state)
+
+    assert isinstance(result, InterpretationReviewPending)
+    assert result.sites[0].component_id == "source"
+    assert result.sites[0].component_type == "source"
+    assert result.sites[0].user_term == "llm_generated_source"
+    assert result.sites[0].kind is InterpretationKind.INVENTED_SOURCE
 
 
 def test_resolved_invented_source_requirement_requires_matching_artifact_hash() -> None:

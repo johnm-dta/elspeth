@@ -15,7 +15,7 @@ from contextvars import ContextVar
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypedDict, cast
 from uuid import UUID
 
 import structlog
@@ -54,6 +54,8 @@ from elspeth.web.interpretation_state import (
     PROMPT_TEMPLATE_PARTS_KEY,
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
+    strip_authoring_options,
+    validate_pipeline_decision_semantics,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
@@ -512,6 +514,24 @@ class InterpretationUnsupportedChoiceError(InterpretationResolveError):
     """The requested choice is valid generally but unsupported for this kind."""
 
 
+class _InterpretationHashDomainV2Payload(TypedDict):
+    """Closed hash-domain payload for interpretation review events."""
+
+    session_id: str
+    composition_state_id: str | None
+    affected_node_id: str
+    tool_call_id: str
+    user_term: str
+    kind: str
+    llm_draft: str
+    accepted_value: str
+    actor: str
+    model_identifier: str
+    model_version: str
+    provider: str
+    composer_skill_hash: str
+
+
 def _interpretation_hash_domain_v2(
     *,
     session_id: str,
@@ -528,8 +548,8 @@ def _interpretation_hash_domain_v2(
     provider: str,
     composer_skill_hash: str,
     context: str,
-) -> dict[str, Any]:
-    domain_dict = {
+) -> _InterpretationHashDomainV2Payload:
+    domain_dict: _InterpretationHashDomainV2Payload = {
         "session_id": session_id,
         "composition_state_id": composition_state_id,
         "affected_node_id": affected_node_id,
@@ -589,6 +609,39 @@ def _find_llm_transform_node(
             )
         return node
     raise InterpretationNodeMissingError(f"{context}: node {affected_node_id!r} is not present in the composition state's nodes")
+
+
+def _find_interpretation_review_node(
+    state: CompositionStateRecord,
+    *,
+    affected_node_id: str,
+    context: str,
+) -> Mapping[str, Any]:
+    if state.nodes is None:
+        raise InterpretationNodeMissingError(f"{context}: composition state has no nodes; node {affected_node_id!r} is not present")
+    for node in state.nodes:
+        if node["id"] == affected_node_id:
+            return node
+    raise InterpretationNodeMissingError(f"{context}: node {affected_node_id!r} is not present in the composition state's nodes")
+
+
+def _pipeline_decision_review_hash_from_node(node: Mapping[str, Any]) -> str:
+    return stable_hash(
+        {
+            "id": node["id"],
+            "node_type": node["node_type"],
+            "plugin": node["plugin"] if "plugin" in node else None,
+            "input": node["input"],
+            "on_success": node["on_success"] if "on_success" in node else None,
+            "on_error": node["on_error"] if "on_error" in node else None,
+            "options": strip_authoring_options(
+                _require_mapping(
+                    node["options"] if "options" in node else None,
+                    message=f"_pipeline_decision_review_hash_from_node: node {node['id']!r} has no options mapping",
+                )
+            ),
+        }
+    )
 
 
 def _matching_pending_requirement_index(
@@ -1078,6 +1131,64 @@ def _resolve_invented_source(
     patched_source = dict(source)
     patched_source["options"] = patched_options
     return patched_source, list(state_record.nodes or ()), None
+
+
+def _resolve_pipeline_decision_review(
+    state_record: CompositionStateRecord,
+    *,
+    event_id: str,
+    affected_node_id: str,
+    user_term: str,
+    llm_draft: str,
+    accepted_value: str,
+) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], None]:
+    node = _find_interpretation_review_node(
+        state_record,
+        affected_node_id=affected_node_id,
+        context="resolve_interpretation_event",
+    )
+    options = _require_mapping(
+        node["options"] if "options" in node else None,
+        message=f"resolve_interpretation_event: node {affected_node_id!r} options is not a mapping",
+    )
+    requirements, matching_index = _matching_pending_requirement_index(
+        options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None,
+        kind=InterpretationKind.PIPELINE_DECISION,
+        user_term=user_term,
+        context="resolve_interpretation_event",
+    )
+    requirement = dict(requirements[matching_index])
+    draft = requirement["draft"] if "draft" in requirement else None
+    if isinstance(draft, str) and draft != llm_draft:
+        raise InterpretationPlaceholderConsumedError(
+            "resolve_interpretation_event: pipeline_decision event draft does not match the node review requirement draft"
+        )
+    validate_pipeline_decision_semantics(
+        node_id=affected_node_id,
+        plugin=node["plugin"] if "plugin" in node else None,
+        options=options,
+        user_term=user_term,
+        draft=draft,
+        context="resolve_interpretation_event",
+    )
+    decision_hash = _pipeline_decision_review_hash_from_node(node)
+    requirement["status"] = "resolved"
+    requirement["event_id"] = event_id
+    requirement["accepted_value"] = accepted_value
+    requirement["accepted_artifact_hash"] = decision_hash
+    requirements[matching_index] = requirement
+
+    final_nodes: list[Mapping[str, Any]] = []
+    for current_node in state_record.nodes or ():
+        if current_node["id"] == affected_node_id:
+            patched_node = dict(current_node)
+            patched_options = dict(options)
+            patched_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
+            patched_node["options"] = patched_options
+            final_nodes.append(patched_node)
+        else:
+            final_nodes.append(current_node)
+    return state_record.source, final_nodes, None
 
 
 class SessionServiceImpl:
@@ -2458,6 +2569,49 @@ class SessionServiceImpl:
                         raise ValueError(
                             "create_pending_interpretation_event: invented_source event draft does not match the source review requirement draft"
                         )
+                elif kind is InterpretationKind.PIPELINE_DECISION:
+                    if nodes is None:
+                        raise ValueError(
+                            f"create_pending_interpretation_event: composition state "
+                            f"{state_id_str!r} has no nodes; affected_node_id "
+                            f"{affected_node_id!r} is not present"
+                        )
+                    state_record = self._row_to_state_record(state_row)
+                    node = _find_interpretation_review_node(
+                        state_record,
+                        affected_node_id=affected_node_id,
+                        context="create_pending_interpretation_event",
+                    )
+                    options = _require_mapping(
+                        node["options"] if "options" in node else None,
+                        message=f"create_pending_interpretation_event: node {affected_node_id!r} options is not a mapping",
+                    )
+                    try:
+                        requirements, matching_index = _matching_pending_requirement_index(
+                            options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None,
+                            kind=kind,
+                            user_term=user_term,
+                            context="create_pending_interpretation_event",
+                        )
+                    except InterpretationPlaceholderConsumedError as exc:
+                        raise ValueError(
+                            "create_pending_interpretation_event: node options.interpretation_requirements "
+                            f"must contain exactly one pending {kind.value!r} requirement for {user_term!r}"
+                        ) from exc
+                    requirement = requirements[matching_index]
+                    draft = requirement["draft"] if "draft" in requirement else None
+                    if isinstance(draft, str) and draft != llm_draft:
+                        raise ValueError(
+                            "create_pending_interpretation_event: pipeline_decision event draft does not match the node review requirement draft"
+                        )
+                    validate_pipeline_decision_semantics(
+                        node_id=affected_node_id,
+                        plugin=node["plugin"] if "plugin" in node else None,
+                        options=options,
+                        user_term=user_term,
+                        draft=draft,
+                        context="create_pending_interpretation_event",
+                    )
                 else:
                     if nodes is None:
                         raise ValueError(
@@ -2589,6 +2743,15 @@ class SessionServiceImpl:
                             llm_draft=llm_draft,
                             accepted_value=llm_draft,
                         )
+                    elif kind is InterpretationKind.PIPELINE_DECISION:
+                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
+                            live_state_record,
+                            event_id=event_id,
+                            affected_node_id=affected_node_id,
+                            user_term=user_term,
+                            llm_draft=llm_draft,
+                            accepted_value=llm_draft,
+                        )
                     else:
                         raise AssertionError(f"unhandled InterpretationKind {kind!r}")
 
@@ -2653,6 +2816,22 @@ class SessionServiceImpl:
                     )
                     row = conn.execute(select(interpretation_events_table).where(interpretation_events_table.c.id == event_id)).one()
                     return _interpretation_event_record_from_row(row)
+
+                if kind is InterpretationKind.PIPELINE_DECISION:
+                    existing_pending_row = conn.execute(
+                        select(interpretation_events_table)
+                        .where(interpretation_events_table.c.session_id == sid)
+                        .where(interpretation_events_table.c.affected_node_id == affected_node_id)
+                        .where(interpretation_events_table.c.kind == kind_value)
+                        .where(interpretation_events_table.c.user_term == user_term)
+                        .where(interpretation_events_table.c.llm_draft == llm_draft)
+                        .where(interpretation_events_table.c.choice == InterpretationChoice.PENDING.value)
+                        .where(interpretation_events_table.c.interpretation_source == InterpretationSource.USER_APPROVED.value)
+                        .order_by(interpretation_events_table.c.created_at, interpretation_events_table.c.id)
+                        .limit(1)
+                    ).one_or_none()
+                    if existing_pending_row is not None:
+                        return _interpretation_event_record_from_row(existing_pending_row)
 
                 conn.execute(
                     insert(interpretation_events_table).values(
@@ -2796,11 +2975,16 @@ class SessionServiceImpl:
                 if choice is InterpretationChoice.AMENDED and kind in {
                     InterpretationKind.INVENTED_SOURCE,
                     InterpretationKind.LLM_PROMPT_TEMPLATE,
+                    InterpretationKind.PIPELINE_DECISION,
                 }:
                     raise InterpretationUnsupportedChoiceError(
                         f"resolve_interpretation_event: {kind.value} does not support inline amendment in this release"
                     )
-                if kind in {InterpretationKind.VAGUE_TERM, InterpretationKind.INVENTED_SOURCE}:
+                if kind in {
+                    InterpretationKind.VAGUE_TERM,
+                    InterpretationKind.INVENTED_SOURCE,
+                    InterpretationKind.PIPELINE_DECISION,
+                }:
                     # Step 3: defence-in-depth validation of user/LLM-supplied
                     # content. Prompt-template review carries real Jinja and
                     # deliberately skips this accepted-value validator.
@@ -2845,6 +3029,15 @@ class SessionServiceImpl:
                     )
                 elif kind is InterpretationKind.INVENTED_SOURCE:
                     final_source, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
+                        state_record,
+                        event_id=eid,
+                        affected_node_id=event_row.affected_node_id,
+                        user_term=event_row.user_term,
+                        llm_draft=event_row.llm_draft,
+                        accepted_value=accepted_value,
+                    )
+                elif kind is InterpretationKind.PIPELINE_DECISION:
+                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,

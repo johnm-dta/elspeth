@@ -493,6 +493,8 @@ class JSONSink(BaseSink):
                 composer_hints=(
                     "Choose format: 'jsonl' for resumable output. JSON-array rewrites the entire file on every checkpoint — not resumable.",
                     "collision_policy: 'fail' (default), 'auto_increment', or 'overwrite'. Pick deliberately — accidental overwrite destroys prior runs.",
+                    "JSON sink writes the row it receives; schema, format, sink name, and output name do not drop fields. Use field_mapper before the sink when the user wants to remove or whitelist fields.",
+                    "For web_scrape results saved without raw page bodies, route the final path through field_mapper(select_only=true) before this sink; a sink named cleanup is not a cleanup transform.",
                     "Set on_write_failure to a quarantine sink (or 'discard') so single-row write errors don't crash the run.",
                     "path templating supports {run_id}, {date}, {sink_name} — use these to avoid collision in concurrent or scheduled runs.",
                 ),

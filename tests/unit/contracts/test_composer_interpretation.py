@@ -159,6 +159,7 @@ def test_interpretation_kind_closed_set() -> None:
         "vague_term",
         "invented_source",
         "llm_prompt_template",
+        "pipeline_decision",
     ]
 
 

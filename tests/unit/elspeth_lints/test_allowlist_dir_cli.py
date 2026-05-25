@@ -25,6 +25,30 @@ ELSPETH_LINTS_SRC = REPO_ROOT / "elspeth-lints" / "src"
 PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
 
 
+def _write_tier_model_fixture(root: Path) -> Path:
+    """Create a tiny repo root whose default tier-model allowlist suppresses one finding."""
+    fixture_root = root / "fixture"
+    fixture_root.mkdir()
+    (fixture_root / "demo.py").write_text(
+        'def read_value(options):\n    return options.get("value")\n',
+        encoding="utf-8",
+    )
+    allowlist_dir = fixture_root / "config" / "cicd" / "enforce_tier_model"
+    allowlist_dir.mkdir(parents=True)
+    (allowlist_dir / "web.yaml").write_text(
+        """per_file_rules:
+- pattern: demo.py
+  rules:
+  - R1
+  reason: Isolated CLI fixture proves default per-rule allowlist discovery.
+  expires: null
+  max_hits: 1
+""",
+        encoding="utf-8",
+    )
+    return fixture_root
+
+
 def _run_cli(args: list[str]) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "PYTHONPATH": str(ELSPETH_LINTS_SRC)}
     return subprocess.run(
@@ -39,17 +63,18 @@ def _run_cli(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 @pytest.mark.skipif(
     sys.version_info[:2] != (3, 13),
-    reason="tier-model allowlist fingerprints are version-specific; Python 3.13 is the canonical lint runtime",
+    reason="Python 3.13 is the canonical tier-model lint runtime",
 )
-def test_allowlist_dir_unset_uses_per_rule_defaults() -> None:
+def test_allowlist_dir_unset_uses_per_rule_defaults(tmp_path: Path) -> None:
     """When --allowlist-dir is unset, rules resolve their own default directories."""
-    # trust_tier.tier_model with its real allowlist → 0 findings (gate is green)
-    result = _run_cli(["check", "--rules", "trust_tier.tier_model", "--root", "src/elspeth"])
-    assert result.returncode == 0, f"stderr: {result.stderr}"
+    fixture_root = _write_tier_model_fixture(tmp_path)
+    result = _run_cli(["check", "--rules", "trust_tier.tier_model", "--root", str(fixture_root)])
+    assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
 
 
 def test_allowlist_dir_overrides_per_rule_default(tmp_path: Path) -> None:
     """A shadow (empty) allowlist directory removes all suppressions."""
+    fixture_root = _write_tier_model_fixture(tmp_path)
     shadow = tmp_path / "shadow"
     shadow.mkdir()
     # Empty directory → no allowlist entries → every previously-suppressed
@@ -62,7 +87,7 @@ def test_allowlist_dir_overrides_per_rule_default(tmp_path: Path) -> None:
             "--allowlist-dir",
             str(shadow),
             "--root",
-            "src/elspeth",
+            str(fixture_root),
             "--format",
             "json",
         ]
@@ -70,7 +95,7 @@ def test_allowlist_dir_overrides_per_rule_default(tmp_path: Path) -> None:
     # Exit 1 = findings (gate worked); the shadow allowlist suppresses nothing.
     assert result.returncode == 1, f"expected findings, got rc={result.returncode}; stderr: {result.stderr}"
     findings = json.loads(result.stdout)
-    assert len(findings) > 0, "shadow allowlist should let real findings through"
+    assert [finding["file_path"] for finding in findings] == ["demo.py"]
 
 
 def test_allowlist_dir_nonexistent_exits_2(tmp_path: Path) -> None:

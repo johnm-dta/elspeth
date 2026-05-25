@@ -132,6 +132,19 @@ function getReviewPresentation(event: InterpretationEvent): ReviewPresentation {
         acceptLabel: "Use prompt template",
         acceptAriaLabel: "Accept LLM prompt template",
       };
+    case "pipeline_decision":
+      return {
+        heading: "Pipeline decision",
+        status: "Pipeline decision needs review",
+        body: (
+          <>
+            The composer made a pipeline-shaping decision for{" "}
+            <em>{event.affected_node_id ?? "this transform"}</em>.
+          </>
+        ),
+        acceptLabel: "Use pipeline decision",
+        acceptAriaLabel: "Accept pipeline decision",
+      };
     case "vague_term":
     case null:
       return {
@@ -333,6 +346,9 @@ export function InterpretationReviewInlineMessage({
       </p>
 
       {event.kind === "invented_source" && (
+        <InventedSourceDraft value={llmDraft} />
+      )}
+      {event.kind === "pipeline_decision" && (
         <InventedSourceDraft value={llmDraft} />
       )}
       {event.kind === "llm_prompt_template" && (

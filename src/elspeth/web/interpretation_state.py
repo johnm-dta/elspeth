@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Final, Literal, NotRequired, TypedDict
 
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.enums import CreationModality
@@ -28,6 +28,10 @@ SOURCE_AUTHORING_KEY = "source_authoring"
 SOURCE_COMPONENT_ID = "source"
 INTERPRETATION_REVIEW_PENDING_CODE = "interpretation_review_pending"
 PENDING_INTERPRETATION_AUTHORING_TEXT = "pending interpretation"
+RAW_HTML_CLEANUP_USER_TERM: Final[str] = "drop_raw_html_fields"
+RAW_HTML_CLEANUP_REVIEW_DRAFT: Final[str] = "Drop the scraped raw HTML and fingerprint fields before saving the JSON output."
+
+_RAW_HTML_CLEANUP_DRAFT_MARKERS: Final[tuple[str, ...]] = ("raw html", "fingerprint")
 
 AUTHORING_METADATA_OPTION_KEYS: frozenset[str] = frozenset(
     {
@@ -97,16 +101,160 @@ def strip_authoring_options(options: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in options.items() if key not in AUTHORING_METADATA_OPTION_KEYS}
 
 
+def validate_pipeline_decision_semantics(
+    *,
+    node_id: str,
+    plugin: str | None,
+    options: Mapping[str, Any],
+    user_term: str,
+    draft: str | None,
+    context: str,
+) -> None:
+    """Validate that reviewed pipeline-shaping decisions match node behavior."""
+
+    if not _is_raw_html_cleanup_decision(user_term=user_term, draft=draft):
+        return
+    if plugin != "field_mapper":
+        raise ValueError(
+            f"{context}: raw-html cleanup decision {user_term!r} must be implemented by a field_mapper node; "
+            f"node {node_id!r} has plugin {plugin!r}"
+        )
+    if options.get("select_only") is not True:
+        raise ValueError(f"{context}: raw-html cleanup decision {user_term!r} requires field_mapper.select_only=true on node {node_id!r}")
+    mapping = options.get("mapping")
+    if not isinstance(mapping, Mapping) or not mapping:
+        raise ValueError(
+            f"{context}: raw-html cleanup decision {user_term!r} requires a non-empty field_mapper.mapping on node {node_id!r}"
+        )
+    preserved_raw_fields = sorted(
+        {
+            field_name
+            for source_field, target_field in mapping.items()
+            for field_name in _validated_mapping_pair(source_field, target_field, context=context, node_id=node_id)
+            if _looks_like_raw_html_field(field_name)
+        }
+    )
+    if preserved_raw_fields:
+        raise ValueError(
+            f"{context}: raw-html cleanup decision {user_term!r} preserves raw HTML/fingerprint field(s) "
+            f"on node {node_id!r}: {preserved_raw_fields}. Remove them from mapping when select_only=true."
+        )
+
+
+def raw_html_cleanup_review_contract_error(state: CompositionState) -> str | None:
+    """Return a composer-facing error for unreviewed or contradictory raw cleanup."""
+    web_scrape_raw_fields = _web_scrape_raw_fields(state.nodes)
+    if not web_scrape_raw_fields:
+        return None
+    for node in state.nodes:
+        requirement_error = _raw_html_cleanup_requirement_contract_error(node)
+        if requirement_error is not None:
+            return requirement_error
+    for node in state.nodes:
+        if node.plugin != "field_mapper" or node.options.get("select_only") is not True:
+            continue
+        mapping = node.options.get("mapping")
+        if not isinstance(mapping, Mapping) or not mapping:
+            continue
+        preserved_fields = _preserved_mapping_fields(mapping)
+        preserved_raw_fields = sorted(field for field in web_scrape_raw_fields if field in preserved_fields)
+        if preserved_raw_fields and _looks_like_cleanup_node_id(node.id):
+            return (
+                f"Node {node.id!r} is named like raw HTML cleanup but preserves web-scrape raw field(s) "
+                f"{preserved_raw_fields}. Remove those fields from field_mapper.mapping when select_only=true."
+            )
+        if preserved_raw_fields:
+            continue
+        requirements = _requirements(node.options)
+        if _requirement_for_kind(requirements, InterpretationKind.PIPELINE_DECISION) is None:
+            return (
+                f"Node {node.id!r} drops web-scrape raw field(s) {sorted(web_scrape_raw_fields)} with "
+                "field_mapper.select_only=true. Stage a pending pipeline_decision interpretation_requirements "
+                f"entry on that node with user_term {RAW_HTML_CLEANUP_USER_TERM!r} and draft "
+                f"{RAW_HTML_CLEANUP_REVIEW_DRAFT!r}, then call request_interpretation_review. "
+                "Do not put interpretation_requirements inside field_mapper.mapping; mapping contains "
+                "only data fields to preserve. interpretation_requirements must be a sibling of mapping "
+                "inside the field_mapper options object. "
+                "If this came from a rejected set_pipeline call, resubmit the full pipeline with that "
+                "requirement on the cleanup node; rejected set_pipeline calls do not persist partial nodes."
+            )
+    return None
+
+
+def _raw_html_cleanup_requirement_contract_error(node: NodeSpec) -> str | None:
+    try:
+        requirements = _requirements(node.options)
+    except (KeyError, TypeError, ValueError) as exc:
+        return f"Node {node.id!r} has invalid interpretation_requirements: {exc}"
+    if requirements is None:
+        return None
+    for requirement in requirements:
+        if InterpretationKind(requirement["kind"]) is not InterpretationKind.PIPELINE_DECISION:
+            continue
+        if not _is_raw_html_cleanup_decision(user_term=requirement["user_term"], draft=requirement["draft"]):
+            continue
+        try:
+            validate_pipeline_decision_semantics(
+                node_id=node.id,
+                plugin=node.plugin,
+                options=node.options,
+                user_term=requirement["user_term"],
+                draft=requirement["draft"],
+                context="raw-html cleanup review contract",
+            )
+        except ValueError as exc:
+            return str(exc)
+    return None
+
+
+def _is_raw_html_cleanup_decision(*, user_term: str, draft: str | None) -> bool:
+    normalized_term = user_term.strip()
+    if normalized_term != RAW_HTML_CLEANUP_USER_TERM:
+        return False
+    if not isinstance(draft, str):
+        return False
+    normalized_draft = draft.lower()
+    return all(marker in normalized_draft for marker in _RAW_HTML_CLEANUP_DRAFT_MARKERS)
+
+
+def _validated_mapping_pair(source_field: object, target_field: object, *, context: str, node_id: str) -> tuple[str, str]:
+    if not isinstance(source_field, str) or not isinstance(target_field, str):
+        raise ValueError(f"{context}: field_mapper.mapping on node {node_id!r} must map string field names to string field names")
+    return (source_field, target_field)
+
+
+def _looks_like_raw_html_field(field_name: str) -> bool:
+    normalized = field_name.strip().lower().replace("-", "_")
+    return normalized == "content" or "html" in normalized or "fingerprint" in normalized
+
+
+def _looks_like_cleanup_node_id(node_id: str) -> bool:
+    normalized = node_id.strip().lower().replace("-", "_")
+    return "drop" in normalized or "cleanup" in normalized or "clean" in normalized or "raw" in normalized or "html" in normalized
+
+
+def _preserved_mapping_fields(mapping: Mapping[str, Any]) -> frozenset[str]:
+    fields: set[str] = set()
+    for source_field, target_field in mapping.items():
+        if isinstance(source_field, str):
+            fields.add(source_field.strip())
+        if isinstance(target_field, str):
+            fields.add(target_field.strip())
+    return frozenset(fields)
+
+
 def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewSite, ...]:
     """Return unresolved interpretation-review sites across source and transforms."""
 
     sites: list[InterpretationReviewSite] = []
     if state.source is not None:
         sites.extend(_pending_source_sites(state.source))
+    web_scrape_raw_fields = _web_scrape_raw_fields(state.nodes)
     for node in state.nodes:
         node_sites = [*_pending_node_sites(node), *_legacy_placeholder_sites(node)]
         sites.extend(node_sites)
-        if not any(site.kind is InterpretationKind.VAGUE_TERM for site in node_sites):
+        sites.extend(_missing_raw_html_cleanup_review_sites(node, web_scrape_raw_fields=web_scrape_raw_fields))
+        if not any(site.kind is InterpretationKind.LLM_PROMPT_TEMPLATE for site in node_sites):
             sites.extend(_missing_prompt_template_review_sites(node))
     return tuple(dict.fromkeys(sites))
 
@@ -184,6 +332,7 @@ def _materialize_node_for_authoring(node: NodeSpec) -> NodeSpec:
 
 
 def _materialize_node_for_execution(node: NodeSpec) -> NodeSpec:
+    _validate_pipeline_decision_review(node)
     if node.plugin != "llm":
         return node
     parts = _prompt_parts(node.options)
@@ -240,7 +389,16 @@ def _pending_source_sites(source: SourceSpec) -> tuple[InterpretationReviewSite,
         return ()
     requirements = _requirements(source.options)
     requirement = _requirement_for_kind(requirements, InterpretationKind.INVENTED_SOURCE)
-    if requirement is None or requirement["status"] == "resolved":
+    if requirement is None:
+        return (
+            InterpretationReviewSite(
+                component_id=SOURCE_COMPONENT_ID,
+                component_type="source",
+                user_term="llm_generated_source",
+                kind=InterpretationKind.INVENTED_SOURCE,
+            ),
+        )
+    if requirement["status"] == "resolved":
         return ()
     return (
         InterpretationReviewSite(
@@ -253,8 +411,6 @@ def _pending_source_sites(source: SourceSpec) -> tuple[InterpretationReviewSite,
 
 
 def _pending_node_sites(node: NodeSpec) -> tuple[InterpretationReviewSite, ...]:
-    if node.plugin != "llm":
-        return ()
     requirements = _requirements(node.options)
     if requirements is None:
         return ()
@@ -262,15 +418,68 @@ def _pending_node_sites(node: NodeSpec) -> tuple[InterpretationReviewSite, ...]:
     for requirement in requirements:
         status = requirement["status"]
         if status == "pending":
+            kind = InterpretationKind(requirement["kind"])
+            if node.plugin != "llm" and kind is not InterpretationKind.PIPELINE_DECISION:
+                continue
             sites.append(
                 InterpretationReviewSite(
                     component_id=node.id,
                     component_type="transform",
                     user_term=requirement["user_term"].strip(),
-                    kind=InterpretationKind(requirement["kind"]),
+                    kind=kind,
                 )
             )
     return tuple(sites)
+
+
+def _web_scrape_raw_fields(nodes: Sequence[NodeSpec]) -> frozenset[str]:
+    fields: set[str] = set()
+    for node in nodes:
+        if node.plugin != "web_scrape":
+            continue
+        content_field = node.options.get("content_field")
+        fingerprint_field = node.options.get("fingerprint_field")
+        if isinstance(content_field, str) and content_field.strip():
+            fields.add(content_field.strip())
+        if isinstance(fingerprint_field, str) and fingerprint_field.strip():
+            fields.add(fingerprint_field.strip())
+    return frozenset(fields)
+
+
+def _missing_raw_html_cleanup_review_sites(
+    node: NodeSpec,
+    *,
+    web_scrape_raw_fields: frozenset[str],
+) -> tuple[InterpretationReviewSite, ...]:
+    """Return the required review site for unreviewed web-scrape field cleanup."""
+    if not web_scrape_raw_fields:
+        return ()
+    if node.plugin != "field_mapper":
+        return ()
+    requirements = _requirements(node.options)
+    if _requirement_for_kind(requirements, InterpretationKind.PIPELINE_DECISION) is not None:
+        return ()
+    if node.options.get("select_only") is not True:
+        return ()
+    mapping = node.options.get("mapping")
+    if not isinstance(mapping, Mapping) or not mapping:
+        return ()
+    preserved_fields = {
+        field_name
+        for source_field, target_field in mapping.items()
+        if isinstance(source_field, str) and isinstance(target_field, str)
+        for field_name in (source_field.strip(), target_field.strip())
+    }
+    if any(field in preserved_fields for field in web_scrape_raw_fields):
+        return ()
+    return (
+        InterpretationReviewSite(
+            component_id=node.id,
+            component_type="transform",
+            user_term=RAW_HTML_CLEANUP_USER_TERM,
+            kind=InterpretationKind.PIPELINE_DECISION,
+        ),
+    )
 
 
 def _legacy_placeholder_sites(node: NodeSpec) -> tuple[InterpretationReviewSite, ...]:
@@ -297,7 +506,16 @@ def _missing_prompt_template_review_sites(node: NodeSpec) -> tuple[Interpretatio
     if not isinstance(prompt_template, str) or not prompt_template:
         return ()
     requirement = _prompt_template_review_requirement(node.options)
-    if requirement is None or requirement["status"] == "resolved":
+    if requirement is None:
+        return (
+            InterpretationReviewSite(
+                component_id=node.id,
+                component_type="transform",
+                user_term=f"llm_prompt_template:{node.id}",
+                kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+            ),
+        )
+    if requirement["status"] == "resolved":
         return ()
     return (
         InterpretationReviewSite(
@@ -451,6 +669,38 @@ def _validate_prompt_template_review(node: NodeSpec, prompt_template: str) -> No
     expected_hash = stable_hash(prompt_template)
     if resolved["resolved_prompt_template_hash"] != expected_hash:
         raise ValueError(f"llm node {node.id!r} prompt-template review hash drifted")
+
+
+def _pipeline_decision_review_hash(node: NodeSpec) -> str:
+    return stable_hash(
+        {
+            "id": node.id,
+            "node_type": node.node_type,
+            "plugin": node.plugin,
+            "input": node.input,
+            "on_success": node.on_success,
+            "on_error": node.on_error,
+            "options": strip_authoring_options(node.options),
+        }
+    )
+
+
+def _validate_pipeline_decision_review(node: NodeSpec) -> None:
+    requirements = _requirements(node.options)
+    resolved = _resolved_requirement_for_kind(requirements, InterpretationKind.PIPELINE_DECISION)
+    if resolved is None:
+        return
+    validate_pipeline_decision_semantics(
+        node_id=node.id,
+        plugin=node.plugin,
+        options=node.options,
+        user_term=resolved["user_term"],
+        draft=resolved["draft"],
+        context="interpretation_state",
+    )
+    expected_hash = _pipeline_decision_review_hash(node)
+    if resolved["accepted_artifact_hash"] != expected_hash:
+        raise ValueError(f"node {node.id!r} pipeline-decision review hash drifted")
 
 
 def _prompt_parts(options: Mapping[str, Any]) -> tuple[PromptPart, ...] | None:

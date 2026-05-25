@@ -266,6 +266,46 @@ def test_type_driven_response_model_walks_via_schema_iterator(
     assert "sk-super-secret" not in str(result)
 
 
+def test_get_blob_content_redacts_tool_result_envelope_content() -> None:
+    """``get_blob_content`` redacts nested ``data.content`` in ToolResult."""
+
+    response = {
+        "success": True,
+        "validation": {"is_valid": True, "errors": []},
+        "affected_nodes": [],
+        "version": 2,
+        "data": {
+            "blob_id": "blob-1",
+            "filename": "input.csv",
+            "mime_type": "text/csv",
+            "content": "secret,row\n1,2\n",
+            "truncated": False,
+            "size_bytes": 15,
+        },
+    }
+
+    result = redact_tool_call_response("get_blob_content", response, telemetry=NoopRedactionTelemetry())
+
+    assert result["data"]["content"] == "<blob-content:15-bytes>"
+    assert "secret,row" not in str(result)
+
+
+def test_get_blob_content_redacts_tool_result_failure_envelope() -> None:
+    """Recoverable failures have no content leaf and must not crash redaction."""
+
+    response = {
+        "success": False,
+        "validation": {"is_valid": False, "errors": []},
+        "affected_nodes": [],
+        "version": 2,
+        "data": {"error": "Blob 'blob-1' not found."},
+    }
+
+    result = redact_tool_call_response("get_blob_content", response, telemetry=NoopRedactionTelemetry())
+
+    assert result == response
+
+
 # ---------------------------------------------------------------------------
 # Test 6: summarizer raises → telemetry counter BEFORE AuditIntegrityError
 # ---------------------------------------------------------------------------

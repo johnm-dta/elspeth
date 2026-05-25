@@ -51,11 +51,12 @@ from elspeth.contracts.composer_interpretation import (
     InterpretationSource,
 )
 from elspeth.web.composer.protocol import ToolArgumentError
-from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
+from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl, _pending_interpretation_review_repair_message
 from elspeth.web.composer.state import (
     CompositionState,
     NodeSpec,
     PipelineMetadata,
+    SourceSpec,
 )
 from elspeth.web.composer.tools import (
     RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE,
@@ -63,7 +64,7 @@ from elspeth.web.composer.tools import (
     RATE_CAP_PER_TERM_CODE,
 )
 from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
-from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, SOURCE_AUTHORING_KEY
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import (
     sessions_table,
@@ -263,6 +264,142 @@ def _state_with_prompt_template_review_node() -> CompositionState:
                             "resolved_prompt_template_hash": None,
                         }
                     ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _state_with_source_review() -> CompositionState:
+    return CompositionState(
+        source=SourceSpec(
+            plugin="csv",
+            on_success="rows",
+            options={
+                "path": "/tmp/generated.csv",
+                SOURCE_AUTHORING_KEY: {
+                    "modality": "llm_generated",
+                    "content_hash": "0" * 64,
+                    "review_event_id": None,
+                    "resolved_kind": None,
+                },
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "source_review:inline_source_url_list",
+                        "kind": InterpretationKind.INVENTED_SOURCE.value,
+                        "user_term": "inline_source_url_list",
+                        "status": "pending",
+                        "draft": "url\nhttps://example.gov.au/\n",
+                        "event_id": None,
+                        "accepted_value": None,
+                        "accepted_artifact_hash": None,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            },
+            on_validation_failure="discard",
+        ),
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _state_with_pipeline_decision_review() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="drop_raw_html",
+                node_type="transform",
+                plugin="field_mapper",
+                input="scored_rows",
+                on_success="clean_rows",
+                on_error=None,
+                options={
+                    "mapping": {
+                        "url": "url",
+                        "agency": "agency",
+                        "primary_colours": "primary_colours",
+                    },
+                    "select_only": True,
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": "drop_raw_html_review",
+                            "kind": InterpretationKind.PIPELINE_DECISION.value,
+                            "user_term": "drop_raw_html_fields",
+                            "status": "pending",
+                            "draft": "Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _state_with_unreviewed_raw_html_cleanup() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="rows",
+                on_success="scraped_rows",
+                on_error=None,
+                options={
+                    "url_field": "url",
+                    "content_field": "content",
+                    "fingerprint_field": "content_fingerprint",
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="drop_raw_html",
+                node_type="transform",
+                plugin="field_mapper",
+                input="scored_rows",
+                on_success="clean_rows",
+                on_error=None,
+                options={
+                    "mapping": {
+                        "url": "url",
+                        "primary_colours": "primary_colours",
+                    },
+                    "select_only": True,
                 },
                 condition=None,
                 routes=None,
@@ -612,6 +749,129 @@ async def test_pending_interpretation_placeholder_without_event_forces_review_to
     assert events[0].user_term == "cool"
     assert events[0].affected_node_id == "rate_node"
     assert events[0].tool_call_id == "call_review_after_repair"
+
+
+@pytest.mark.asyncio
+async def test_prompt_template_review_event_does_not_trigger_vague_term_repair(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """Prompt-template reviews are not legacy ``{{interpretation:...}}`` handoffs."""
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_prompt_template_review_node()
+    session_id, state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    await sessions_service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state_id,
+        affected_node_id="rate_node",
+        tool_call_id="call_prompt_review",
+        user_term="llm_prompt_template:rate_node",
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        llm_draft="Read {{ row.html }} and return JSON.",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    missing = await composer._missing_pending_interpretation_review_sites(
+        state,
+        session_id=str(session_id),
+    )
+
+    assert missing == ()
+
+
+@pytest.mark.asyncio
+async def test_missing_prompt_template_review_event_forces_review_tool_retry(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """A pending prompt-template requirement is incomplete until its event exists."""
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_prompt_template_review_node()
+    session_id, _state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    missing = await composer._missing_pending_interpretation_review_sites(
+        state,
+        session_id=str(session_id),
+    )
+
+    assert missing == (("rate_node", "llm_prompt_template:rate_node", InterpretationKind.LLM_PROMPT_TEMPLATE),)
+
+
+@pytest.mark.asyncio
+async def test_missing_invented_source_review_event_forces_review_tool_retry(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """A pending invented-source requirement is incomplete until its event exists."""
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_source_review()
+    session_id, _state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    missing = await composer._missing_pending_interpretation_review_sites(
+        state,
+        session_id=str(session_id),
+    )
+
+    assert missing == (("source", "inline_source_url_list", InterpretationKind.INVENTED_SOURCE),)
+
+
+@pytest.mark.asyncio
+async def test_missing_pipeline_decision_review_event_forces_review_tool_retry(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """A pending pipeline-decision requirement is incomplete until its event exists."""
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_pipeline_decision_review()
+    session_id, _state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    missing = await composer._missing_pending_interpretation_review_sites(
+        state,
+        session_id=str(session_id),
+    )
+
+    assert missing == (("drop_raw_html", "drop_raw_html_fields", InterpretationKind.PIPELINE_DECISION),)
+
+
+def test_pending_interpretation_repair_message_requires_one_call_per_site() -> None:
+    message = _pending_interpretation_review_repair_message(
+        (
+            ("source", "inline_source_url_list", InterpretationKind.INVENTED_SOURCE),
+            ("identify_colours", "llm_prompt_template:identify_colours", InterpretationKind.LLM_PROMPT_TEMPLATE),
+            ("drop_html", "drop_raw_html_fields", InterpretationKind.PIPELINE_DECISION),
+        ),
+        next_turn=1,
+    )
+
+    assert "one request_interpretation_review tool call per listed handoff" in message
+    assert "in this same assistant turn before stopping" in message
+
+
+@pytest.mark.asyncio
+async def test_unreviewed_raw_html_cleanup_forces_pipeline_decision_staging_retry(
+    tmp_path: Path,
+    sessions_service: SessionServiceImpl,
+) -> None:
+    """A field_mapper that drops web-scrape raw fields needs a review site."""
+
+    composer = _build_composer(tmp_path, sessions_service)
+    state = _state_with_unreviewed_raw_html_cleanup()
+    session_id, _state_id = await _seed_session_and_state(sessions_service, state=state)
+
+    missing = await composer._missing_pending_interpretation_review_sites(
+        state,
+        session_id=str(session_id),
+    )
+
+    assert missing == (("drop_raw_html", "drop_raw_html_fields", InterpretationKind.PIPELINE_DECISION),)
 
 
 @pytest.mark.asyncio

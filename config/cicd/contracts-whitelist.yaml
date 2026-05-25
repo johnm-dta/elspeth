@@ -214,6 +214,8 @@ allowed_dict_patterns:
   - "src/elspeth/core/blobs_inline.py:_validate_blob_content_refs:config"
   - "src/elspeth/core/blobs_inline.py:_validate_blob_content_refs_sync:config"
   - "src/elspeth/core/blobs_inline.py:_substitute_blob_content_refs:config"
+  - "src/elspeth/core/blobs_inline.py:_substitute_blob_content_refs_for_validation:config"
+  - "src/elspeth/core/blobs_inline.py:_substitute_blob_content_refs_for_validation:return"
   - "src/elspeth/core/blobs_inline.py:_substitute_at_path:config"
   - "src/elspeth/core/blobs_inline.py:_source_options:config"
   - "src/elspeth/core/blobs_inline.py:_source_options:return"
@@ -690,7 +692,6 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools/_common.py:ToolResult.to_dict:return"
   - "src/elspeth/web/composer/tools/sessions.py:_authoring_validation_payload:return"
   - "src/elspeth/web/composer/tools/_common.py:_secret_ref_placement_error:options"
-  - "src/elspeth/web/composer/tools/generation.py:_numeric_aggregation_diagnostics_for_observed_csv:return (list)"
   - "src/elspeth/web/composer/tools/_dispatch.py:get_tool_definitions:return (list)"
   - "src/elspeth/web/composer/tools/_dispatch.py:execute_tool:arguments"
   # JSON Schema meta-validation helper for the two non-declared inline
@@ -753,13 +754,8 @@ allowed_dict_patterns:
   # Each entry has {code, severity, message, suggested_repair, evidence_locator}
   # and is consumed by the forced-repair loop (service.py) and the convergence
   # eval harness (evals/lib/composer_rgr_score.py).
-  - "src/elspeth/web/composer/tools/generation.py:compute_proof_diagnostics:return (list)"
-  - "src/elspeth/web/composer/tools/generation.py:_gate_expression_type_diagnostics_for_observed_csv:return (list)"
-  # _blocking_diagnostic constructor for the same dict shape — registry-checked
-  # against _BLOCKING_DIAGNOSTIC_CODES at construction so the LLM's repair
-  # vocabulary cannot drift silently.
-  - "src/elspeth/web/composer/tools/generation.py:_blocking_diagnostic:evidence_locator"
-  - "src/elspeth/web/composer/tools/generation.py:_blocking_diagnostic:return"
+  # Blocking-diagnostic payloads use a local TypedDict; the dynamic dict
+  # allowance remains only for the top-level LLM-visible diagnostics list.
   # _attempt_proof_repair appends a synthesised user-role message to the
   # OpenAI-format chat completion list. Each entry is the documented chat
   # message shape ({role, content, ...}) which is inherently dynamic.
@@ -832,7 +828,6 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/tools/_common.py:_validate_sink_path:options"
   - "src/elspeth/web/composer/tools/_common.py:_prevalidate_plugin_options:options"
   - "src/elspeth/web/composer/tools/_common.py:_prevalidate_plugin_options:injected_fields"
-  - "src/elspeth/web/composer/tools/_common.py:_prevalidate_transform:options"
   - "src/elspeth/web/composer/tools/_common.py:_prevalidate_sink:options"
 
   # ═══════════════════════════════════════════════════════════════════════════

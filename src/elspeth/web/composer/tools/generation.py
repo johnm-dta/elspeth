@@ -8,7 +8,7 @@ import io
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal, TypedDict
 
 from opentelemetry import metrics
 from sqlalchemy import Engine
@@ -751,13 +751,21 @@ _BLOCKING_DIAGNOSTIC_CODES: Final[frozenset[str]] = frozenset(
 )
 
 
+class _BlockingDiagnosticPayload(TypedDict):
+    code: str
+    severity: Literal["blocking"]
+    message: str
+    suggested_repair: str
+    evidence_locator: Mapping[str, Any]
+
+
 def _blocking_diagnostic(
     *,
     code: str,
     message: str,
     suggested_repair: str,
-    evidence_locator: dict[str, Any],
-) -> dict[str, Any]:
+    evidence_locator: Mapping[str, Any],
+) -> _BlockingDiagnosticPayload:
     """Construct a blocking diagnostic dict and assert the code is registered.
 
     Offensive: a contributor who adds a new blocker without registering it in
@@ -786,7 +794,7 @@ def _csv_source_field_resolution_error_diagnostic(
     blob_id: object,
     facts: SourceInspectionFacts,
     exc: ValueError,
-) -> dict[str, Any]:
+) -> _BlockingDiagnosticPayload:
     return _blocking_diagnostic(
         code="csv_source_field_resolution_error",
         message=(
@@ -863,7 +871,7 @@ def _gate_expression_type_diagnostics_for_observed_csv(
     blob_id: str,
     filename: str,
     content: bytes,
-) -> list[dict[str, Any]]:
+) -> list[Mapping[str, Any]]:
     """Evaluate direct source-fed gates against sampled observed CSV rows.
 
     Observed CSV sources emit raw strings because there are no declared field
@@ -880,7 +888,7 @@ def _gate_expression_type_diagnostics_for_observed_csv(
     if not rows:
         return []
 
-    diagnostics: list[dict[str, Any]] = []
+    diagnostics: list[Mapping[str, Any]] = []
     direct_gate_nodes = (
         node for node in state.nodes if node.node_type == "gate" and node.input == source.on_success and node.condition is not None
     )
@@ -1000,13 +1008,13 @@ def _numeric_aggregation_diagnostics_for_observed_csv(
     blob_id: str,
     inferred_types: Mapping[str, str] | None,
     observed_headers: tuple[str, ...] | None,
-) -> list[dict[str, Any]]:
+) -> list[Mapping[str, Any]]:
     """Block observed CSV strings before numeric aggregation runtime failures."""
     if _source_schema_mode(source) != "observed" or observed_headers is None:
         return []
 
     observed_header_set = set(observed_headers)
-    diagnostics: list[dict[str, Any]] = []
+    diagnostics: list[Mapping[str, Any]] = []
     for node in state.nodes:
         if node.node_type != "aggregation" or node.plugin not in _NUMERIC_VALUE_FIELD_AGGREGATION_PLUGINS:
             continue
@@ -1058,7 +1066,7 @@ def compute_proof_diagnostics(
     *,
     session_engine: Engine | None = None,
     session_id: str | None = None,
-) -> list[dict[str, Any]]:
+) -> list[Mapping[str, Any]]:
     """Compute machine-readable proof diagnostics for a composer state.
 
     Promotes ``preview_pipeline`` from a "state validates" check into a
@@ -1105,7 +1113,7 @@ def compute_proof_diagnostics(
     No-op (returns an empty list) if the source is not blob-backed or
     if session context is absent.
     """
-    diagnostics: list[dict[str, Any]] = []
+    diagnostics: list[Mapping[str, Any]] = []
 
     source = state.source
     if source is None:

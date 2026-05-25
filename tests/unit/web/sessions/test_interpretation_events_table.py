@@ -196,8 +196,8 @@ def _surface_opt_out_row(*, row_id: str, session_id: str, state_id: str) -> dict
     }
 
 
-def test_proposal_provenance_schema_cohort_epoch_is_16() -> None:
-    assert SESSION_SCHEMA_EPOCH == 16
+def test_proposal_provenance_schema_cohort_epoch_is_17() -> None:
+    assert SESSION_SCHEMA_EPOCH == 17
 
 
 def test_composition_proposal_composer_provenance_is_all_or_none(engine) -> None:
@@ -592,6 +592,22 @@ class TestSourceNullability:
             )
             with pytest.raises(IntegrityError):
                 conn.execute(insert(interpretation_events_table).values(row))
+
+    def test_pipeline_decision_kind_is_allowed(self, engine) -> None:
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            _seed_composition_state(conn, state_id=state_id, session_id=session_id)
+            row = _user_approved_row(
+                row_id=str(uuid.uuid4()),
+                session_id=session_id,
+                state_id=state_id,
+                kind="pipeline_decision",
+            )
+            row["affected_node_id"] = "drop_raw_html"
+            row["user_term"] = "drop_raw_html_fields"
+            conn.execute(insert(interpretation_events_table).values(row))
 
     # Test 4a — opted_out + composition_state_id non-NULL → IntegrityError
     def test_opted_out_with_non_null_composition_state_id_raises(self, engine) -> None:

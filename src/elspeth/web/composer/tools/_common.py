@@ -32,7 +32,9 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine
 
 from elspeth.contracts.blobs_inline import is_widened_blob_ref
+from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.core.config import TriggerConfig
 from elspeth.core.secrets import (
@@ -61,7 +63,12 @@ from elspeth.web.composer.state import (
     _serialize_branches,
 )
 from elspeth.web.execution.schemas import ValidationResult
-from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY, strip_authoring_options
+from elspeth.web.interpretation_state import (
+    INTERPRETATION_REQUIREMENTS_KEY,
+    SOURCE_AUTHORING_KEY,
+    InterpretationRequirement,
+    strip_authoring_options,
+)
 from elspeth.web.paths import (
     allowed_sink_directories,
     allowed_source_directories,
@@ -76,6 +83,100 @@ from elspeth.web.validation import (
 )
 
 _DATA_ERROR_KEY: Final[str] = "error"
+
+
+def _pending_interpretation_requirement(
+    *,
+    requirement_id: str,
+    kind: InterpretationKind,
+    user_term: str,
+    draft: str,
+) -> InterpretationRequirement:
+    """Return a pending interpretation-review requirement row."""
+    requirement: InterpretationRequirement = {
+        "id": requirement_id,
+        "kind": kind.value,
+        "user_term": user_term,
+        "status": "pending",
+        "draft": draft,
+        "event_id": None,
+        "accepted_value": None,
+        "accepted_artifact_hash": None,
+        "resolved_prompt_template_hash": None,
+    }
+    return requirement
+
+
+def _requirement_matches_prompt_template(requirement: Mapping[str, Any], prompt_template: str) -> bool:
+    status = requirement["status"] if "status" in requirement else None
+    if status == "pending":
+        return requirement.get("draft") == prompt_template
+    if status != "resolved":
+        return False
+    return requirement.get("resolved_prompt_template_hash") == stable_hash(prompt_template)
+
+
+def _options_with_pending_requirement(
+    options: Mapping[str, Any],
+    *,
+    requirement: Mapping[str, Any],
+    replace_kind: InterpretationKind | None = None,
+    current_prompt_template: str | None = None,
+) -> Mapping[str, Any]:
+    """Append or refresh a pending requirement without mutating ``options``."""
+    requirements_value = options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None
+    if requirements_value is not None and not isinstance(requirements_value, (list, tuple)):
+        return dict(options)
+
+    requirements: list[Any] = list(requirements_value or ())
+    if replace_kind is not None:
+        next_requirements: list[Any] = []
+        replaced = False
+        for existing in requirements:
+            if not isinstance(existing, Mapping) or existing.get("kind", InterpretationKind.VAGUE_TERM.value) != replace_kind.value:
+                next_requirements.append(existing)
+                continue
+            if current_prompt_template is not None and _requirement_matches_prompt_template(existing, current_prompt_template):
+                next_requirements.append(existing)
+                replaced = True
+                continue
+            next_requirements.append(requirement)
+            replaced = True
+        if replaced:
+            patched = dict(options)
+            patched[INTERPRETATION_REQUIREMENTS_KEY] = next_requirements
+            return patched
+
+    requirements.append(requirement)
+    patched = dict(options)
+    patched[INTERPRETATION_REQUIREMENTS_KEY] = requirements
+    return patched
+
+
+def _options_with_default_prompt_template_review(
+    *,
+    node_id: str,
+    plugin: str | None,
+    options: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Ensure LLM-authored prompt templates carry a Class 3 review gate."""
+    if plugin != "llm":
+        return options
+    prompt_template = options["prompt_template"] if "prompt_template" in options else None
+    if not isinstance(prompt_template, str) or not prompt_template:
+        return options
+    requirement = _pending_interpretation_requirement(
+        requirement_id=f"prompt_template_review:{node_id}",
+        kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        user_term=f"llm_prompt_template:{node_id}",
+        draft=prompt_template,
+    )
+    return _options_with_pending_requirement(
+        options,
+        requirement=requirement,
+        replace_kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+        current_prompt_template=prompt_template,
+    )
 
 
 class _SemanticEdgeContractPayload(TypedDict):

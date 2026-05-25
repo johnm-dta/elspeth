@@ -1114,12 +1114,12 @@ class TestSourceRowExceptionType:
         from elspeth.contracts.results import SourceRow
 
         with pytest.raises(ValueError, match=r"[Vv]alid.*contract"):
-            SourceRow(row={"id": 1}, is_quarantined=False, contract=None)
+            SourceRow(row={"id": 1}, is_quarantined=False, contract=None, source_row_index=0)
 
     def test_quarantined_row_still_raises_value_error(self) -> None:
         """Quarantined rows raise ValueError — this is a state violation, not a bug."""
         from elspeth.contracts.results import SourceRow
 
-        row = SourceRow.quarantined(row={"id": 1}, error="bad data", destination="errors")
+        row = SourceRow.quarantined(row={"id": 1}, error="bad data", destination="errors", source_row_index=0)
         with pytest.raises(ValueError, match="quarantined"):
             row.to_pipeline_row()

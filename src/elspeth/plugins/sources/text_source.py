@@ -151,6 +151,7 @@ class TextSource(BaseSource):
                                 "__raw_bytes_hex__": raw_bytes.hex(),
                             },
                             error_msg=f"Text parse error at line {line_num}: invalid {self._encoding} encoding",
+                            source_row_index=line_num - 1,
                         )
                         if quarantined is not None:
                             yield quarantined
@@ -172,6 +173,7 @@ class TextSource(BaseSource):
                     yield from self._validate_and_yield(
                         {self._column: value},
                         ctx,
+                        source_row_index=line_num - 1,
                     )
         except UnicodeDecodeError as exc:
             error_line = line_num + 1 if line_num > 0 else 1
@@ -217,7 +219,7 @@ class TextSource(BaseSource):
             )
         return None
 
-    def _validate_and_yield(self, row: dict[str, Any], ctx: SourceContext) -> Iterator[SourceRow]:
+    def _validate_and_yield(self, row: dict[str, Any], ctx: SourceContext, *, source_row_index: int) -> Iterator[SourceRow]:
         """Validate a line row and quarantine schema failures."""
         try:
             validated = self._schema_class.model_validate(row)
@@ -245,10 +247,11 @@ class TextSource(BaseSource):
                             row=validated_row,
                             error=error_msg,
                             destination=self._on_validation_failure,
+                            source_row_index=source_row_index,
                         )
                     return
 
-            yield SourceRow.valid(validated_row, contract=contract)
+            yield SourceRow.valid(validated_row, contract=contract, source_row_index=source_row_index)
         except ValidationError as exc:
             ctx.record_validation_error(
                 row=row,
@@ -261,6 +264,7 @@ class TextSource(BaseSource):
                     row=row,
                     error=str(exc),
                     destination=self._on_validation_failure,
+                    source_row_index=source_row_index,
                 )
 
     def _record_parse_error(
@@ -268,6 +272,7 @@ class TextSource(BaseSource):
         ctx: SourceContext,
         row: Mapping[str, object],
         error_msg: str,
+        source_row_index: int = 0,
     ) -> SourceRow | None:
         """Record a parse error and quarantine unless discard mode."""
         row_payload = dict(row)
@@ -283,6 +288,7 @@ class TextSource(BaseSource):
             row=row_payload,
             error=error_msg,
             destination=self._on_validation_failure,
+            source_row_index=source_row_index,
         )
 
     def close(self) -> None:

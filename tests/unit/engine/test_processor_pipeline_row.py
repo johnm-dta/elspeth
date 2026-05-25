@@ -41,6 +41,7 @@ def _make_mock_factory() -> MagicMock:
     factory = setup.factory
     factory.data_flow.create_row = MagicMock(wraps=factory.data_flow.create_row)  # type: ignore[method-assign]
     factory.data_flow.create_token = MagicMock(wraps=factory.data_flow.create_token)  # type: ignore[method-assign]
+    factory.data_flow.create_row_with_token = MagicMock(wraps=factory.data_flow.create_row_with_token)  # type: ignore[method-assign]
     return factory  # type: ignore[return-value]
 
 
@@ -116,9 +117,8 @@ class TestRowProcessorPipelineRow:
             ingest_sequence=0,
         )
 
-        # Should have created a row and token via data_flow repository
-        factory.data_flow.create_row.assert_called_once()
-        factory.data_flow.create_token.assert_called_once()
+        # Should have created a row and token atomically via data_flow repository
+        factory.data_flow.create_row_with_token.assert_called_once()
 
     def test_process_row_creates_pipeline_row(self) -> None:
         """process_row should create token with PipelineRow containing contract."""

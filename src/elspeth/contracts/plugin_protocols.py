@@ -150,8 +150,8 @@ class SourceProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
             def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
                 with open(self.path) as f:
                     reader = csv.DictReader(f)
-                    for row in reader:
-                        yield SourceRow.valid(row, contract=contract)
+                    for source_row_index, row in enumerate(reader):
+                        yield SourceRow.valid(row, contract=contract, source_row_index=source_row_index)
     """
 
     name: str
@@ -197,7 +197,7 @@ class SourceProtocol(_PluginReferenceContent, _PluginAssistanceHooks, Protocol):
 
         Yields:
             SourceRow for each row - either SourceRow.valid() for valid rows
-            or SourceRow.quarantined() for invalid rows.
+            or SourceRow.quarantined(..., source_row_index=...) for invalid rows.
         """
         ...
 

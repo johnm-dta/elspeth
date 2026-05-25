@@ -299,7 +299,11 @@ def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
     Example:
         try:
             validated = self._schema_contract.validate(row)
-            yield SourceRow.valid(validated, contract=self.require_schema_contract())
+            yield SourceRow.valid(
+                validated,
+                contract=self.require_schema_contract(),
+                source_row_index=source_row_index,
+            )
         except ValidationError as e:
             if self._on_validation_failure != "discard":
                 yield SourceRow.quarantined(
@@ -402,7 +406,7 @@ class SourceRow:
 ```
 
 **Usage:**
-- Valid rows: `SourceRow.valid(row_dict, contract=schema_contract)`
+- Valid rows: `SourceRow.valid(row_dict, contract=schema_contract, source_row_index=source_row_index)`
 - Invalid rows: `SourceRow.quarantined(row_data, error_message, destination_sink)`
 - The `contract` parameter is required for valid rows; without it the engine cannot create downstream `PipelineRow` values
 - Quarantined rows never have contracts

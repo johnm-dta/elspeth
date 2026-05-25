@@ -78,7 +78,7 @@ from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+from elspeth.core.landscape.scheduler_repository import BlockedPendingSinkHandoff, TokenSchedulerRepository
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.executors import (
     AggregationExecutor,
@@ -304,7 +304,7 @@ class RowProcessor:
             row_index=0,
             source_row_index=0,
             ingest_sequence=0,
-            source_row=SourceRow.valid({"value": 42}, contract=contract),
+            source_row=SourceRow.valid({"value": 42}, contract=contract, source_row_index=0),
             transforms=[transform1, transform2],
             ctx=ctx,
         )
@@ -1509,8 +1509,14 @@ class RowProcessor:
             self._emit_transform_completed(token=token, transform=transform, transform_result=result)
 
         if settings.output_mode == OutputMode.PASSTHROUGH:
-            routed = self._route_passthrough_results(fctx, result)
-            self._mark_buffered_scheduler_work_terminal(node_id, tuple(buffered_tokens))
+            flush_results, child_items = self._route_passthrough_results(fctx, result)
+            flush_results, pending_sink_token_ids = self._mark_blocked_sink_results_pending(node_id, flush_results)
+            self._mark_buffered_scheduler_work_terminal(
+                node_id,
+                tuple(buffered_tokens),
+                exclude_token_ids=pending_sink_token_ids,
+            )
+            routed = (flush_results, child_items)
             return routed
         if settings.output_mode == OutputMode.TRANSFORM:
             routed = self._route_transform_results(fctx, result)
@@ -1628,7 +1634,17 @@ class RowProcessor:
             if output_mode == OutputMode.PASSTHROUGH:
                 flush_results, flush_child_items = self._route_passthrough_results(fctx, result)
                 child_items.extend(flush_child_items)
-                self._mark_buffered_scheduler_work_terminal(node_id, tuple(buffered_tokens), leased_token_id=current_token.token_id)
+                flush_results, pending_sink_token_ids = self._mark_blocked_sink_results_pending(
+                    node_id,
+                    flush_results,
+                    leased_token_id=current_token.token_id,
+                )
+                self._mark_buffered_scheduler_work_terminal(
+                    node_id,
+                    tuple(buffered_tokens),
+                    leased_token_id=current_token.token_id,
+                    exclude_token_ids=pending_sink_token_ids,
+                )
                 return flush_results, child_items
             if output_mode == OutputMode.TRANSFORM:
                 flush_results, flush_child_items = self._route_transform_results(fctx, result)
@@ -2505,15 +2521,69 @@ class RowProcessor:
         tokens: Sequence[TokenInfo],
         *,
         leased_token_id: str | None = None,
+        exclude_token_ids: frozenset[str] | None = None,
     ) -> None:
         """Mark scheduler work for aggregation-buffered tokens consumed by a flush."""
-        blocked_token_ids = tuple(token.token_id for token in tokens if token.token_id != leased_token_id)
+        excluded_token_ids = exclude_token_ids or frozenset()
+        blocked_token_ids = tuple(
+            token.token_id for token in tokens if token.token_id != leased_token_id and token.token_id not in excluded_token_ids
+        )
         if not blocked_token_ids:
             return
         self.mark_blocked_barrier_terminal(
             str(node_id),
             blocked_token_ids,
         )
+
+    def _mark_blocked_sink_results_pending(
+        self,
+        node_id: NodeID,
+        results: tuple[RowResult, ...],
+        *,
+        leased_token_id: str | None = None,
+    ) -> tuple[tuple[RowResult, ...], frozenset[str]]:
+        """Move sink-bound BLOCKED aggregation flush outputs to PENDING_SINK."""
+        handoffs: dict[str, BlockedPendingSinkHandoff] = {}
+        for result in results:
+            token_id = result.token.token_id
+            if token_id == leased_token_id:
+                continue
+            if not self._is_scheduler_sink_bound_result(result):
+                continue
+            if token_id in handoffs:
+                raise AuditIntegrityError(
+                    f"Aggregation flush for node {node_id!r} produced duplicate sink-bound result for token_id={token_id!r}; "
+                    "cannot create an unambiguous scheduler pending-sink handoff."
+                )
+            handoffs[token_id] = BlockedPendingSinkHandoff(
+                row_payload_json=self._scheduler.serialize_row_payload(result.token.row_data),
+                sink_name=self._require_scheduler_sink_name(result),
+                outcome=self._require_scheduler_outcome(result).value,
+                path=result.path.value,
+                error_hash=self._scheduler_error_hash(result),
+                error_message=self._scheduler_error_message(result),
+            )
+
+        if not handoffs:
+            return results, frozenset()
+
+        pending_sink_token_ids = frozenset(handoffs)
+        transitioned = self._scheduler.mark_blocked_barrier_pending_sink_many(
+            run_id=self._run_id,
+            barrier_key=str(node_id),
+            handoffs=handoffs,
+            now=self._clock.now_utc(),
+        )
+        if transitioned != len(pending_sink_token_ids):
+            raise AuditIntegrityError(
+                f"Aggregation flush pending-sink handoff for run_id={self._run_id!r} node_id={node_id!r} "
+                f"transitioned {transitioned} rows for {len(pending_sink_token_ids)} sink-bound blocked token(s)."
+            )
+        tagged_results = cast(
+            tuple[RowResult, ...],
+            self._with_scheduler_pending_sink_handoffs(results, pending_sink_token_ids),
+        )
+        return tagged_results, pending_sink_token_ids
 
     def _drain_durable_work_queue(
         self,
@@ -2993,7 +3063,17 @@ class RowProcessor:
         return any(item.token.token_id == claimed_token_id and item.outcome is TerminalOutcome.FAILURE for item in result_items)
 
     @staticmethod
+    def _is_scheduler_sink_bound_result(result: RowResult) -> bool:
+        return result.sink_name is not None and result.path in {
+            TerminalPath.DEFAULT_FLOW,
+            TerminalPath.GATE_ROUTED,
+            TerminalPath.ON_ERROR_ROUTED,
+            TerminalPath.COALESCED,
+        }
+
+    @classmethod
     def _scheduler_sink_bound_result_for_claimed_token(
+        cls,
         result: RowResult | tuple[RowResult, ...] | None,
         claimed_token_id: str,
     ) -> RowResult | None:
@@ -3004,14 +3084,44 @@ class RowProcessor:
         for item in result_items:
             if item.token.token_id != claimed_token_id:
                 continue
-            if item.sink_name is not None and item.path in {
-                TerminalPath.DEFAULT_FLOW,
-                TerminalPath.GATE_ROUTED,
-                TerminalPath.ON_ERROR_ROUTED,
-                TerminalPath.COALESCED,
-            }:
+            if cls._is_scheduler_sink_bound_result(item):
                 return item
         return None
+
+    @staticmethod
+    def _with_scheduler_pending_sink_handoffs(
+        result: RowResult | tuple[RowResult, ...] | None,
+        token_ids: frozenset[str],
+    ) -> RowResult | tuple[RowResult, ...]:
+        """Mark every requested token result as scheduler pending-sink backed."""
+        if result is None:
+            raise OrchestrationInvariantError(
+                f"Cannot mark scheduler pending-sink handoffs for token_ids={sorted(token_ids)!r}: result is None."
+            )
+        if not token_ids:
+            return result
+        if isinstance(result, tuple):
+            tagged: list[RowResult] = []
+            matched_token_ids: set[str] = set()
+            for item in result:
+                if item.token.token_id in token_ids:
+                    tagged.append(replace(item, scheduler_pending_sink=True))
+                    matched_token_ids.add(item.token.token_id)
+                else:
+                    tagged.append(item)
+            missing_token_ids = token_ids - matched_token_ids
+            if missing_token_ids:
+                raise OrchestrationInvariantError(
+                    "Cannot mark scheduler pending-sink handoffs: "
+                    f"token_ids={sorted(missing_token_ids)!r} were not present in tuple result."
+                )
+            return tuple(tagged)
+        if result.token.token_id not in token_ids:
+            raise OrchestrationInvariantError(
+                "Cannot mark scheduler pending-sink handoff: "
+                f"token_ids={sorted(token_ids)!r} do not include result token {result.token.token_id!r}."
+            )
+        return replace(result, scheduler_pending_sink=True)
 
     @staticmethod
     def _with_scheduler_pending_sink_handoff(
@@ -3019,30 +3129,7 @@ class RowProcessor:
         claimed_token_id: str,
     ) -> RowResult | tuple[RowResult, ...]:
         """Mark only the claimed token result as scheduler pending-sink backed."""
-        if result is None:
-            raise OrchestrationInvariantError(
-                f"Cannot mark scheduler pending-sink handoff for claimed token {claimed_token_id!r}: result is None."
-            )
-        if isinstance(result, tuple):
-            tagged: list[RowResult] = []
-            matched = False
-            for item in result:
-                if item.token.token_id == claimed_token_id:
-                    tagged.append(replace(item, scheduler_pending_sink=True))
-                    matched = True
-                else:
-                    tagged.append(item)
-            if not matched:
-                raise OrchestrationInvariantError(
-                    f"Cannot mark scheduler pending-sink handoff: claimed token {claimed_token_id!r} was not present in tuple result."
-                )
-            return tuple(tagged)
-        if result.token.token_id != claimed_token_id:
-            raise OrchestrationInvariantError(
-                f"Cannot mark scheduler pending-sink handoff: claimed token {claimed_token_id!r} "
-                f"does not match result token {result.token.token_id!r}."
-            )
-        return replace(result, scheduler_pending_sink=True)
+        return RowProcessor._with_scheduler_pending_sink_handoffs(result, frozenset((claimed_token_id,)))
 
     @staticmethod
     def _require_scheduler_sink_name(result: RowResult) -> str:

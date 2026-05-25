@@ -38,8 +38,16 @@ class SourceWithoutSchema(BaseSource):
 
     def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
         """Yield test rows."""
-        yield SourceRow.valid({"id": 1, "value": "row1"}, contract=make_contract({"id": 1, "value": "row1"}))
-        yield SourceRow.valid({"id": 2, "value": "row2"}, contract=make_contract({"id": 2, "value": "row2"}))
+        yield SourceRow.valid(
+            {"id": 1, "value": "row1"},
+            contract=make_contract({"id": 1, "value": "row1"}),
+            source_row_index=0,
+        )
+        yield SourceRow.valid(
+            {"id": 2, "value": "row2"},
+            contract=make_contract({"id": 2, "value": "row2"}),
+            source_row_index=1,
+        )
 
     def on_start(self, ctx: LifecycleContext) -> None:
         pass

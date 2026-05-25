@@ -63,8 +63,8 @@ def test_source_row_payloads_are_stored_during_run(tmp_path: Path, payload_store
             pass
 
         def load(self, ctx: Any) -> Any:
-            for row in self._data:
-                yield SourceRow.valid(row, contract=create_observed_contract(row))
+            for source_row_index, row in enumerate(self._data):
+                yield SourceRow.valid(row, contract=create_observed_contract(row), source_row_index=source_row_index)
 
         def close(self) -> None:
             pass

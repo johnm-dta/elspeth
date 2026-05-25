@@ -544,6 +544,7 @@ class DataverseSource(BaseSource):
         pages_fetched = 0
         rows_yielded = 0
         quarantine_count = 0
+        source_row_index = 0
 
         # Client must be constructed by on_start() before load()
         if self._client is None:
@@ -586,6 +587,8 @@ class DataverseSource(BaseSource):
 
                 # Process rows
                 for raw_row in page.rows:
+                    current_source_row_index = source_row_index
+                    source_row_index += 1
                     # Strip OData metadata
                     try:
                         cleaned_row = self._strip_odata_metadata(raw_row)
@@ -603,6 +606,7 @@ class DataverseSource(BaseSource):
                                 row=raw_row,
                                 error=str(e),
                                 destination=self._on_validation_failure,
+                                source_row_index=current_source_row_index,
                             )
                         continue
 
@@ -626,6 +630,7 @@ class DataverseSource(BaseSource):
                                 row=cleaned_row,
                                 error=f"Field normalization failed: {e}",
                                 destination=self._on_validation_failure,
+                                source_row_index=current_source_row_index,
                             )
                         continue
                     is_first_row = False
@@ -647,6 +652,7 @@ class DataverseSource(BaseSource):
                                 row=normalized_row,
                                 error=str(e),
                                 destination=self._on_validation_failure,
+                                source_row_index=current_source_row_index,
                             )
                         continue
 
@@ -681,11 +687,12 @@ class DataverseSource(BaseSource):
                                     row=validated_row,
                                     error=error_msg,
                                     destination=self._on_validation_failure,
+                                    source_row_index=current_source_row_index,
                                 )
                             continue
 
                     rows_yielded += 1
-                    yield SourceRow.valid(validated_row, contract=contract)
+                    yield SourceRow.valid(validated_row, contract=contract, source_row_index=current_source_row_index)
 
         except DataverseClientError as e:
             # Use the actual failing URL from the error when available

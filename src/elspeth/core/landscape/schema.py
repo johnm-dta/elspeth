@@ -82,7 +82,12 @@ metadata = MetaData()
 #  17 → Scheduler event lease-expiry evidence: scheduler_events stores
 #        from/to lease_expires_at timestamps and enforces event/status/attempt
 #        domains so lease recovery and heartbeat loss are exportable facts.
-SQLITE_SCHEMA_EPOCH = 17
+#   17 → Token-scoped pending-sink lookup: token_work_items gains
+#        ix_token_work_items_pending_sink_token for post-sink terminalization.
+#   18 → Source exhaustion lifecycle evidence: run_sources.lifecycle_state
+#        distinguishes exhausted-before-EOF-engine-work from interrupted source
+#        iteration so resume can safely drain recoverable engine state.
+SQLITE_SCHEMA_EPOCH = 18
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -94,6 +99,7 @@ class RunSourceLifecycleState(StrEnum):
 
     READY = "ready"
     LOADING = "loading"
+    EXHAUSTED = "exhausted"
     LOADED = "loaded"
     INTERRUPTED = "interrupted"
 
@@ -188,7 +194,7 @@ run_sources_table = Table(
     PrimaryKeyConstraint("run_id", "source_node_id"),
     UniqueConstraint("run_id", "source_name"),
     CheckConstraint(
-        "lifecycle_state IN ('ready', 'loading', 'loaded', 'interrupted')",
+        "lifecycle_state IN ('ready', 'loading', 'exhausted', 'loaded', 'interrupted')",
         name="ck_run_sources_lifecycle_state",
     ),
     ForeignKeyConstraint(["source_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),

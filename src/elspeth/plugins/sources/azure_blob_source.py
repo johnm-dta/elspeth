@@ -560,6 +560,7 @@ class AzureBlobSource(BaseSource):
                     row=raw_row,
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=0,
                 )
             return
 
@@ -592,6 +593,7 @@ class AzureBlobSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=0,
                     )
                 return
             except csv.Error as e:
@@ -612,6 +614,7 @@ class AzureBlobSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=0,
                     )
                 return
 
@@ -700,6 +703,7 @@ class AzureBlobSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=row_count - 1,
                     )
                 break
 
@@ -729,12 +733,13 @@ class AzureBlobSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=row_count - 1,
                     )
                 continue
 
             # Build row dict — csv.reader returns strings, matching dtype=str behavior
             row = dict(zip(headers, values, strict=True))
-            yield from self._validate_and_yield(row, ctx)
+            yield from self._validate_and_yield(row, ctx, source_row_index=row_count - 1)
 
         # Log row count for operator visibility
         logger.info("csv_blob_parsed", rows_encountered=row_count, blob_path=self._blob_path)
@@ -771,6 +776,7 @@ class AzureBlobSource(BaseSource):
                     row=raw_row,
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=0,
                 )
 
         # THEIR DATA: JSON parsing - quarantine failures at boundary
@@ -808,8 +814,8 @@ class AzureBlobSource(BaseSource):
         # Log row count for operator visibility
         logger.info("json_blob_parsed", row_count=len(data), blob_path=self._blob_path)
 
-        for row in data:
-            yield from self._validate_and_yield(row, ctx)
+        for source_row_index, row in enumerate(data):
+            yield from self._validate_and_yield(row, ctx, source_row_index=source_row_index)
 
     def _load_jsonl(self, blob_data: bytes, ctx: SourceContext) -> Iterator[SourceRow]:
         """Load rows from JSONL (newline-delimited JSON) blob data.
@@ -858,6 +864,7 @@ class AzureBlobSource(BaseSource):
                             row=raw_row,
                             error=error_msg,
                             destination=self._on_validation_failure,
+                            source_row_index=line_num - 1,
                         )
                     continue
 
@@ -882,10 +889,11 @@ class AzureBlobSource(BaseSource):
                             row=raw_row,
                             error=error_msg,
                             destination=self._on_validation_failure,
+                            source_row_index=line_num - 1,
                         )
                     continue
 
-                yield from self._validate_and_yield(row, ctx)
+                yield from self._validate_and_yield(row, ctx, source_row_index=line_num - 1)
         except UnicodeDecodeError as e:
             # Some codecs can still raise on truncated byte sequences while
             # reading. Treat that as a line-level external parse failure.
@@ -907,6 +915,7 @@ class AzureBlobSource(BaseSource):
                     row=raw_row,
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=error_line - 1,
                 )
             return
 
@@ -954,7 +963,7 @@ class AzureBlobSource(BaseSource):
 
         return normalized
 
-    def _validate_and_yield(self, row: Any, ctx: SourceContext) -> Iterator[SourceRow]:
+    def _validate_and_yield(self, row: Any, ctx: SourceContext, *, source_row_index: int) -> Iterator[SourceRow]:
         """Validate a row and yield if valid, otherwise quarantine.
 
         For FLEXIBLE/OBSERVED schemas, the first valid row triggers type inference and
@@ -983,6 +992,7 @@ class AzureBlobSource(BaseSource):
                     row=row,
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=source_row_index,
                 )
             return
 
@@ -1023,10 +1033,11 @@ class AzureBlobSource(BaseSource):
                             row=validated_row,
                             error=error_msg,
                             destination=self._on_validation_failure,
+                            source_row_index=source_row_index,
                         )
                     return
 
-            yield SourceRow.valid(validated_row, contract=contract)
+            yield SourceRow.valid(validated_row, contract=contract, source_row_index=source_row_index)
         except ValidationError as e:
             # Record validation failure in audit trail
             # This is a trust boundary: external data may be invalid
@@ -1044,6 +1055,7 @@ class AzureBlobSource(BaseSource):
                     row=row_to_validate,
                     error=str(e),
                     destination=self._on_validation_failure,
+                    source_row_index=source_row_index,
                 )
 
     def close(self) -> None:

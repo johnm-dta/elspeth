@@ -13,6 +13,7 @@ from sqlalchemy import Connection, create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.journal import LandscapeJournal
@@ -907,7 +908,12 @@ class LandscapeDB:
         Returns:
             LandscapeDB instance with in-memory SQLite
         """
-        engine = create_engine("sqlite:///:memory:", echo=False)
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+            echo=False,
+        )
         cls._configure_sqlite(engine)
         cls._verify_sqlite_pragmas(engine, "sqlite:///:memory:")
         metadata.create_all(engine)

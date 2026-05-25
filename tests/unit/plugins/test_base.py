@@ -300,8 +300,8 @@ class TestBaseSource:
                 self._data = config["data"]
 
             def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
-                for _row in self._data:
-                    yield SourceRow.valid(_row, contract=make_contract(_row))
+                for source_row_index, _row in enumerate(self._data):
+                    yield SourceRow.valid(_row, contract=make_contract(_row), source_row_index=source_row_index)
 
             def close(self) -> None:
                 pass

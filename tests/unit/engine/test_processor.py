@@ -3877,6 +3877,7 @@ class TestDurableSchedulerResumeDrain:
         def executor_side_effect(*, transform, token, ctx, attempt=0):
             assert token.token_id == "token-expired"
             assert token.row_data.to_dict() == {"value": 43}
+            assert attempt == 1
             return (success_result, token, None)
 
         with patch.object(processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
@@ -4778,6 +4779,134 @@ class TestDurableSchedulerResumeDrain:
             first_token_id: "terminal",
             triggering_token_id: "terminal",
             stray_token.token_id: "blocked",
+        }
+
+    def test_passthrough_aggregation_sink_flush_marks_all_outputs_pending_sink(self) -> None:
+        """Every sink-bound passthrough flush token needs a durable sink handoff."""
+        db, factory = _make_factory()
+        source_node = NodeID("source-0")
+        agg_node = NodeID("agg-1")
+        contract = _make_contract()
+        transform = _make_mock_transform(
+            node_id=str(agg_node),
+            name="agg-transform",
+            is_batch_aware=True,
+            on_success="agg_sink",
+            result=TransformResult.success_multi(
+                (
+                    make_row({"value": 11}, contract=contract),
+                    make_row({"value": 22}, contract=contract),
+                ),
+                success_reason={"action": "passthrough"},
+            ),
+        )
+        transform.passes_through_input = True
+        processor = _make_processor(
+            factory,
+            node_step_map={source_node: 0, agg_node: 1},
+            node_to_next={source_node: agg_node, agg_node: None},
+            node_to_plugin={agg_node: transform},
+            aggregation_settings={
+                agg_node: AggregationSettings(
+                    name="batch_agg",
+                    plugin="agg-transform",
+                    input="default",
+                    on_error="discard",
+                    trigger={"count": 2},
+                    output_mode="passthrough",
+                ),
+            },
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        first_results = processor.process_row(
+            row_index=0,
+            source_row=_make_source_row({"value": 1}),
+            transforms=[transform],
+            ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+        assert len(first_results) == 1
+        _assert_outcome_pair(first_results[0], None, TerminalPath.BUFFERED)
+
+        second_results = processor.process_row(
+            row_index=1,
+            source_row=_make_source_row({"value": 2}),
+            transforms=[transform],
+            ctx=ctx,
+            source_row_index=1,
+            ingest_sequence=1,
+        )
+
+        assert len(second_results) == 2
+        flushed_token_ids = tuple(result.token.token_id for result in second_results)
+        assert first_results[0].token.token_id in flushed_token_ids
+        assert len(frozenset(flushed_token_ids)) == 2
+        assert all(result.sink_name == "agg_sink" for result in second_results)
+        assert all(result.scheduler_pending_sink for result in second_results)
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            rows = conn.execute(
+                select(
+                    token_work_items_table.c.token_id,
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.pending_sink_name,
+                    token_work_items_table.c.pending_outcome,
+                    token_work_items_table.c.pending_path,
+                ).where(token_work_items_table.c.token_id.in_(flushed_token_ids))
+            ).all()
+        assert {(row.token_id, row.status, row.pending_sink_name, row.pending_outcome, row.pending_path) for row in rows} == {
+            (token_id, "pending_sink", "agg_sink", TerminalOutcome.SUCCESS.value, TerminalPath.DEFAULT_FLOW.value)
+            for token_id in flushed_token_ids
+        }
+
+        resumed_processor = _make_processor(
+            factory,
+            node_step_map={source_node: 0, agg_node: 1},
+            node_to_next={source_node: agg_node, agg_node: None},
+            node_to_plugin={agg_node: transform},
+            aggregation_settings={
+                agg_node: AggregationSettings(
+                    name="batch_agg",
+                    plugin="agg-transform",
+                    input="default",
+                    on_error="discard",
+                    trigger={"count": 2},
+                    output_mode="passthrough",
+                ),
+            },
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="resume-worker",
+        )
+        with patch.object(
+            resumed_processor._transform_executor,
+            "execute_transform",
+            side_effect=AssertionError("transform replayed during aggregation pending-sink recovery"),
+        ):
+            recovered_results = resumed_processor.drain_scheduled_work(ctx)
+
+        recovered_token_ids = tuple(result.token.token_id for result in recovered_results)
+        assert len(recovered_token_ids) == len(frozenset(recovered_token_ids))
+        assert sorted(recovered_token_ids) == sorted(flushed_token_ids)
+        assert all(result.sink_name == "agg_sink" for result in recovered_results)
+        assert all(result.scheduler_pending_sink for result in recovered_results)
+
+        with db.connection() as conn:
+            resumed_rows = conn.execute(
+                select(
+                    token_work_items_table.c.token_id,
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.lease_owner,
+                ).where(token_work_items_table.c.token_id.in_(flushed_token_ids))
+            ).all()
+        assert {(row.token_id, row.status, row.lease_owner) for row in resumed_rows} == {
+            (token_id, "leased", "resume-worker") for token_id in flushed_token_ids
         }
 
     def test_drain_refuses_when_peer_worker_holds_active_lease(self) -> None:

@@ -844,9 +844,10 @@ class EmptyResumeStateError(OrchestrationInvariantError):
 
 # TIER-2: Operator-interpretable refuse signal — persisted rows can be
 # replayed, but the audit trail proves at least one source was interrupted
-# before it reached lifecycle_state=loaded. The current resume architecture
-# replays persisted row payloads through NullSource; it cannot prove that
-# unread source rows do not exist. Refuse rather than fabricating completion.
+# before it reached a source-complete lifecycle_state (loaded/exhausted). The
+# current resume architecture replays persisted row payloads through NullSource;
+# it cannot prove that unread source rows do not exist. Refuse rather than
+# fabricating completion.
 class IncompleteSourceResumeError(Exception):
     """Raised when resume would falsely complete an interrupted source.
 

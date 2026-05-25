@@ -46,8 +46,8 @@ class TestPluginSystemIntegration:
                     fields=(make_field("value", int, original_name="value", required=True, source="declared"),),
                     locked=True,
                 )
-                for v in self.config["values"]:
-                    yield SourceRow.valid({"value": v}, contract=contract)
+                for source_row_index, v in enumerate(self.config["values"]):
+                    yield SourceRow.valid({"value": v}, contract=contract, source_row_index=source_row_index)
 
             def close(self) -> None:
                 pass

@@ -55,6 +55,7 @@ class ADR019QuarantineSource(ListSource):
                 row=dict(row),
                 error=f"adr019 forced quarantine {idx}",
                 destination=self._quarantine_destination,
+                source_row_index=idx,
             )
 
 

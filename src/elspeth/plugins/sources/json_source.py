@@ -259,6 +259,7 @@ class JSONSource(BaseSource):
                             ctx=ctx,
                             row=raw_row,
                             error_msg=error_msg,
+                            source_row_index=line_num - 1,
                         )
                         if quarantined is not None:
                             yield quarantined
@@ -281,12 +282,13 @@ class JSONSource(BaseSource):
                             ctx=ctx,
                             row=raw_row,
                             error_msg=error_msg,
+                            source_row_index=line_num - 1,
                         )
                         if quarantined is not None:
                             yield quarantined
                         continue
 
-                    yield from self._validate_and_yield(row, ctx)
+                    yield from self._validate_and_yield(row, ctx, source_row_index=line_num - 1)
         except UnicodeDecodeError as e:
             # Some codecs (notably utf-16/utf-32) can still raise on truncated byte
             # sequences while reading. Treat as an external parse failure.
@@ -362,6 +364,7 @@ class JSONSource(BaseSource):
                         row={"file_path": str(self._path), "structure_error": error_msg},
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=0,
                     )
                 return
 
@@ -379,6 +382,7 @@ class JSONSource(BaseSource):
                         row={"file_path": str(self._path), "structure_error": error_msg},
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=0,
                     )
                 return
 
@@ -398,11 +402,12 @@ class JSONSource(BaseSource):
                     row={"file_path": str(self._path), "structure_error": error_msg},
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=0,
                 )
             return
 
-        for row in data:
-            yield from self._validate_and_yield(row, ctx)
+        for source_row_index, row in enumerate(data):
+            yield from self._validate_and_yield(row, ctx, source_row_index=source_row_index)
 
     def _normalize_row_keys(self, row: Any) -> dict[str, Any]:
         """Normalize JSON keys to valid Python identifiers.
@@ -470,7 +475,7 @@ class JSONSource(BaseSource):
 
         return normalized
 
-    def _validate_and_yield(self, row: Any, ctx: SourceContext) -> Iterator[SourceRow]:
+    def _validate_and_yield(self, row: Any, ctx: SourceContext, *, source_row_index: int) -> Iterator[SourceRow]:
         """Validate a row and yield if valid, otherwise quarantine.
 
         Field names are normalized to valid Python identifiers before validation.
@@ -493,6 +498,7 @@ class JSONSource(BaseSource):
                 ctx=ctx,
                 row=row,
                 error_msg=str(exc),
+                source_row_index=source_row_index,
             )
             if quarantined is not None:
                 yield quarantined
@@ -533,15 +539,17 @@ class JSONSource(BaseSource):
                             row=validated_row,
                             error=error_msg,
                             destination=self._on_validation_failure,
+                            source_row_index=source_row_index,
                         )
                     return
 
-            yield SourceRow.valid(validated_row, contract=contract)
+            yield SourceRow.valid(validated_row, contract=contract, source_row_index=source_row_index)
         except ValidationError as e:
             quarantined = self._record_validation_failure(
                 ctx=ctx,
                 row=normalized_row,
                 error_msg=str(e),
+                source_row_index=source_row_index,
             )
             if quarantined is not None:
                 yield quarantined
@@ -551,6 +559,7 @@ class JSONSource(BaseSource):
         ctx: SourceContext,
         row: Mapping[str, object],
         error_msg: str,
+        source_row_index: int = 0,
     ) -> SourceRow | None:
         """Record a parse error and return quarantined row unless discard mode."""
         row_payload = dict(row)
@@ -566,6 +575,7 @@ class JSONSource(BaseSource):
             row=row_payload,
             error=error_msg,
             destination=self._on_validation_failure,
+            source_row_index=source_row_index,
         )
 
     def _record_validation_failure(
@@ -573,6 +583,7 @@ class JSONSource(BaseSource):
         ctx: SourceContext,
         row: Any,
         error_msg: str,
+        source_row_index: int,
     ) -> SourceRow | None:
         """Record a row-level validation failure unless discard mode."""
         row_payload = row
@@ -588,6 +599,7 @@ class JSONSource(BaseSource):
             row=row_payload,
             error=error_msg,
             destination=self._on_validation_failure,
+            source_row_index=source_row_index,
         )
 
     def get_field_resolution(self) -> tuple[Mapping[str, str], str | None] | None:

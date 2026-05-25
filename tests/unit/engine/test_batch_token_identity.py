@@ -177,7 +177,7 @@ class TestBatchTokenIdentity:
         }
         for i in range(3):
             pipeline_row = make_pipeline_row({"value": (i + 1) * 10})  # 10, 20, 30
-            source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract)
+            source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract, source_row_index=i)
             results = processor.process_row(
                 row_index=i,
                 source_row=source_row,
@@ -254,7 +254,7 @@ class TestBatchTokenIdentity:
 
         # Process row 0 - buffered, returns BUFFERED (T26: non-terminal at buffer time)
         pipeline_row_0 = make_pipeline_row({"value": 10})
-        source_row_0 = SourceRow.valid(pipeline_row_0.to_dict(), contract=pipeline_row_0.contract)
+        source_row_0 = SourceRow.valid(pipeline_row_0.to_dict(), contract=pipeline_row_0.contract, source_row_index=0)
         results_0 = processor.process_row(
             row_index=0,
             source_row=source_row_0,
@@ -270,7 +270,7 @@ class TestBatchTokenIdentity:
 
         # Process row 1 - triggers flush
         pipeline_row_1 = make_pipeline_row({"value": 20})
-        source_row_1 = SourceRow.valid(pipeline_row_1.to_dict(), contract=pipeline_row_1.contract)
+        source_row_1 = SourceRow.valid(pipeline_row_1.to_dict(), contract=pipeline_row_1.contract, source_row_index=1)
         results_1 = processor.process_row(
             row_index=1,
             source_row=source_row_1,
@@ -349,7 +349,7 @@ class TestBatchTokenIdentity:
         }
         for i in range(3):
             pipeline_row = make_pipeline_row({"value": (i + 1) * 10})
-            source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract)
+            source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract, source_row_index=i)
             results = processor.process_row(
                 row_index=i,
                 source_row=source_row,

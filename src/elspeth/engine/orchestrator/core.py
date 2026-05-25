@@ -24,7 +24,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import chain
@@ -116,6 +116,7 @@ from elspeth.core.config import AggregationSettings
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.schema import RunSourceLifecycleState
 from elspeth.core.operations import track_operation
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine.executors.sink import DiversionCounts
@@ -175,6 +176,13 @@ if TYPE_CHECKING:
     from elspeth.engine.coalesce_executor import CoalesceExecutor
 
 slog = structlog.get_logger(__name__)
+
+_SOURCE_COMPLETE_LIFECYCLE_STATES = frozenset(
+    {
+        RunSourceLifecycleState.EXHAUSTED.value,
+        RunSourceLifecycleState.LOADED.value,
+    }
+)
 
 
 def _runtime_preflight_is_retryable(exc: BaseException) -> bool:
@@ -2106,9 +2114,9 @@ class Orchestrator:
 
         A hard kill between source lifecycles must leave audit evidence that
         later sources were declared but never exhausted. The source-specific
-        loop updates the active source from ready -> loading -> loaded or
-        interrupted; unstarted later sources remain ready and resume refuses
-        rather than fabricating source exhaustion.
+        loop updates the active source from ready -> loading -> exhausted ->
+        loaded, or interrupted; unstarted later sources remain ready and resume
+        refuses rather than fabricating source exhaustion.
         """
         for source_name, source_node_id in source_id_map.items():
             source = config.sources[source_name]
@@ -2187,8 +2195,10 @@ class Orchestrator:
 
         try:
             if include_source_on_start:
-                for source in config.sources.values():
+                for source_name, source in config.sources.items():
+                    ctx.node_id = artifacts.source_id_map[source_name]
                     source.on_start(ctx)
+                ctx.node_id = source_id
             for transform in config.transforms:
                 transform.on_start(ctx)
             for sink in config.sinks.values():
@@ -2454,6 +2464,7 @@ class Orchestrator:
         run_id: str,
         source_id: NodeID,
         source_item: SourceRow,
+        row_index: int,
         source_row_index: int,
         ingest_sequence: int,
         edge_map: Mapping[tuple[NodeID, str], str],
@@ -2493,7 +2504,7 @@ class Orchestrator:
                 f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
                 f"with missing quarantine_destination. "
                 f"This is a plugin bug: quarantined rows MUST specify a destination. "
-                f"Use SourceRow.quarantined(row, error, destination) factory method."
+                f"Use SourceRow.quarantined(row, error, destination, source_row_index=...) factory method."
             )
         if quarantine_sink not in config.sinks:
             raise RouteValidationError(
@@ -2523,7 +2534,7 @@ class Orchestrator:
         quarantine_token = processor.token_manager.create_quarantine_token(
             run_id=run_id,
             source_node_id=source_id,
-            row_index=ingest_sequence,
+            row_index=row_index,
             source_row_index=source_row_index,
             ingest_sequence=ingest_sequence,
             source_row=source_item,
@@ -2695,6 +2706,36 @@ class Orchestrator:
         ctx.contract = schema_contract
         return True
 
+    def _record_run_source_lifecycle(
+        self,
+        factory: RecorderFactory,
+        run_id: str,
+        source_id: NodeID,
+        source_name: str,
+        active_source: SourceProtocol,
+        lifecycle_state: RunSourceLifecycleState,
+    ) -> None:
+        """Record source lifecycle with the latest source schema evidence."""
+
+        field_resolution = active_source.get_field_resolution()
+        resolution_mapping: Mapping[str, str] | None = None
+        normalization_version: str | None = None
+        if field_resolution is not None:
+            resolution_mapping, normalization_version = field_resolution
+
+        factory.run_lifecycle.record_run_source(
+            run_id=run_id,
+            source_node_id=source_id,
+            source_name=source_name,
+            plugin_name=active_source.name,
+            config_hash=stable_hash(active_source.config),
+            source_schema_json=json.dumps(active_source.output_schema.model_json_schema()),
+            schema_contract=active_source.get_schema_contract(),
+            field_resolution_mapping=resolution_mapping,
+            normalization_version=normalization_version,
+            lifecycle_state=lifecycle_state,
+        )
+
     def _restore_source_iteration_context(
         self,
         ctx: PluginContext,
@@ -2724,10 +2765,10 @@ class Orchestrator:
     def _idle_timeout_context(self, source_ctx: PluginContext) -> PluginContext:
         """Create an isolated context for idle timeout work.
 
-        Source generators may still be executing on a background ``next()``
-        thread while idle timeout checks run on the orchestrator thread. The
-        timeout path must therefore never clear or overwrite the source
-        context's node/operation identity.
+        Source generators keep executing on the orchestrator/source thread
+        while idle timeout checks run in a helper thread. The timeout path
+        must therefore never clear or overwrite the source context's
+        node/operation identity.
         """
         return PluginContext(
             run_id=source_ctx.run_id,
@@ -2785,8 +2826,14 @@ class Orchestrator:
         source_id: NodeID,
         source_operation_id: str,
     ) -> SourceRow:
-        """Fetch the next source row while periodically flushing idle timeouts."""
-        result_queue: queue.Queue[tuple[str, SourceRow | BaseException | None]] = queue.Queue(maxsize=1)
+        """Fetch the next source row while periodically flushing idle timeouts.
+
+        SourceProtocol lifecycle and iterator advancement stay on this caller
+        thread. Only timeout/coalesce maintenance runs on a helper thread while
+        the caller is blocked inside ``next(source_iterator)``.
+        """
+        error_queue: queue.Queue[BaseException] = queue.Queue(maxsize=1)
+        stop_idle_polling = threading.Event()
 
         self._restore_source_iteration_context(
             loop_ctx.ctx,
@@ -2794,21 +2841,10 @@ class Orchestrator:
             source_operation_id=source_operation_id,
         )
 
-        def fetch_next() -> None:
-            try:
-                result_queue.put(("row", next(source_iterator)))
-            except StopIteration:
-                result_queue.put(("stop", None))
-            except BaseException as exc:  # pragma: no cover - re-raised on orchestrator thread
-                result_queue.put(("error", exc))
-
-        threading.Thread(target=fetch_next, daemon=True).start()
-        receive_source_result = result_queue.get
-
-        while True:
-            try:
-                kind, payload = receive_source_result(timeout=self._SOURCE_IDLE_POLL_INTERVAL_SECONDS)
-            except queue.Empty:
+        def poll_idle_flushes() -> None:
+            while not stop_idle_polling.wait(self._SOURCE_IDLE_POLL_INTERVAL_SECONDS):
+                if not error_queue.empty():
+                    return
                 self._process_idle_timeout_flushes(
                     loop_ctx,
                     agg_transform_lookup=agg_transform_lookup,
@@ -2816,13 +2852,45 @@ class Orchestrator:
                     source_id=source_id,
                     source_operation_id=source_operation_id,
                 )
-                continue
 
-            if kind == "stop":
-                raise StopIteration
-            if kind == "error":
-                raise cast(BaseException, payload)
-            return cast(SourceRow, payload)
+        def poll_idle_flushes_guarded() -> None:
+            try:
+                poll_idle_flushes()
+            except BaseException as exc:  # pragma: no cover - re-raised on orchestrator thread
+                with suppress(queue.Full):
+                    error_queue.put_nowait(exc)
+                stop_idle_polling.set()
+
+        poller = threading.Thread(target=poll_idle_flushes_guarded, daemon=True)
+        poller.start()
+
+        source_row: SourceRow | None = None
+        source_stop = False
+        source_exc: BaseException | None = None
+        try:
+            try:
+                source_row = next(source_iterator)
+            except StopIteration:
+                source_stop = True
+            except BaseException as exc:
+                source_exc = exc
+        finally:
+            stop_idle_polling.set()
+            poller.join()
+
+        try:
+            idle_error = error_queue.get_nowait()
+        except queue.Empty:
+            idle_error = None
+        if idle_error is not None:
+            raise idle_error
+        if source_exc is not None:
+            raise source_exc
+        if source_stop:
+            raise StopIteration
+        if source_row is None:
+            raise OrchestrationInvariantError("Source iterator returned no row, no StopIteration, and no exception.")
+        return source_row
 
     def _maybe_emit_progress(
         self,
@@ -2878,10 +2946,12 @@ class Orchestrator:
         factory: RecorderFactory,
         run_id: str,
         source_id: NodeID,
+        active_source_name: str,
         source_operation_id: str,
         field_resolution_recorded: bool,
         schema_contract_recorded: bool,
         *,
+        source_exhausted: bool,
         interrupted_by_shutdown: bool,
         flush_end_of_input: bool,
         active_source: SourceProtocol,
@@ -2918,6 +2988,26 @@ class Orchestrator:
             source_id=source_id,
             source_operation_id=source_operation_id,
         )
+
+        # Record deferred source metadata before EOF engine work. A crash in
+        # aggregation/coalesce flushing after StopIteration must be resumable as
+        # source-exhausted engine work, not indistinguishable from mid-source
+        # interruption.
+        if not field_resolution_recorded:
+            self._record_field_resolution(factory, run_id, active_source=active_source)
+
+        if not schema_contract_recorded:
+            self._record_schema_contract(factory, run_id, source_id, ctx, active_source=active_source)
+
+        if source_exhausted and not interrupted_by_shutdown:
+            self._record_run_source_lifecycle(
+                factory,
+                run_id,
+                source_id,
+                active_source_name,
+                active_source,
+                RunSourceLifecycleState.EXHAUSTED,
+            )
 
         if not interrupted_by_shutdown and flush_end_of_input:
             # CRITICAL: Flush remaining aggregation buffers only at true end-of-input.
@@ -2962,17 +3052,6 @@ class Orchestrator:
                     counters=counters,
                     pending_tokens=pending_tokens,
                 )
-
-        # Record field resolution for empty sources (header-only files).
-        # For sources with rows, this was recorded inside the loop on first iteration.
-        if not field_resolution_recorded:
-            self._record_field_resolution(factory, run_id, active_source=active_source)
-
-        # Record schema contract for runs with no valid source rows.
-        # In-loop recording happens on first VALID row. For all-invalid
-        # or empty inputs, that branch never executes.
-        if not schema_contract_recorded:
-            self._record_schema_contract(factory, run_id, source_id, ctx, active_source=active_source)
 
     def _load_source_with_events(
         self,
@@ -3110,6 +3189,7 @@ class Orchestrator:
             )
 
             interrupted_by_shutdown = False
+            source_exhausted = False
             try:
                 source_row_index = 0
                 use_idle_polling = self._requires_idle_aggregation_polling(config)
@@ -3127,10 +3207,17 @@ class Orchestrator:
                         else:
                             source_item = next(source_iterator)
                     except StopIteration:
+                        source_exhausted = True
                         break
 
                     current_source_row_index = source_row_index
                     source_row_index += 1
+                    if source_item.source_row_index is None:
+                        raise OrchestrationInvariantError(
+                            f"Source '{active_source.name}' yielded SourceRow without source_row_index at "
+                            f"loop row_index={current_source_row_index}. Source row identity must be source-authored."
+                        )
+                    source_identity_index = source_item.source_row_index
                     ingest_sequence = counters.rows_processed
                     counters.rows_processed += 1
 
@@ -3147,6 +3234,7 @@ class Orchestrator:
                             source_id,
                             source_item,
                             current_source_row_index,
+                            source_identity_index,
                             ingest_sequence,
                             edge_map,
                             loop_ctx,
@@ -3191,14 +3279,14 @@ class Orchestrator:
                     counters.accumulate_flush_result(timeout_result)
 
                     results = processor.process_row(
-                        row_index=ingest_sequence,
+                        row_index=current_source_row_index,
                         source_row=source_item,
                         transforms=config.transforms,
                         ctx=ctx,
                         source_node_id=source_id,
                         source_plugin=active_source,
                         source_on_success=active_source.on_success,
-                        source_row_index=current_source_row_index,
+                        source_row_index=source_identity_index,
                         ingest_sequence=ingest_sequence,
                     )
                     if results:
@@ -3241,29 +3329,22 @@ class Orchestrator:
                     factory,
                     run_id,
                     source_id,
+                    active_source_name,
                     source_operation_id,
                     field_resolution_recorded,
                     schema_contract_recorded,
+                    source_exhausted=source_exhausted,
                     interrupted_by_shutdown=interrupted_by_shutdown,
                     flush_end_of_input=flush_end_of_input,
                     active_source=active_source,
                 )
-                field_resolution = active_source.get_field_resolution()
-                resolution_mapping: Mapping[str, str] | None = None
-                normalization_version: str | None = None
-                if field_resolution is not None:
-                    resolution_mapping, normalization_version = field_resolution
-                factory.run_lifecycle.record_run_source(
-                    run_id=run_id,
-                    source_node_id=source_id,
-                    source_name=active_source_name,
-                    plugin_name=active_source.name,
-                    config_hash=stable_hash(active_source.config),
-                    source_schema_json=json.dumps(active_source.output_schema.model_json_schema()),
-                    schema_contract=active_source.get_schema_contract(),
-                    field_resolution_mapping=resolution_mapping,
-                    normalization_version=normalization_version,
-                    lifecycle_state="interrupted" if interrupted_by_shutdown else "loaded",
+                self._record_run_source_lifecycle(
+                    factory,
+                    run_id,
+                    source_id,
+                    active_source_name,
+                    active_source,
+                    RunSourceLifecycleState.INTERRUPTED if interrupted_by_shutdown else RunSourceLifecycleState.LOADED,
                 )
 
             except Exception as e:
@@ -3662,20 +3743,11 @@ class Orchestrator:
         # Pass payload_store for external call payload persistence
         factory = RecorderFactory(self._db, payload_store=payload_store)
 
-        # 1. Handle incomplete batches - call module function directly
-        batch_id_mapping = handle_incomplete_batches(factory.execution, run_id)
-
-        # 2. Update run status to running
-        factory.run_lifecycle.update_run_status(run_id, RunStatus.RUNNING)
-
-        # 3. Build restored aggregation state map, rebinding batch_ids to retry batches
-        restored_state: dict[str, AggregationCheckpointState] = {}
-        if resume_point.aggregation_state is not None:
-            rebound_state = rebind_checkpoint_batch_ids(resume_point.aggregation_state, batch_id_mapping)
-            restored_state[resume_point.node_id] = rebound_state
-        restored_coalesce_state = resume_point.coalesce_state
-
-        # 4. Get unprocessed row data from payload store
+        # Validate resumability before mutating the run header or batch state.
+        # Incomplete-source refusal is an operator-facing "start fresh or use a
+        # source-aware resume path" outcome; it must not strand the run as
+        # RUNNING or rewrite retry batches merely because the operator probed
+        # resume.
         from elspeth.core.checkpoint import RecoveryManager
 
         if self._checkpoint_manager is None:
@@ -3718,7 +3790,9 @@ class Orchestrator:
         if not source_lifecycle_records:
             raise EmptyResumeStateError(run_id=run_id)
         incomplete_sources = {
-            record.source_name: record.lifecycle_state for record in source_lifecycle_records.values() if record.lifecycle_state != "loaded"
+            record.source_name: record.lifecycle_state
+            for record in source_lifecycle_records.values()
+            if record.lifecycle_state not in _SOURCE_COMPLETE_LIFECYCLE_STATES
         }
         if incomplete_sources:
             raise IncompleteSourceResumeError(run_id, incomplete_sources)
@@ -3741,6 +3815,19 @@ class Orchestrator:
             payload_store,
             source_schema_classes=source_schema_classes,
         )
+
+        # 1. Handle incomplete batches - call module function directly
+        batch_id_mapping = handle_incomplete_batches(factory.execution, run_id)
+
+        # 2. Update run status to running after validation has succeeded.
+        factory.run_lifecycle.update_run_status(run_id, RunStatus.RUNNING)
+
+        # 3. Build restored aggregation state map, rebinding batch_ids to retry batches
+        restored_state: dict[str, AggregationCheckpointState] = {}
+        if resume_point.aggregation_state is not None:
+            rebound_state = rebind_checkpoint_batch_ids(resume_point.aggregation_state, batch_id_mapping)
+            restored_state[resume_point.node_id] = rebound_state
+        restored_coalesce_state = resume_point.coalesce_state
 
         return ResumeState(
             factory=factory,
@@ -3814,7 +3901,7 @@ class Orchestrator:
             incomplete_sources = {
                 state.source_names_by_source[source_node_id]: lifecycle_state
                 for source_node_id, lifecycle_state in state.source_lifecycle_by_source.items()
-                if lifecycle_state != "loaded"
+                if lifecycle_state not in _SOURCE_COMPLETE_LIFECYCLE_STATES
             }
             if incomplete_sources:
                 raise IncompleteSourceResumeError(run_id, incomplete_sources)

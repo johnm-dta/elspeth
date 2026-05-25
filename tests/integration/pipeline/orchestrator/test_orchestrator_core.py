@@ -118,6 +118,7 @@ class ValidationErrorAfterValidRowSource(_TestSourceBase):
             row={"value": "bad"},
             error="source parse failed on second row",
             destination="quarantine",
+            source_row_index=1,
         )
 
 
@@ -133,6 +134,51 @@ class LoadTrackingSource(ListSource):
     def load(self, ctx: Any) -> Any:
         self.load_started = True
         yield from super().load(ctx)
+
+
+class OnStartNodeRecordingSource(ListSource):
+    """List source that records lifecycle attribution at on_start()."""
+
+    determinism = Determinism.IO_READ
+
+    def __init__(self, data: list[dict[str, Any]], *, name: str, on_success: str) -> None:
+        super().__init__(data, name=name, on_success=on_success)
+        self.on_start_node_id: str | None = None
+
+    def on_start(self, ctx: Any) -> None:
+        self.on_start_node_id = ctx.node_id
+
+
+class ExplicitSourceRowIndexSource(ListSource):
+    """Source that supplies non-enumeration source row identity."""
+
+    determinism = Determinism.IO_READ
+
+    def load(self, ctx: Any) -> Any:
+        del ctx
+        yield SourceRow.valid(
+            {"value": 7},
+            contract=self._contract_for({"value": 7}),
+            source_row_index=42,
+        )
+
+    def _contract_for(self, row: dict[str, Any]) -> Any:
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+
+        return SchemaContract(
+            mode="OBSERVED",
+            fields=tuple(
+                FieldContract(
+                    normalized_name=key,
+                    original_name=key,
+                    python_type=object,
+                    required=False,
+                    source="inferred",
+                )
+                for key in row
+            ),
+            locked=True,
+        )
 
 
 class RuntimePreflightFailingTransform(PassTransform):
@@ -255,6 +301,61 @@ class TestOrchestrator:
         assert run_result.rows_processed == 3
         assert len(sink.results) == 3
         assert sink.results[0] == {"value": 1, "doubled": 2}
+
+    def test_multi_source_on_start_receives_each_source_node_id(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """Each named source lifecycle hook must receive its own source node id."""
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        orders = OnStartNodeRecordingSource([{"value": 1}], name="orders_source", on_success="output")
+        refunds = OnStartNodeRecordingSource([{"value": 2}], name="refunds_source", on_success="output")
+        sink = CollectSink("output")
+        source_settings = {
+            "orders": SourceSettings(plugin=orders.name, on_success="output"),
+            "refunds": SourceSettings(plugin=refunds.name, on_success="output"),
+        }
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"orders": as_source(orders), "refunds": as_source(refunds)},
+            source_settings_map=source_settings,
+            transforms=[],
+            sinks={"output": as_sink(sink)},
+        )
+        config = PipelineConfig(
+            sources={"orders": as_source(orders), "refunds": as_source(refunds)},
+            transforms=[],
+            sinks={"output": as_sink(sink)},
+        )
+
+        run_result = Orchestrator(landscape_db).run(config, graph=graph, payload_store=payload_store)
+
+        assert run_result.status == RunStatus.COMPLETED
+        assert orders.node_id != refunds.node_id
+        assert orders.on_start_node_id == orders.node_id
+        assert refunds.on_start_node_id == refunds.node_id
+
+    def test_source_authored_source_row_index_is_persisted(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """Source-authored row identity must persist separately from ingest order."""
+        source = ExplicitSourceRowIndexSource([{"value": 7}], name="explicit_source_index", on_success="default")
+        sink = CollectSink()
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[],
+            sinks={"default": as_sink(sink)},
+        )
+        graph = build_production_graph(config)
+
+        run_result = Orchestrator(landscape_db).run(config, graph=graph, payload_store=payload_store)
+
+        assert run_result.status == RunStatus.COMPLETED
+        with landscape_db.engine.connect() as conn:
+            row = conn.execute(
+                select(rows_table.c.row_index, rows_table.c.source_row_index, rows_table.c.ingest_sequence).where(
+                    rows_table.c.run_id == run_result.run_id
+                )
+            ).one()
+        assert row.row_index == 0
+        assert row.source_row_index == 42
+        assert row.ingest_sequence == 0
 
     def test_runtime_preflight_failure_aborts_before_source_load(self, landscape_db: LandscapeDB, payload_store) -> None:
         """Runtime preflight failures must fail the run before any row work starts."""

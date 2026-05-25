@@ -75,15 +75,16 @@ class QuarantiningSource(_TestSourceBase):
         self._on_validation_failure = quarantine_sink
 
     def load(self, ctx: Any) -> Any:
-        for row in self._rows:
+        for source_row_index, row in enumerate(self._rows):
             if not row.get("valid", True):
                 yield SourceRow.quarantined(
                     row=row,
                     error="validation_failed:valid=False",
                     destination=self._on_validation_failure,
+                    source_row_index=source_row_index,
                 )
             else:
-                yield make_source_row(row)
+                yield make_source_row(row, source_row_index=source_row_index)
 
     def get_field_resolution(self) -> tuple[Mapping[str, str], str] | None:
         return ({"value": "value", "valid": "valid"}, "identity")

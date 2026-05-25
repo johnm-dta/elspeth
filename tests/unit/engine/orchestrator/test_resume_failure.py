@@ -21,6 +21,7 @@ from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenOutcome
 from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
 from elspeth.contracts.enums import NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.run_result import RunResult
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.types import SinkName
@@ -513,6 +514,77 @@ class TestResumeFinalizesAsFailed:
         assert events == ["record:loading", "load", "process"]
         factory.run_lifecycle.record_run_source.assert_called_once()
 
+    def test_source_exhaustion_is_recorded_before_eof_flush_failure(self) -> None:
+        """A crash in EOF engine work must not look like an incomplete source load."""
+
+        @contextmanager
+        def _source_operation(*args, **kwargs):
+            yield SimpleNamespace(operation=SimpleNamespace(operation_id="source-op-1"))
+
+        orch = _make_orchestrator(make_landscape_db())
+        source_contract = _observed_contract("refund_id", str)
+        source = MagicMock()
+        source.name = "csv"
+        source.config = {"path": "refunds.csv"}
+        source.on_success = "refunds_sink"
+        source.output_schema.model_json_schema.return_value = {"type": "object", "properties": {"refund_id": {"type": "string"}}}
+        source.get_schema_contract.return_value = source_contract
+        source.get_field_resolution.return_value = None
+        config = PipelineConfig(
+            sources={"refunds": source},
+            transforms=(),
+            sinks={"refunds_sink": MagicMock()},
+            aggregation_settings={NodeID("agg-refunds"): MagicMock()},
+        )
+        factory = MagicMock(spec=RecorderFactory)
+        events: list[str] = []
+
+        def _record_run_source(**kwargs):
+            events.append(f"record:{kwargs['lifecycle_state']}")
+
+        factory.run_lifecycle.record_run_source.side_effect = _record_run_source
+        processor = MagicMock()
+        processor.check_aggregation_timeout.return_value = (False, None)
+        processor.process_row.side_effect = lambda **kwargs: events.append("process") or []
+
+        loop_ctx = LoopContext(
+            counters=ExecutionCounters(),
+            pending_tokens={"refunds_sink": []},
+            processor=processor,
+            ctx=MagicMock(),
+            config=config,
+            agg_transform_lookup={},
+            coalesce_executor=None,
+            coalesce_node_map={},
+        )
+
+        def _load_source(run_id_arg, ctx_arg, *, active_source):
+            events.append("load")
+            return iter((make_source_row({"refund_id": "r1"}, contract=source_contract),))
+
+        def _flush_eof_buffers(**kwargs):
+            events.append("eof_flush")
+            raise RuntimeError("boom during EOF flush")
+
+        with (
+            patch("elspeth.engine.orchestrator.core.track_operation", _source_operation),
+            patch.object(orch, "_load_source_with_events", side_effect=_load_source),
+            patch("elspeth.engine.orchestrator.core.flush_remaining_aggregation_buffers", side_effect=_flush_eof_buffers),
+            pytest.raises(RuntimeError, match="boom during EOF flush"),
+        ):
+            orch._run_main_processing_loop(
+                loop_ctx,
+                factory,
+                run_id="run-1",
+                source_id=NodeID("source-refunds"),
+                edge_map={},
+                active_source_name="refunds",
+                active_source=source,
+                flush_end_of_input=True,
+            )
+
+        assert events == ["record:loading", "load", "process", "record:exhausted", "eof_flush"]
+
     def test_second_observed_source_persists_resume_contract_before_row_failure(self) -> None:
         """A later source crash must leave source-scoped resume metadata behind."""
 
@@ -727,6 +799,58 @@ class TestResumeFinalizesAsFailed:
             NodeID("source-refunds"): refunds_schema,
         }
 
+    def test_reconstruct_resume_state_accepts_exhausted_source_lifecycle(self) -> None:
+        """Exhausted sources are complete enough for engine-only EOF work resume."""
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        orch._checkpoint_manager = MagicMock()
+        run_id = "run-exhausted-source-reconstruct"
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-exhausted-source-reconstruct",
+            run_id=run_id,
+            token_id="tok-exhausted-source-reconstruct",
+            node_id="node-exhausted-source-reconstruct",
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            checkpoint_node_config_hash="b" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(
+            checkpoint=checkpoint,
+            token_id=checkpoint.token_id,
+            node_id=checkpoint.node_id,
+            sequence_number=checkpoint.sequence_number,
+        )
+        source_contract = MagicMock(name="source-contract")
+        mock_factory = MagicMock(spec=RecorderFactory)
+        prepare_for_run()
+        mock_factory.run_lifecycle.get_runtime_val_manifest.return_value = canonical_json(build_runtime_val_manifest())
+        mock_factory.run_lifecycle.get_run_source_lifecycle_records.return_value = {
+            NodeID("source-primary"): SimpleNamespace(source_name="primary", lifecycle_state="exhausted")
+        }
+        mock_factory.run_lifecycle.get_run_source_resume_records.return_value = {
+            NodeID("source-primary"): SimpleNamespace(
+                source_name="primary",
+                lifecycle_state="exhausted",
+                source_schema_json='{"title":"Primary"}',
+                schema_contract=source_contract,
+            )
+        }
+        mock_recovery = MagicMock()
+        mock_recovery.get_unprocessed_row_data_by_source.return_value = ()
+        source_schema = MagicMock(name="PrimarySchema")
+
+        with (
+            patch("elspeth.engine.orchestrator.core.RecorderFactory", return_value=mock_factory),
+            patch("elspeth.core.checkpoint.RecoveryManager", return_value=mock_recovery),
+            patch("elspeth.engine.orchestrator.core.reconstruct_schema_from_json", return_value=source_schema),
+        ):
+            state = orch._reconstruct_resume_state(resume_point, MockPayloadStore())
+
+        assert state.source_lifecycle_by_source == {NodeID("source-primary"): "exhausted"}
+        assert state.schema_contracts_by_source == {NodeID("source-primary"): source_contract}
+
     def test_resume_treats_empty_coalesce_checkpoint_as_all_rows_processed(self) -> None:
         """Empty restored coalesce state must not force a resume processing pass."""
         db = make_landscape_db()
@@ -899,6 +1023,68 @@ class TestResumeFinalizesAsFailed:
         assert result.rows_buffered == 1
         assert result.rows_coalesced == 1
         assert result.rows_diverted == 1
+
+    def test_resume_allows_exhausted_source_with_restored_engine_work(self) -> None:
+        """Resume must not reject exhausted sources before engine-only work drains."""
+        db = make_landscape_db()
+        orch = _make_orchestrator(db)
+        run_id = "run-exhausted-source-engine-work"
+        mock_factory = MagicMock(spec=RecorderFactory)
+        mock_factory.run_lifecycle.finalize_run = MagicMock()
+
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-exhausted-source-engine-work",
+            run_id=run_id,
+            token_id="tok-exhausted-source-engine-work",
+            node_id="node-exhausted-source-engine-work",
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            checkpoint_node_config_hash="b" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(
+            checkpoint=checkpoint,
+            token_id=checkpoint.token_id,
+            node_id=checkpoint.node_id,
+            sequence_number=checkpoint.sequence_number,
+        )
+        resume_state = ResumeState(
+            factory=mock_factory,
+            run_id=run_id,
+            restored_aggregation_state={"agg-node": MagicMock()},
+            restored_coalesce_state=None,
+            unprocessed_rows=(),
+            schema_contracts_by_source={NodeID("source"): MagicMock()},
+            source_names_by_source={NodeID("source"): "source"},
+            source_lifecycle_by_source={NodeID("source"): "exhausted"},
+        )
+        resumed_result = RunResult(
+            run_id=run_id,
+            status=RunStatus.RUNNING,
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+        )
+
+        with (
+            patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
+            patch.object(orch, "_process_resumed_rows", return_value=resumed_result) as process_resumed,
+            patch.object(orch, "_emit_telemetry"),
+            patch.object(orch, "_delete_checkpoints"),
+        ):
+            result = orch.resume(
+                resume_point,
+                MagicMock(),
+                MagicMock(),
+                payload_store=MockPayloadStore(),
+            )
+
+        process_resumed.assert_called_once()
+        assert result.status == RunStatus.EMPTY
 
 
 class TestBuildProcessorCallsCleanupOnFailure:

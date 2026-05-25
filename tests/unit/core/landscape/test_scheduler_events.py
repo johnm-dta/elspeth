@@ -778,6 +778,76 @@ def test_blocked_barrier_restore_and_terminalization_record_transition_events() 
     assert json.loads(events[1].context_json) == {"barrier_key": "join:1"}
 
 
+def test_blocked_barrier_pending_sink_handoff_records_state_and_event() -> None:
+    from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
+    from elspeth.core.landscape.scheduler_repository import BlockedPendingSinkHandoff, TokenSchedulerRepository
+
+    engine = _make_scheduler_engine()
+    repo = TokenSchedulerRepository(engine)
+    now = datetime.now(UTC)
+    payload = _insert_scheduler_prerequisites(engine, now=now)
+    item = repo.ensure_blocked_barrier_work_item(
+        run_id="run-1",
+        token_id="token-1",
+        row_id="row-1",
+        node_id="normalize",
+        step_index=1,
+        ingest_sequence=0,
+        row_payload_json=payload,
+        barrier_key="agg-1",
+        available_at=now,
+    )
+    sink_payload = TokenSchedulerRepository.serialize_row_payload(
+        PipelineRow({"id": 2}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
+    )
+
+    transitioned = repo.mark_blocked_barrier_pending_sink_many(
+        run_id="run-1",
+        barrier_key="agg-1",
+        handoffs={
+            "token-1": BlockedPendingSinkHandoff(
+                row_payload_json=sink_payload,
+                sink_name="sink-a",
+                outcome=TerminalOutcome.SUCCESS.value,
+                path=TerminalPath.DEFAULT_FLOW.value,
+                error_hash=None,
+                error_message=None,
+            )
+        },
+        now=now + timedelta(seconds=1),
+    )
+
+    with engine.connect() as conn:
+        row = (
+            conn.execute(
+                select(
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.row_payload_json,
+                    token_work_items_table.c.pending_sink_name,
+                    token_work_items_table.c.pending_outcome,
+                    token_work_items_table.c.pending_path,
+                ).where(token_work_items_table.c.work_item_id == item.work_item_id)
+            )
+            .mappings()
+            .one()
+        )
+
+    events = _scheduler_events(engine)
+    assert transitioned == 1
+    assert row.status == TokenWorkStatus.PENDING_SINK.value
+    assert row.row_payload_json == sink_payload
+    assert row.pending_sink_name == "sink-a"
+    assert row.pending_outcome == TerminalOutcome.SUCCESS.value
+    assert row.pending_path == TerminalPath.DEFAULT_FLOW.value
+    assert [event.event_type for event in events] == [
+        SchedulerEventType.RESTORE_BLOCKED.value,
+        SchedulerEventType.MARK_PENDING_SINK.value,
+    ]
+    assert events[-1].from_status == TokenWorkStatus.BLOCKED.value
+    assert events[-1].to_status == TokenWorkStatus.PENDING_SINK.value
+    assert json.loads(events[-1].context_json) == {"barrier_key": "agg-1"}
+
+
 def test_release_waiting_rolls_back_work_item_update_when_scheduler_event_insert_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
     from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository

@@ -44,7 +44,7 @@ class TestSourceProtocol:
 
             def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
                 for i in range(3):
-                    yield SourceRow.valid({"value": i}, contract=make_contract({"value": i}))
+                    yield SourceRow.valid({"value": i}, contract=make_contract({"value": i}), source_row_index=i)
 
             def close(self) -> None:
                 pass
@@ -120,7 +120,7 @@ class TestSourceProtocol:
                 self.config = config
 
             def load(self, ctx: PluginContext) -> Iterator[SourceRow]:
-                yield SourceRow.valid({"value": 1}, contract=make_contract({"value": 1}))
+                yield SourceRow.valid({"value": 1}, contract=make_contract({"value": 1}), source_row_index=0)
 
             def close(self) -> None:
                 pass

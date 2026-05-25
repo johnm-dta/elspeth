@@ -614,9 +614,9 @@ class CheckpointAfterSinkCallback(Protocol):
 class _CheckpointFactory(Protocol):
     """Factory that creates per-sink checkpoint callbacks.
 
-    ``terminalize_scheduler`` is disabled only for source-quarantine sink
-    writes, which have token outcomes but no durable scheduler pending-sink
-    row to terminalize.
+    ``terminalize_scheduler`` is enabled only for sink writes whose pending
+    outcome carries a durable scheduler PENDING_SINK handoff for every token in
+    the grouped batch.
     """
 
     def __call__(self, sink_node_id: str, *, terminalize_scheduler: bool = True) -> CheckpointAfterSinkCallback:

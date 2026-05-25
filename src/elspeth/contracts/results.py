@@ -411,6 +411,8 @@ class RowResult:
         path: Provenance answer (always populated)
         sink_name: For paths that reach a sink, the destination sink name
         error: For ON_ERROR_ROUTED, type-safe error details for audit
+        scheduler_pending_sink: True only after the durable scheduler row for
+            this exact token has been transitioned to PENDING_SINK.
     """
 
     token: TokenInfo
@@ -419,8 +421,13 @@ class RowResult:
     path: TerminalPath
     sink_name: str | None = None
     error: FailureInfo | None = None
+    scheduler_pending_sink: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.scheduler_pending_sink) is not bool:
+            raise OrchestrationInvariantError(
+                f"RowResult.scheduler_pending_sink must be bool, got {type(self.scheduler_pending_sink).__name__}"
+            )
         if self.outcome is not None and (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
             raise OrchestrationInvariantError(f"RowResult: illegal (outcome, path) pair: ({self.outcome!r}, {self.path!r})")
         if self.outcome is None and self.path != TerminalPath.BUFFERED:

@@ -1577,15 +1577,17 @@ def _build_resume_graphs(
     Returns:
         Tuple of (validation_graph, execution_graph):
         - validation_graph: Uses original source for topology hash matching
-        - execution_graph: Uses NullSource since resume data comes from stored payloads
+        - execution_graph: Uses the same original topology/source IDs; runtime
+          plugin instances are swapped to NullSource later because resume data
+          comes from stored payloads
     """
-    from elspeth.plugins.sources.null_source import NullSource
-
     gate_settings = list(settings_config.gates)
     coalesce_settings = list(settings_config.coalesce) if settings_config.coalesce else None
 
-    # Validation graph uses the ORIGINAL sources to match the topology hash
-    # computed during the original run.
+    # Both resume graphs use the ORIGINAL source topology to match the topology
+    # hash and source node IDs computed during the original run. The runtime
+    # PluginBundle is swapped to NullSource separately before execution; graph
+    # identity must not change just because resume does not reopen sources.
     validation_graph = ExecutionGraph.from_plugin_instances(
         sources=plugins.sources,
         source_settings_map=plugins.source_settings_map,
@@ -1598,22 +1600,9 @@ def _build_resume_graphs(
     )
     validation_graph.validate()
 
-    # Execution graph uses NullSource per original source name — resume data
-    # comes from stored payloads. Each NullSource inherits the original
-    # source's on_success (which may be a connection name or sink name — the
-    # DAG builder validates it during graph construction). Per ADR-025 §2,
-    # source identity always keys on source_name, so the resume execution
-    # graph must mirror the original source-name set.
-    null_sources: dict[str, SourceProtocol] = {}
-    null_source_settings_map: dict[str, SourceSettings] = {}
-    for source_name, original_source in plugins.sources.items():
-        null_source = NullSource({})
-        null_source.on_success = original_source.on_success
-        null_sources[source_name] = null_source
-        null_source_settings_map[source_name] = SourceSettings(plugin="null", on_success=original_source.on_success)
     execution_graph = ExecutionGraph.from_plugin_instances(
-        sources=null_sources,
-        source_settings_map=null_source_settings_map,
+        sources=plugins.sources,
+        source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
         sinks=plugins.sinks,
         aggregations=plugins.aggregations,

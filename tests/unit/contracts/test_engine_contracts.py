@@ -117,6 +117,14 @@ class TestPendingOutcomePostInit:
         po = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
         assert po.error_hash is None
 
+    def test_scheduler_pending_sink_requires_bool(self) -> None:
+        with pytest.raises(ValueError, match="scheduler_pending_sink must be a bool"):
+            PendingOutcome(
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                scheduler_pending_sink=1,  # type: ignore[arg-type]
+            )
+
     def test_routed_without_error_hash_accepted(self) -> None:
         po = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.GATE_ROUTED)
         assert po.error_hash is None

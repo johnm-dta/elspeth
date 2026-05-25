@@ -406,6 +406,7 @@ class TestBuildResumeGraphs:
         # Both graphs should build successfully
         assert validation_graph.node_count > 0
         assert execution_graph.node_count > 0
+        assert execution_graph.get_sources() == validation_graph.get_sources()
 
     def test_sink_valued_on_success_still_accepted(self, plugin_manager) -> None:
         """_build_resume_graphs still works when source.on_success is a sink name."""
@@ -439,6 +440,7 @@ class TestBuildResumeGraphs:
 
         assert validation_graph.node_count > 0
         assert execution_graph.node_count > 0
+        assert execution_graph.get_sources() == validation_graph.get_sources()
 
 
 class TestHealthCommand:

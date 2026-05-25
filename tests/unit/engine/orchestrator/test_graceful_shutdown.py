@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import signal
 import threading
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import structlog.testing
 
@@ -264,6 +264,85 @@ class TestCheckpointInterruptedProgress:
             call_kwargs = orchestrator._checkpoint_manager.create_checkpoint.call_args.kwargs
             assert call_kwargs["coalesce_state"] is coalesce_state
             mock_processor.mark_sink_bound_scheduler_terminal_many.assert_called_once_with(("tok-1",))
+        finally:
+            db.close()
+
+    def test_pending_sink_terminalization_uses_per_token_scheduler_handoff(self) -> None:
+        """Generated sink tokens must not be terminalized as scheduler work.
+
+        A sink batch may mix scheduler-backed tokens with tokens generated after
+        a scheduler barrier. Only tokens with a recorded PENDING_SINK handoff
+        should be closed by the post-sink callback.
+        """
+        from elspeth.contracts import PendingOutcome, TokenInfo
+        from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+        from elspeth.engine.executors.sink import DiversionCounts
+        from elspeth.engine.orchestrator import Orchestrator
+        from elspeth.engine.orchestrator.types import ExecutionCounters
+        from elspeth.testing import make_row
+        from tests.fixtures.landscape import make_landscape_db
+
+        db = make_landscape_db()
+        try:
+            orchestrator = Orchestrator(db=db)
+            orchestrator._checkpoint_config = Mock()
+            orchestrator._checkpoint_config.enabled = False
+
+            sink = Mock()
+            sink._on_write_failure = None
+            config = Mock()
+            config.sinks = {"output": sink}
+
+            processor = Mock()
+            processor.get_aggregation_checkpoint_state.return_value = None
+            processor.get_coalesce_checkpoint_state.return_value = None
+            on_token_written_factory = orchestrator._make_checkpoint_after_sink_factory("run-x", processor)
+
+            scheduler_token = TokenInfo(row_id="row-1", token_id="tok-scheduler", row_data=make_row({"value": 1}))
+            generated_token = TokenInfo(row_id="row-2", token_id="tok-generated", row_data=make_row({"value": 2}))
+            pending_tokens = {
+                "output": [
+                    (
+                        generated_token,
+                        PendingOutcome(
+                            outcome=TerminalOutcome.SUCCESS,
+                            path=TerminalPath.COALESCED,
+                            scheduler_pending_sink=False,
+                        ),
+                    ),
+                    (
+                        scheduler_token,
+                        PendingOutcome(
+                            outcome=TerminalOutcome.SUCCESS,
+                            path=TerminalPath.COALESCED,
+                            scheduler_pending_sink=True,
+                        ),
+                    ),
+                ]
+            }
+
+            def write_side_effect(*, tokens, on_token_written, **_kwargs):
+                for token in tokens:
+                    on_token_written(token)
+                return None, DiversionCounts()
+
+            with patch("elspeth.engine.executors.sink.SinkExecutor") as sink_executor_cls:
+                sink_executor_cls.return_value.write.side_effect = write_side_effect
+
+                orchestrator._write_pending_to_sinks(
+                    factory=Mock(),
+                    run_id="run-x",
+                    config=config,
+                    ctx=Mock(),
+                    counters=ExecutionCounters(),
+                    pending_tokens=pending_tokens,
+                    sink_id_map={"output": "sink-output"},
+                    edge_map={},
+                    sink_step=1,
+                    on_token_written_factory=on_token_written_factory,
+                )
+
+            processor.mark_sink_bound_scheduler_terminal_many.assert_called_once_with(("tok-scheduler",))
         finally:
             db.close()
 

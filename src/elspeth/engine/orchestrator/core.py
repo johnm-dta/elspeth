@@ -945,12 +945,12 @@ class Orchestrator:
             # Group tokens by pending_outcome for separate write() calls
             # (sink_executor.write() takes a single PendingOutcome for all tokens in a batch)
             # PendingOutcome carries error_hash for QUARANTINED tokens
-            def pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str, str]:
+            def pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str, str, bool]:
                 pending = pair[1]
                 if pending is None:
-                    return (True, "", "", "")  # None sorts first
+                    return (True, "", "", "", False)  # None sorts last
                 outcome_value = pending.outcome.value if pending.outcome is not None else ""
-                return (False, outcome_value, pending.path.value, pending.error_hash or "")
+                return (False, outcome_value, pending.path.value, pending.error_hash or "", pending.scheduler_pending_sink)
 
             sorted_pairs = sorted(token_outcome_pairs, key=pending_sort_key)
 
@@ -958,11 +958,12 @@ class Orchestrator:
                 group_pairs = list(group)
                 pending_outcome = group_pairs[0][1]
                 group_tokens = [token for token, _pending in group_pairs]
-                # Source-quarantine rows are sink-written for investigation but
-                # never entered the durable scheduler. They still need
-                # post-sink checkpoints; scheduler terminalization would be
-                # fabrication because no PENDING_SINK row exists for them.
-                terminalize_scheduler = pending_outcome is None or pending_outcome.path != TerminalPath.QUARANTINED_AT_SOURCE
+                # Only tokens with a proven durable PENDING_SINK handoff are
+                # terminalized after sink durability. Generated terminal
+                # outputs (aggregation/coalesce flushes) and source-quarantine
+                # rows still need checkpoints but have no scheduler row to
+                # close.
+                terminalize_scheduler = bool(pending_outcome is not None and pending_outcome.scheduler_pending_sink)
                 on_token_written: CheckpointAfterSinkCallback | None = None
                 if on_token_written_factory is not None:
                     on_token_written = on_token_written_factory(sink_node_id, terminalize_scheduler=terminalize_scheduler)

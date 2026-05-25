@@ -49,6 +49,8 @@ class PendingOutcome:
 
     Carries (outcome, path) pairs through the pending_tokens queue so token
     outcomes are recorded only after sink write + flush complete successfully.
+    ``scheduler_pending_sink`` is true only when a durable scheduler row has
+    already been transitioned to PENDING_SINK for this exact token.
     """
 
     _REQUIRES_ERROR_HASH_PATHS: ClassVar[frozenset[TerminalPath]] = frozenset(
@@ -64,9 +66,12 @@ class PendingOutcome:
     outcome: TerminalOutcome | None
     path: TerminalPath
     error_hash: str | None = None
+    scheduler_pending_sink: bool = False
 
     def __post_init__(self) -> None:
         """Validate pair/error_hash consistency before sink side effects."""
+        if type(self.scheduler_pending_sink) is not bool:
+            raise ValueError("PendingOutcome.scheduler_pending_sink must be a bool")
         if self.outcome is None:
             if self.path != TerminalPath.BUFFERED:
                 raise ValueError(f"PendingOutcome with outcome=None requires path=BUFFERED, got {self.path.name}")

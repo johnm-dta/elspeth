@@ -59,6 +59,22 @@ its wiring. Do not delete the LLM node and continue as if the request were only 
 scrape or copy workflow. If a requested cleanup step fails validation, repair the
 cleanup mapping or its placement before the sink; do not bypass the cleanup.
 
+Before any `set_pipeline` mutation that omits a user-requested LLM, extraction,
+scoring, summarisation, classification, or enrichment node that was present in a
+prior turn's draft, compare your planned `nodes[]` against the user's original
+request. If the user asked for a step you are now omitting, the omission is the
+bug, not the requested topology. Repairs proceed by restoring the omitted node
+and fixing its wiring; they do not proceed by shipping a smaller pipeline whose
+cleanup mapper, sinks, or downstream consumers still reference fields the omitted
+node would have produced. Specifically: if a downstream `field_mapper`,
+sink schema, or transform `required_input_fields` references a field whose only
+realistic upstream producer is a missing user-requested node (typical examples:
+`llm_response`, fields prefixed `extracted_`, `*_score`, `*_classification`),
+the missing node MUST be restored before the next `set_pipeline`. A validation
+error such as "Duplicate consumer for connection" means the wiring needs a gate
+or distinct routing to each consumer — it is not a reason to delete the node
+that one of those consumers was consuming from.
+
 If validation says an `on_success` value is neither a sink nor a known
 connection, repair the routing field that names the missing connection. For a
 linear pipeline ending in a sink, set the final producer's `on_success` to the
@@ -913,6 +929,8 @@ Use tool diagnostics first. These are common one-shot mappings:
 | Consumer requires a generated or inspected CSV column but source guarantees are empty | Patch the source schema to guarantee that known column, then retry; do not ask the user to confirm a column you authored or inspected. |
 | Producer guarantees are empty and producer is a transform | Patch that transform schema or use plugin assistance for the plugin-owned contract. |
 | Consumer requires fields not produced upstream | Correct the upstream producer, or narrow the consumer's `required_input_fields` if the requirement was overstated. |
+| `field_mapper` mapping references a field (e.g. `llm_response`, `extracted_*`, `*_score`, `*_classification`) that no upstream node guarantees, AND a user-requested LLM/extraction/scoring/summarisation node is absent from the current `nodes[]` | Restore the missing LLM/extraction node — this is the silent-downgrade pattern from **Requested Workflow Integrity**. The cleanup mapper's field requirements are the trace of what the dropped node was supposed to produce. Do NOT repair by deleting the mapping entries; the user asked for those fields. Resubmit the full `set_pipeline` with the missing LLM node restored and wired between its upstream producer (e.g. `web_scrape`) and the cleanup mapper. Reapply the LLM-node preflight (prompt-template review, `vague_term` review if you authored judgement semantics, `llm_model_choice` review) on the restored node. |
+| `set_pipeline` rejected with "Duplicate consumer for connection" | A single upstream output is wired to two or more consumers. Insert a gate node between the upstream and the two consumers, or restructure so each connection has exactly one consumer. Do not remove either consumer node to resolve the conflict; the user requested both. |
 | `set_pipeline` rejected due malformed or invalid tool arguments | Rebuild the same requested topology with valid tool arguments and retry the full `set_pipeline`; do not stop or shrink the workflow. |
 | Rejected `set_pipeline` used `source.inline_blob` and the source blob is absent afterward | Failed mutations do not create reusable blobs. Resubmit with the same corrected `source.inline_blob`, or call `create_blob` with the same artifact and retry using the returned `blob_id`; do not ask for a blob id. |
 | Generated source path is outside the allowed blob directory | Keep the generated artifact, create a blob from the generated rows, bind it as the source, and retry the complete workflow. Do not ask for an upload or replace the source with an imaginary path. |

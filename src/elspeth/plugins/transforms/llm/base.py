@@ -227,3 +227,53 @@ class LLMConfig(TransformDataConfig):
                     "This explicit declaration enables DAG validation to catch missing fields at config time."
                 )
         return self
+
+    @model_validator(mode="after")
+    def _validate_required_input_fields_appear_in_template(self) -> LLMConfig:
+        """Reject single-query configs that declare row-field requirements the template never uses.
+
+        Dual of `_validate_required_input_fields_declared`. That check catches the
+        "template uses row.X but contract is undeclared" footgun. This check catches
+        the inverse "contract declares X but template never references row.X" footgun
+        — a prompt body that does not interpolate any row data, so every row receives
+        the same static prompt and the model has no per-row context to reason about.
+
+        Scope:
+        - Single-query mode only (``queries is None``). Multi-query mode flows row
+          data via per-query ``input_fields`` mappings, so an empty ``row.*`` set in
+          the top-level template is not by itself diagnostic.
+        - Empty ``required_input_fields: []`` is the explicit opt-out and passes.
+        - ``required_input_fields is None`` is handled by the sibling validator;
+          this check only fires when fields are declared.
+        """
+        if self.queries is not None:
+            return self
+        if self.required_input_fields is None or len(self.required_input_fields) == 0:
+            return self
+
+        from elspeth.core.templates import extract_jinja2_fields
+
+        template_fields = extract_jinja2_fields(self.prompt_template)
+        if template_fields:
+            return self
+
+        declared = sorted(self.required_input_fields)
+        declared_json = json.dumps(declared)
+        example_interpolations = " ".join(f"{{{{ row.{f} }}}}" for f in declared)
+        raise ValueError(
+            f"LLM options.required_input_fields declares {declared} but the "
+            "prompt_template does not interpolate any row.* fields. "
+            "Every row would receive the same static prompt and the model would "
+            "have no row-specific context to reason about.\n\n"
+            "Fix one of the following:\n"
+            f"  (a) Reference the declared fields inside prompt_template using "
+            f"Jinja2 row-namespace syntax, e.g. {example_interpolations}\n"
+            "  (b) If the fields are required for runtime presence but intentionally "
+            "not interpolated into the prompt, set\n"
+            "      options.required_input_fields: []   # explicit opt-out\n"
+            "      and document the presence assertion elsewhere.\n\n"
+            "Composer repair example:\n"
+            f'  patch_node_options({{"node_id": "<node_id>", "patch": '
+            f'{{"prompt_template": "<...includes {example_interpolations}...>"}}}})\n\n'
+            f"Declared fields: {declared_json}. Template row.* references: []."
+        )

@@ -322,6 +322,68 @@ input stream, and set the cleanup mapper's `on_success` to the sink name.
 
 ### LLM Nodes
 
+#### Authoring the prompt body — field interpolation
+
+The `prompt_template` field is a Jinja2 template rendered per-row. Row data
+is exposed under the `row` namespace: to put a row field's value into the
+prompt the model actually sees, write `{{ row.field_name }}` (or
+`{{ row["field-with-dashes"] }}`) inside the template body. Without those
+interpolations, every row is sent the same static prompt and the model has
+no row context. `required_input_fields` is the runtime presence contract:
+it must list every field referenced in the template (without the `row.`
+prefix — just the bare field name), and every field listed there should
+appear in the template — otherwise the contract is declared but unused.
+
+The failure to avoid (today's broken pipeline):
+
+```yaml
+prompt_template: |
+  For each government agency page, identify the primary colours used by
+  the agency branding shown on the page HTML/content.
+  Return a concise result with the agency and its primary colours.
+  Use the provided page content and URL.
+required_input_fields: [url, content]
+```
+
+The prompt tells the LLM to "use the provided page content", but `url` and
+`content` are never substituted in. Every row produces the same model input
+and the model has nothing row-specific to reason about.
+
+The corrected form:
+
+```yaml
+prompt_template: |
+  You are looking at an Australian government agency web page at {{ row.url }}.
+
+  The page HTML/text is:
+
+  {{ row.content }}
+
+  Identify the primary brand colours used by the agency on this page.
+  Return ONLY a JSON object with keys: agency, primary_colours.
+  primary_colours must be an array of CSS hex strings (e.g. "#0a4d8f").
+  Do not invent facts; if the page does not show a clear brand palette,
+  return an empty primary_colours array.
+required_input_fields: [url, content]
+response_field: llm_response
+```
+
+When you want structured output, ask for it explicitly in the prompt body:
+name the exact keys, name the value types and shapes, and instruct the model
+to "return ONLY a JSON object" (or equivalent) to suppress prose. The model's
+reply lands in `response_field` as a single raw string — downstream nodes
+that need JSON keys exposed as columns must parse it explicitly (for example
+via a JSON-extract transform). `response_field` is the only field the LLM
+transform writes.
+
+Reciprocity rule: every `{{ row.field }}` in the template must appear in
+`required_input_fields` (without the `row.` prefix), and every field in
+`required_input_fields` should appear in the template (or be dropped by
+`field_mapper` before reaching the LLM). Declaring fields you do not
+interpolate is either a bug — you forgot to inject them — or an unstated
+runtime presence assertion; for the latter, prefer an empty
+`required_input_fields: []` opt-out and document the assertion separately.
+
 Use `get_plugin_schema` for the `llm` plugin before configuring it. Declare every
 template field in `required_input_fields`. The prompt you author must be
 surfaced as an `llm_prompt_template` review card. Do not rely on automatic
@@ -435,7 +497,7 @@ Construction pattern for an LLM-authored scoring prompt:
 {
   "provider": "openrouter",
   "model": "<model returned by list_models>",
-  "prompt_template": "<prompt text you authored, including the scoring/rubric/cutoff/category semantics>",
+  "prompt_template": "<prompt text you authored, including {{ field_name }} interpolations for every entry in required_input_fields, plus the scoring/rubric/cutoff/category semantics>",
   "required_input_fields": ["<field_used_by_prompt>"],
   "response_field": "<llm_response_field>",
   "temperature": 0,

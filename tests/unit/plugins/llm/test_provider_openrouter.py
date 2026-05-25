@@ -555,6 +555,32 @@ class TestHTTPErrorMapping:
                     token_id="tok-1",
                 )
 
+    def test_400_anthropic_prompt_too_long_pattern(self, provider: OpenRouterLLMProvider) -> None:
+        # Anthropic via OpenRouter returns "prompt is too long: N tokens > M maximum"
+        # (an envelope wrapping Anthropic's invalid_request_error). Previously
+        # misclassified as a generic LLMClientError → audit reason llm_call_failed;
+        # must classify as ContextLengthError → audit reason context_length_exceeded.
+        anthropic_body = (
+            '{"error":{"message":"Provider returned error","code":400,'
+            '"metadata":{"raw":"{\\"type\\":\\"error\\",\\"error\\":{\\"type\\":'
+            '\\"invalid_request_error\\",\\"message\\":\\"prompt is too long: '
+            '202814 tokens > 200000 maximum\\"}}","provider_name":"Anthropic"}}}'
+        )
+        with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_error_response(400, body=anthropic_body)
+            mock_get.return_value = mock_client
+
+            with pytest.raises(ContextLengthError):
+                provider.execute_query(
+                    messages=[{"role": "user", "content": "hi"}],
+                    model="anthropic/claude-sonnet-4",
+                    temperature=0.0,
+                    max_tokens=100,
+                    state_id="state-1",
+                    token_id="tok-1",
+                )
+
     def test_empty_choices_raises(self, provider: OpenRouterLLMProvider) -> None:
         with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()

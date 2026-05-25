@@ -164,10 +164,11 @@ _CONTENT_POLICY_PATTERNS = (
     "content policy",
     "safety system",
 )
-_CONTEXT_LENGTH_PATTERNS = (
-    "context_length_exceeded",
-    "context length",
-    "maximum context",
+CONTEXT_LENGTH_PATTERNS = (
+    "context_length_exceeded",  # OpenAI / Azure OpenAI canonical code
+    "context length",  # OpenAI / Azure verbose wording ("maximum context length is X")
+    "maximum context",  # Catches "maximum context length", "exceeds maximum context"
+    "prompt is too long",  # Anthropic via OpenRouter ("prompt is too long: N tokens > M maximum")
 )
 
 
@@ -177,7 +178,7 @@ def _classify_llm_error(exception: Exception) -> str:
 
     if any(pattern in error_str for pattern in _CONTENT_POLICY_PATTERNS):
         return "content_policy"
-    if any(pattern in error_str for pattern in _CONTEXT_LENGTH_PATTERNS):
+    if any(pattern in error_str for pattern in CONTEXT_LENGTH_PATTERNS):
         return "context_length"
 
     # Match explicit rate-limit indicators only; do not match arbitrary "rate" substrings.

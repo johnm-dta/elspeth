@@ -106,9 +106,14 @@ class TestErrorClassification:
             Exception("This model's maximum context length is 8192 tokens"),
             Exception("context_length_exceeded"),
             Exception("Maximum context length exceeded"),
+            # Anthropic via OpenRouter wording — was previously misclassified as
+            # generic "client" (so audit reason became llm_call_failed instead
+            # of context_length_exceeded).
+            Exception("prompt is too long: 202814 tokens > 200000 maximum"),
         ]
 
         for error in context_errors:
+            assert _classify_llm_error(error) == "context_length", f"Failed for: {error}"
             assert (_classify_llm_error(error) in _RETRYABLE_CLASSES) is False, f"Failed for: {error}"
 
     def test_unknown_errors_are_not_retryable(self) -> None:

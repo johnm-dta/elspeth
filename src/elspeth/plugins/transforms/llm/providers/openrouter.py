@@ -32,6 +32,7 @@ from elspeth.contracts.token_usage import TokenUsage
 from elspeth.contracts.value_source import CatalogValueSource, ValueSource
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 from elspeth.plugins.infrastructure.clients.llm import (
+    CONTEXT_LENGTH_PATTERNS,
     ContentPolicyError,
     ContextLengthError,
     LLMClientError,
@@ -328,17 +329,11 @@ class OpenRouterLLMProvider:
                     raise ServerError(f"Server error ({status_code}): {e}{detail}") from e
                 else:
                     # Check response body for context length indicators before
-                    # falling through to generic LLMClientError. Matches the same
-                    # patterns used by AuditedLLMClient._classify_llm_error().
+                    # falling through to generic LLMClientError. Imports the shared
+                    # pattern tuple so the provider classifier and AuditedLLMClient
+                    # cannot drift — adding a wording in one place reaches both.
                     error_body = e.response.text.lower()
-                    if any(
-                        p in error_body
-                        for p in (
-                            "context_length_exceeded",
-                            "context length",
-                            "maximum context",
-                        )
-                    ):
+                    if any(p in error_body for p in CONTEXT_LENGTH_PATTERNS):
                         raise ContextLengthError(
                             f"Context length exceeded: {e.response.text[:200]}",
                         ) from e

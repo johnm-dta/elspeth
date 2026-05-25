@@ -304,10 +304,10 @@ class _TypedResumeSource(_TestSourceBase):
     def load(self, ctx: Any) -> Iterator[SourceRow]:
         contract = self._schema_contract
         assert contract is not None
-        for index, row in enumerate(self._rows, start=1):
-            if self._shutdown_event is not None and self._interrupt_after is not None and index >= self._interrupt_after:
+        for source_row_index, row in enumerate(self._rows):
+            if self._shutdown_event is not None and self._interrupt_after is not None and source_row_index + 1 >= self._interrupt_after:
                 self._shutdown_event.set()
-            yield SourceRow.valid(row, contract=contract)
+            yield SourceRow.valid(row, contract=contract, source_row_index=source_row_index)
 
 
 class _FailingBeforeRowsSource(_TypedResumeSource):

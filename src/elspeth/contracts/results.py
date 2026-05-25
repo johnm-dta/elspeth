@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
 
-from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.url import SanitizedDatabaseUrl, SanitizedWebhookUrl
 
 if TYPE_CHECKING:
@@ -561,8 +561,8 @@ class SourceRow:
     """Result from source loading - either valid data or quarantined invalid data.
 
     ALL rows from sources MUST be wrapped in SourceRow:
-    - Valid rows: SourceRow.valid(row_dict, contract=contract)
-    - Invalid rows: SourceRow.quarantined(row_data, error, destination)
+    - Valid rows: SourceRow.valid(row_dict, contract=contract, source_row_index=index)
+    - Invalid rows: SourceRow.quarantined(row_data, error, destination, source_row_index=index)
 
     This makes source outcomes first-class engine concepts:
     - All rows get proper token_id for lineage
@@ -573,13 +573,18 @@ class SourceRow:
     Example usage in a source:
         try:
             validated = schema.model_validate(row)
-            yield SourceRow.valid(validated.to_row(), contract=contract)
+            yield SourceRow.valid(
+                validated.to_row(),
+                contract=contract,
+                source_row_index=source_row_index,
+            )
         except ValidationError as e:
             if on_validation_failure != "discard":
                 yield SourceRow.quarantined(
                     row=row,
                     error=str(e),
                     destination=on_validation_failure,
+                    source_row_index=source_row_index,
                 )
             # else: don't yield, row is intentionally discarded
     """
@@ -592,6 +597,7 @@ class SourceRow:
     quarantine_error: str | None = None
     quarantine_destination: str | None = None
     contract: SchemaContract | None = None
+    source_row_index: int | None = None
 
     def __post_init__(self) -> None:
         """Validate quarantine field invariants.
@@ -601,11 +607,17 @@ class SourceRow:
         accidental misuse where quarantine metadata is silently ignored).
         """
         if self.is_quarantined:
+            if self.source_row_index is None:
+                raise ValueError("Quarantined SourceRow must have source_row_index. Pass source_row_index= to SourceRow.quarantined().")
+            require_int(self.source_row_index, "SourceRow.source_row_index", min_value=0)
             if self.quarantine_error is None:
                 raise ValueError("Quarantined SourceRow must have quarantine_error")
             if self.quarantine_destination is None:
                 raise ValueError("Quarantined SourceRow must have quarantine_destination")
         else:
+            if self.source_row_index is None:
+                raise ValueError("Valid SourceRow must have source_row_index. Pass source_row_index= to SourceRow.valid().")
+            require_int(self.source_row_index, "SourceRow.source_row_index", min_value=0)
             if self.quarantine_error is not None:
                 raise ValueError(f"Non-quarantined SourceRow must not have quarantine_error, got: {self.quarantine_error!r}")
             if self.quarantine_destination is not None:
@@ -621,17 +633,19 @@ class SourceRow:
         row: dict[str, Any],
         *,
         contract: SchemaContract,
+        source_row_index: int,
     ) -> SourceRow:
         """Create a valid source row.
 
         Args:
             row: Validated row data
             contract: Schema contract for the row
+            source_row_index: Source-authored row position within its emission stream
 
         Returns:
             SourceRow with is_quarantined=False
         """
-        return cls(row=row, is_quarantined=False, contract=contract)
+        return cls(row=row, is_quarantined=False, contract=contract, source_row_index=source_row_index)
 
     @classmethod
     def quarantined(
@@ -639,6 +653,8 @@ class SourceRow:
         row: Any,
         error: str,
         destination: str,
+        *,
+        source_row_index: int,
     ) -> SourceRow:
         """Create a quarantined row result.
 
@@ -647,6 +663,8 @@ class SourceRow:
                  for malformed external data (e.g., JSON primitives).
             error: The validation error message
             destination: The sink name to route this row to
+            source_row_index: Source-authored row position for emitted
+                quarantined rows.
         """
         return cls(
             row=row,
@@ -654,6 +672,7 @@ class SourceRow:
             quarantine_error=error,
             quarantine_destination=destination,
             contract=None,  # Quarantined rows don't have contracts
+            source_row_index=source_row_index,
         )
 
     def to_pipeline_row(self) -> PipelineRow:

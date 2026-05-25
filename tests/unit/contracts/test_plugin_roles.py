@@ -49,7 +49,7 @@ class _DeclaredSourceBase(BaseSource):
         self.node_id = None
 
     def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
-        yield SourceRow.valid({"customer_id": "v"}, contract=_contract(("customer_id",)))
+        yield SourceRow.valid({"customer_id": "v"}, contract=_contract(("customer_id",)), source_row_index=0)
 
     def close(self) -> None:
         pass

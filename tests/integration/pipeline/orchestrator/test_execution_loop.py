@@ -199,7 +199,33 @@ class IdleBlockingSource(_TestSourceBase):
         yield SourceRow.valid(
             {"value": 2},
             contract=rows[0].contract,
+            source_row_index=1,
         )
+
+
+class ThreadAffinitySource(_TestSourceBase):
+    """Source that proves timeout polling does not move iterator execution threads."""
+
+    name = "thread_affinity_source"
+    output_schema = _TestSchema
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_success = "agg_in"
+        self.load_thread_id: int | None = None
+        self.next_thread_ids: list[int] = []
+
+    def load(self, ctx: Any) -> Any:
+        self.load_thread_id = threading.get_ident()
+        rows = list(self.wrap_rows([{"value": 1}, {"value": 2}]))
+
+        self.next_thread_ids.append(threading.get_ident())
+        yield rows[0]
+
+        self.next_thread_ids.append(threading.get_ident())
+        if self.next_thread_ids[-1] != self.load_thread_id:
+            raise RuntimeError("source iterator advanced on a different thread from load()")
+        yield rows[1]
 
 
 class IdleFlushSignalingBatchTransform(BaseTransform):
@@ -376,6 +402,58 @@ class TestExecutionLoopRowProcessing:
         assert result.status == RunStatus.COMPLETED
         assert flush_seen.is_set()
         assert sink.results[0]["flushed_count"] == 1
+
+    def test_timeout_aggregation_polls_source_iterator_on_load_thread(self, payload_store) -> None:
+        """Timeout-enabled aggregation must not advance source iterators on worker threads."""
+        source = ThreadAffinitySource()
+        flush_seen = threading.Event()
+        transform = IdleFlushSignalingBatchTransform(flush_seen)
+        sink = CollectSink("output")
+
+        agg_settings = AggregationSettings(
+            name="thread_affinity_agg",
+            plugin=transform.name,
+            input="agg_in",
+            on_success="output",
+            on_error="discard",
+            trigger=TriggerConfig(count=2, timeout_seconds=30),
+            output_mode=OutputMode.TRANSFORM,
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"primary": as_source(source)},
+            source_settings_map={
+                "primary": SourceSettings(
+                    plugin=source.name,
+                    on_success="agg_in",
+                    options={},
+                ),
+            },
+            transforms=[],
+            sinks={"output": as_sink(sink)},
+            aggregations={"thread_affinity_agg": (as_transform(transform), agg_settings)},
+            gates=[],
+        )
+        agg_node_id = graph.get_aggregation_id_map()[AggregationName("thread_affinity_agg")]
+        transform.node_id = agg_node_id
+
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[as_transform(transform)],
+            sinks={"output": as_sink(sink)},
+            aggregation_settings={agg_node_id: agg_settings},
+        )
+
+        result = Orchestrator(LandscapeDB.in_memory()).run(
+            config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert source.load_thread_id is not None
+        assert source.next_thread_ids == [source.load_thread_id, source.load_thread_id]
+        assert flush_seen.is_set()
+        assert sink.results[0]["flushed_count"] == 2
 
 
 class TestDatabaseInitialization:

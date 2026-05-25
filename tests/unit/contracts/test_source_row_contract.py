@@ -31,6 +31,20 @@ class TestSourceRowContractInvariant:
         assert contract_param.kind is inspect.Parameter.KEYWORD_ONLY
         assert contract_param.default is inspect.Parameter.empty
 
+    def test_valid_signature_requires_source_row_index_without_default(self) -> None:
+        """SourceRow.valid() should require source-authored row identity at the API boundary."""
+        source_row_index_param = inspect.signature(SourceRow.valid).parameters["source_row_index"]
+
+        assert source_row_index_param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert source_row_index_param.default is inspect.Parameter.empty
+
+    def test_quarantined_signature_requires_source_row_index_without_default(self) -> None:
+        """SourceRow.quarantined() should require source-authored row identity at the API boundary."""
+        source_row_index_param = inspect.signature(SourceRow.quarantined).parameters["source_row_index"]
+
+        assert source_row_index_param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert source_row_index_param.default is inspect.Parameter.empty
+
     def test_valid_without_contract_raises(self) -> None:
         """SourceRow.valid() without contract raises TypeError.
 
@@ -45,10 +59,11 @@ class TestSourceRowContractInvariant:
     def test_valid_with_contract(self, sample_contract: SchemaContract) -> None:
         """SourceRow.valid() with contract succeeds and carries the contract reference."""
         row_data = {"id": 1, "name": "Alice"}
-        source_row = SourceRow.valid(row_data, contract=sample_contract)
+        source_row = SourceRow.valid(row_data, contract=sample_contract, source_row_index=42)
 
         assert source_row.is_quarantined is False
         assert source_row.contract is sample_contract
+        assert source_row.source_row_index == 42
 
     def test_quarantined_no_contract(self) -> None:
         """Quarantined rows don't carry contracts (they failed validation)."""
@@ -56,15 +71,25 @@ class TestSourceRowContractInvariant:
             row={"bad": "data"},
             error="validation failed",
             destination="quarantine",
+            source_row_index=0,
         )
 
         assert source_row.is_quarantined
         assert source_row.contract is None
 
+    def test_quarantined_without_source_row_index_raises(self) -> None:
+        """SourceRow.quarantined() without source_row_index raises TypeError."""
+        with pytest.raises(TypeError, match="source_row_index"):
+            SourceRow.quarantined(
+                row={"bad": "data"},
+                error="validation failed",
+                destination="quarantine",
+            )
+
     def test_to_pipeline_row(self, sample_contract: SchemaContract) -> None:
         """SourceRow can convert to PipelineRow."""
         row_data = {"id": 1, "name": "Alice"}
-        source_row = SourceRow.valid(row_data, contract=sample_contract)
+        source_row = SourceRow.valid(row_data, contract=sample_contract, source_row_index=42)
 
         pipeline_row = source_row.to_pipeline_row()
 
@@ -78,6 +103,7 @@ class TestSourceRowContractInvariant:
             row={"bad": "data"},
             error="failed",
             destination="quarantine",
+            source_row_index=0,
         )
 
         with pytest.raises(ValueError, match="quarantined"):

@@ -16,7 +16,7 @@ import pytest
 
 from elspeth.contracts import Determinism, PipelineRow, RunStatus
 from elspeth.contracts.audit import TokenRef
-from elspeth.contracts.errors import GracefulShutdownError
+from elspeth.contracts.errors import GracefulShutdownError, IncompleteSourceResumeError
 from elspeth.contracts.results import SourceRow
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
@@ -91,6 +91,7 @@ class QuarantineSource(_TestSourceBase):
                 row={"value": i},
                 error=f"validation_error_{i}",
                 destination="quarantine",
+                source_row_index=i,
             )
 
 
@@ -168,8 +169,8 @@ class InterruptingAggregationSource(_TestSourceBase):
         self.on_success = "source_out"
 
     def load(self, ctx: Any) -> Iterator[SourceRow]:
-        for index, row in enumerate(self._rows, start=1):
-            if index >= self._interrupt_after:
+        for source_row_index, row in enumerate(self._rows):
+            if source_row_index + 1 >= self._interrupt_after:
                 self._event.set()
             fields = tuple(
                 FieldContract(
@@ -183,7 +184,7 @@ class InterruptingAggregationSource(_TestSourceBase):
             )
             contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
             self._schema_contract = contract
-            yield SourceRow.valid(row, contract=contract)
+            yield SourceRow.valid(row, contract=contract, source_row_index=source_row_index)
 
 
 def _build_interruptible_aggregation_config(
@@ -634,8 +635,12 @@ class TestInterruptAndResume:
         check = recovery.can_resume(run_id, graph)
         assert check.can_resume, f"Expected resumable buffered shutdown, got: {check.reason}"
 
-    def test_buffered_coalesce_shutdown_restores_pending_join_on_resume(self, landscape_db: LandscapeDB, payload_store) -> None:
-        """Shutdown checkpoint must persist pending coalesces without replaying buffered rows."""
+    def test_buffered_coalesce_shutdown_refuses_completion_without_source_exhaustion(
+        self,
+        landscape_db: LandscapeDB,
+        payload_store,
+    ) -> None:
+        """Shutdown checkpoint persists pending coalesces but cannot complete an interrupted source."""
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings
@@ -713,18 +718,16 @@ class TestInterruptAndResume:
         assert resume_point is not None
         assert resume_point.coalesce_state is not None
 
-        result = orchestrator.resume(
-            resume_point=resume_point,
-            config=config,
-            graph=graph,
-            payload_store=payload_store,
-            settings=settings,
-        )
+        with pytest.raises(IncompleteSourceResumeError, match=r"source.*primary.*interrupted"):
+            orchestrator.resume(
+                resume_point=resume_point,
+                config=config,
+                graph=graph,
+                payload_store=payload_store,
+                settings=settings,
+            )
 
-        assert result.status == RunStatus.COMPLETED
-        assert len(output_sink.results) == 1
-        assert output_sink.results[0]["agg_branch"]["count"] == 1
-        assert output_sink.results[0]["direct_branch"]["value"] == 10
+        assert output_sink.results == []
         with landscape_db.connection() as conn:
             post_resume_work = (
                 conn.execute(
@@ -737,10 +740,14 @@ class TestInterruptAndResume:
                 .all()
             )
         assert post_resume_work
-        assert set(post_resume_work) == {"terminal"}
+        assert set(post_resume_work) == {"blocked"}
 
-    def test_buffered_only_resume_respects_pre_set_shutdown(self, landscape_db: LandscapeDB, payload_store) -> None:
-        """Buffered-only resume must checkpoint again instead of flushing when shutdown is already set."""
+    def test_buffered_only_resume_refuses_interrupted_source_before_pre_set_shutdown(
+        self,
+        landscape_db: LandscapeDB,
+        payload_store,
+    ) -> None:
+        """Buffered-only resume must not turn interrupted source work into completed output."""
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings
@@ -780,7 +787,7 @@ class TestInterruptAndResume:
 
         resume_shutdown = threading.Event()
         resume_shutdown.set()
-        with pytest.raises(GracefulShutdownError):
+        with pytest.raises(IncompleteSourceResumeError, match=r"source.*primary.*interrupted"):
             orchestrator.resume(
                 resume_point=first_resume_point,
                 config=config,
@@ -794,7 +801,7 @@ class TestInterruptAndResume:
 
         second_resume_point = recovery.get_resume_point(run_id, graph)
         assert second_resume_point is not None
-        assert second_resume_point.sequence_number > first_resume_point.sequence_number
+        assert second_resume_point.sequence_number == first_resume_point.sequence_number
         assert second_resume_point.coalesce_state is not None
         assert recovery.get_unprocessed_rows(run_id) == []
 

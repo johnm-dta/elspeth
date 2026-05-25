@@ -32,8 +32,7 @@ def _make_contract() -> SchemaContract:
 def _make_mock_recorder() -> MagicMock:
     """Create a mock ExecutionRepository."""
     recorder = MagicMock()
-    recorder.create_row.return_value = Mock(row_id="row_001")
-    recorder.create_token.return_value = Mock(token_id="token_001")
+    recorder.create_row_with_token.return_value = (Mock(row_id="row_001"), Mock(token_id="token_001"))
     return recorder
 
 
@@ -65,8 +64,8 @@ class TestTokenManagerCreateInitialToken:
         assert token.row_data.contract is contract
 
         # Recorder was called with dict (for landscape storage)
-        recorder.create_row.assert_called_once()
-        call_kwargs = recorder.create_row.call_args.kwargs
+        recorder.create_row_with_token.assert_called_once()
+        call_kwargs = recorder.create_row_with_token.call_args.kwargs
         assert call_kwargs["data"] == {"amount": 100}
 
     def test_create_initial_token_requires_contract(self) -> None:

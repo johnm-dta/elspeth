@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
@@ -32,6 +33,18 @@ from elspeth.core.landscape.schema import (
     token_work_items_table,
     tokens_table,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class BlockedPendingSinkHandoff:
+    """Sink handoff metadata for a BLOCKED scheduler row released by a barrier."""
+
+    row_payload_json: str
+    sink_name: str
+    outcome: str
+    path: str
+    error_hash: str | None
+    error_message: str | None
 
 
 class TokenSchedulerRepository:
@@ -1421,6 +1434,111 @@ class TokenSchedulerRepository:
                         f"run_id={run_id!r} token_id={token_id!r} work_item_id={row['work_item_id']!r}; expected 0 or 1."
                     )
         return terminalized
+
+    def mark_blocked_barrier_pending_sink_many(
+        self,
+        *,
+        run_id: str,
+        barrier_key: str,
+        handoffs: Mapping[str, BlockedPendingSinkHandoff],
+        now: datetime,
+    ) -> int:
+        """Move BLOCKED barrier work to PENDING_SINK before external sink writes."""
+        requested_token_ids = tuple(handoffs.keys())
+        if not requested_token_ids:
+            return 0
+
+        with self._engine.begin() as conn:
+            rows = (
+                conn.execute(
+                    select(token_work_items_table)
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.barrier_key == barrier_key)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+                    .where(token_work_items_table.c.token_id.in_(requested_token_ids))
+                    .order_by(
+                        token_work_items_table.c.ingest_sequence,
+                        token_work_items_table.c.step_index,
+                        token_work_items_table.c.work_item_id,
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            rows_by_token_id: dict[str, list[RowMapping]] = {}
+            for row in rows:
+                row_token_id = row["token_id"]
+                if row_token_id not in rows_by_token_id:
+                    rows_by_token_id[row_token_id] = []
+                rows_by_token_id[row_token_id].append(row)
+
+            for token_id in requested_token_ids:
+                matching_rows = rows_by_token_id[token_id] if token_id in rows_by_token_id else []
+                if not matching_rows:
+                    raise AuditIntegrityError(
+                        f"Scheduler barrier pending-sink handoff for run_id={run_id!r} barrier_key={barrier_key!r} "
+                        f"is missing token_id={token_id!r}; refusing partial sink handoff."
+                    )
+                if len(matching_rows) != 1:
+                    raise AuditIntegrityError(
+                        f"Scheduler barrier pending-sink handoff for run_id={run_id!r} barrier_key={barrier_key!r} "
+                        f"token_id={token_id!r} found {len(matching_rows)} matching rows; expected exactly one."
+                    )
+
+            transitioned = 0
+            for row in rows:
+                handoff = handoffs[row["token_id"]]
+                result = conn.execute(
+                    update(token_work_items_table)
+                    .where(token_work_items_table.c.work_item_id == row["work_item_id"])
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(token_work_items_table.c.barrier_key == barrier_key)
+                    .where(token_work_items_table.c.status == TokenWorkStatus.BLOCKED.value)
+                    .where(token_work_items_table.c.token_id == row["token_id"])
+                    .values(
+                        status=TokenWorkStatus.PENDING_SINK.value,
+                        row_payload_json=handoff.row_payload_json,
+                        pending_sink_name=handoff.sink_name,
+                        pending_outcome=handoff.outcome,
+                        pending_path=handoff.path,
+                        pending_error_hash=handoff.error_hash,
+                        pending_error_message=handoff.error_message,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount == 1:
+                    self._record_scheduler_event(
+                        conn,
+                        event_type=SchedulerEventType.MARK_PENDING_SINK,
+                        run_id=run_id,
+                        token_id=row["token_id"],
+                        work_item_id=row["work_item_id"],
+                        node_id=row["node_id"],
+                        from_status=TokenWorkStatus.BLOCKED,
+                        to_status=TokenWorkStatus.PENDING_SINK,
+                        from_lease_owner=row["lease_owner"],
+                        to_lease_owner=None,
+                        from_attempt=row["attempt"],
+                        to_attempt=row["attempt"],
+                        recorded_at=now,
+                        from_lease_expires_at=row["lease_expires_at"],
+                        to_lease_expires_at=None,
+                        context={"barrier_key": barrier_key},
+                    )
+                    transitioned += 1
+                elif result.rowcount not in (0, None):
+                    raise AuditIntegrityError(
+                        f"Scheduler barrier pending-sink handoff affected {result.rowcount} rows for "
+                        f"run_id={run_id!r} barrier_key={barrier_key!r} work_item_id={row['work_item_id']!r}; expected 0 or 1."
+                    )
+            if transitioned != len(requested_token_ids):
+                raise AuditIntegrityError(
+                    f"Scheduler barrier pending-sink handoff mismatch for run_id={run_id!r} barrier_key={barrier_key!r}: "
+                    f"requested {len(requested_token_ids)} token(s), transitioned {transitioned}."
+                )
+        return transitioned
 
     def mark_pending_sink_terminal_many(
         self,

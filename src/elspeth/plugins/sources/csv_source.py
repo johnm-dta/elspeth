@@ -215,6 +215,7 @@ class CSVSource(BaseSource):
                     row=raw_row,
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=0,
                 )
             return
 
@@ -243,6 +244,7 @@ class CSVSource(BaseSource):
                     row=raw_row,
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=0,
                 )
         finally:
             f.close()
@@ -322,6 +324,7 @@ class CSVSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=skip_idx,
                     )
                 return  # Don't continue with corrupted parser state
 
@@ -377,6 +380,7 @@ class CSVSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=0,
                     )
                 return
 
@@ -486,6 +490,7 @@ class CSVSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=row_num - 1,
                     )
                 return  # Don't continue with corrupted parser state
 
@@ -518,6 +523,7 @@ class CSVSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=row_num - 1,
                     )
                 continue
 
@@ -557,12 +563,14 @@ class CSVSource(BaseSource):
                                 row=validated_row,
                                 error=error_msg,
                                 destination=self._on_validation_failure,
+                                source_row_index=row_num - 1,
                             )
                         continue
 
                 yield SourceRow.valid(
                     validated_row,
                     contract=contract,
+                    source_row_index=row_num - 1,
                 )
             except ValidationError as e:
                 ctx.record_validation_error(
@@ -577,6 +585,7 @@ class CSVSource(BaseSource):
                         row=row,
                         error=str(e),
                         destination=self._on_validation_failure,
+                        source_row_index=row_num - 1,
                     )
 
         # CRITICAL: Handle empty source case (all rows quarantined or no rows)

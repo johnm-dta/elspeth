@@ -55,7 +55,7 @@ class _TestSourceBase:
         """Wrap plain dicts in SourceRow.valid() as required by source protocol."""
         from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
-        for row in rows:
+        for source_row_index, row in enumerate(rows):
             fields = tuple(
                 FieldContract(
                     normalized_name=key,
@@ -69,7 +69,7 @@ class _TestSourceBase:
             contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
             if self._schema_contract is None:
                 self._schema_contract = contract
-            yield SourceRow.valid(row, contract=contract)
+            yield SourceRow.valid(row, contract=contract, source_row_index=source_row_index)
 
     def on_start(self, ctx: Any) -> None:
         pass
@@ -127,7 +127,7 @@ class CallbackSource(_TestSourceBase):
                 for key in row
             )
             contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
-            yield SourceRow.valid(row, contract=contract)
+            yield SourceRow.valid(row, contract=contract, source_row_index=i)
             if self._after_yield_callback is not None:
                 self._after_yield_callback(i)
 

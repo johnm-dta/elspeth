@@ -122,7 +122,7 @@ contracts are the single source of truth.
 | `source_node_id` | `String(64)` NOT NULL | Composite PK with `run_id`; composite FK to `(nodes.node_id, nodes.run_id)`. |
 | `source_name` | `String(64)` NOT NULL | Operator-facing name; unique per run via `UniqueConstraint(run_id, source_name)`. |
 | `plugin_name` | `String(128)` NOT NULL | Source plugin identifier. |
-| `lifecycle_state` | `String(32)` NOT NULL | One of `ready`, `loading`, `loaded`, `interrupted` (enforced by `ck_run_sources_lifecycle_state`). Mirrors `RunSourceLifecycleState`. |
+| `lifecycle_state` | `String(32)` NOT NULL | One of `ready`, `loading`, `exhausted`, `loaded`, `interrupted` (enforced by `ck_run_sources_lifecycle_state`). Mirrors `RunSourceLifecycleState`. |
 | `config_hash` | `String(64)` NOT NULL | Hash of plugin config at registration. |
 | `schema_json` | `Text` | Declared schema (raw form). |
 | `schema_contract_json` | `Text` | Resolved per-source `SchemaContract` (authoritative for resume). |
@@ -227,7 +227,7 @@ row_index"*. See [Plugin Protocol — Source row identity](../contracts/plugin-p
   [Plugin Protocol — Source row identity](../contracts/plugin-protocol.md#source-row-identity--no-fabrication).
 - `run_sources` is the per-source contract surface: `(run_id,
   source_node_id)` is the PK, `(run_id, source_name)` is unique, and
-  `lifecycle_state` is constrained to the four `RunSourceLifecycleState`
+  `lifecycle_state` is constrained to the five `RunSourceLifecycleState`
   enum values. Resume reconstructs schema contracts by joining
   `rows.source_node_id` to `run_sources.schema_contract_json`.
 - `token_work_items` lease state mutations are CAS-gated on

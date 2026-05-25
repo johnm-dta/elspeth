@@ -193,6 +193,7 @@ def make_source_row(
     data: dict[str, Any] | None = None,
     *,
     contract: SchemaContract | None = None,
+    source_row_index: int = 0,
     **kwargs: Any,
 ) -> SourceRow:
     """Build a valid SourceRow from a dict."""
@@ -200,16 +201,17 @@ def make_source_row(
         data = kwargs
     if contract is None:
         contract = make_contract(data)
-    return SourceRow.valid(data, contract=contract)
+    return SourceRow.valid(data, contract=contract, source_row_index=source_row_index)
 
 
 def make_source_row_quarantined(
     data: dict[str, Any],
     error: str = "validation_failed",
     destination: str = "quarantine",
+    source_row_index: int = 0,
 ) -> SourceRow:
     """Build a quarantined SourceRow."""
-    return SourceRow.quarantined(row=data, error=error, destination=destination)
+    return SourceRow.quarantined(row=data, error=error, destination=destination, source_row_index=source_row_index)
 
 
 # =============================================================================

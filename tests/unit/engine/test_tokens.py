@@ -28,7 +28,7 @@ def _make_observed_contract(*field_names: str) -> SchemaContract:
 def _make_source_row(data: dict[str, Any]) -> SourceRow:
     """Create a SourceRow with an OBSERVED contract containing all data fields."""
     contract = _make_observed_contract(*data.keys())
-    return SourceRow.valid(data, contract=contract)
+    return SourceRow.valid(data, contract=contract, source_row_index=0)
 
 
 def _make_pipeline_row(data: dict[str, Any], contract: SchemaContract | None = None) -> PipelineRow:
@@ -930,6 +930,7 @@ class TestTokenManagerBoundaryPaths:
                 row={"raw": "invalid"},
                 error="bad data",
                 destination="quarantine",
+                source_row_index=0,
             ),
             source_row_index=0,
             ingest_sequence=0,
@@ -951,6 +952,7 @@ class TestTokenManagerBoundaryPaths:
                 row=["not", "a", "dict"],
                 error="bad row type",
                 destination="quarantine",
+                source_row_index=0,
             ),
             source_row_index=0,
             ingest_sequence=0,
@@ -1165,6 +1167,7 @@ class TestCreateQuarantineTokenFlag:
             {"bad_data": float("nan")},
             error="NaN value",
             destination="quarantine_sink",
+            source_row_index=0,
         )
 
         # This must NOT raise — quarantined=True enables repr_hash fallback

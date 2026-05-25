@@ -453,6 +453,61 @@ def test_e2e_grandfathered_judge_metadata_mutation_is_flagged(tmp_path: Path) ->
     assert not report.passes
 
 
+def test_e2e_same_rationale_rejudged_after_fingerprint_drift_passes(tmp_path: Path) -> None:
+    """A fresh judge record can replace an old one after source/fingerprint drift."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: same accepted rationale
+          file_fingerprint: '{"0" * 64}'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: judged entry")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=bbbbbbbbbbbbbbbb
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-24T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: same accepted rationale
+          file_fingerprint: '{"1" * 64}'
+          ast_path: body[1]
+          judge_metadata_signature: '{"hmac-sha256:v1:" + "1" * 64}'
+    """)
+    )
+    _commit(tmp_path, "PR: rejudge after fingerprint drift")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert report.violations == ()
+    assert report.passes
+
+
 def test_e2e_baseline_absent_directory_treats_all_entries_as_new(tmp_path: Path) -> None:
     """A directory added in this PR has no baseline — every entry must be judged."""
     enforce_dir = _init_git_fixture(tmp_path)

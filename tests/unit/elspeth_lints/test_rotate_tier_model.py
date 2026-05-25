@@ -594,6 +594,61 @@ def test_check_rotation_audit_flags_unrecorded_rotation(tmp_path: Path) -> None:
     assert violation.new_key == "a.py:R1:foo:fp=bbbb"
 
 
+def test_check_rotation_audit_accepts_rejudged_key_change_without_manifest(tmp_path: Path) -> None:
+    """Re-running justify for a judged entry is not a mechanical rotation."""
+    _init_git_fixture(tmp_path)
+    allowlist_dir = tmp_path / "config" / "cicd" / "enforce_tier_model"
+    allowlist_dir.mkdir(parents=True)
+    (allowlist_dir / "web.yaml").write_text(
+        f"""allow_hits:
+- key: a.py:R1:foo:fp=aaaa
+  owner: team
+  reason: boundary
+  safety: validated
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-23T00:00:00+00:00'
+  judge_model: {DEFAULT_JUDGE_MODEL}
+  judge_policy_hash: '{JUDGE_POLICY_HASH}'
+  judge_rationale: same accepted rationale
+  file_fingerprint: '{"0" * 64}'
+  ast_path: body[0]
+  judge_metadata_signature: '{"hmac-sha256:v1:" + "0" * 64}'
+""",
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "baseline judged entry")
+
+    (allowlist_dir / "web.yaml").write_text(
+        f"""allow_hits:
+- key: a.py:R1:foo:fp=bbbb
+  owner: team
+  reason: boundary
+  safety: validated
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-24T00:00:00+00:00'
+  judge_model: {DEFAULT_JUDGE_MODEL}
+  judge_policy_hash: '{JUDGE_POLICY_HASH}'
+  judge_rationale: same accepted rationale
+  file_fingerprint: '{"1" * 64}'
+  ast_path: body[1]
+  judge_metadata_signature: '{"hmac-sha256:v1:" + "1" * 64}'
+""",
+        encoding="utf-8",
+    )
+    _commit(tmp_path, "rejudge after source drift")
+
+    report = check_rotation_audit_coverage(
+        allowlist_root=tmp_path / "config" / "cicd",
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+        rotation_log_path=tmp_path / ".elspeth" / "rotations.log",
+    )
+
+    assert report.passes
+    assert report.checked_rotation_count == 0
+    assert report.violations == ()
+
+
 def test_check_rotation_audit_accepts_recorded_rotation(tmp_path: Path) -> None:
     """A matching rotations.log entry satisfies the PR gate."""
     _init_git_fixture(tmp_path)

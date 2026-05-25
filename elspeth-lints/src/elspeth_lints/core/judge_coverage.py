@@ -28,7 +28,13 @@ is stripped because it is the AST-position artefact rotation
 mutates. ``owner`` and ``reason`` discriminate between two distinct
 entries that happen to share the parsed-key triple (an unusual but
 legal shape that the triple alone cannot disambiguate).
-``reaudit`` remains the surface for periodic re-judging.
+``reaudit`` remains the surface for periodic re-judging. A judged entry whose
+source binding changed because the operator re-ran ``justify`` after
+source/fingerprint drift is not a grandfathered metadata mutation: it is
+counted as a fresh judged record, provided the HEAD entry carries the complete
+judge metadata cluster and its ``key`` / ``file_fingerprint`` / ``ast_path``
+binding no longer matches any judged baseline binding for the same
+discriminator.
 
 Boundary discipline: this module routes directories into C1 only when
 they contain the standard judge-covered ``allow_hits:`` shape parsed by
@@ -205,6 +211,9 @@ def check_one_directory(
         baseline_matches = baseline_by_discriminator.get(_discriminator(entry))
         if baseline_matches is not None:
             if not _judge_metadata_matches_any_baseline(entry, baseline_matches):
+                if _is_fresh_judge_record_after_binding_drift(entry, baseline_matches):
+                    new_count += 1
+                    continue
                 violations.append(
                     JudgeCoverageViolation(
                         entry_key=entry.key,
@@ -308,6 +317,35 @@ def _judge_metadata_matches_any_baseline(entry: AllowlistEntry, baseline_entries
     """Return whether ``entry`` preserves the judge metadata for its baseline identity."""
     head_payload = _judge_metadata_payload(entry)
     return any(head_payload == _judge_metadata_payload(baseline_entry) for baseline_entry in baseline_entries)
+
+
+def _is_fresh_judge_record_after_binding_drift(entry: AllowlistEntry, baseline_entries: list[AllowlistEntry]) -> bool:
+    """Return whether ``entry`` is a newly-judged replacement for the same audit claim.
+
+    A same-discriminator entry with changed judge metadata is normally a
+    mutation. The legitimate exception is the documented source-drift lifecycle:
+    the operator re-runs ``justify`` for the same owner/reason after the source
+    binding changed, producing a complete fresh record with a different
+    ``key`` / ``file_fingerprint`` / ``ast_path`` tuple. Treat that shape as a
+    judged new record so operators can refresh stale bindings without inventing
+    a different human rationale.
+    """
+    if _missing_judge_fields(entry):
+        return False
+
+    judged_baseline_entries = [baseline_entry for baseline_entry in baseline_entries if _judge_metadata_payload(baseline_entry) is not None]
+    if not judged_baseline_entries:
+        return False
+
+    head_binding = _judge_binding_identity(entry)
+    if any(baseline_entry.judge_metadata_signature == entry.judge_metadata_signature for baseline_entry in judged_baseline_entries):
+        return False
+    return all(_judge_binding_identity(baseline_entry) != head_binding for baseline_entry in judged_baseline_entries)
+
+
+def _judge_binding_identity(entry: AllowlistEntry) -> tuple[str, str | None, str | None]:
+    """Return source-binding fields that a fresh ``justify`` run may legitimately change."""
+    return (entry.key, entry.file_fingerprint, entry.ast_path)
 
 
 def _judge_metadata_payload(entry: AllowlistEntry) -> tuple[object, ...] | None:

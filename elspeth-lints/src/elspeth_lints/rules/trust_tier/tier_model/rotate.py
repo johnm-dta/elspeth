@@ -85,6 +85,28 @@ from .rule import (
 
 _FP_TAG: Final = ":fp="
 DEFAULT_ROTATION_LOG_PATH: Final = Path(".elspeth/rotations.log")
+_JUDGE_METADATA_SIGNATURE_PREFIX: Final = "hmac-sha256:v1:"
+_REJUDGE_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "judge_verdict",
+        "judge_recorded_at",
+        "judge_model",
+        "judge_policy_hash",
+        "judge_rationale",
+        "file_fingerprint",
+        "ast_path",
+        "judge_metadata_signature",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _AllowHitKeyRecord:
+    """Raw allow-hit identity used by the rotation-audit diff."""
+
+    key: str
+    source_binding: tuple[str, object, object] | None
+    judge_metadata_signature: object | None
 
 
 def identity_prefix(canonical_key: str) -> str:
@@ -704,31 +726,33 @@ def _rotation_requirements_from_git_diff(
         if baseline_text is None:
             continue
         head_text = head_path.read_text(encoding="utf-8")
-        old_by_prefix = _allow_hit_keys_by_prefix(baseline_text, source_label=f"baseline {baseline_ref}:{rel_path}")
-        new_by_prefix = _allow_hit_keys_by_prefix(head_text, source_label=rel_path)
+        old_by_prefix = _allow_hit_key_records_by_prefix(baseline_text, source_label=f"baseline {baseline_ref}:{rel_path}")
+        new_by_prefix = _allow_hit_key_records_by_prefix(head_text, source_label=rel_path)
         allowlist_dir = Path(rel_path).parent.as_posix()
         source_file = Path(rel_path).name
         for prefix in sorted(set(old_by_prefix) & set(new_by_prefix)):
-            old_keys = sorted(old_by_prefix[prefix])
-            new_keys = sorted(new_by_prefix[prefix])
-            if len(old_keys) != len(new_keys):
+            old_records = sorted(old_by_prefix[prefix], key=lambda record: record.key)
+            new_records = sorted(new_by_prefix[prefix], key=lambda record: record.key)
+            if len(old_records) != len(new_records):
                 continue
-            for old_key, new_key in zip(old_keys, new_keys, strict=True):
-                if old_key == new_key:
+            for old_record, new_record in zip(old_records, new_records, strict=True):
+                if old_record.key == new_record.key:
+                    continue
+                if _is_rejudged_key_change(old_record, new_record):
                     continue
                 requirements.append(
                     RotationAuditViolation(
                         allowlist_file=rel_path,
                         allowlist_dir=allowlist_dir,
                         source_file=source_file,
-                        old_key=old_key,
-                        new_key=new_key,
+                        old_key=old_record.key,
+                        new_key=new_record.key,
                     )
                 )
     return tuple(requirements)
 
 
-def _allow_hit_keys_by_prefix(text: str, *, source_label: str) -> dict[str, list[str]]:
+def _allow_hit_key_records_by_prefix(text: str, *, source_label: str) -> dict[str, list[_AllowHitKeyRecord]]:
     try:
         data = yaml.safe_load(text) or {}
     except yaml.YAMLError as exc:
@@ -741,15 +765,52 @@ def _allow_hit_keys_by_prefix(text: str, *, source_label: str) -> dict[str, list
     if not isinstance(raw_entries, list):
         raise RotationAuditError(f"{source_label}: allow_hits must be a list")
 
-    by_prefix: dict[str, list[str]] = defaultdict(list)
+    by_prefix: dict[str, list[_AllowHitKeyRecord]] = defaultdict(list)
     for index, raw_entry in enumerate(raw_entries):
         if not isinstance(raw_entry, dict):
             raise RotationAuditError(f"{source_label}: allow_hits[{index}] must be a mapping")
         key = raw_entry.get("key")
         if not isinstance(key, str) or _FP_TAG not in key:
             continue
-        by_prefix[identity_prefix(key)].append(key)
+        by_prefix[identity_prefix(key)].append(_allow_hit_key_record(key=key, raw_entry=raw_entry))
     return by_prefix
+
+
+def _allow_hit_key_record(*, key: str, raw_entry: dict[object, object]) -> _AllowHitKeyRecord:
+    if not _has_complete_rejudge_metadata(raw_entry):
+        return _AllowHitKeyRecord(
+            key=key,
+            source_binding=None,
+            judge_metadata_signature=None,
+        )
+    return _AllowHitKeyRecord(
+        key=key,
+        source_binding=(key, raw_entry["file_fingerprint"], raw_entry["ast_path"]),
+        judge_metadata_signature=raw_entry["judge_metadata_signature"],
+    )
+
+
+def _has_complete_rejudge_metadata(raw_entry: dict[object, object]) -> bool:
+    for field in _REJUDGE_REQUIRED_FIELDS:
+        value = raw_entry.get(field)
+        if value is None or value == "":
+            return False
+    signature = raw_entry.get("judge_metadata_signature")
+    if not isinstance(signature, str):
+        return False
+    digest = signature.removeprefix(_JUDGE_METADATA_SIGNATURE_PREFIX)
+    return (
+        signature.startswith(_JUDGE_METADATA_SIGNATURE_PREFIX) and len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
+    )
+
+
+def _is_rejudged_key_change(old_record: _AllowHitKeyRecord, new_record: _AllowHitKeyRecord) -> bool:
+    """Return whether a same-prefix key change is a fresh judge write, not rotation."""
+    if old_record.source_binding is None or new_record.source_binding is None:
+        return False
+    if old_record.source_binding == new_record.source_binding:
+        return False
+    return old_record.judge_metadata_signature != new_record.judge_metadata_signature
 
 
 def _load_rotation_manifest_records(*, rotation_log_path: Path, repo_root: Path) -> set[tuple[str, str, str, str]]:

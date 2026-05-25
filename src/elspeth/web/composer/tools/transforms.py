@@ -33,7 +33,7 @@ from elspeth.web.composer.tools._common import (
     _discovery_result,
     _failure_result,
     _mutation_result,
-    _options_with_default_prompt_template_review,
+    _options_with_default_llm_reviews,
     _prevalidate_transform,
     _validate_aggregation_trigger,
     _validate_mutation_arguments,
@@ -434,7 +434,7 @@ def _execute_upsert_node(
         if batch_required_error is not None:
             return _failure_result(state, batch_required_error)
 
-        review_options = _options_with_default_prompt_template_review(
+        review_options = _options_with_default_llm_reviews(
             node_id=node_id,
             plugin=plugin,
             options=node_options,
@@ -468,7 +468,7 @@ def _execute_upsert_node(
         input=validated.input,
         on_success=validated.on_success,
         on_error=validated.on_error or ("discard" if node_type in ("transform", "aggregation") else None),
-        options=_options_with_default_prompt_template_review(
+        options=_options_with_default_llm_reviews(
             node_id=node_id,
             plugin=plugin,
             options=node_options,
@@ -703,7 +703,7 @@ def _execute_patch_node_options(
     if routing_patch_error is not None:
         return _failure_result(state, routing_patch_error)
     new_options: Mapping[str, Any] = _apply_merge_patch(current.options, patch)
-    new_options = _options_with_default_prompt_template_review(
+    new_options = _options_with_default_llm_reviews(
         node_id=node_id,
         plugin=current.plugin,
         options=new_options,

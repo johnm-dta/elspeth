@@ -7128,6 +7128,58 @@ class TestListModels:
         # Must not contain the non-round-trippable "(no provider)" label
         assert "(no provider)" not in providers
 
+    def test_list_models_openrouter_reads_live_catalog(self) -> None:
+        """``provider="openrouter/"`` returns the live-catalog slice, not the bundled litellm slice.
+
+        Closes the loop between composer discovery and validator preflight:
+        the validator (``CatalogValueSource`` on ``OpenRouterLLMProviderConfig``)
+        rejects model identifiers absent from ``get_catalog_values(MODEL_CATALOG_OPENROUTER)``,
+        so the discovery tool MUST advertise the exact same set. A
+        regression here re-opens the
+        ``ValueSourceValidationError`` class of tutorial-run failure.
+        """
+        from elspeth.contracts.value_source import get_catalog_values
+        from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        live = get_catalog_values(MODEL_CATALOG_OPENROUTER)
+        if not live:
+            pytest.skip("OpenRouter catalog empty; cannot verify wiring")
+        result = execute_tool(
+            "list_models",
+            {"provider": "openrouter/", "limit": 1000},
+            state,
+            catalog,
+        )
+        assert result.success is True
+        returned = set(result.data["models"])
+        # Sample-correctness: every advertised model exists in the live catalog.
+        assert returned <= live, (
+            "list_models advertised openrouter slugs absent from the live catalog "
+            f"(strays={returned - live!r}) — composer discovery and validator preflight drifted apart"
+        )
+
+    def test_list_models_openrouter_count_reflects_live_catalog(self) -> None:
+        """The unfiltered summary advertises the live-catalog count for openrouter.
+
+        Prevents the regression where the summary's ``providers["openrouter"]``
+        count came from the stale bundled litellm list while a follow-up
+        ``provider="openrouter/"`` filter returned the live (smaller) set.
+        """
+        from elspeth.contracts.value_source import get_catalog_values
+        from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        live = get_catalog_values(MODEL_CATALOG_OPENROUTER)
+        if not live:
+            pytest.skip("OpenRouter catalog empty; cannot verify wiring")
+        result = execute_tool("list_models", {}, state, catalog)
+        assert result.success is True
+        providers = result.data["providers"]
+        assert providers.get("openrouter") == len(live)
+
 
 # ---------------------------------------------------------------------------
 # get_audit_info tool tests

@@ -128,6 +128,20 @@ function getReviewPresentation(event: InterpretationEvent): ReviewPresentation {
         acceptLabel: "Use pipeline decision",
         acceptAriaLabel: "Accept pipeline decision",
       };
+    case "llm_model_choice":
+      return {
+        heading: "LLM model choice",
+        status: "LLM model choice needs review",
+        body: (
+          <>
+            I picked the model <em>{llmDraft || "(unspecified)"}</em> for{" "}
+            <em>{event.affected_node_id ?? "this transform"}</em>. Accept it, or
+            change the model before running.
+          </>
+        ),
+        acceptLabel: "Use this model",
+        acceptAriaLabel: "Accept LLM model choice",
+      };
     case "vague_term":
     case null:
       return {
@@ -379,6 +393,9 @@ export function InterpretationReviewTurn({
         <InventedSourceDraft value={llmDraft} />
       )}
       {event.kind === "pipeline_decision" && (
+        <InventedSourceDraft value={llmDraft} />
+      )}
+      {event.kind === "llm_model_choice" && (
         <InventedSourceDraft value={llmDraft} />
       )}
       {event.kind === "llm_prompt_template" && (

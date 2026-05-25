@@ -160,6 +160,7 @@ def test_interpretation_kind_closed_set() -> None:
         "invented_source",
         "llm_prompt_template",
         "pipeline_decision",
+        "llm_model_choice",
     ]
 
 

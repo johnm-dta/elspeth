@@ -15,12 +15,14 @@ from sqlalchemy import Engine
 
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.schema import get_aggregation_contract_options
+from elspeth.contracts.value_source import get_catalog_values
 from elspeth.core.expression_parser import ExpressionEvaluationError, ExpressionParser
 from elspeth.plugins.infrastructure.manager import (
     PluginNotFoundError,
     get_shared_plugin_manager,
 )
 from elspeth.plugins.transforms.llm.model_catalog import (
+    MODEL_CATALOG_OPENROUTER,
     OPENROUTER_LITELLM_PREFIX,
     read_litellm_model_list,
 )
@@ -648,9 +650,18 @@ def _execute_list_models(
     to avoid dumping hundreds of entries. With a provider filter,
     returns matching model IDs capped at ``limit``.
 
-    Reads via :func:`read_litellm_model_list` so this tool and the
-    value-source compliance walker share a single source of truth for
-    what counts as "a known model."
+    For ``provider="openrouter/"`` the slugs are read from the live
+    OpenRouter catalog primed at boot (or the bundled litellm fallback
+    when the primer hasn't run / is offline) via
+    :func:`get_catalog_values` against :data:`MODEL_CATALOG_OPENROUTER` —
+    the same catalog accessor the value-source compliance walker
+    consults at preflight. Sharing one source of truth between the
+    composer's discovery surface and the validator closes the
+    "composer recommended a model the validator then rejects" loop
+    that previously surfaced as ``ValueSourceValidationError`` on
+    tutorial runs. Non-OpenRouter providers continue to be served from
+    the bundled litellm list because no per-provider live primer exists
+    yet.
     """
     del context  # unused; signature uniformity with the other handlers.
     all_models: list[str] = list(read_litellm_model_list())
@@ -661,24 +672,21 @@ def _execute_list_models(
         limit = 50
 
     if provider is not None and isinstance(provider, str):
-        if provider == "":
+        normalised = provider.rstrip("/")
+        if normalised == OPENROUTER_LITELLM_PREFIX.rstrip("/"):
+            # Live-catalog read returns un-prefixed slugs already (e.g.
+            # ``anthropic/claude-sonnet-4.5``) — exactly the form the
+            # OpenRouterLLMProvider config field ``model`` expects and
+            # the value-source walker compares against. No prefix strip
+            # needed; the litellm fallback path inside
+            # ``get_catalog_values`` already strips ``openrouter/`` from
+            # its bundled list.
+            filtered = sorted(get_catalog_values(MODEL_CATALOG_OPENROUTER))
+        elif provider == "":
             # Empty string means "models without a provider prefix"
             filtered = [m for m in all_models if "/" not in m]
         else:
             filtered = [m for m in all_models if m.startswith(provider)]
-        # OpenRouter consumers (the actual HTTP API at /chat/completions)
-        # expect un-prefixed slugs (e.g. ``openai/gpt-4o``, not
-        # ``openrouter/openai/gpt-4o``). The litellm representation carries
-        # an ``openrouter/`` routing prefix that ELSPETH's
-        # OpenRouterLLMProvider does not strip — so the tool returns the
-        # un-prefixed form to match what the user must put in their YAML
-        # and what the value-source compliance validator accepts. The
-        # OPENROUTER_LITELLM_PREFIX constant lives next to the catalog
-        # reader so both sites strip identically.
-        normalised = provider.rstrip("/")
-        if normalised == OPENROUTER_LITELLM_PREFIX.rstrip("/"):
-            prefix_len = len(OPENROUTER_LITELLM_PREFIX)
-            filtered = [m[prefix_len:] for m in filtered]
         truncated = len(filtered) > limit
         data: dict[str, Any] = {
             "models": filtered[:limit],
@@ -699,9 +707,25 @@ def _execute_list_models(
             if prefix not in providers:
                 providers[prefix] = 0
             providers[prefix] += 1
+        # Replace the bundled-litellm openrouter count with the live
+        # catalog size so the unfiltered summary advertises the same
+        # numbers a follow-up ``provider="openrouter/"`` filter will
+        # return. The litellm bundled list and the live OpenRouter
+        # catalog drift apart as Anthropic / OpenAI rotate model slugs;
+        # advertising the bundled count would invite the composer to
+        # request a "known" model that the validator then rejects.
+        openrouter_key = OPENROUTER_LITELLM_PREFIX.rstrip("/")
+        live_openrouter = get_catalog_values(MODEL_CATALOG_OPENROUTER)
+        if openrouter_key in providers:
+            bundled = providers[openrouter_key]
+            providers[openrouter_key] = len(live_openrouter)
+            total_models = len(all_models) - bundled + len(live_openrouter)
+        else:
+            providers[openrouter_key] = len(live_openrouter)
+            total_models = len(all_models) + len(live_openrouter)
         data = {
             "providers": providers,
-            "total_models": len(all_models),
+            "total_models": total_models,
             "hint": "Use provider parameter to list models for a specific provider. An empty string key means models without a provider prefix.",
         }
 

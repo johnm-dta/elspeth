@@ -844,53 +844,35 @@ def test_prompt_shield_hash_changes_when_authorized_shield_inserted() -> None:
     assert hash_unshielded != hash_shielded
 
 
-def test_prompt_shield_hash_drift_after_model_swap_does_not_block_preflight() -> None:
-    """End-to-end regression: resolve shield review on model=3.7, swap to 3.5, expect no drift error.
+def test_prompt_shield_hash_survives_model_swap() -> None:
+    """Narrow shield-hash invariant: model swap does not invalidate shield review.
 
-    This mirrors the staging session timeline (b930f0aa-…) — the composer LLM
+    Mirrors the staging session timeline (b930f0aa-…) — the composer LLM
     resolved the shield recommendation against a v4 state with model=3.7-sonnet
-    and then patched the model to 3.5-sonnet at v8. Preflight at v9 used to
-    raise ``pipeline-decision review hash drifted``; with the narrowed hash
-    the resolved review survives the model swap and execution proceeds.
+    and then patched the model to 3.5-sonnet at v8. The narrowed
+    ``pipeline_decision_artifact_hash`` domain (which deliberately excludes
+    ``options.model``) MUST keep the prompt-shield review valid through
+    that swap — the shield review's premise is "untrusted content into an
+    LLM", not "this specific model".
+
+    Asserts ONLY the hash-domain invariant. The model swap separately
+    surfaces a new ``llm_model_choice`` review (algorithmic enforcement
+    of the "every model choice surfaced" contract), and the auto-stager
+    is responsible for re-staging that requirement when the mutation
+    pipeline patches ``options.model``. That behavior is pinned in the
+    auto-stager tests; this test focuses on the shield-hash invariant
+    alone.
     """
 
     prompt = "Identify: {{ row.url }} {{ row.content }}"
 
-    def _options_with_both_reviews(model: str) -> dict[str, Any]:
-        opts = _shield_review_llm_options(model=model, prompt_template=prompt)
-        opts["resolved_prompt_template_hash"] = stable_hash(prompt)
-        existing_requirements = list(opts[INTERPRETATION_REQUIREMENTS_KEY])  # type: ignore[arg-type]
-        existing_requirements.append(
-            {
-                "id": "llm_prompt_template:identify_colours",
-                "kind": "llm_prompt_template",
-                "user_term": "llm_prompt_template:identify_colours",
-                "status": "resolved",
-                "draft": prompt,
-                "event_id": "prompt-template-resolve-1",
-                "accepted_value": prompt,
-                "accepted_artifact_hash": None,
-                "resolved_prompt_template_hash": stable_hash(prompt),
-            }
-        )
-        opts[INTERPRETATION_REQUIREMENTS_KEY] = existing_requirements
-        return opts
+    pre_swap = _state_with_web_scrape_llm_pair(_shield_review_llm_options(model="anthropic/claude-3.7-sonnet", prompt_template=prompt))
+    pre_swap_hash = pipeline_decision_artifact_hash(pre_swap.nodes[1], pre_swap.nodes, user_term=PROMPT_SHIELD_USER_TERM)
 
-    pre_swap = _state_with_web_scrape_llm_pair(_options_with_both_reviews("anthropic/claude-3.7-sonnet"))
-    accepted_hash = pipeline_decision_artifact_hash(pre_swap.nodes[1], pre_swap.nodes, user_term=PROMPT_SHIELD_USER_TERM)
+    post_swap = _state_with_web_scrape_llm_pair(_shield_review_llm_options(model="anthropic/claude-3.5-sonnet", prompt_template=prompt))
+    post_swap_hash = pipeline_decision_artifact_hash(post_swap.nodes[1], post_swap.nodes, user_term=PROMPT_SHIELD_USER_TERM)
 
-    post_swap_options = _options_with_both_reviews("anthropic/claude-3.5-sonnet")
-    shield_requirement = dict(post_swap_options[INTERPRETATION_REQUIREMENTS_KEY][0])  # type: ignore[index]
-    shield_requirement["accepted_artifact_hash"] = accepted_hash
-    requirements = list(post_swap_options[INTERPRETATION_REQUIREMENTS_KEY])  # type: ignore[arg-type]
-    requirements[0] = shield_requirement
-    post_swap_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
-    post_swap = _state_with_web_scrape_llm_pair(post_swap_options)
-
-    materialized = materialize_state_for_execution(post_swap)
-
-    assert isinstance(materialized, CompositionState)
-    assert materialized.nodes[1].options["model"] == "anthropic/claude-3.5-sonnet"
+    assert pre_swap_hash == post_swap_hash
 
 
 def test_raw_html_cleanup_hash_includes_upstream_raw_field_set() -> None:

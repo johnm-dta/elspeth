@@ -40,7 +40,7 @@ cannot accidentally hide real violations.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from elspeth_lints.core.ast_walker import walk_function_own_scope
@@ -104,26 +104,77 @@ class BoundaryFinding:
 
 
 _TRUST_BOUNDARY_NAME = "trust_boundary"
+_TRUST_BOUNDARY_EXPORT = "elspeth.contracts.trust_boundary"
+_TRUST_BOUNDARY_FUNCTION = "elspeth.contracts.trust_boundary.trust_boundary"
+_TRUST_BOUNDARY_QUALIFIED_NAMES: frozenset[str] = frozenset(
+    {
+        _TRUST_BOUNDARY_EXPORT,
+        _TRUST_BOUNDARY_FUNCTION,
+    }
+)
 
 
-def _is_trust_boundary_decorator(decorator: ast.expr) -> ast.Call | None:
+def _dotted_name(expr: ast.expr) -> tuple[str, ...] | None:
+    if isinstance(expr, ast.Name):
+        return (expr.id,)
+    if isinstance(expr, ast.Attribute):
+        base = _dotted_name(expr.value)
+        if base is None:
+            return None
+        return (*base, expr.attr)
+    return None
+
+
+def _matches_elspeth_trust_boundary_import(
+    func: ast.expr,
+    import_aliases: Mapping[str, str],
+) -> bool:
+    """Return True when ``func`` resolves to Elspeth's trust-boundary decorator."""
+    parts = _dotted_name(func)
+    if parts is None:
+        return False
+
+    alias_target = import_aliases.get(parts[0])
+    dotted = ".".join(parts)
+    if alias_target is None:
+        return dotted in _TRUST_BOUNDARY_QUALIFIED_NAMES
+
+    target_parts = tuple(alias_target.split("."))
+    if parts[: len(target_parts)] == target_parts:
+        resolved = dotted
+    else:
+        resolved = ".".join((*target_parts, *parts[1:]))
+    return resolved in _TRUST_BOUNDARY_QUALIFIED_NAMES
+
+
+def _is_trust_boundary_decorator(
+    decorator: ast.expr,
+    *,
+    import_aliases: Mapping[str, str] | None = None,
+) -> ast.Call | None:
     """Return the ``ast.Call`` if ``decorator`` references ``trust_boundary``.
 
     Recognises all three documented spellings:
 
-    * ``@trust_boundary(...)`` after ``from elspeth.contracts import trust_boundary``;
+    * ``@trust_boundary(...)`` after importing the function from
+      ``elspeth.contracts`` or ``elspeth.contracts.trust_boundary``;
     * ``@elspeth.contracts.trust_boundary(...)``;
-    * ``@contracts.trust_boundary(...)``.
+    * ``@contracts.trust_boundary(...)`` after ``import elspeth.contracts as
+      contracts`` or ``from elspeth import contracts``;
+    * ``@tb_mod.trust_boundary(...)`` after importing
+      ``elspeth.contracts.trust_boundary`` as ``tb_mod``.
 
-    All three reduce to either ``ast.Name(id="trust_boundary")`` or an
-    ``ast.Attribute`` chain terminating in ``attr="trust_boundary"`` at the
-    ``Call.func`` site. Bare-decorator usage (``@trust_boundary`` without a
-    call) is not recognised — the decorator is keyword-only and never appears
-    without arguments — so we only accept ``ast.Call`` here.
+    When ``import_aliases`` is provided by the tier-model visitor, the match is
+    import-aware: a local ``foo.trust_boundary`` or ``from foo import
+    trust_boundary`` cannot masquerade as Elspeth's decorator and hide R1/R5
+    findings. ``import_aliases=None`` keeps the extraction helper usable in
+    direct metadata unit tests that parse only a function body.
     """
     if not isinstance(decorator, ast.Call):
         return None
     func = decorator.func
+    if import_aliases is not None:
+        return decorator if _matches_elspeth_trust_boundary_import(func, import_aliases) else None
     if isinstance(func, ast.Name) and func.id == _TRUST_BOUNDARY_NAME:
         return decorator
     if isinstance(func, ast.Attribute) and func.attr == _TRUST_BOUNDARY_NAME:
@@ -131,7 +182,11 @@ def _is_trust_boundary_decorator(decorator: ast.expr) -> ast.Call | None:
     return None
 
 
-def find_trust_boundary_calls(decorator_list: Iterable[ast.expr]) -> list[ast.Call]:
+def find_trust_boundary_calls(
+    decorator_list: Iterable[ast.expr],
+    *,
+    import_aliases: Mapping[str, str] | None = None,
+) -> list[ast.Call]:
     """Locate all ``@trust_boundary(...)`` calls in a function's decorator list.
 
     Order-independent: one trust-boundary decorator may appear anywhere in the
@@ -142,7 +197,7 @@ def find_trust_boundary_calls(decorator_list: Iterable[ast.expr]) -> list[ast.Ca
     """
     calls: list[ast.Call] = []
     for decorator in decorator_list:
-        call = _is_trust_boundary_decorator(decorator)
+        call = _is_trust_boundary_decorator(decorator, import_aliases=import_aliases)
         if call is not None:
             calls.append(call)
     return calls
@@ -206,6 +261,8 @@ def _literal_value(node: ast.expr) -> tuple[bool, object]:
 
 def extract_boundary_metadata(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    import_aliases: Mapping[str, str] | None = None,
 ) -> tuple[BoundaryMetadata | None, list[BoundaryFinding]]:
     """Parse a function's ``@trust_boundary`` decorator, if any.
 
@@ -228,7 +285,7 @@ def extract_boundary_metadata(
     * ``R_TB_STACKED`` — the function carries multiple ``@trust_boundary``
       decorators, so the analyzer refuses to choose one suppression claim.
     """
-    calls = find_trust_boundary_calls(func_node.decorator_list)
+    calls = find_trust_boundary_calls(func_node.decorator_list, import_aliases=import_aliases)
     if not calls:
         return None, []
     if len(calls) > 1:

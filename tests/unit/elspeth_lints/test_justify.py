@@ -298,6 +298,35 @@ def _mock_judge_call(
         yield client_class
 
 
+@contextmanager
+def _mock_judge_call_without_hmac(
+    *,
+    verdict: str,
+    rationale: str,
+    confidence: float = 0.91,
+    prompt_tokens: int = 4000,
+    cached_tokens: int | None = 0,
+    served_model: str | None = DEFAULT_JUDGE_MODEL,
+) -> Iterator[MagicMock]:
+    """Patch the judge client while leaving metadata signing unconfigured."""
+    fake_completion = _mock_openrouter_completion(
+        verdict=verdict,
+        rationale=rationale,
+        confidence=confidence,
+        prompt_tokens=prompt_tokens,
+        cached_tokens=cached_tokens,
+        served_model=served_model,
+    )
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+    with (
+        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch("openai.OpenAI", return_value=fake_client) as client_class,
+    ):
+        os.environ.pop("ELSPETH_JUDGE_METADATA_HMAC_KEY", None)
+        yield client_class
+
+
 # ---------- call_judge contract ----------
 
 
@@ -782,6 +811,39 @@ def test_justify_blocked_does_not_write_and_exits_nonzero(tmp_path: Path, capsys
     assert "rationale is shallow" in captured.out
 
 
+def test_justify_non_dry_run_requires_hmac_before_judge_call(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A write-capable justify run must not spend a judge call before HMAC preflight."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "This would write if the judge accepted it",
+        "--owner",
+        "test-agent",
+    ]
+    with _mock_judge_call_without_hmac(verdict="ACCEPTED", rationale="acceptable") as client_class:
+        exit_code = main(argv)
+
+    assert exit_code == 2
+    assert client_class.call_count == 0
+    captured = capsys.readouterr()
+    assert "ELSPETH_JUDGE_METADATA_HMAC_KEY" in captured.err
+    assert not (allowlist_dir / "plugins.yaml").exists()
+
+
 def test_justify_blocked_without_override_writes_under_override_event(tmp_path: Path) -> None:
     """A BLOCKED suppression attempt leaves a C3 under-override metric trace."""
     root, _target = _build_source_tree(tmp_path)
@@ -1216,6 +1278,69 @@ def test_justify_blocked_dry_run_does_not_write_judge_metrics(tmp_path: Path) ->
 
     assert not (allowlist_dir / "plugins.yaml").exists()
     assert not judge_decision_events_path(allowlist_dir).exists()
+
+
+def test_justify_blocked_dry_run_without_hmac_surfaces_judge_rationale(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A non-writing BLOCKED preview must not try to sign a YAML entry."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "I want to preview the judge decision only",
+        "--owner",
+        "test-agent-dry-run",
+        "--dry-run",
+    ]
+    with _mock_judge_call_without_hmac(verdict="BLOCKED", rationale="rationale is shallow; fix the code"):
+        exit_code = main(argv)
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "BLOCKED" in captured.out
+    assert "rationale is shallow" in captured.out
+    assert "ELSPETH_JUDGE_METADATA_HMAC_KEY" not in captured.err
+    assert not (allowlist_dir / "plugins.yaml").exists()
+
+
+def test_justify_accepted_dry_run_without_hmac_does_not_write_or_fail_late(tmp_path: Path) -> None:
+    """Accepted dry-run previews are non-writing and must not need the signing key."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "I want to preview the judge decision only",
+        "--owner",
+        "test-agent-dry-run",
+        "--dry-run",
+    ]
+    with _mock_judge_call_without_hmac(verdict="ACCEPTED", rationale="suppression rationale is adequate"):
+        exit_code = main(argv)
+
+    assert exit_code == 0
+    assert not (allowlist_dir / "plugins.yaml").exists()
 
 
 def test_justify_cli_forwards_max_tokens_to_judge(tmp_path: Path) -> None:

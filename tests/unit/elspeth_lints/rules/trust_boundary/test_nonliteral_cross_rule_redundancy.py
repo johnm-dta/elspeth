@@ -27,6 +27,8 @@ from elspeth_lints.rules.trust_tier.tier_model import RULE as TIER_MODEL_RULE
 
 _FIXTURE = textwrap.dedent(
     """
+    from elspeth.contracts import trust_boundary
+
     SOME_TIER = 3
     @trust_boundary(
         tier=SOME_TIER,

@@ -737,7 +737,7 @@ class TierModelVisitor(ast.NodeVisitor):
         can flag the decorator at lint time even if the function is never
         imported. A mismatch is reported as R_TB_MALFORMED.
         """
-        metadata, diagnostics = extract_boundary_metadata(node)
+        metadata, diagnostics = extract_boundary_metadata(node, import_aliases=self._import_aliases)
         for diagnostic in diagnostics:
             self._add_boundary_diagnostic(diagnostic)
 

@@ -651,6 +651,88 @@ class TestDecoratorStackOrdering:
         findings = _findings(source)
         assert _findings_by_rule(findings, "R1") == []
 
+    def test_elspeth_contracts_alias_attribute_form_recognised(self) -> None:
+        """``import elspeth.contracts as contracts`` remains a valid spelling."""
+        source = dedent("""
+            import elspeth.contracts as contracts
+
+            @contracts.trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="x",
+            )
+            def handler(arguments):
+                arguments.get("k")
+                return None
+        """)
+        findings = _findings(source)
+        assert _findings_by_rule(findings, "R1") == []
+
+    def test_non_elspeth_attribute_named_trust_boundary_does_not_suppress(self) -> None:
+        """An unrelated ``foo.trust_boundary`` decorator is not Elspeth's boundary."""
+        source = dedent("""
+            import foo
+
+            @foo.trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="x",
+            )
+            def handler(arguments):
+                arguments.get("k")
+                return None
+        """)
+        visitor = _visitor(source)
+
+        assert len(_findings_by_rule(visitor.findings, "R1")) == 1
+        assert _findings_by_rule(visitor.suppressed_findings, "R_TB_SUPPRESSED") == []
+
+    def test_shadowed_elspeth_name_does_not_suppress(self) -> None:
+        """An alias named ``elspeth`` is not enough; it must resolve to Elspeth."""
+        source = dedent("""
+            import foo as elspeth
+
+            @elspeth.contracts.trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="x",
+            )
+            def handler(arguments):
+                arguments.get("k")
+                return None
+        """)
+        visitor = _visitor(source)
+
+        assert len(_findings_by_rule(visitor.findings, "R1")) == 1
+        assert _findings_by_rule(visitor.suppressed_findings, "R_TB_SUPPRESSED") == []
+
+    def test_non_elspeth_bare_import_named_trust_boundary_does_not_suppress(self) -> None:
+        """``from foo import trust_boundary`` must not masquerade as Elspeth's decorator."""
+        source = dedent("""
+            from foo import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="x",
+            )
+            def handler(arguments):
+                arguments.get("k")
+                return None
+        """)
+        visitor = _visitor(source)
+
+        assert len(_findings_by_rule(visitor.findings, "R1")) == 1
+        assert _findings_by_rule(visitor.suppressed_findings, "R_TB_SUPPRESSED") == []
+
 
 # =============================================================================
 # Async functions

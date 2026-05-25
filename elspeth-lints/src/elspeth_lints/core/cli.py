@@ -1122,7 +1122,7 @@ def _run_justify(args: argparse.Namespace) -> int:
     # Lazy imports: the judge module pulls in the anthropic SDK on
     # ``call_judge``, the tier_model rule is heavy. Keep the CLI
     # responsive on subcommands that don't need them.
-    from elspeth_lints.core.allowlist import JudgeVerdict
+    from elspeth_lints.core.allowlist import JudgeVerdict, _judge_metadata_hmac_key
     from elspeth_lints.core.judge import (
         DEFAULT_JUDGE_MAX_TOKENS,
         DEFAULT_JUDGE_MODEL,
@@ -1281,6 +1281,13 @@ def _run_justify(args: argparse.Namespace) -> int:
         )
         return 2
 
+    if not args.dry_run:
+        try:
+            _judge_metadata_hmac_key()
+        except ValueError as exc:
+            sys.stderr.write(f"Judge metadata signature configuration error: {exc}\n")
+            return 2
+
     # Source-excerpt secrets-scrubber gate (closes elspeth-9bbb9df9a5 /
     # C2-2). ``extract_safe_excerpt`` is the single chokepoint between
     # local source bytes and OpenRouter; it path-contains, reads, and
@@ -1368,22 +1375,26 @@ def _run_justify(args: argparse.Namespace) -> int:
     # and asserts the binding still holds, closing the quartet-
     # transplant attack vector.
     file_fingerprint = safe_excerpt.file_fingerprint
-    yaml_entry = _build_yaml_entry_text(
-        key=finding_key,
-        owner=args.owner,
-        reason=args.rationale,
-        verdict=write_verdict,
-        recorded_at=response.recorded_at,
-        model_id=response.model_id,
-        judge_rationale=response.judge_rationale,
-        judge_confidence=response.confidence,
-        policy_hash=response.policy_hash,
-        model_verdict=model_verdict,
-        file_fingerprint=file_fingerprint,
-        ast_path=_finding_ast_path(finding),
-        excerpt_redactions=safe_excerpt.redactions,
-    )
     target_yaml = _suggest_yaml_target(finding=finding, allowlist_dir=allowlist_dir)
+
+    def build_signed_yaml_entry() -> str:
+        return _build_yaml_entry_text(
+            key=finding_key,
+            owner=args.owner,
+            reason=args.rationale,
+            verdict=write_verdict,
+            recorded_at=response.recorded_at,
+            model_id=response.model_id,
+            judge_rationale=response.judge_rationale,
+            judge_confidence=response.confidence,
+            policy_hash=response.policy_hash,
+            model_verdict=model_verdict,
+            file_fingerprint=file_fingerprint,
+            ast_path=_finding_ast_path(finding),
+            excerpt_redactions=safe_excerpt.redactions,
+        )
+
+    yaml_entry = ""
 
     # BLOCKED without override is the terminal-failure branch: print the
     # judge's rationale + the model that produced it, do not write, exit
@@ -1411,6 +1422,12 @@ def _run_justify(args: argparse.Namespace) -> int:
         return 1
 
     if args.dry_run:
+        try:
+            _judge_metadata_hmac_key()
+        except ValueError:
+            yaml_entry = ""
+        else:
+            yaml_entry = build_signed_yaml_entry()
         _emit_justify_output(
             args=args,
             verdict=write_verdict,
@@ -1423,6 +1440,7 @@ def _run_justify(args: argparse.Namespace) -> int:
         )
         return 0
 
+    yaml_entry = build_signed_yaml_entry()
     _append_entry_to_yaml(target_yaml, yaml_entry)
     _append_judge_decision_event_after_judge(
         allowlist_dir=allowlist_dir,

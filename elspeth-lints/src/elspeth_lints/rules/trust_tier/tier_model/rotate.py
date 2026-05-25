@@ -695,7 +695,7 @@ def check_rotation_audit_coverage(
     violations = [
         rotation
         for rotation in expected_rotations
-        if (rotation.allowlist_dir, rotation.source_file, rotation.old_key, rotation.new_key) not in recorded_rotations
+        if not _rotation_is_covered_by_manifest(rotation=rotation, recorded_rotations=recorded_rotations)
     ]
     resolved_log = rotation_log_path if rotation_log_path.is_absolute() else repo_root / rotation_log_path
     return RotationAuditCoverageReport(
@@ -750,6 +750,38 @@ def _rotation_requirements_from_git_diff(
                     )
                 )
     return tuple(requirements)
+
+
+def _rotation_is_covered_by_manifest(
+    *,
+    rotation: RotationAuditViolation,
+    recorded_rotations: set[tuple[str, str, str, str]],
+) -> bool:
+    """Return whether manifest records cover ``rotation`` directly or via adjacent hops."""
+
+    direct_record = (rotation.allowlist_dir, rotation.source_file, rotation.old_key, rotation.new_key)
+    if direct_record in recorded_rotations:
+        return True
+
+    next_keys_by_old_key: dict[str, set[str]] = defaultdict(set)
+    for allowlist_dir, source_file, old_key, new_key in recorded_rotations:
+        if allowlist_dir != rotation.allowlist_dir or source_file != rotation.source_file:
+            continue
+        next_keys_by_old_key[old_key].add(new_key)
+
+    visited: set[str] = set()
+    frontier = [rotation.old_key]
+    while frontier:
+        current_key = frontier.pop()
+        if current_key in visited:
+            continue
+        visited.add(current_key)
+        for next_key in sorted(next_keys_by_old_key.get(current_key, ())):
+            if next_key == rotation.new_key:
+                return True
+            if next_key not in visited:
+                frontier.append(next_key)
+    return False
 
 
 def _allow_hit_key_records_by_prefix(text: str, *, source_label: str) -> dict[str, list[_AllowHitKeyRecord]]:

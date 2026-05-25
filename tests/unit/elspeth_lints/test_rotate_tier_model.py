@@ -709,6 +709,76 @@ def test_check_rotation_audit_accepts_recorded_rotation(tmp_path: Path) -> None:
     assert report.violations == ()
 
 
+def test_check_rotation_audit_accepts_chained_recorded_rotations(tmp_path: Path) -> None:
+    """Adjacent rotation records cover a baseline-to-HEAD aggregate change."""
+    _init_git_fixture(tmp_path)
+    allowlist_dir = tmp_path / "config" / "cicd" / "enforce_tier_model"
+    allowlist_dir.mkdir(parents=True)
+    (allowlist_dir / "web.yaml").write_text(
+        """allow_hits:
+- key: a.py:R1:foo:fp=aaaa
+  owner: team
+  reason: boundary
+  safety: validated
+""",
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "baseline")
+
+    (allowlist_dir / "web.yaml").write_text(
+        """allow_hits:
+- key: a.py:R1:foo:fp=cccc
+  owner: team
+  reason: boundary
+  safety: validated
+""",
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / ".elspeth" / "rotations.log"
+    manifest_path.parent.mkdir(parents=True)
+    records = [
+        {
+            "schema_version": 1,
+            "kind": "tier_model_rotation",
+            "recorded_at": "2026-05-24T00:00:00+00:00",
+            "allowlist_dir": "config/cicd/enforce_tier_model",
+            "rotations": [
+                {
+                    "source_file": "web.yaml",
+                    "old_key": "a.py:R1:foo:fp=aaaa",
+                    "new_key": "a.py:R1:foo:fp=bbbb",
+                }
+            ],
+        },
+        {
+            "schema_version": 1,
+            "kind": "tier_model_rotation",
+            "recorded_at": "2026-05-24T01:00:00+00:00",
+            "allowlist_dir": "config/cicd/enforce_tier_model",
+            "rotations": [
+                {
+                    "source_file": "web.yaml",
+                    "old_key": "a.py:R1:foo:fp=bbbb",
+                    "new_key": "a.py:R1:foo:fp=cccc",
+                }
+            ],
+        },
+    ]
+    manifest_path.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records), encoding="utf-8")
+    _commit(tmp_path, "chained recorded rotation")
+
+    report = check_rotation_audit_coverage(
+        allowlist_root=tmp_path / "config" / "cicd",
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+        rotation_log_path=manifest_path,
+    )
+
+    assert report.passes
+    assert report.checked_rotation_count == 1
+    assert report.violations == ()
+
+
 def test_apply_plan_refuses_when_todo_stubs_exist(tmp_path: Path) -> None:
     """Known TODO-stub debt blocks apply unless explicitly accepted."""
     yaml_path = tmp_path / "web.yaml"

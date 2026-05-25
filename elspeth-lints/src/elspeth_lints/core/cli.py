@@ -3011,7 +3011,10 @@ def _run_check_override_rate(args: argparse.Namespace) -> int:
                 f"rate={per_rule.rate * 100.0:.2f}%\n"
             )
 
-    if report.insufficient_data:
+    if report.absolute_budget_exceeded:
+        assert report.max_overrides is not None
+        sys.stdout.write(f"FAIL: override count {report.overrides_in_window} exceeds absolute budget {report.max_overrides}.\n")
+    elif report.insufficient_data:
         sys.stdout.write(
             f"PASS: insufficient data (denominator={report.judged_in_window} < "
             f"min_samples={report.min_samples}). Override-rate gate cannot "
@@ -3019,14 +3022,9 @@ def _run_check_override_rate(args: argparse.Namespace) -> int:
             "informational until the denominator grows.\n"
         )
         return 0
-
-    if report.passes:
+    elif report.passes:
         sys.stdout.write("PASS: override rate within budget.\n")
         return 0
-
-    if report.absolute_budget_exceeded:
-        assert report.max_overrides is not None
-        sys.stdout.write(f"FAIL: override count {report.overrides_in_window} exceeds absolute budget {report.max_overrides}.\n")
     if report.ratio_budget_exceeded:
         sys.stdout.write(f"FAIL: override rate {pct:.2f}% exceeds budget {max_pct:.2f}%.\n")
     sys.stdout.write(f"\n{len(detail.override_entries)} OVERRIDDEN_BY_OPERATOR entries in window:\n")

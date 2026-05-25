@@ -95,9 +95,8 @@ from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
+    composition_review_contract_error,
     interpretation_sites,
-    prompt_shield_recommendation_contract_error,
-    raw_html_cleanup_review_contract_error,
     transform_vague_term_site_tuples,
     validate_pipeline_decision_semantics,
 )
@@ -568,12 +567,9 @@ def _execute_set_pipeline(
         metadata=metadata_spec,
         version=state.version + 1,
     )
-    raw_cleanup_error = raw_html_cleanup_review_contract_error(new_state)
-    if raw_cleanup_error is not None:
-        return _failure_result(state, raw_cleanup_error)
-    shield_error = prompt_shield_recommendation_contract_error(new_state)
-    if shield_error is not None:
-        return _failure_result(state, shield_error)
+    review_contract_error = composition_review_contract_error(new_state)
+    if review_contract_error is not None:
+        return _failure_result(state, review_contract_error)
 
     if prepared_inline_blob is not None:
         if session_engine is None or session_id is None:

@@ -43,7 +43,12 @@ from elspeth.web.composer.tools import (
     get_tool_definitions,
 )
 from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationReadiness, ValidationResult
-from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
+from elspeth.web.interpretation_state import (
+    INTERPRETATION_REQUIREMENTS_KEY,
+    PROMPT_SHIELD_USER_TERM,
+    PROMPT_TEMPLATE_PARTS_KEY,
+    SOURCE_AUTHORING_KEY,
+)
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -661,6 +666,67 @@ class TestUpsertNode:
         assert result.success is True
         assert len(result.updated_state.nodes) == 1
         assert "t1" in result.affected_nodes
+
+    def test_rejects_llm_consuming_web_scrape_without_prompt_shield_review(self) -> None:
+        state = CompositionState(
+            source=None,
+            nodes=(
+                NodeSpec(
+                    id="fetch_pages",
+                    node_type="transform",
+                    plugin="web_scrape",
+                    input="rows",
+                    on_success="scraped_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "url_field": "url",
+                        "content_field": "content",
+                        "http": {
+                            "abuse_contact": "ops@example.com",
+                            "scraping_reason": "technical evaluation",
+                            "allowed_hosts": ["example.com"],
+                        },
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "summarise_pages",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "scraped_rows",
+                "on_success": "summaries",
+                "on_error": "discard",
+                "options": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Summarise {{ row.content }}.",
+                    "schema": {"mode": "observed"},
+                },
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert PROMPT_SHIELD_USER_TERM in result.data["error"]
 
     def test_replaces_existing_node(self) -> None:
         state = _empty_state()

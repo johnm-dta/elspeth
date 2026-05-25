@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
     pipeline_decision_artifact_hash,
+    prompt_shield_recommendation_contract_error,
     strip_authoring_options,
 )
 
@@ -122,6 +124,84 @@ def _state_with_web_scrape_cleanup_node(options: dict[str, object]) -> Compositi
         metadata=PipelineMetadata(),
         version=1,
     )
+
+
+def _state_with_web_scrape_gate_to_llm() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="rows",
+                on_success="scraped_rows",
+                on_error="stop",
+                options={"url_field": "url", "content_field": "content"},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="interesting_pages",
+                node_type="gate",
+                plugin=None,
+                input="scraped_rows",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="row['interesting'] == true",
+                routes={"true": "llm_input", "false": "discard"},
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="summarise_pages",
+                node_type="transform",
+                plugin="llm",
+                input="llm_input",
+                on_success="summaries",
+                on_error="stop",
+                options={"prompt_template": "Summarise {{ row.content }}."},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _state_with_web_scrape_gate_shield_to_llm() -> CompositionState:
+    state = _state_with_web_scrape_gate_to_llm()
+    shield = NodeSpec(
+        id="shield_pages",
+        node_type="transform",
+        plugin="azure_prompt_shield",
+        input="llm_input",
+        on_success="shielded_rows",
+        on_error="stop",
+        options={},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+    llm = replace(state.nodes[2], input="shielded_rows")
+    return replace(state, nodes=(state.nodes[0], state.nodes[1], shield, llm))
 
 
 def _pipeline_decision_options(*, status: str = "pending", artifact_hash: str | None = None) -> dict[str, object]:
@@ -378,6 +458,26 @@ def test_unreviewed_field_mapper_drop_of_web_scrape_raw_fields_blocks_execution(
     assert result.sites[0].component_type == "transform"
     assert result.sites[0].user_term == "drop_raw_html_fields"
     assert result.sites[0].kind is InterpretationKind.PIPELINE_DECISION
+
+
+def test_gate_routed_web_scrape_into_llm_requires_prompt_shield_review() -> None:
+    state = _state_with_web_scrape_gate_to_llm()
+
+    error = prompt_shield_recommendation_contract_error(state)
+    result = materialize_state_for_execution(state)
+
+    assert error is not None
+    assert PROMPT_SHIELD_USER_TERM in error
+    assert isinstance(result, InterpretationReviewPending)
+    assert any(site.component_id == "summarise_pages" and site.user_term == PROMPT_SHIELD_USER_TERM for site in result.sites)
+
+
+def test_gate_routed_web_scrape_through_prompt_shield_needs_no_recommendation() -> None:
+    state = _state_with_web_scrape_gate_shield_to_llm()
+
+    error = prompt_shield_recommendation_contract_error(state)
+
+    assert error is None
 
 
 def test_field_mapper_projection_without_web_scrape_raw_fields_does_not_create_cleanup_review_site() -> None:

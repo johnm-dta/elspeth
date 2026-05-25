@@ -43,7 +43,7 @@ from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
 )
-from elspeth.web.interpretation_state import raw_html_cleanup_review_contract_error
+from elspeth.web.interpretation_state import composition_review_contract_error
 
 _NODE_ROUTING_OPTION_PATCH_KEYS: Final[frozenset[str]] = frozenset({"input", "on_success", "on_error", "routes", "fork_to"})
 
@@ -485,9 +485,9 @@ def _execute_upsert_node(
     )
 
     new_state = state.with_node(node)
-    raw_cleanup_error = raw_html_cleanup_review_contract_error(new_state)
-    if raw_cleanup_error is not None:
-        return _failure_result(state, raw_cleanup_error)
+    review_contract_error = composition_review_contract_error(new_state)
+    if review_contract_error is not None:
+        return _failure_result(state, review_contract_error)
 
     # Affected: the node itself plus nodes with edges referencing it
     affected = {node_id}
@@ -724,9 +724,9 @@ def _execute_patch_node_options(
 
     new_node = replace(current, options=new_options)
     new_state = state.with_node(new_node)
-    raw_cleanup_error = raw_html_cleanup_review_contract_error(new_state)
-    if raw_cleanup_error is not None:
-        return _failure_result(state, raw_cleanup_error)
+    review_contract_error = composition_review_contract_error(new_state)
+    if review_contract_error is not None:
+        return _failure_result(state, review_contract_error)
     return _mutation_result(new_state, (node_id,))
 
 

@@ -785,6 +785,47 @@ def test_cli_absolute_override_count_budget_exits_one(
     assert "override count 2 exceeds absolute budget 1" in capsys.readouterr().out
 
 
+def test_cli_absolute_override_count_budget_fails_with_insufficient_ratio_data(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--max-overrides`` is an absolute cap, not a rate-only small-N guard."""
+    from elspeth_lints.core.cli import main
+
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    _write_entry(
+        enforce_dir,
+        file_name="override.yaml",
+        key="x.py:R1:override:fp=aa",
+        verdict="OVERRIDDEN_BY_OPERATOR",
+        recorded_at=now - timedelta(days=1),
+        model_verdict="BLOCKED",
+    )
+
+    exit_code = main(
+        [
+            "check-override-rate",
+            "--allowlist-root",
+            str(enforce_root),
+            "--window-days",
+            "30",
+            "--min-samples",
+            "10",
+            "--max-rate",
+            "0.10",
+            "--max-overrides",
+            "0",
+            "--reference-time",
+            now.isoformat(),
+        ]
+    )
+
+    assert exit_code == 1
+    assert "override count 1 exceeds absolute budget 0" in capsys.readouterr().out
+
+
 # =========================================================================
 # Misconfiguration
 # =========================================================================

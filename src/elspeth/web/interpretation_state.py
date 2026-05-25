@@ -427,7 +427,7 @@ def materialize_state_for_execution(state: CompositionState) -> CompositionState
         changed = changed or materialized_source is not state.source
     materialized_nodes: list[NodeSpec] = []
     for node in state.nodes:
-        materialized = _materialize_node_for_execution(node)
+        materialized = _materialize_node_for_execution(node, state.nodes)
         materialized_nodes.append(materialized)
         changed = changed or materialized is not node
     if not changed:
@@ -454,8 +454,8 @@ def _materialize_node_for_authoring(node: NodeSpec) -> NodeSpec:
     return _replace_prompt_if_changed(node, masked, include_hash=False)
 
 
-def _materialize_node_for_execution(node: NodeSpec) -> NodeSpec:
-    _validate_pipeline_decision_review(node)
+def _materialize_node_for_execution(node: NodeSpec, all_nodes: Sequence[NodeSpec]) -> NodeSpec:
+    _validate_pipeline_decision_review(node, all_nodes)
     if node.plugin != "llm":
         return node
     parts = _prompt_parts(node.options)
@@ -794,21 +794,113 @@ def _validate_prompt_template_review(node: NodeSpec, prompt_template: str) -> No
         raise ValueError(f"llm node {node.id!r} prompt-template review hash drifted")
 
 
-def _pipeline_decision_review_hash(node: NodeSpec) -> str:
+def pipeline_decision_artifact_hash(
+    node: NodeSpec,
+    all_nodes: Sequence[NodeSpec],
+    *,
+    user_term: str,
+) -> str:
+    """Canonical artifact hash for a pipeline-decision review.
+
+    The hash domain is the *minimum* state projection that, if changed,
+    would invalidate the prior review. Different decision kinds adjudicate
+    different facts about the graph, so each one routes through its own
+    projection helper. A whole-node hash would invalidate the review on
+    unrelated edits (e.g. swapping the LLM model) — operationally noisy
+    without auditability gain because the review's premise is unchanged.
+
+    Both the write side (sessions/service when an interpretation-resolve
+    event lands) and the read side (preflight materialisation) call this
+    function so the hash is produced by exactly one piece of code.
+
+    Adding a new pipeline-decision kind requires a registered helper —
+    unknown user_terms raise rather than fall through to a permissive
+    default.
+    """
+
+    normalized = user_term.strip()
+    if normalized == PROMPT_SHIELD_USER_TERM:
+        return _prompt_shield_artifact_hash(node, all_nodes)
+    if normalized == RAW_HTML_CLEANUP_USER_TERM:
+        return _raw_html_cleanup_artifact_hash(node, all_nodes)
+    raise ValueError(f"pipeline_decision_artifact_hash: unknown pipeline_decision user_term {user_term!r}")
+
+
+def _prompt_shield_artifact_hash(node: NodeSpec, all_nodes: Sequence[NodeSpec]) -> str:
+    """Material-scoped hash for the prompt-shield recommendation review.
+
+    The review accepts the recommendation that an authorized prompt-injection
+    shield (currently azure_prompt_shield) be inserted between an
+    untrusted-remote-content producer (currently web_scrape) and this LLM.
+    The hash binds to exactly that adjudication:
+
+    - this LLM's node id (the review attaches to a specific node)
+    - the upstream chain from this LLM's input back to either an authorized
+      shield, an untrusted producer, or the end of the chain — captured as
+      ``(producer_id, producer_plugin)`` pairs in stream order.
+
+    Fields like ``model``, ``temperature``, ``prompt_template``, ``api_key``
+    and ``schema`` are intentionally NOT in scope: they don't change whether
+    a shield is needed. Swapping the model after review should leave the
+    review intact.
+    """
+
+    producer_by_output_stream = _producer_by_output_stream(all_nodes)
+    chain: list[tuple[str, str | None]] = []
+    stream = node.input
+    visited: set[str] = set()
+    while isinstance(stream, str) and stream and stream not in visited:
+        visited.add(stream)
+        if stream not in producer_by_output_stream:
+            break
+        producer = producer_by_output_stream[stream]
+        chain.append((producer.id, producer.plugin))
+        if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
+            break
+        if producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
+            break
+        stream = producer.input
     return stable_hash(
         {
-            "id": node.id,
-            "node_type": node.node_type,
-            "plugin": node.plugin,
-            "input": node.input,
-            "on_success": node.on_success,
-            "on_error": node.on_error,
-            "options": strip_authoring_options(node.options),
+            "review_kind": "prompt_shield_recommendation",
+            "llm_node_id": node.id,
+            "upstream_chain": chain,
         }
     )
 
 
-def _validate_pipeline_decision_review(node: NodeSpec) -> None:
+def _raw_html_cleanup_artifact_hash(node: NodeSpec, all_nodes: Sequence[NodeSpec]) -> str:
+    """Material-scoped hash for the raw-html cleanup review.
+
+    The review accepts that this field_mapper drops the upstream web_scrape's
+    raw content/fingerprint fields. The hash binds to:
+
+    - this field_mapper's node id
+    - its ``mapping`` and ``select_only`` flag (the topological adjudication)
+    - the set of raw fields any upstream web_scrape exposes (so adding a new
+      raw field upstream re-stages the review — that's a material change to
+      what "drop the raw fields" means).
+
+    ``schema.guaranteed_fields`` on the field_mapper itself is excluded —
+    it's a downstream consequence of the mapping, not adjudication input.
+    """
+
+    upstream_raw_fields = sorted(_web_scrape_raw_fields(all_nodes))
+    raw_mapping = node.options["mapping"] if "mapping" in node.options else None
+    mapping: dict[str, Any] = dict(raw_mapping) if isinstance(raw_mapping, Mapping) else {}
+    select_only = "select_only" in node.options and node.options["select_only"] is True
+    return stable_hash(
+        {
+            "review_kind": "raw_html_cleanup",
+            "field_mapper_node_id": node.id,
+            "mapping": mapping,
+            "select_only": select_only,
+            "upstream_web_scrape_raw_fields": upstream_raw_fields,
+        }
+    )
+
+
+def _validate_pipeline_decision_review(node: NodeSpec, all_nodes: Sequence[NodeSpec]) -> None:
     requirements = _requirements(node.options)
     resolved = _resolved_requirement_for_kind(requirements, InterpretationKind.PIPELINE_DECISION)
     if resolved is None:
@@ -821,7 +913,7 @@ def _validate_pipeline_decision_review(node: NodeSpec) -> None:
         draft=resolved["draft"],
         context="interpretation_state",
     )
-    expected_hash = _pipeline_decision_review_hash(node)
+    expected_hash = pipeline_decision_artifact_hash(node, all_nodes, user_term=resolved["user_term"])
     if resolved["accepted_artifact_hash"] != expected_hash:
         raise ValueError(f"node {node.id!r} pipeline-decision review hash drifted")
 

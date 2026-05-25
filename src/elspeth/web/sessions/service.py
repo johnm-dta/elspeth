@@ -54,7 +54,7 @@ from elspeth.web.interpretation_state import (
     PROMPT_TEMPLATE_PARTS_KEY,
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
-    strip_authoring_options,
+    pipeline_decision_artifact_hash,
     validate_pipeline_decision_semantics,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
@@ -625,23 +625,30 @@ def _find_interpretation_review_node(
     raise InterpretationNodeMissingError(f"{context}: node {affected_node_id!r} is not present in the composition state's nodes")
 
 
-def _pipeline_decision_review_hash_from_node(node: Mapping[str, Any]) -> str:
-    return stable_hash(
-        {
-            "id": node["id"],
-            "node_type": node["node_type"],
-            "plugin": node["plugin"] if "plugin" in node else None,
-            "input": node["input"],
-            "on_success": node["on_success"] if "on_success" in node else None,
-            "on_error": node["on_error"] if "on_error" in node else None,
-            "options": strip_authoring_options(
-                _require_mapping(
-                    node["options"] if "options" in node else None,
-                    message=f"_pipeline_decision_review_hash_from_node: node {node['id']!r} has no options mapping",
-                )
-            ),
-        }
-    )
+def _pipeline_decision_artifact_hash_from_state_record(
+    state_record: CompositionStateRecord,
+    *,
+    affected_node_id: str,
+    user_term: str,
+) -> str:
+    """Compute the canonical pipeline-decision artifact hash from a record DTO.
+
+    Bridge between the persistence layer (dict-shaped nodes on
+    :class:`CompositionStateRecord`) and the canonical hash function on
+    :class:`NodeSpec`. Both write and read paths use the same projection
+    helpers under the hood, so an interpretation_resolve event stores
+    exactly the hash that preflight will recompute later.
+    """
+
+    from elspeth.web.composer.state import NodeSpec
+
+    all_nodes_spec: tuple[NodeSpec, ...] = tuple(NodeSpec.from_dict(dict(n)) for n in state_record.nodes or ())
+    target = next((n for n in all_nodes_spec if n.id == affected_node_id), None)
+    if target is None:
+        raise InterpretationNodeMissingError(
+            f"_pipeline_decision_artifact_hash_from_state_record: node {affected_node_id!r} is not present in the composition state's nodes"
+        )
+    return pipeline_decision_artifact_hash(target, all_nodes_spec, user_term=user_term)
 
 
 def _matching_pending_requirement_index(
@@ -1171,7 +1178,11 @@ def _resolve_pipeline_decision_review(
         draft=draft,
         context="resolve_interpretation_event",
     )
-    decision_hash = _pipeline_decision_review_hash_from_node(node)
+    decision_hash = _pipeline_decision_artifact_hash_from_state_record(
+        state_record,
+        affected_node_id=affected_node_id,
+        user_term=user_term,
+    )
     requirement["status"] = "resolved"
     requirement["event_id"] = event_id
     requirement["accepted_value"] = accepted_value

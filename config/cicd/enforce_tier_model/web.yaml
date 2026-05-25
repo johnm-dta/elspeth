@@ -2282,7 +2282,7 @@ allow_hits:
   safety: Malformed source_authoring data raises TypeError before execution materialization;
     absence remains None and no source hash, modality, or review binding is invented.
   expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=72057f98b3c23cd3
+- key: web/interpretation_state.py:R5:_prompt_parts:fp=6cf5f7216242ff96
   owner: web-interpretation
   reason: Tier-3 shape validation of composer-authored options['prompt_template_parts'].
     Same list/tuple shape requirement as interpretation_requirements above; raises
@@ -2290,7 +2290,7 @@ allow_hits:
   safety: TypeError raised at the boundary; no fabricated default; downstream code
     operates on a validated tuple of PromptPart entries.
   expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=bdc8a35f286894f0
+- key: web/interpretation_state.py:R5:_prompt_parts:fp=de97107eaccee8a4
   owner: web-interpretation
   reason: Tier-3 element-shape validation in prompt_template_parts. Each entry must
     be a Mapping (it then carries kind/text/requirement_id depending on type). Raises
@@ -2298,7 +2298,7 @@ allow_hits:
   safety: Raises TypeError with a precise message; no entry is silently skipped or
     coerced. The downstream parts tuple contains only validated mappings.
   expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=4f7e5e4bb02a9a5c
+- key: web/interpretation_state.py:R5:_prompt_parts:fp=2a4780fe4b6e6186
   owner: web-interpretation
   reason: 'Tier-3 type validation of the text payload on a ''text'' prompt-part. The
     TypedDict PromptTextPart declares text: str; this check enforces that at the boundary,
@@ -2306,7 +2306,7 @@ allow_hits:
   safety: Raises TypeError on non-string text. No default text fabricated; the PromptPart
     tuple only contains string-typed text parts.
   expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=19b0ad144e01f1ea
+- key: web/interpretation_state.py:R5:_prompt_parts:fp=a0760abd43cf8870
   owner: web-interpretation
   reason: Tier-3 validation of an interpretation_ref prompt-part's requirement_id
     field. Must be a non-empty string to be resolvable against the interpretation_requirements
@@ -2315,7 +2315,7 @@ allow_hits:
     Downstream _render_prompt_parts can rely on every interpretation_ref carrying
     a usable requirement_id.
   expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_render_prompt_parts:fp=04c47a53eaa681ed
+- key: web/interpretation_state.py:R5:_render_prompt_parts:fp=0aa9bb4e45e46ae3
   owner: web-interpretation
   reason: 'Late safety net during rendering: the resolved interpretation requirement''s
     accepted_value must be a string by TypedDict contract, but the requirement came
@@ -2324,6 +2324,26 @@ allow_hits:
     requirements_by_id from a different boundary). Raises TypeError to halt rendering.'
   safety: TypeError raised; rendered prompt never contains a non-string accepted value
     cast through str(). No fabrication.
+  expires: '2026-08-23'
+- key: web/interpretation_state.py:R5:_prompt_shield_artifact_hash:fp=32591159f5bb0d08
+  owner: web-interpretation
+  reason: Type-narrowing on NodeSpec.input (typed str | None) while walking the upstream
+    producer chain for the prompt-shield review's material hash. Mirrors the canonical
+    pattern at _llm_consumes_untrusted_remote_content. Exits the loop cleanly when
+    input is None (chain root) — no fabrication, no silent coercion.
+  safety: Loop terminates when stream is not a string; no synthetic upstream chain
+    entries are produced. Pure topology projection feeding stable_hash.
+  expires: '2026-08-23'
+- key: web/interpretation_state.py:R5:_raw_html_cleanup_artifact_hash:fp=2899d092a7222cb8
+  owner: web-interpretation
+  reason: Type-narrowing on node.options.get("mapping") to validate it's a Mapping
+    before coercing to a plain dict for the raw-html cleanup review's material hash.
+    options is typed Mapping[str, Any] so the inner value is Any at the type system
+    level; this isinstance guards a non-Mapping intruder (e.g. None or a stale list)
+    from being included in the canonical hash domain.
+  safety: Non-Mapping mapping value falls through to empty dict, which is what the
+    review semantics already require — there's no fabrication path. Pure projection
+    feeding stable_hash.
   expires: '2026-08-23'
 - key: web/app.py:R6:_periodic_orphan_cleanup:fp=2de630b45978d685
   owner: web-execution

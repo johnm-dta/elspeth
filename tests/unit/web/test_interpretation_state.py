@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from elspeth.contracts.composer_interpretation import InterpretationKind
@@ -9,12 +11,15 @@ from elspeth.contracts.hashing import stable_hash
 from elspeth.web.composer.state import CompositionState, NodeSpec, PipelineMetadata, SourceSpec
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
+    PROMPT_SHIELD_USER_TERM,
     PROMPT_TEMPLATE_PARTS_KEY,
+    RAW_HTML_CLEANUP_USER_TERM,
     SOURCE_AUTHORING_KEY,
     InterpretationReviewPending,
     interpretation_sites,
     materialize_state_for_authoring,
     materialize_state_for_execution,
+    pipeline_decision_artifact_hash,
     strip_authoring_options,
 )
 
@@ -393,24 +398,17 @@ def test_field_mapper_projection_without_web_scrape_raw_fields_does_not_create_c
 
 def test_resolved_pipeline_decision_requires_matching_node_hash() -> None:
     reviewed = _state_with_cleanup_node(_pipeline_decision_options())
-    clean_options = strip_authoring_options(reviewed.nodes[0].options)
-    artifact_hash = stable_hash(
-        {
-            "id": "drop_raw_html",
-            "node_type": "transform",
-            "plugin": "field_mapper",
-            "input": "scored_rows",
-            "on_success": "clean_rows",
-            "on_error": "stop",
-            "options": clean_options,
-        }
+    artifact_hash = pipeline_decision_artifact_hash(
+        reviewed.nodes[0],
+        reviewed.nodes,
+        user_term=RAW_HTML_CLEANUP_USER_TERM,
     )
     state = _state_with_cleanup_node(_pipeline_decision_options(status="resolved", artifact_hash=artifact_hash))
 
     materialized = materialize_state_for_execution(state)
 
     assert isinstance(materialized, CompositionState)
-    assert materialized.nodes[0].options["mapping"] == clean_options["mapping"]
+    assert materialized.nodes[0].options["mapping"] == strip_authoring_options(reviewed.nodes[0].options)["mapping"]
 
 
 def test_resolved_pipeline_decision_hash_drift_fails_closed() -> None:
@@ -637,3 +635,317 @@ def test_strip_authoring_options_removes_metadata_keys() -> None:
     assert INTERPRETATION_REQUIREMENTS_KEY not in stripped
     assert SOURCE_AUTHORING_KEY not in stripped
     assert stripped["resolved_prompt_template_hash"] == "a" * 64
+
+
+# ---------------------------------------------------------------------------
+# pipeline_decision_artifact_hash — material-only scoping
+#
+# Regression coverage for the staging incident where the composer LLM swapped
+# the LLM ``model`` field (claude-3.7-sonnet → claude-3.5-sonnet) after the
+# prompt-shield-recommendation review had already resolved. The legacy
+# whole-stripped-options hash treated the model change as material drift and
+# crashed preflight with a confusing "pipeline-decision review hash drifted"
+# message. The narrowed hash binds to topology only, so model edits no longer
+# spurious-drift the review.
+# ---------------------------------------------------------------------------
+
+
+def _state_with_web_scrape_llm_pair(llm_options: dict[str, Any]) -> CompositionState:
+    """Two-node state: untrusted web_scrape upstream feeding an LLM."""
+
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="url_rows",
+                on_success="scraped_pages",
+                on_error="stop",
+                options={
+                    "url_field": "url",
+                    "content_field": "content",
+                    "fingerprint_field": "fingerprint",
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="identify_colours",
+                node_type="transform",
+                plugin="llm",
+                input="scraped_pages",
+                on_success="coloured_pages",
+                on_error="stop",
+                options=llm_options,
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _shielded_three_node_state(llm_options: dict[str, Any]) -> CompositionState:
+    """Three-node state: web_scrape → azure_prompt_shield → LLM."""
+
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="url_rows",
+                on_success="scraped_pages",
+                on_error="stop",
+                options={
+                    "url_field": "url",
+                    "content_field": "content",
+                    "fingerprint_field": "fingerprint",
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="shield_content",
+                node_type="transform",
+                plugin="azure_prompt_shield",
+                input="scraped_pages",
+                on_success="shielded_pages",
+                on_error="stop",
+                options={},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="identify_colours",
+                node_type="transform",
+                plugin="llm",
+                input="shielded_pages",
+                on_success="coloured_pages",
+                on_error="stop",
+                options=llm_options,
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _shield_review_llm_options(*, model: str, prompt_template: str) -> dict[str, Any]:
+    return {
+        "provider": "openrouter",
+        "model": model,
+        "prompt_template": prompt_template,
+        "temperature": 0,
+        INTERPRETATION_REQUIREMENTS_KEY: [
+            {
+                "id": "prompt_injection_shield_review:identify_colours",
+                "kind": "pipeline_decision",
+                "user_term": PROMPT_SHIELD_USER_TERM,
+                "status": "resolved",
+                "draft": "Public web content from web_scrape flows directly into the LLM. Recommend inserting azure_prompt_shield.",
+                "event_id": "shield-resolve-1",
+                "accepted_value": "Public web content from web_scrape flows directly into the LLM. Recommend inserting azure_prompt_shield.",
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": None,
+            }
+        ],
+    }
+
+
+def test_prompt_shield_hash_is_stable_across_model_swap() -> None:
+    """Regression: changing the LLM model after the shield review must not drift the hash.
+
+    This is the exact staging failure — composer LLM resolved the shield review
+    with model=3.7-sonnet, then swapped model=3.5-sonnet after a separate
+    value-source validation failure. The narrowed hash binds to topology, not
+    model identity, so the swap is immaterial.
+    """
+
+    state_v37 = _state_with_web_scrape_llm_pair(
+        _shield_review_llm_options(model="anthropic/claude-3.7-sonnet", prompt_template="Identify colours: {{ row.url }} {{ row.content }}")
+    )
+    state_v35 = _state_with_web_scrape_llm_pair(
+        _shield_review_llm_options(model="anthropic/claude-3.5-sonnet", prompt_template="Identify colours: {{ row.url }} {{ row.content }}")
+    )
+
+    hash_v37 = pipeline_decision_artifact_hash(state_v37.nodes[1], state_v37.nodes, user_term=PROMPT_SHIELD_USER_TERM)
+    hash_v35 = pipeline_decision_artifact_hash(state_v35.nodes[1], state_v35.nodes, user_term=PROMPT_SHIELD_USER_TERM)
+
+    assert hash_v37 == hash_v35
+
+
+def test_prompt_shield_hash_is_stable_across_prompt_template_edit() -> None:
+    """Editing prompt_template doesn't invalidate the shield recommendation."""
+
+    state_a = _state_with_web_scrape_llm_pair(
+        _shield_review_llm_options(model="anthropic/claude-3.7-sonnet", prompt_template="Original prompt: {{ row.url }}")
+    )
+    state_b = _state_with_web_scrape_llm_pair(
+        _shield_review_llm_options(
+            model="anthropic/claude-3.7-sonnet", prompt_template="Rewritten prompt with extra prose: {{ row.url }} {{ row.content }}"
+        )
+    )
+
+    hash_a = pipeline_decision_artifact_hash(state_a.nodes[1], state_a.nodes, user_term=PROMPT_SHIELD_USER_TERM)
+    hash_b = pipeline_decision_artifact_hash(state_b.nodes[1], state_b.nodes, user_term=PROMPT_SHIELD_USER_TERM)
+
+    assert hash_a == hash_b
+
+
+def test_prompt_shield_hash_changes_when_authorized_shield_inserted() -> None:
+    """Inserting azure_prompt_shield between web_scrape and LLM is material.
+
+    The review's premise was "no shield exists." Adding a shield invalidates
+    that premise — the operator needs to confirm whether the prior review is
+    still meaningful (it is moot, but the audit trail should reflect that).
+    """
+
+    unshielded = _state_with_web_scrape_llm_pair(
+        _shield_review_llm_options(model="anthropic/claude-3.7-sonnet", prompt_template="Identify: {{ row.content }}")
+    )
+    shielded = _shielded_three_node_state(
+        _shield_review_llm_options(model="anthropic/claude-3.7-sonnet", prompt_template="Identify: {{ row.content }}")
+    )
+
+    hash_unshielded = pipeline_decision_artifact_hash(unshielded.nodes[1], unshielded.nodes, user_term=PROMPT_SHIELD_USER_TERM)
+    hash_shielded = pipeline_decision_artifact_hash(shielded.nodes[2], shielded.nodes, user_term=PROMPT_SHIELD_USER_TERM)
+
+    assert hash_unshielded != hash_shielded
+
+
+def test_prompt_shield_hash_drift_after_model_swap_does_not_block_preflight() -> None:
+    """End-to-end regression: resolve shield review on model=3.7, swap to 3.5, expect no drift error.
+
+    This mirrors the staging session timeline (b930f0aa-…) — the composer LLM
+    resolved the shield recommendation against a v4 state with model=3.7-sonnet
+    and then patched the model to 3.5-sonnet at v8. Preflight at v9 used to
+    raise ``pipeline-decision review hash drifted``; with the narrowed hash
+    the resolved review survives the model swap and execution proceeds.
+    """
+
+    prompt = "Identify: {{ row.url }} {{ row.content }}"
+
+    def _options_with_both_reviews(model: str) -> dict[str, Any]:
+        opts = _shield_review_llm_options(model=model, prompt_template=prompt)
+        opts["resolved_prompt_template_hash"] = stable_hash(prompt)
+        existing_requirements = list(opts[INTERPRETATION_REQUIREMENTS_KEY])  # type: ignore[arg-type]
+        existing_requirements.append(
+            {
+                "id": "llm_prompt_template:identify_colours",
+                "kind": "llm_prompt_template",
+                "user_term": "llm_prompt_template:identify_colours",
+                "status": "resolved",
+                "draft": prompt,
+                "event_id": "prompt-template-resolve-1",
+                "accepted_value": prompt,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(prompt),
+            }
+        )
+        opts[INTERPRETATION_REQUIREMENTS_KEY] = existing_requirements
+        return opts
+
+    pre_swap = _state_with_web_scrape_llm_pair(_options_with_both_reviews("anthropic/claude-3.7-sonnet"))
+    accepted_hash = pipeline_decision_artifact_hash(pre_swap.nodes[1], pre_swap.nodes, user_term=PROMPT_SHIELD_USER_TERM)
+
+    post_swap_options = _options_with_both_reviews("anthropic/claude-3.5-sonnet")
+    shield_requirement = dict(post_swap_options[INTERPRETATION_REQUIREMENTS_KEY][0])  # type: ignore[index]
+    shield_requirement["accepted_artifact_hash"] = accepted_hash
+    requirements = list(post_swap_options[INTERPRETATION_REQUIREMENTS_KEY])  # type: ignore[arg-type]
+    requirements[0] = shield_requirement
+    post_swap_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
+    post_swap = _state_with_web_scrape_llm_pair(post_swap_options)
+
+    materialized = materialize_state_for_execution(post_swap)
+
+    assert isinstance(materialized, CompositionState)
+    assert materialized.nodes[1].options["model"] == "anthropic/claude-3.5-sonnet"
+
+
+def test_raw_html_cleanup_hash_includes_upstream_raw_field_set() -> None:
+    """Adding a new raw field to upstream web_scrape re-stages cleanup review.
+
+    If the upstream web_scrape suddenly emits a new raw field (e.g. an
+    additional fingerprint variant), the prior cleanup review didn't authorise
+    dropping it. The hash domain has to surface that as drift so the operator
+    re-confirms.
+    """
+
+    base = _state_with_web_scrape_cleanup_node({"mapping": {"url": "url", "primary_colours": "primary_colours"}, "select_only": True})
+    hash_a = pipeline_decision_artifact_hash(base.nodes[1], base.nodes, user_term=RAW_HTML_CLEANUP_USER_TERM)
+
+    # Upstream web_scrape now also exports a "fingerprint" field via fingerprint_field.
+    extended_nodes = list(base.nodes)
+    web_scrape = extended_nodes[0]
+    extended_options = dict(web_scrape.options)
+    extended_options["fingerprint_field"] = "fingerprint_v2"
+    extended_nodes[0] = NodeSpec(
+        id=web_scrape.id,
+        node_type=web_scrape.node_type,
+        plugin=web_scrape.plugin,
+        input=web_scrape.input,
+        on_success=web_scrape.on_success,
+        on_error=web_scrape.on_error,
+        options=extended_options,
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+    extended_state = CompositionState(
+        source=None,
+        nodes=tuple(extended_nodes),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    hash_b = pipeline_decision_artifact_hash(extended_state.nodes[1], extended_state.nodes, user_term=RAW_HTML_CLEANUP_USER_TERM)
+
+    assert hash_a != hash_b
+
+
+def test_pipeline_decision_artifact_hash_rejects_unknown_user_term() -> None:
+    """Adding a new pipeline-decision kind requires a registered helper.
+
+    We refuse to fall through to a permissive default — every kind needs its
+    own material projection or the audit boundary becomes lossy.
+    """
+
+    state = _state_with_cleanup_node({"mapping": {"url": "url"}, "select_only": True})
+
+    with pytest.raises(ValueError, match="unknown pipeline_decision user_term"):
+        pipeline_decision_artifact_hash(state.nodes[0], state.nodes, user_term="some_new_review_we_havent_implemented")

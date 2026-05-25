@@ -84,7 +84,7 @@ class CSVSource(BaseSource):
     name = "csv"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f0c1210f0dadb49c"
+    source_file_hash: str | None = "sha256:e12abb9306a7ab9f"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str

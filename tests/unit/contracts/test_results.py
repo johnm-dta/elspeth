@@ -408,6 +408,19 @@ class TestRowResult:
         assert result.outcome == TerminalOutcome.SUCCESS
         assert result.path == TerminalPath.DEFAULT_FLOW
         assert result.sink_name == "processed"
+        assert result.scheduler_pending_sink is False
+
+    def test_scheduler_pending_sink_requires_bool(self) -> None:
+        token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=_wrap_dict_as_pipeline_row({"x": 1}))
+        with pytest.raises(OrchestrationInvariantError, match="scheduler_pending_sink must be bool"):
+            RowResult(
+                token=token,
+                final_data=_wrap_dict_as_pipeline_row({"x": 1}),
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                sink_name="processed",
+                scheduler_pending_sink=1,  # type: ignore[arg-type]
+            )
 
     def test_completed_without_sink_name_raises(self) -> None:
         """COMPLETED outcome requires sink_name."""

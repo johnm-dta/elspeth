@@ -14,7 +14,7 @@ import hashlib
 import logging
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
@@ -2856,12 +2856,6 @@ class RowProcessor:
                 self._active_claim_work_item_id = None
                 self._last_heartbeat_at = None
 
-            if result is not None:
-                if type(result) is tuple:
-                    results.extend(result)
-                else:
-                    results.append(result)
-
             for child_item in child_items:
                 self._enqueue_scheduler_work_item(child_item, pending_items)
 
@@ -2873,6 +2867,10 @@ class RowProcessor:
                     queue_key=None,
                     barrier_key=self._barrier_key_for_buffered_scheduler_result(result),
                 )
+                if isinstance(result, tuple):
+                    results.extend(result)
+                else:
+                    results.append(result)
                 if not recover_pending_sinks and not pending_items:
                     break
                 continue
@@ -2883,13 +2881,7 @@ class RowProcessor:
                     break
                 continue
 
-            if self._scheduler_result_failed_claimed_token(result, claimed.token_id):
-                self._scheduler.mark_failed(
-                    work_item_id=claimed.work_item_id,
-                    now=self._clock.now_utc(),
-                    expected_lease_owner=claimed_lease_owner,
-                )
-            elif (sink_bound_result := self._scheduler_sink_bound_result_for_claimed_token(result, claimed.token_id)) is not None:
+            if (sink_bound_result := self._scheduler_sink_bound_result_for_claimed_token(result, claimed.token_id)) is not None:
                 self._scheduler.mark_pending_sink(
                     work_item_id=claimed.work_item_id,
                     row_payload_json=self._scheduler.serialize_row_payload(sink_bound_result.token.row_data),
@@ -2901,12 +2893,25 @@ class RowProcessor:
                     now=self._clock.now_utc(),
                     expected_lease_owner=claimed_lease_owner,
                 )
+                result = self._with_scheduler_pending_sink_handoff(result, claimed.token_id)
+            elif self._scheduler_result_failed_claimed_token(result, claimed.token_id):
+                self._scheduler.mark_failed(
+                    work_item_id=claimed.work_item_id,
+                    now=self._clock.now_utc(),
+                    expected_lease_owner=claimed_lease_owner,
+                )
             else:
                 self._scheduler.mark_terminal(
                     work_item_id=claimed.work_item_id,
                     now=self._clock.now_utc(),
                     expected_lease_owner=claimed_lease_owner,
                 )
+
+            if result is not None:
+                if isinstance(result, tuple):
+                    results.extend(result)
+                else:
+                    results.append(result)
 
             if not recover_pending_sinks and not pending_items:
                 break
@@ -3017,6 +3022,7 @@ class RowProcessor:
             error=FailureInfo(exception_type="ResumedPendingSink", message=scheduled.pending_error_message or "")
             if scheduled.pending_path == TerminalPath.ON_ERROR_ROUTED.value
             else None,
+            scheduler_pending_sink=True,
         )
 
     def _mark_claimed_scheduler_work_blocked(
@@ -3169,6 +3175,37 @@ class RowProcessor:
             }:
                 return item
         return None
+
+    @staticmethod
+    def _with_scheduler_pending_sink_handoff(
+        result: RowResult | tuple[RowResult, ...] | None,
+        claimed_token_id: str,
+    ) -> RowResult | tuple[RowResult, ...]:
+        """Mark only the claimed token result as scheduler pending-sink backed."""
+        if result is None:
+            raise OrchestrationInvariantError(
+                f"Cannot mark scheduler pending-sink handoff for claimed token {claimed_token_id!r}: result is None."
+            )
+        if isinstance(result, tuple):
+            tagged: list[RowResult] = []
+            matched = False
+            for item in result:
+                if item.token.token_id == claimed_token_id:
+                    tagged.append(replace(item, scheduler_pending_sink=True))
+                    matched = True
+                else:
+                    tagged.append(item)
+            if not matched:
+                raise OrchestrationInvariantError(
+                    f"Cannot mark scheduler pending-sink handoff: claimed token {claimed_token_id!r} was not present in tuple result."
+                )
+            return tuple(tagged)
+        if result.token.token_id != claimed_token_id:
+            raise OrchestrationInvariantError(
+                f"Cannot mark scheduler pending-sink handoff: claimed token {claimed_token_id!r} "
+                f"does not match result token {result.token.token_id!r}."
+            )
+        return replace(result, scheduler_pending_sink=True)
 
     @staticmethod
     def _require_scheduler_sink_name(result: RowResult) -> str:

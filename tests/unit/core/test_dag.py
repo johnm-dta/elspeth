@@ -188,7 +188,10 @@ def _apply_explicit_success_routing(settings: Any) -> Any:
 
     routed_settings = routed_settings.model_copy(
         update={
-            "source": updated_source,
+            "sources": {
+                **dict(routed_settings.sources),
+                "primary": updated_source,
+            },
             "transforms": updated_transforms,
             "aggregations": updated_aggregations,
             "gates": updated_gates,
@@ -690,29 +693,27 @@ class TestSourceSinkValidation:
 
         assert graph.get_sources()[0] == "my_source"
 
-    def test_get_source_crashes_on_no_source(self) -> None:
-        """get_source() raises GraphValidationError when graph has no source node."""
+    def test_get_sources_returns_empty_when_no_source(self) -> None:
+        """get_sources() returns an empty list when graph has no source node."""
         from elspeth.contracts import NodeType
-        from elspeth.core.dag import ExecutionGraph, GraphValidationError
+        from elspeth.core.dag import ExecutionGraph
 
         graph = ExecutionGraph()
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv")
 
-        with pytest.raises(GraphValidationError, match="Expected exactly 1 source node, found 0"):
-            graph.get_sources()[0]
+        assert graph.get_sources() == []
 
-    def test_get_source_crashes_on_multiple_sources(self) -> None:
-        """get_source() raises GraphValidationError when graph has multiple sources."""
+    def test_get_sources_returns_all_sources(self) -> None:
+        """get_sources() returns every source node in a plural-source graph."""
         from elspeth.contracts import NodeType
-        from elspeth.core.dag import ExecutionGraph, GraphValidationError
+        from elspeth.core.dag import ExecutionGraph
 
         graph = ExecutionGraph()
         graph.add_node("source1", node_type=NodeType.SOURCE, plugin_name="csv")
         graph.add_node("source2", node_type=NodeType.SOURCE, plugin_name="json")
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv")
 
-        with pytest.raises(GraphValidationError, match="Expected exactly 1 source node, found 2"):
-            graph.get_sources()[0]
+        assert graph.get_sources() == ["source1", "source2"]
 
     def test_get_sink_nodes(self) -> None:
         from elspeth.contracts import NodeType
@@ -1769,7 +1770,7 @@ class TestExecutionGraphFromConfig:
 
         sequence = graph.get_pipeline_node_sequence()
         assert len(sequence) == 2
-        assert graph.get_first_transform_node() == sequence[0]
+        assert graph.get_next_node(graph.get_sources()[0]) == sequence[0]
         assert graph.get_next_node(sequence[0]) == sequence[1]
         assert graph.get_next_node(sequence[1]) is None
 
@@ -1942,7 +1943,9 @@ class TestExecutionGraphFromConfig:
             },
         )
         bad_plugins = instantiate_plugins_from_config_raw(bad_config)
-        with pytest.raises(GraphValidationError, match=r"Source 'csv' on_success 'missing_sink' is neither a sink nor a known connection"):
+        with pytest.raises(
+            GraphValidationError, match=r"Source 'primary' on_success 'missing_sink' is neither a sink nor a known connection"
+        ):
             ExecutionGraph.from_plugin_instances(
                 sources=bad_plugins.sources,
                 source_settings_map=bad_plugins.source_settings_map,
@@ -4892,7 +4895,7 @@ class TestDeterministicNodeIDs:
         plugins1 = instantiate_plugins_from_config(config)
         graph1 = ExecutionGraph.from_plugin_instances(
             sources=plugins1.sources,
-            source_settings_map={"primary": plugins1.source_settings},
+            source_settings_map=plugins1.source_settings_map,
             transforms=plugins1.transforms,
             sinks=plugins1.sinks,
             aggregations=plugins1.aggregations,
@@ -4902,7 +4905,7 @@ class TestDeterministicNodeIDs:
         plugins2 = instantiate_plugins_from_config(config)
         graph2 = ExecutionGraph.from_plugin_instances(
             sources=plugins2.sources,
-            source_settings_map={"primary": plugins2.source_settings},
+            source_settings_map=plugins2.source_settings_map,
             transforms=plugins2.transforms,
             sinks=plugins2.sinks,
             aggregations=plugins2.aggregations,
@@ -4963,7 +4966,7 @@ class TestDeterministicNodeIDs:
         plugins1 = instantiate_plugins_from_config(config1)
         graph1 = ExecutionGraph.from_plugin_instances(
             sources=plugins1.sources,
-            source_settings_map={"primary": plugins1.source_settings},
+            source_settings_map=plugins1.source_settings_map,
             transforms=plugins1.transforms,
             sinks=plugins1.sinks,
             aggregations=plugins1.aggregations,
@@ -4973,7 +4976,7 @@ class TestDeterministicNodeIDs:
         plugins2 = instantiate_plugins_from_config(config2)
         graph2 = ExecutionGraph.from_plugin_instances(
             sources=plugins2.sources,
-            source_settings_map={"primary": plugins2.source_settings},
+            source_settings_map=plugins2.source_settings_map,
             transforms=plugins2.transforms,
             sinks=plugins2.sinks,
             aggregations=plugins2.aggregations,

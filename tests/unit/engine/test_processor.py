@@ -47,7 +47,7 @@ from elspeth.contracts.errors import (
     OrchestrationInvariantError,
     SourceGuaranteedFieldsViolation,
 )
-from elspeth.contracts.results import GateResult
+from elspeth.contracts.results import FailureInfo, GateResult
 from elspeth.contracts.routing import RoutingAction
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
@@ -4074,6 +4074,85 @@ class TestDurableSchedulerResumeDrain:
         assert run_id == "test-run"
         assert work_item_id
 
+    def test_durable_scheduler_on_error_routed_result_marks_pending_sink(self) -> None:
+        """ON_ERROR_ROUTED failures are sink-bound until error-sink durability."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-on-error-routed")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default", on_error="errors")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        routed_result = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id=token.token_id, row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.ON_ERROR_ROUTED,
+            sink_name="errors",
+            error=FailureInfo(exception_type="TransformError", message="bad row"),
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with patch.object(processor, "_process_single_token", return_value=(routed_result, [])):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        assert results[0].outcome == TerminalOutcome.FAILURE
+        assert results[0].path == TerminalPath.ON_ERROR_ROUTED
+        assert results[0].sink_name == "errors"
+        assert results[0].scheduler_pending_sink is True
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            row_state = conn.execute(
+                select(
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.pending_sink_name,
+                    token_work_items_table.c.pending_outcome,
+                    token_work_items_table.c.pending_path,
+                    token_work_items_table.c.row_payload_json,
+                ).where(token_work_items_table.c.token_id == "token-on-error-routed")
+            ).one()
+        assert row_state.status == "pending_sink"
+        assert row_state.pending_sink_name == "errors"
+        assert row_state.pending_outcome == TerminalOutcome.FAILURE.value
+        assert row_state.pending_path == TerminalPath.ON_ERROR_ROUTED.value
+        assert factory.scheduler.deserialize_row_payload(row_state.row_payload_json).to_dict() == source_payload.to_dict()
+
     def test_durable_scheduler_tuple_failure_for_claimed_token_marks_work_failed(self) -> None:
         """Tuple results must classify the claimed token, not fall through to terminal."""
         db, factory = _make_factory()
@@ -4203,7 +4282,13 @@ class TestDurableSchedulerResumeDrain:
         with patch.object(processor, "_process_single_token", return_value=((sibling_failure, claimed_success), [])):
             results = processor.drain_scheduled_work(ctx)
 
-        assert results == [sibling_failure, claimed_success]
+        assert len(results) == 2
+        assert results[0] == sibling_failure
+        assert results[1].token.token_id == claimed_success.token.token_id
+        assert results[1].outcome == claimed_success.outcome
+        assert results[1].path == claimed_success.path
+        assert results[1].sink_name == claimed_success.sink_name
+        assert results[1].scheduler_pending_sink is True
         from sqlalchemy import select
 
         from elspeth.core.landscape.schema import token_work_items_table

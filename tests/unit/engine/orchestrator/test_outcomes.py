@@ -50,6 +50,7 @@ def _make_result(
     result.token = result_token
     result.sink_name = sink_name
     result.error = None
+    result.scheduler_pending_sink = False
     return result
 
 
@@ -199,6 +200,7 @@ class TestAccumulateTerminalPairsRoutedOnError:
             exception_type="ValueError",
             message="upstream transform raised",
         )
+        result.scheduler_pending_sink = False
         return result
 
     def test_routed_on_error_increments_routed_failure_counter(self) -> None:

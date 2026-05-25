@@ -53,6 +53,7 @@ def _route_to_sink(
     outcome: TerminalOutcome | None,
     path: TerminalPath,
     error_hash: str | None = None,
+    scheduler_pending_sink: bool = False,
 ) -> None:
     """Validate sink exists in pending_tokens and append the token.
 
@@ -68,12 +69,24 @@ def _route_to_sink(
         path: Terminal provenance path to persist after sink durability
         error_hash: 16-char sha256 prefix capturing the originating error;
             required by PendingOutcome for failure/error paths.
+        scheduler_pending_sink: Whether this exact token has a durable
+            PENDING_SINK scheduler handoff to terminalize after sink durability.
     """
     if sink_name not in pending_tokens:
         raise OrchestrationInvariantError(
             f"Sink '{sink_name}' not in configured sinks. Available: {sorted(pending_tokens.keys())}. Token: {token}"
         )
-    pending_tokens[sink_name].append((token, PendingOutcome(outcome=outcome, path=path, error_hash=error_hash)))
+    pending_tokens[sink_name].append(
+        (
+            token,
+            PendingOutcome(
+                outcome=outcome,
+                path=path,
+                error_hash=error_hash,
+                scheduler_pending_sink=scheduler_pending_sink,
+            ),
+        )
+    )
 
 
 def _mark_barrier_tokens_terminal(
@@ -294,6 +307,7 @@ def accumulate_row_outcomes(
                 result.token,
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.DEFAULT_FLOW,
+                scheduler_pending_sink=result.scheduler_pending_sink,
             )
         elif pair == (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED):
             counters.rows_succeeded += 1
@@ -306,6 +320,7 @@ def accumulate_row_outcomes(
                 result.token,
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.GATE_ROUTED,
+                scheduler_pending_sink=result.scheduler_pending_sink,
             )
         elif pair == (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
             if result.error is None:
@@ -322,6 +337,7 @@ def accumulate_row_outcomes(
                 outcome=TerminalOutcome.FAILURE,
                 path=TerminalPath.ON_ERROR_ROUTED,
                 error_hash=error_hash,
+                scheduler_pending_sink=result.scheduler_pending_sink,
             )
         elif pair == (TerminalOutcome.FAILURE, TerminalPath.UNROUTED):
             counters.rows_failed += 1
@@ -357,6 +373,7 @@ def accumulate_row_outcomes(
                 result.token,
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.COALESCED,
+                scheduler_pending_sink=result.scheduler_pending_sink,
             )
         elif pair == (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT):
             # Deaggregation parent token - children counted separately

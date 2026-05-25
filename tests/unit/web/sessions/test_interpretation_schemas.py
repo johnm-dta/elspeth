@@ -263,18 +263,30 @@ class TestInterpretationResolveRequest:
             )
         assert "template metacharacters" in str(exc.value)
 
-    def test_amended_value_rejects_newline(self) -> None:
-        with pytest.raises(ValidationError) as exc:
-            InterpretationResolveRequest(
-                choice="amended",
-                amended_value="line one\nline two",
-            )
-        assert "control characters" in str(exc.value)
+    def test_amended_value_permits_newline(self) -> None:
+        # Newlines are permitted: pipeline_decision and vague_term amended
+        # values can legitimately span lines (a multi-paragraph rubric or
+        # decision rationale). The per-line length cap below still bounds
+        # pathological single-line pastes.
+        req = InterpretationResolveRequest(
+            choice="amended",
+            amended_value="line one\nline two",
+        )
+        assert req.amended_value == "line one\nline two"
+
+    def test_amended_value_permits_carriage_return(self) -> None:
+        # CRLF-terminated content from operators on Windows must round-trip.
+        req = InterpretationResolveRequest(
+            choice="amended",
+            amended_value="line one\r\nline two",
+        )
+        assert req.amended_value == "line one\r\nline two"
 
     def test_amended_value_rejects_other_control_chars(self) -> None:
-        # \x00 (NUL) and \x07 (BEL) must be rejected; \t (horizontal tab) is
-        # explicitly permitted per the Task 3 spec.
-        for char in ("\x00", "\x07", "\x1f", "\x7f"):
+        # \x00 (NUL), \x07 (BEL), \x0b (VT), \x0c (FF), \x1b (ESC), \x1f
+        # (US), and \x7f (DEL) must be rejected. \t \n \r are explicitly
+        # permitted.
+        for char in ("\x00", "\x07", "\x0b", "\x0c", "\x1b", "\x1f", "\x7f"):
             with pytest.raises(ValidationError):
                 InterpretationResolveRequest(
                     choice="amended",
@@ -282,21 +294,30 @@ class TestInterpretationResolveRequest:
                 )
 
     def test_amended_value_permits_horizontal_tab(self) -> None:
-        # Tab is explicitly permitted by the spec.
         req = InterpretationResolveRequest(
             choice="amended",
             amended_value="prefix\tsuffix",
         )
         assert req.amended_value == "prefix\tsuffix"
 
-    def test_amended_value_single_line_length_cap(self) -> None:
-        # Single-line >1024 chars is pathological per the spec.  The 8192
-        # outer cap permits this length, so the validator must catch it.
+    def test_amended_value_per_line_length_cap_single_line(self) -> None:
         long_single_line = "a" * 1025
         with pytest.raises(ValidationError) as exc:
             InterpretationResolveRequest(
                 choice="amended",
                 amended_value=long_single_line,
+            )
+        assert "1024-character" in str(exc.value)
+
+    def test_amended_value_per_line_length_cap_multi_line(self) -> None:
+        # The per-line cap must fire even when the offending line is in
+        # the middle of a multi-line payload — the previous single-line
+        # cap silently allowed this case.
+        payload = "ok\n" + ("b" * 1025) + "\ntail"
+        with pytest.raises(ValidationError) as exc:
+            InterpretationResolveRequest(
+                choice="amended",
+                amended_value=payload,
             )
         assert "1024-character" in str(exc.value)
 

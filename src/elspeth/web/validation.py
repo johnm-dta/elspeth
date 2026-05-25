@@ -212,13 +212,17 @@ def _warn_pii_shaped_content(value: str) -> Iterable[PIIWarning]:
             yield PIIWarning(pattern_name=name)
 
 
-# Allowed control character: horizontal tab (\t = \x09).  All other ASCII
-# control characters (NUL through ETB except TAB, then SI through US, plus
-# DEL) and the newline / vertical-tab / form-feed / CR range are rejected.
-# Newlines are treated as control characters here because interpretation
-# values are single-phrase, not multi-line: a user pasting a multi-line
-# block has almost certainly mis-pasted from elsewhere.
-_FORBIDDEN_CONTROL_CHARS_RE: re.Pattern[str] = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+# Permitted whitespace: horizontal tab (\t), line feed (\n), carriage
+# return (\r). All other ASCII control characters (NUL through ETB except
+# TAB, then VT, FF, then SI through US, plus DEL) remain rejected.
+# Newlines must be permitted because three of the four interpretation
+# kinds carry inherently multi-line content: invented_source drafts are
+# CSV/JSONL artifacts, llm_prompt_template drafts are templates with
+# multi-line instructions, and pipeline_decision drafts are decision
+# rationales that span lines. The 1024-character cap is applied per line
+# (see below) so the original protection against unbounded single-line
+# pastes is preserved.
+_FORBIDDEN_CONTROL_CHARS_RE: re.Pattern[str] = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _validate_accepted_value_content(value: str) -> None:
@@ -228,9 +232,11 @@ def _validate_accepted_value_content(value: str) -> None:
 
     * Jinja-style template metacharacters (``{{`` or ``}}``) — would
       corrupt the placeholder substitution at the consumer.
-    * Control characters (newline, NUL, etc., except horizontal tab).
-    * Single-line strings longer than 1024 characters — pathological and
-      a likely sign of an automated paste-of-large-data.  The outer
+    * Non-whitespace control characters (NUL, BEL, VT, FF, ESC, DEL,
+      etc.). Horizontal tab, line feed, and carriage return are
+      explicitly permitted.
+    * Any single line longer than 1024 characters — pathological and a
+      likely sign of an automated paste-of-large-data. The outer
       8192-character cap is enforced by the field's ``max_length`` on
       the schema; this is the per-line cap.
     * Credential-shaped content (delegates to
@@ -240,16 +246,15 @@ def _validate_accepted_value_content(value: str) -> None:
 
     * Schema layer — ``InterpretationResolveRequest.amended_value``.
     * Tool boundary — ``request_interpretation_review`` against
-      ``user_term`` and ``llm_draft`` (Task 5).
+      ``llm_draft`` for vague_term and pipeline_decision kinds (Task 5).
     """
     if "{{" in value or "}}" in value:
         raise ValueError("accepted_value must not contain template metacharacters {{ or }}")
     if _FORBIDDEN_CONTROL_CHARS_RE.search(value):
-        raise ValueError("accepted_value must not contain control characters (newlines and non-printable characters are not permitted)")
-    # Per Phase 5b spec lines 1511-1516: a string longer than 1024 chars and
-    # still single-line is pathological.  Multi-line strings are already
-    # rejected by the control-char check above, so this branch is reached
-    # only for genuine single-line strings.
-    if len(value) > 1024:
-        raise ValueError("accepted_value exceeds the single-line 1024-character limit")
+        raise ValueError(
+            "accepted_value must not contain non-printable control characters (horizontal tab, newline, and carriage return are permitted)"
+        )
+    for line in value.splitlines() or [value]:
+        if len(line) > 1024:
+            raise ValueError("accepted_value has a line exceeding the 1024-character per-line limit")
     _reject_credential_shaped_content(value)

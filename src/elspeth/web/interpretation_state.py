@@ -30,8 +30,26 @@ INTERPRETATION_REVIEW_PENDING_CODE = "interpretation_review_pending"
 PENDING_INTERPRETATION_AUTHORING_TEXT = "pending interpretation"
 RAW_HTML_CLEANUP_USER_TERM: Final[str] = "drop_raw_html_fields"
 RAW_HTML_CLEANUP_REVIEW_DRAFT: Final[str] = "Drop the scraped raw HTML and fingerprint fields before saving the JSON output."
+PROMPT_SHIELD_USER_TERM: Final[str] = "prompt_injection_shield_recommendation"
+PROMPT_SHIELD_REVIEW_DRAFT: Final[str] = (
+    "Recommend inserting azure_prompt_shield (or the deployment equivalent prompt-injection shield) "
+    "between the external-content fetch step and this LLM. The current draft routes "
+    "internet-controlled text directly into the LLM without that shield, which is a prompt-injection "
+    "exposure on untrusted remote content."
+)
 
 _RAW_HTML_CLEANUP_DRAFT_MARKERS: Final[tuple[str, ...]] = ("raw html", "fingerprint")
+
+# Transform plugins whose output is externally-controlled remote content for
+# prompt-injection-defence purposes. web_scrape returns whatever the fetched
+# page served, which is by definition untrusted.
+_UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS: Final[frozenset[str]] = frozenset({"web_scrape"})
+
+# Transform plugins that constitute an authorized prompt-injection shield
+# sitting between an untrusted producer and a downstream LLM consumer.
+# Content-moderation (azure_content_safety) is deliberately NOT in this set:
+# content moderation and prompt-injection shielding are different controls.
+_AUTHORIZED_PROMPT_SHIELD_PLUGINS: Final[frozenset[str]] = frozenset({"azure_prompt_shield"})
 
 AUTHORING_METADATA_OPTION_KEYS: frozenset[str] = frozenset(
     {
@@ -181,6 +199,106 @@ def raw_html_cleanup_review_contract_error(state: CompositionState) -> str | Non
     return None
 
 
+def prompt_shield_recommendation_contract_error(state: CompositionState) -> str | None:
+    """Return a composer-facing error when an LLM consumes untrusted remote content unreviewed.
+
+    An LLM node that ingests output from an untrusted-remote-content producer
+    (currently ``web_scrape``) without an authorized prompt-injection shield
+    between them must carry a pending ``pipeline_decision`` review with
+    ``user_term`` :data:`PROMPT_SHIELD_USER_TERM`. The review is reviewable
+    prose recommending an actual shield — it is NOT a topology change. This
+    contract is the server-side analogue of the raw-HTML cleanup contract.
+    """
+
+    producer_by_output_stream = _producer_by_output_stream(state.nodes)
+    for node in state.nodes:
+        if node.plugin != "llm":
+            continue
+        if not _llm_consumes_untrusted_remote_content(node, producer_by_output_stream):
+            continue
+        if _llm_has_shield_recommendation(node):
+            continue
+        return (
+            f"LLM node {node.id!r} consumes externally-fetched content from a web_scrape "
+            "upstream without an authorized prompt-injection shield between them. Stage a "
+            "pending pipeline_decision interpretation_requirements entry on this LLM node "
+            f"with user_term {PROMPT_SHIELD_USER_TERM!r} and a draft recommending "
+            "azure_prompt_shield (or the deployment equivalent) between the external-content "
+            "step and the LLM. interpretation_requirements is a sibling of prompt_template "
+            "in the llm options object. Do NOT add azure_prompt_shield or azure_content_safety "
+            "to the graph for this requirement — the recommendation is a reviewable record, "
+            "not a topology change. After the next successful set_pipeline, call "
+            "request_interpretation_review with kind='pipeline_decision', "
+            f"affected_node_id={node.id!r}, user_term={PROMPT_SHIELD_USER_TERM!r}, and an "
+            "llm_draft that mentions azure_prompt_shield or 'prompt injection'."
+        )
+    return None
+
+
+def _producer_by_output_stream(nodes: Sequence[NodeSpec]) -> dict[str, NodeSpec]:
+    producers: dict[str, NodeSpec] = {}
+    for node in nodes:
+        if isinstance(node.on_success, str) and node.on_success:
+            producers[node.on_success] = node
+    return producers
+
+
+def _llm_consumes_untrusted_remote_content(
+    node: NodeSpec,
+    producer_by_output_stream: Mapping[str, NodeSpec],
+) -> bool:
+    """Walk upstream from ``node``; return True iff untrusted producer reached without a shield."""
+
+    if node.plugin != "llm":
+        return False
+    stream = node.input
+    visited: set[str] = set()
+    while isinstance(stream, str) and stream and stream not in visited:
+        visited.add(stream)
+        producer = producer_by_output_stream.get(stream)
+        if producer is None:
+            return False
+        if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
+            return False
+        if producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
+            return True
+        stream = producer.input
+    return False
+
+
+def _llm_has_shield_recommendation(node: NodeSpec) -> bool:
+    requirements = _requirements(node.options)
+    if requirements is None:
+        return False
+    for requirement in requirements:
+        if InterpretationKind(requirement["kind"]) is not InterpretationKind.PIPELINE_DECISION:
+            continue
+        if requirement["user_term"].strip() == PROMPT_SHIELD_USER_TERM:
+            return True
+    return False
+
+
+def _missing_prompt_shield_recommendation_review_sites(
+    node: NodeSpec,
+    *,
+    llm_ids_consuming_untrusted: frozenset[str],
+) -> tuple[InterpretationReviewSite, ...]:
+    """Return the required review site for an LLM that needs the shield recommendation."""
+
+    if node.id not in llm_ids_consuming_untrusted:
+        return ()
+    if _llm_has_shield_recommendation(node):
+        return ()
+    return (
+        InterpretationReviewSite(
+            component_id=node.id,
+            component_type="transform",
+            user_term=PROMPT_SHIELD_USER_TERM,
+            kind=InterpretationKind.PIPELINE_DECISION,
+        ),
+    )
+
+
 def _raw_html_cleanup_requirement_contract_error(node: NodeSpec) -> str | None:
     try:
         requirements = _requirements(node.options)
@@ -250,10 +368,15 @@ def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewS
     if state.source is not None:
         sites.extend(_pending_source_sites(state.source))
     web_scrape_raw_fields = _web_scrape_raw_fields(state.nodes)
+    producer_by_output_stream = _producer_by_output_stream(state.nodes)
+    llm_ids_consuming_untrusted = frozenset(
+        node.id for node in state.nodes if _llm_consumes_untrusted_remote_content(node, producer_by_output_stream)
+    )
     for node in state.nodes:
         node_sites = [*_pending_node_sites(node), *_legacy_placeholder_sites(node)]
         sites.extend(node_sites)
         sites.extend(_missing_raw_html_cleanup_review_sites(node, web_scrape_raw_fields=web_scrape_raw_fields))
+        sites.extend(_missing_prompt_shield_recommendation_review_sites(node, llm_ids_consuming_untrusted=llm_ids_consuming_untrusted))
         if not any(site.kind is InterpretationKind.LLM_PROMPT_TEMPLATE for site in node_sites):
             sites.extend(_missing_prompt_template_review_sites(node))
     return tuple(dict.fromkeys(sites))

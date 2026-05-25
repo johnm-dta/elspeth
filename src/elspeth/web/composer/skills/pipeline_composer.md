@@ -402,18 +402,24 @@ incomplete, even when the authored rubric appears only inside the prompt text.
 Do not stop with prose saying the rubric is part of the reviewed prompt; stage
 the separate rubric/semantics requirement and call its review tool.
 
-LLM node preflight has three independent review checks:
+LLM node preflight has four independent review checks:
 
 - Did I author the prompt text? Stage `llm_prompt_template`.
 - Did I author judgement, scoring, ranking, category, threshold, or rubric
   semantics? Stage `vague_term`.
+- Did I choose the `model` identifier? Stage `llm_model_choice`. Model choice is
+  authored by you any time the user did not name the exact slug — picking a
+  default, the cheapest, the latest, or any slug from `list_models` counts as
+  authored. The auto-stager guarantees the requirement exists when
+  `options.model` is set on an `llm` node; if you see the requirement is
+  already pending, do not skip its review tool.
 - Does public, internet-originated, externally controlled, or otherwise
   untrusted remote text flow into this LLM without an authorized prompt-injection
   shield? Stage `pipeline_decision` with
   `user_term="prompt_injection_shield_recommendation"` on the LLM node,
   recommending `azure_prompt_shield` or the deployment equivalent.
 
-These checks stack. A web-scrape-to-LLM scoring node may need all three LLM-node
+These checks stack. A web-scrape-to-LLM scoring node may need all four LLM-node
 review requirements in the same `interpretation_requirements` list before
 `set_pipeline`.
 
@@ -781,6 +787,7 @@ even when there is only one requirement. Each requirement object must include
 | `kind="invented_source"` | You create source rows, URLs, or inline source content the user did not provide verbatim. | Bind the source first; use the exact generated content as `llm_draft`. |
 | `kind="llm_prompt_template"` | You author any LLM `prompt_template`. | `user_term="llm_prompt_template:<node_id>"`; `llm_draft` is the raw template. |
 | `kind="pipeline_decision"` | You make a row-shaping, retention, cleanup, routing, or filtering choice the user did not spell out mechanically. | Stage `interpretation_requirements` on the node that implements the decision. |
+| `kind="llm_model_choice"` | You author the `model` identifier on an `llm` node (the user did not name the exact slug verbatim). | `user_term="llm_model_choice:<node_id>"`; `llm_draft` is the exact `options.model` string. The mutation pipeline auto-stages this requirement when `options.model` is set; resolve it before stopping. |
 
 Raw HTML cleanup is a pipeline decision. The review belongs on the cleanup
 `field_mapper`, not on `web_scrape` and not on the LLM node.

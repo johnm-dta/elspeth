@@ -49,7 +49,7 @@ from elspeth.web.composer.tools._common import (
     _graph_repair_suggestions,
     _missing_output_options_repair_error,
     _mutation_result,
-    _options_with_default_prompt_template_review,
+    _options_with_default_llm_reviews,
     _prevalidate_sink,
     _prevalidate_source,
     _prevalidate_transform,
@@ -379,7 +379,7 @@ def _execute_set_pipeline(
             if batch_required_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {batch_required_error}")
 
-            review_options = _options_with_default_prompt_template_review(
+            review_options = _options_with_default_llm_reviews(
                 node_id=node_id,
                 plugin=node_plugin,
                 options=node_options,
@@ -497,7 +497,7 @@ def _execute_set_pipeline(
                 input=n.input,
                 on_success=n.on_success,
                 on_error=n.on_error or ("discard" if nt in ("transform", "aggregation") else None),
-                options=_options_with_default_prompt_template_review(
+                options=_options_with_default_llm_reviews(
                     node_id=n.id,
                     plugin=n.plugin,
                     options=n.options,
@@ -1215,13 +1215,19 @@ def _assert_affected_component(
         )
 
     options = node.options if node.options else {}
-    prompt_template = options.get("prompt_template")
-    if not isinstance(prompt_template, str) or not prompt_template:
-        raise ToolArgumentError(
-            argument="affected_node_id",
-            expected=f"node {affected_node_id!r} to declare non-empty options.prompt_template",
-            actual_type=f"options.prompt_template is {type(prompt_template).__name__}",
-        )
+    # ``llm_model_choice`` reviews a different field of the same LLM node;
+    # the prompt-template existence guard does not apply (a model can
+    # legitimately be set before the prompt is authored mid-compose).
+    if kind is not InterpretationKind.LLM_MODEL_CHOICE:
+        prompt_template = options.get("prompt_template")
+        if not isinstance(prompt_template, str) or not prompt_template:
+            raise ToolArgumentError(
+                argument="affected_node_id",
+                expected=f"node {affected_node_id!r} to declare non-empty options.prompt_template",
+                actual_type=f"options.prompt_template is {type(prompt_template).__name__}",
+            )
+    else:
+        prompt_template = None
 
     matched_terms = _matching_interpretation_sites(state, affected_node_id, kind, user_term)
     if not matched_terms:
@@ -1237,6 +1243,20 @@ def _assert_affected_component(
             expected=f"current options.prompt_template for node {affected_node_id!r}",
             actual_type="stale prompt-template draft",
         )
+    if kind is InterpretationKind.LLM_MODEL_CHOICE and llm_draft is not None:
+        current_model = options.get("model")
+        if not isinstance(current_model, str) or not current_model:
+            raise ToolArgumentError(
+                argument="affected_node_id",
+                expected=f"node {affected_node_id!r} to declare non-empty options.model",
+                actual_type=f"options.model is {type(current_model).__name__}",
+            )
+        if llm_draft != current_model:
+            raise ToolArgumentError(
+                argument="llm_draft",
+                expected=f"current options.model for node {affected_node_id!r}",
+                actual_type="stale model-choice draft",
+            )
 
 
 def _assert_affected_llm_node(
@@ -1482,7 +1502,17 @@ async def _handle_request_interpretation_review(
     # before any DB write. Prompt-template reviews deliberately carry real
     # Jinja such as ``{{ row.html }}``, so they keep the credential prefilter
     # above but skip the accepted-value validator.
-    if parsed.kind in {InterpretationKind.VAGUE_TERM, InterpretationKind.PIPELINE_DECISION}:
+    if parsed.kind in {
+        InterpretationKind.VAGUE_TERM,
+        InterpretationKind.PIPELINE_DECISION,
+        InterpretationKind.LLM_MODEL_CHOICE,
+    }:
+        # ``llm_model_choice`` drafts are short model identifier strings
+        # (e.g. ``anthropic/claude-sonnet-4.5``) selected from a catalog
+        # at compose time; they are treated as accepted-value content
+        # because they flow into the runtime config as-is, never as
+        # template fragments — the same content rules apply (no Jinja,
+        # no control characters, no credential shapes).
         try:
             _validate_accepted_value_content(parsed.llm_draft)
         except ValueError as exc:

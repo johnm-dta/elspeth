@@ -180,7 +180,21 @@ defaults:
     # hash domain was narrowed by user_term (fixes spurious drift when an
     # unrelated field like ``model`` is edited after a shield-recommendation
     # review resolves).
-    max_allow_hits: 645
+    #
+    # Bumped to 652 on 2026-05-25 (net +7) for the llm_model_choice
+    # algorithmic-surfacing addition: parallel to the existing
+    # llm_prompt_template auto-stager, the new auto-stager fires whenever
+    # an LLM node's options.model is set, and the new missing-site
+    # enumerator surfaces a pending review for any unreviewed model
+    # choice loaded from existing sessions. 9 net-new fingerprinted
+    # allowlist entries land here (model branch of _materialize_node_for_execution
+    # R1+R5, _missing_model_choice_review_sites R1+R5, _assert_affected_component
+    # R1+R5 for the resolution-time draft check, _options_with_default_model_choice_review
+    # R5 isinstance, 2 R1 entries on _requirement_matches_field_value
+    # carried forward from the pre-rename _requirement_matches_prompt_template
+    # function). Two stale entries dropped: _requirement_matches_prompt_template
+    # R1×2 (function renamed in this commit). Net 9 − 2 = +7.
+    max_allow_hits: 652
     # Bumped from 92 → 93 on 2026-05-19 to accommodate the Phase 8b-1a
     # per_file_rules entry for ``web/composer/telemetry_phase8.py`` (R4
     # — W5 load-bearing telemetry-only exemption per
@@ -249,7 +263,11 @@ defaults:
     # rotation as ``max_allow_hits`` above.
     # Bumped to 737 on 2026-05-25 (net +2) for the same two new R5 entries
     # accounted for in ``max_allow_hits`` above.
-    max_total_entries: 737
+    #
+    # Bumped to 744 on 2026-05-25 (net +7) for the same llm_model_choice
+    # algorithmic-surfacing addition accounted for in ``max_allow_hits``
+    # above.
+    max_total_entries: 744
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.

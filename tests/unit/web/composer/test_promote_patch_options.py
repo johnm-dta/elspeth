@@ -410,9 +410,20 @@ class TestPromotePatchNodeOptionsArgErrorRouting:
 
         assert result.success is True, result.data
         requirements = result.updated_state.nodes[0].options[INTERPRETATION_REQUIREMENTS_KEY]
-        assert [requirement["kind"] for requirement in requirements] == ["vague_term", "llm_prompt_template"]
+        # The composite LLM-review auto-stager attaches every default
+        # gate; ``vague_term`` was pre-existing and copied forward, the
+        # prompt template gate was added (the patched field), and the
+        # model-choice gate was added because the node already has a
+        # non-empty ``options.model``.
+        assert [requirement["kind"] for requirement in requirements] == [
+            "vague_term",
+            "llm_prompt_template",
+            "llm_model_choice",
+        ]
         assert requirements[1]["user_term"] == "llm_prompt_template:llm1"
         assert requirements[1]["draft"] == "New {{ row.text }}."
+        assert requirements[2]["user_term"] == "llm_model_choice:llm1"
+        assert requirements[2]["draft"] == "anthropic/claude-haiku-4.5"
 
     def test_patch_rejects_unreviewed_drop_of_web_scrape_raw_fields(self) -> None:
         """A patch cannot create raw-field cleanup without the pipeline decision gate."""

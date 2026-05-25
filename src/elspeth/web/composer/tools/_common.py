@@ -107,13 +107,21 @@ def _pending_interpretation_requirement(
     return requirement
 
 
-def _requirement_matches_prompt_template(requirement: Mapping[str, Any], prompt_template: str) -> bool:
+def _requirement_matches_field_value(requirement: Mapping[str, Any], field_value: str) -> bool:
+    """True when ``requirement``'s draft/resolved hash already matches ``field_value``.
+
+    Polymorphic by status: pending requirements carry the raw ``draft``
+    string and compare equal; resolved requirements carry the stable hash
+    of the accepted value in ``resolved_prompt_template_hash`` (a
+    historical field name retained across kinds — the field is the
+    universal resolved-value hash, not prompt-template-specific).
+    """
     status = requirement["status"] if "status" in requirement else None
     if status == "pending":
-        return requirement.get("draft") == prompt_template
+        return requirement.get("draft") == field_value
     if status != "resolved":
         return False
-    return requirement.get("resolved_prompt_template_hash") == stable_hash(prompt_template)
+    return requirement.get("resolved_prompt_template_hash") == stable_hash(field_value)
 
 
 def _options_with_pending_requirement(
@@ -121,9 +129,17 @@ def _options_with_pending_requirement(
     *,
     requirement: Mapping[str, Any],
     replace_kind: InterpretationKind | None = None,
-    current_prompt_template: str | None = None,
+    current_field_value: str | None = None,
 ) -> Mapping[str, Any]:
-    """Append or refresh a pending requirement without mutating ``options``."""
+    """Append or refresh a pending requirement without mutating ``options``.
+
+    When ``replace_kind`` matches an existing requirement and
+    ``current_field_value`` already equals that requirement's draft (or
+    resolved hash), the existing requirement is kept — the call is
+    idempotent so re-issuing the same mutation does not churn the review
+    state. Otherwise the existing requirement of ``replace_kind`` is
+    replaced with the supplied one.
+    """
     requirements_value = options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None
     if requirements_value is not None and not isinstance(requirements_value, (list, tuple)):
         return dict(options)
@@ -136,7 +152,7 @@ def _options_with_pending_requirement(
             if not isinstance(existing, Mapping) or existing.get("kind", InterpretationKind.VAGUE_TERM.value) != replace_kind.value:
                 next_requirements.append(existing)
                 continue
-            if current_prompt_template is not None and _requirement_matches_prompt_template(existing, current_prompt_template):
+            if current_field_value is not None and _requirement_matches_field_value(existing, current_field_value):
                 next_requirements.append(existing)
                 replaced = True
                 continue
@@ -175,8 +191,78 @@ def _options_with_default_prompt_template_review(
         options,
         requirement=requirement,
         replace_kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
-        current_prompt_template=prompt_template,
+        current_field_value=prompt_template,
     )
+
+
+def _options_with_default_model_choice_review(
+    *,
+    node_id: str,
+    plugin: str | None,
+    options: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Ensure LLM-authored model choices carry a review gate.
+
+    Algorithmic enforcement of the "every model choice must be surfaced
+    to the user" contract — every state mutation that sets ``options.model``
+    on an LLM node MUST stage a pending interpretation requirement of
+    kind ``llm_model_choice``. Mirrors
+    :func:`_options_with_default_prompt_template_review` so the composer
+    cannot ship a model identifier without surfacing it for review.
+
+    The surfacing is provider-agnostic and unconditional. Whether the
+    model id is also enforced by a live catalog (currently OpenRouter
+    via ``CatalogValueSource`` in
+    ``elspeth.plugins.transforms.llm.providers.openrouter``) is decided
+    separately by the validator at preflight time — the operator's
+    directive is "reliable surfacing", so we surface for every provider
+    including operator-overridden ``base_url`` (chaos servers, private
+    OpenAI-compatible gateways). The catalog SHA the choice was made
+    against is captured separately on the audit ``runs`` row at
+    execution time (``openrouter_catalog_sha256``), not here — that
+    keeps the requirement shape symmetric with ``llm_prompt_template``
+    (``draft == options.<field>`` invariant) and avoids leaking
+    provider-specific metadata into a provider-agnostic surface.
+    """
+    if plugin != "llm":
+        return options
+    model = options["model"] if "model" in options else None
+    if not isinstance(model, str) or not model:
+        return options
+    requirement = _pending_interpretation_requirement(
+        requirement_id=f"model_choice_review:{node_id}",
+        kind=InterpretationKind.LLM_MODEL_CHOICE,
+        user_term=f"llm_model_choice:{node_id}",
+        draft=model,
+    )
+    return _options_with_pending_requirement(
+        options,
+        requirement=requirement,
+        replace_kind=InterpretationKind.LLM_MODEL_CHOICE,
+        current_field_value=model,
+    )
+
+
+def _options_with_default_llm_reviews(
+    *,
+    node_id: str,
+    plugin: str | None,
+    options: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Apply every default review auto-stager for an LLM node, in order.
+
+    Composes the per-field auto-stagers (prompt template, model choice)
+    so call sites do not have to remember the full set. Each individual
+    helper is a no-op when its trigger condition doesn't hold (non-llm
+    plugin, missing field), so the composition is safe for non-llm nodes
+    and for partial LLM-node options.
+
+    Adding a new default review here is the canonical extension point —
+    callers stay on the composite and acquire the new gate automatically.
+    """
+    staged = _options_with_default_prompt_template_review(node_id=node_id, plugin=plugin, options=options)
+    staged = _options_with_default_model_choice_review(node_id=node_id, plugin=plugin, options=staged)
+    return staged
 
 
 class _SemanticEdgeContractPayload(TypedDict):

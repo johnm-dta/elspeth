@@ -379,6 +379,8 @@ def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewS
         sites.extend(_missing_prompt_shield_recommendation_review_sites(node, llm_ids_consuming_untrusted=llm_ids_consuming_untrusted))
         if not any(site.kind is InterpretationKind.LLM_PROMPT_TEMPLATE for site in node_sites):
             sites.extend(_missing_prompt_template_review_sites(node))
+        if not any(site.kind is InterpretationKind.LLM_MODEL_CHOICE for site in node_sites):
+            sites.extend(_missing_model_choice_review_sites(node))
     return tuple(dict.fromkeys(sites))
 
 
@@ -458,6 +460,9 @@ def _materialize_node_for_execution(node: NodeSpec, all_nodes: Sequence[NodeSpec
     _validate_pipeline_decision_review(node, all_nodes)
     if node.plugin != "llm":
         return node
+    model = node.options.get("model")
+    if isinstance(model, str) and model:
+        _validate_model_choice_review(node, model)
     parts = _prompt_parts(node.options)
     if parts is None:
         prompt_template = node.options.get("prompt_template")
@@ -650,6 +655,45 @@ def _missing_prompt_template_review_sites(node: NodeSpec) -> tuple[Interpretatio
     )
 
 
+def _missing_model_choice_review_sites(node: NodeSpec) -> tuple[InterpretationReviewSite, ...]:
+    """Enumerate an unreviewed model choice as a pending review site.
+
+    Parallel to :func:`_missing_prompt_template_review_sites` for the
+    ``llm_model_choice`` review kind. The mutation-time auto-stager
+    (:func:`_options_with_default_model_choice_review`) catches new
+    options-mutations; this enumerator catches pre-existing state that
+    pre-dates the auto-stager (e.g. composition rows loaded from
+    ``sessions.db`` before the gate was added). Together they guarantee
+    that no LLM node with a non-empty ``options.model`` ever reaches a
+    runnable state without a surfaced model-choice review.
+    """
+    if node.plugin != "llm":
+        return ()
+    model = node.options.get("model")
+    if not isinstance(model, str) or not model:
+        return ()
+    requirement = _model_choice_review_requirement(node.options)
+    if requirement is None:
+        return (
+            InterpretationReviewSite(
+                component_id=node.id,
+                component_type="transform",
+                user_term=f"llm_model_choice:{node.id}",
+                kind=InterpretationKind.LLM_MODEL_CHOICE,
+            ),
+        )
+    if requirement["status"] == "resolved":
+        return ()
+    return (
+        InterpretationReviewSite(
+            component_id=node.id,
+            component_type="transform",
+            user_term=_requirement_user_term_or_default(requirement, "model"),
+            kind=InterpretationKind.LLM_MODEL_CHOICE,
+        ),
+    )
+
+
 def _requirement_user_term_or_default(requirement: InterpretationRequirement | None, default: str) -> str:
     if requirement is None:
         return default
@@ -774,6 +818,10 @@ def _prompt_template_review_requirement(options: Mapping[str, Any]) -> Interpret
     return _requirement_for_kind(_requirements(options), InterpretationKind.LLM_PROMPT_TEMPLATE)
 
 
+def _model_choice_review_requirement(options: Mapping[str, Any]) -> InterpretationRequirement | None:
+    return _requirement_for_kind(_requirements(options), InterpretationKind.LLM_MODEL_CHOICE)
+
+
 def _resolved_requirement_for_kind(
     requirements: Sequence[InterpretationRequirement] | None,
     kind: InterpretationKind,
@@ -792,6 +840,25 @@ def _validate_prompt_template_review(node: NodeSpec, prompt_template: str) -> No
     expected_hash = stable_hash(prompt_template)
     if resolved["resolved_prompt_template_hash"] != expected_hash:
         raise ValueError(f"llm node {node.id!r} prompt-template review hash drifted")
+
+
+def _validate_model_choice_review(node: NodeSpec, model: str) -> None:
+    """Tier-1 read guard — resolved model choice must still match options.model.
+
+    If a previously accepted ``llm_model_choice`` review exists but the
+    node's current ``options.model`` no longer hashes to the same value,
+    something changed the model after acceptance — that violates the
+    "every model choice surfaced to the user" contract and the audit
+    trail can no longer attribute the run's model to a user decision.
+    Crash rather than silently let a drifted choice through.
+    """
+    requirements = _requirements(node.options)
+    resolved = _resolved_requirement_for_kind(requirements, InterpretationKind.LLM_MODEL_CHOICE)
+    if resolved is None:
+        return
+    expected_hash = stable_hash(model)
+    if resolved["resolved_prompt_template_hash"] != expected_hash:
+        raise ValueError(f"llm node {node.id!r} model-choice review hash drifted")
 
 
 def pipeline_decision_artifact_hash(

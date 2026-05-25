@@ -147,6 +147,45 @@ def _run_accounting_for_status(status: RunStatus) -> RunAccounting:
     )
 
 
+def _with_resolved_model_choice(node: dict[str, Any]) -> dict[str, Any]:
+    """Pre-stage a resolved ``llm_model_choice`` interpretation requirement.
+
+    Tests that construct an LLM node by raw dict bypass the composer's
+    mutation-time auto-stager (which would create a pending
+    requirement). Without this resolution, the validator's interpretation
+    gate short-circuits before any downstream check runs. Tests
+    exercising downstream behavior (fanout guard, blob-inline,
+    placeholder gate, etc.) get the gate resolved here so the test stays
+    focused on its actual subject.
+    """
+    if node.get("plugin") != "llm":
+        return node
+    options = node.get("options")
+    if not isinstance(options, dict):
+        return node
+    model = options.get("model")
+    if not isinstance(model, str) or not model:
+        return node
+    requirements = list(options.get(INTERPRETATION_REQUIREMENTS_KEY) or ())
+    requirements.append(
+        {
+            "id": f"model_choice_review:{node['id']}",
+            "kind": "llm_model_choice",
+            "user_term": f"llm_model_choice:{node['id']}",
+            "status": "resolved",
+            "draft": model,
+            "event_id": f"model-choice-accepted:{node['id']}",
+            "accepted_value": model,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": stable_hash(model),
+        }
+    )
+    return {
+        **node,
+        "options": {**options, INTERPRETATION_REQUIREMENTS_KEY: requirements},
+    }
+
+
 def _composition_state_record(
     *,
     session_id: UUID,
@@ -168,7 +207,7 @@ def _composition_state_record(
                 "schema": {"mode": "observed"},
             },
         },
-        nodes=nodes,
+        nodes=[_with_resolved_model_choice(node) for node in nodes],
         edges=[],
         outputs=[
             {
@@ -3927,6 +3966,26 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
                 "options": {
                     "prompt_template": f"Rate {{{{interpretation:{term}}}}} aspects.",
                     "model": "test-model",
+                    # Pre-resolve the model-choice review so this fixture
+                    # exercises ONLY the unresolved-vague-term /
+                    # unresolved-prompt-template gates the test class
+                    # targets. Without this, the auto-enumerated
+                    # model-choice site shows up as a third pending
+                    # interpretation and contaminates the gate's
+                    # observed telemetry list.
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": f"model_choice_review:{node_id}",
+                            "kind": "llm_model_choice",
+                            "user_term": f"llm_model_choice:{node_id}",
+                            "status": "resolved",
+                            "draft": "test-model",
+                            "event_id": "model-choice-accepted",
+                            "accepted_value": "test-model",
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": stable_hash("test-model"),
+                        }
+                    ],
                 },
             }
         ]
@@ -3981,7 +4040,21 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
                             "accepted_value": None,
                             "accepted_artifact_hash": None,
                             "resolved_prompt_template_hash": None,
-                        }
+                        },
+                        # Pre-resolve the model-choice review so this
+                        # fixture exercises only the structured pending
+                        # vague_term scenario.
+                        {
+                            "id": f"model_choice_review:{node_id}",
+                            "kind": "llm_model_choice",
+                            "user_term": f"llm_model_choice:{node_id}",
+                            "status": "resolved",
+                            "draft": "test-model",
+                            "event_id": "model-choice-accepted",
+                            "accepted_value": "test-model",
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": stable_hash("test-model"),
+                        },
                     ],
                 },
             }
@@ -4145,7 +4218,22 @@ class TestExecuteUnresolvedInterpretationPlaceholderGate:
                             "accepted_value": prompt,
                             "accepted_artifact_hash": None,
                             "resolved_prompt_template_hash": stable_hash(prompt),
-                        }
+                        },
+                        # Model-choice review also resolved — the gate fires
+                        # on any unresolved llm_model_choice site so the
+                        # "all reviews resolved" negative-space test must
+                        # cover this requirement explicitly.
+                        {
+                            "id": "model-choice-review",
+                            "kind": "llm_model_choice",
+                            "user_term": "llm_model_choice:rate_node",
+                            "status": "resolved",
+                            "draft": "test-model",
+                            "event_id": "event-3",
+                            "accepted_value": "test-model",
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": stable_hash("test-model"),
+                        },
                     ],
                 },
             }

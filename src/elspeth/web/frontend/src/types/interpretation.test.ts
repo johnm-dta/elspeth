@@ -58,20 +58,25 @@ describe("interpretation protocol types", () => {
     expect(all).toHaveLength(3);
   });
 
-  it("InterpretationKind union has exactly 4 values matching the Python enum", () => {
+  it("InterpretationKind union has exactly 5 values matching the Python enum", () => {
     const _exact: Equals<
       InterpretationKind,
-      "vague_term" | "invented_source" | "llm_prompt_template" | "pipeline_decision"
+      | "vague_term"
+      | "invented_source"
+      | "llm_prompt_template"
+      | "pipeline_decision"
+      | "llm_model_choice"
     > = true;
     const all: InterpretationKind[] = [
       "vague_term",
       "invented_source",
       "llm_prompt_template",
       "pipeline_decision",
+      "llm_model_choice",
     ];
     expect(_exact).toBe(true);
     expect(INTERPRETATION_KIND_VALUES).toEqual(all);
-    expect(all).toHaveLength(4);
+    expect(all).toHaveLength(5);
   });
 
   it("InterpretationKind rejects unknown runtime values", () => {

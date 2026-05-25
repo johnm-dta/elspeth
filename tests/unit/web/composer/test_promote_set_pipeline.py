@@ -1027,13 +1027,28 @@ class TestPromoteSetPipelineArgErrorRouting:
         assert result.success is True, result.data
         node = result.updated_state.nodes[0]
         requirements = node.options[INTERPRETATION_REQUIREMENTS_KEY]
-        assert len(requirements) == 1
+        # set_pipeline routes node options through the composite LLM-review
+        # auto-stager — every LLM node with a non-empty ``model`` and
+        # ``prompt_template`` acquires both default gates in the same
+        # mutation.
+        assert len(requirements) == 2
         assert requirements[0] == {
             "id": "prompt_template_review:summarise",
             "kind": "llm_prompt_template",
             "user_term": "llm_prompt_template:summarise",
             "status": "pending",
             "draft": "Summarise {{ row.text }}.",
+            "event_id": None,
+            "accepted_value": None,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": None,
+        }
+        assert requirements[1] == {
+            "id": "model_choice_review:summarise",
+            "kind": "llm_model_choice",
+            "user_term": "llm_model_choice:summarise",
+            "status": "pending",
+            "draft": "anthropic/claude-haiku-4.5",
             "event_id": None,
             "accepted_value": None,
             "accepted_artifact_hash": None,

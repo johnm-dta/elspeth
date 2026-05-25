@@ -198,7 +198,8 @@ artifact yourself in the same turn, then retry the complete workflow.
 
 Use `inspect_source` for existing blobs before declaring fixed fields. Column
 names come from source inspection or user-provided inline content, not guesses.
-If a CSV blob is a bare list, either add a real header row or set `columns`.
+If a CSV blob handed to you by the user is a bare list, either add a real header
+row or set `columns`.
 
 `columns` controls how a headerless CSV is parsed; it is not by itself a DAG
 contract. If a downstream transform requires a CSV field, the source schema must
@@ -208,6 +209,44 @@ is authoritative for its header/column names; declare those generated fields in
 the source schema when downstream nodes consume them. Do not stop by saying the
 source contract is incomplete when you know the generated or inspected column
 names and can patch the source schema.
+
+#### Generated-source discipline (invented_source path)
+
+When you generate inline source content yourself, the shape of the bytes and the
+shape of the source options must agree exactly. The two halves are authored in the
+same turn by the same actor (you), so disagreement is silent corruption rather
+than a validator-visible error. Apply the following rules unconditionally for
+generated content.
+
+- **CSV.** Always write a header row as the first non-skipped line of the
+  generated CSV, and always leave `source.options.columns` unset. `columns` and a
+  header row are mutually exclusive: when `columns` is set, `csv` source treats
+  the file as headerless and consumes your header row as the first data row,
+  producing a row like `{url: "url", agency: "agency"}` with no quarantine event.
+  Headered mode (no `columns`) is the only correct shape for generated CSV.
+  Declare the same column names in `schema.fields` or `schema.guaranteed_fields`
+  so the header, the source options, and the source contract all agree.
+- **JSON.** Emit a bare top-level JSON array of objects (or JSONL with one object
+  per line). Do not wrap in `{"results": [...]}` or any other envelope; the
+  envelope forces a `data_key` you do not need. Every object must carry the same
+  keys; declare those keys in the source schema.
+- **Text.** Emit one data record per line with no header line — `text` source
+  treats every non-blank line as a data row. Pick a `column` value that names
+  what each line contains (e.g. `url`, `prompt`, `line_text`); it must be a valid
+  Python identifier and not a Python keyword. Declare that column in the source
+  schema.
+- **Azure-blob, Dataverse, null.** None of these sources support generated
+  content. If the user asked you to generate rows, switch to `csv`, `json`, or
+  `text`, bind the generated artifact with `create_blob` plus
+  `set_source_from_blob`, and never synthesise an Azure path, Dataverse
+  environment URL, or null-source placeholder for invented content.
+
+The header-and-`columns` collision is the canonical generated-source bug. If a
+preview shows a first data row whose values are literally the column names, or
+the `interpretation_requirements` draft contains a header line while
+`source.options.columns` is also set, remove `columns` from the source options;
+keep the header. Never strip the header to make `columns` "win" — the header is
+the self-describing audit fact, `columns` is the inversion of that fact.
 
 ### Utility Transforms
 
@@ -851,6 +890,7 @@ Use tool diagnostics first. These are common one-shot mappings:
 | Missing source or sink schema/options | Patch the exact source/sink/node with the full replacement options object required by `get_plugin_schema`. |
 | Source or node options rejected with extra/unknown fields | Remove the rejected fields from that component's options, put them only on the plugin that owns them, and retry the same full topology. |
 | `csv_source_blob_header_mismatch` | Add a header row with `update_blob`, or set source `columns` so the first data row stays data. |
+| Generated CSV has a header row AND `source.options.columns` is set | This is the silent header-eaten-as-data bug — both halves were authored together. Remove `columns` from `source.options` with `patch_source_options` (or resubmit the full `set_pipeline` without `columns`); keep the header row in the generated blob and the field declarations in `schema.fields`/`schema.guaranteed_fields`. Do not strip the header to keep `columns`. |
 | `gate_expression_type_mismatch_against_source_schema` | Declare numeric fields in source schema, or insert a schema-approved `type_coerce` before the gate. |
 | Producer guarantees are empty and producer is source | Patch source schema using inspected fields. |
 | Consumer requires a generated or inspected CSV column but source guarantees are empty | Patch the source schema to guarantee that known column, then retry; do not ask the user to confirm a column you authored or inspected. |

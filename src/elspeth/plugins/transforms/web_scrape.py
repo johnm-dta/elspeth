@@ -178,6 +178,74 @@ class WebScrapeConfig(TransformDataConfig):
             raise ValueError(f"content_field and fingerprint_field must differ, both are '{self.content_field}'")
         return self
 
+    @model_validator(mode="after")
+    def _reject_option_key_names_in_schema_field_lists(self) -> "WebScrapeConfig":
+        """Catch the LLM-composer footgun of listing option-key names in schema column lists.
+
+        A bad config emitted by upstream composers has been observed listing the
+        literal strings ``"url_field"``, ``"content_field"``, and
+        ``"fingerprint_field"`` inside ``schema.guaranteed_fields``. Those are
+        *names of WebScrapeConfig options*, not column names — what the author
+        meant was to list the *values* of those options (i.e. the actual column
+        names the transform reads from or writes to). The same hallucination is
+        equally likely in ``schema.required_fields`` and ``schema.audit_fields``,
+        which are sibling ``tuple[str, ...] | None`` column-name lists on
+        ``SchemaConfig``, so this guard scans all three. At runtime the
+        SchemaConfigModeContract correctly rejects the offending names, but the
+        misconfiguration is detectable at plugin-validate time, so we surface it
+        here for early, actionable feedback to composer authors (human or LLM).
+
+        Degenerate case: an operator may legitimately configure a knob so that
+        its value equals its key name (e.g. ``content_field: "content_field"``),
+        meaning the column on the row is literally called ``content_field``. In
+        that case the schema list entry is correct — the row really does carry
+        a column of that name — so the guard skips entries where the configured
+        value matches the key.
+        """
+        option_key_to_value: dict[str, str] = {
+            "url_field": self.url_field,
+            "content_field": self.content_field,
+            "fingerprint_field": self.fingerprint_field,
+        }
+
+        list_name_to_entries: dict[str, tuple[str, ...] | None] = {
+            "guaranteed_fields": self.schema_config.guaranteed_fields,
+            "required_fields": self.schema_config.required_fields,
+            "audit_fields": self.schema_config.audit_fields,
+        }
+
+        # Collect offenders per list so the error message can tell the author
+        # which list each bad entry came from.
+        offenders_by_list: dict[str, list[str]] = {}
+        for list_name, entries in list_name_to_entries.items():
+            if entries is None:
+                continue
+            list_offenders = [entry for entry in entries if entry in option_key_to_value and option_key_to_value[entry] != entry]
+            if list_offenders:
+                offenders_by_list[list_name] = list_offenders
+
+        if not offenders_by_list:
+            return self
+
+        bullet_lines: list[str] = []
+        offender_summary_parts: list[str] = []
+        for list_name, list_offenders in offenders_by_list.items():
+            offender_summary_parts.append(f"{list_name}=[{', '.join(repr(entry) for entry in list_offenders)}]")
+            for entry in list_offenders:
+                bullet_lines.append(
+                    f"  - schema.{list_name}: '{entry}' is the name of the '{entry}' "
+                    f"option, not a column name; substitute the configured value "
+                    f"'{option_key_to_value[entry]}'."
+                )
+        offender_summary = "; ".join(offender_summary_parts)
+        message = (
+            f"schema field-name lists contain option-key names ({offender_summary}), "
+            "not column names; those strings are WebScrapeConfig option keys whose "
+            "values are the actual column names this transform reads from or writes "
+            "to. Replace each with the configured column name:\n" + "\n".join(bullet_lines)
+        )
+        raise ValueError(message)
+
 
 def _parse_allowed_ranges(entries: list[str]) -> tuple[IPv4Network | IPv6Network, ...]:
     """Parse allowed_hosts list entries into ip_network objects.

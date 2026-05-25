@@ -11,10 +11,10 @@ import {
 describe("tutorialMachine", () => {
   it("pins the canonical tutorial prompt verbatim", () => {
     expect(CANONICAL_TUTORIAL_PROMPT).toBe(
-      "Create a data source with URLs for five public government agency web pages\n" +
-        "that you choose. Use abuse contact noreply@dta.gov.au and\n" +
-        "scraping reason 'DTA technical demonstration'. Read the HTML for each\n" +
-        "page, have an LLM identify the primary colours for each government agency.\n" +
+      "Create a data source with URLs for five public government agency web pages " +
+        "that you choose. Use abuse contact noreply@dta.gov.au and " +
+        "scraping reason 'DTA technical demonstration'. Read the HTML for each " +
+        "page, have an LLM identify the primary colours for each government agency. " +
         "Remove the HTML and save the rest to a json file.",
     );
   });

@@ -242,6 +242,59 @@ field the upstream plugin actually guarantees, add a mapper that explicitly
 renames/preserves the value, or narrow the downstream consumer so it no longer
 requires an unavailable field.
 
+Option keys and column names live in different domains. A plugin option named
+`url_field`, `content_field`, `fingerprint_field`, `response_field`, or any
+`*_field`/`*_fields` knob is the name of a configuration knob; its value names
+a column on the row. Values listed in `schema.guaranteed_fields` are column
+names on the incoming row, never the knob names themselves. If a name appears
+in `guaranteed_fields`, an auditor must be able to point at a column on the row
+that literally carries that name. Knob names such as `content_field` can never
+satisfy that test, because no row column is literally named `content_field`;
+the column is named by the value the knob is set to.
+
+Wrong (lists knob names as if they were columns):
+
+```yaml
+options:
+  schema:
+    mode: observed
+    guaranteed_fields:
+      - url
+      - content_field
+      - fingerprint_field
+      - fetch_status
+      - fetch_url_final
+      - fetch_url_final_ip
+  url_field: url
+  content_field: content
+  fingerprint_field: content_fingerprint
+```
+
+Right (substitutes the configured knob values into `guaranteed_fields`):
+
+```yaml
+options:
+  schema:
+    mode: observed
+    guaranteed_fields:
+      - url
+      - content
+      - content_fingerprint
+      - fetch_status
+      - fetch_url_final
+      - fetch_url_final_ip
+  url_field: url
+  content_field: content
+  fingerprint_field: content_fingerprint
+```
+
+Apply the same rule to every `SchemaConfig` row-schema list — `guaranteed_fields`,
+`required_fields`, and `audit_fields` — and to every plugin with
+`*_field`/`*_fields` options, including `llm` (`response_field`,
+`required_input_fields`) and `field_mapper` (the keys and values of `mapping`):
+the strings that appear in those lists must be the actual column names that
+will be present on the row, resolved through whatever knob configures them.
+
 When a downstream cleanup, sink, mapper, or transform needs an LLM response
 field, the LLM node must guarantee that `response_field` by name. If the
 downstream node also requires source or scrape fields that pass through the LLM,

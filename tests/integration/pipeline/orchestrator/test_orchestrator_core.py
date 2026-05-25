@@ -528,10 +528,13 @@ class TestOrchestratorEmptyPipeline:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # All rows fail source validation and are quarantined: no
-        # success indicator, only failure indicator (rows_quarantined > 0)
-        # — predicate correctly returns FAILED.
-        assert run_result.status == RunStatus.FAILED
+        # All rows fail source validation and are quarantined. Per
+        # CLAUDE.md Tier-3 data manifesto, quarantine is a clean terminal
+        # outcome — the pipeline made a deliberate classification on every
+        # row. With ``terminal_clean_indicator`` satisfied via quarantine
+        # and no uncaught ``failure_indicator``, the predicate returns
+        # COMPLETED_WITH_FAILURES rather than FAILED.
+        assert run_result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert run_result.rows_processed == 2
         assert run_result.rows_quarantined == 2
         assert len(default_sink.results) == 0

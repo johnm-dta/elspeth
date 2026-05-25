@@ -338,17 +338,23 @@ class TestRunResultStatusInvariant:
         assert result.status == RunStatus.COMPLETED
 
     def test_completed_rejects_zero_rows_succeeded(self) -> None:
-        """COMPLETED requires rows_succeeded > 0."""
-        with pytest.raises(ValueError, match=r"COMPLETED.*rows_succeeded > 0"):
+        """COMPLETED requires a clean terminal indicator —
+        rows_succeeded > 0 OR rows_quarantined > 0.
+        """
+        with pytest.raises(ValueError, match=r"COMPLETED.*requires a clean terminal indicator"):
             self._build(status=RunStatus.COMPLETED, rows_processed=5, rows_succeeded=0)
 
     def test_completed_rejects_failures(self) -> None:
-        """COMPLETED forbids rows_failed > 0 (use COMPLETED_WITH_FAILURES)."""
-        with pytest.raises(ValueError, match=r"COMPLETED.*requires no failures"):
+        """COMPLETED forbids uncaught rows_failed > 0 (use COMPLETED_WITH_FAILURES)."""
+        with pytest.raises(ValueError, match=r"COMPLETED.*requires no uncaught failures"):
             self._build(status=RunStatus.COMPLETED, rows_processed=10, rows_succeeded=7, rows_failed=3)
 
     def test_completed_rejects_quarantine(self) -> None:
-        with pytest.raises(ValueError, match=r"COMPLETED.*requires no failures"):
+        """Quarantine is a clean terminal outcome but still warrants the
+        COMPLETED_WITH_FAILURES label per CLAUDE.md Tier-3 manifesto — the
+        operator should see "failures" on a run that quarantined any row.
+        """
+        with pytest.raises(ValueError, match=r"COMPLETED.*requires no quarantined rows"):
             self._build(
                 status=RunStatus.COMPLETED,
                 rows_processed=10,
@@ -358,8 +364,12 @@ class TestRunResultStatusInvariant:
             )
 
     def test_completed_with_failures_rejects_zero_succeeded(self) -> None:
-        """COMPLETED_WITH_FAILURES requires rows_succeeded > 0 (else it's FAILED)."""
-        with pytest.raises(ValueError, match=r"COMPLETED_WITH_FAILURES.*rows_succeeded > 0"):
+        """COMPLETED_WITH_FAILURES requires a clean terminal indicator —
+        rows_succeeded > 0 OR rows_quarantined > 0. With both at zero and
+        only uncaught failures, the run is FAILED, not
+        COMPLETED_WITH_FAILURES.
+        """
+        with pytest.raises(ValueError, match=r"COMPLETED_WITH_FAILURES.*requires a clean terminal indicator"):
             self._build(
                 status=RunStatus.COMPLETED_WITH_FAILURES,
                 rows_processed=6,
@@ -395,10 +405,10 @@ class TestRunResultStatusInvariant:
             self._build(status=RunStatus.EMPTY, rows_processed=5, rows_succeeded=0)
 
     def test_empty_rejects_nonzero_succeeded(self) -> None:
-        # Post-rows_routed-split (elspeth-5069612f3c): the EMPTY guard on
-        # success indicators now reads as "requires no success indicator"
-        # because rows_succeeded > 0 OR rows_routed_success > 0 both qualify.
-        with pytest.raises(ValueError, match=r"EMPTY.*requires no success indicator"):
+        # Post-quarantine-promotion (run-status policy revision): the EMPTY
+        # guard now rejects any clean terminal indicator — rows_succeeded > 0
+        # OR rows_quarantined > 0 both contradict EMPTY semantics.
+        with pytest.raises(ValueError, match=r"EMPTY.*requires no clean terminal indicator"):
             self._build(status=RunStatus.EMPTY, rows_processed=0, rows_succeeded=1)
 
     def test_empty_rejects_failures(self) -> None:
@@ -690,7 +700,15 @@ class TestRunStatusRowsRoutedSplitPredicate:
         )
         assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
-    def test_on_error_routed_with_quarantine_and_coalesce_failures_classifies_as_failed(self) -> None:
+    def test_on_error_routed_with_quarantine_and_coalesce_failures_classifies_as_completed_with_failures(self) -> None:
+        """Post-quarantine-promotion: quarantine is a clean terminal outcome
+        per CLAUDE.md Tier-3 manifesto. With ``rows_quarantined=2`` the
+        pipeline made a clean determination on two rows, satisfying the
+        ``terminal_clean_indicator``. The remaining 4 uncaught
+        ``rows_failed`` (6 - 2 quarantined = 4) and 2 ``rows_coalesce_failed``
+        still constitute a ``failure_indicator``. Both indicators present →
+        COMPLETED_WITH_FAILURES, not FAILED.
+        """
         derived = derive_terminal_run_status(
             rows_processed=8,
             rows_succeeded=0,
@@ -700,16 +718,114 @@ class TestRunStatusRowsRoutedSplitPredicate:
             rows_quarantined=2,
             rows_coalesce_failed=2,
         )
-        assert derived == RunStatus.FAILED
+        assert derived == RunStatus.COMPLETED_WITH_FAILURES
         result = self._build(
-            status=RunStatus.FAILED,
+            status=RunStatus.COMPLETED_WITH_FAILURES,
             rows_processed=8,
             rows_failed=6,
             rows_routed_failure=4,
             rows_quarantined=2,
             rows_coalesce_failed=2,
         )
-        assert result.status == RunStatus.FAILED
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+
+    # ------------------------------------------------------------------
+    # Quarantine-promotion regression coverage (run-status policy
+    # revision: quarantine is a clean terminal outcome per CLAUDE.md
+    # Tier-3 manifesto, not a failure). Three canonical shapes:
+    #   1) all rows quarantined cleanly -> COMPLETED_WITH_FAILURES
+    #      (was FAILED; bug the policy revision fixed).
+    #   2) mixed quarantine + uncaught failures, zero succeeded ->
+    #      FAILED still — quarantine doesn't offset uncaught failure
+    #      when no row reached an actual success path.
+    #   3) succeeded + quarantine + uncaught failures unchanged from
+    #      pre-revision behaviour -> COMPLETED_WITH_FAILURES.
+    # ------------------------------------------------------------------
+
+    def test_all_rows_quarantined_classifies_as_completed_with_failures(self) -> None:
+        """Canonical bug: a pipeline that cleanly quarantines every row was
+        classified FAILED. Per CLAUDE.md Tier-3 data manifesto quarantine is
+        a deliberate clean terminal outcome ("row 42 was quarantined because
+        field X was NULL" is legitimate audit evidence, not a framework
+        failure). The pipeline made a clean determination on every row, so
+        the verdict is COMPLETED_WITH_FAILURES — not FAILED.
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=5,
+            rows_succeeded=0,
+            rows_failed=5,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=5,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.COMPLETED_WITH_FAILURES
+        result = self._build(
+            status=RunStatus.COMPLETED_WITH_FAILURES,
+            rows_processed=5,
+            rows_succeeded=0,
+            rows_failed=5,
+            rows_quarantined=5,
+        )
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+
+    def test_partial_quarantine_with_uncaught_failures_zero_succeeded_classifies_as_completed_with_failures(self) -> None:
+        """Mixed quarantine + uncaught failures with zero succeeded rows.
+        ``rows_quarantined=3`` satisfies the clean terminal indicator, and
+        the remaining ``rows_failed - rows_quarantined = 2`` is an uncaught
+        failure indicator. Both indicators present →
+        COMPLETED_WITH_FAILURES. The pipeline made a clean determination on
+        the 3 quarantined rows, AND had 2 uncaught failures — the operator
+        sees both signals via the "with failures" terminal label.
+
+        (Contrast with the all-quarantined case where ``failure_indicator``
+        is False and the policy lifts the verdict from FAILED to
+        COMPLETED_WITH_FAILURES via the
+        ``rows_quarantined > 0`` arm of the predicate.)
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=5,
+            rows_succeeded=0,
+            rows_failed=5,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=3,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.COMPLETED_WITH_FAILURES
+        result = self._build(
+            status=RunStatus.COMPLETED_WITH_FAILURES,
+            rows_processed=5,
+            rows_succeeded=0,
+            rows_failed=5,
+            rows_quarantined=3,
+        )
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+
+    def test_succeeded_with_partial_quarantine_classifies_as_completed_with_failures(self) -> None:
+        """Pre-revision behaviour preserved: some rows succeeded, some
+        quarantined, no uncaught failures still classifies as
+        COMPLETED_WITH_FAILURES (the quarantine itself is the failure-like
+        indicator that lifts the verdict above COMPLETED).
+        """
+        derived = derive_terminal_run_status(
+            rows_processed=3,
+            rows_succeeded=2,
+            rows_failed=1,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=1,
+            rows_coalesce_failed=0,
+        )
+        assert derived == RunStatus.COMPLETED_WITH_FAILURES
+        result = self._build(
+            status=RunStatus.COMPLETED_WITH_FAILURES,
+            rows_processed=3,
+            rows_succeeded=2,
+            rows_failed=1,
+            rows_quarantined=1,
+        )
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
     @given(
         rows_processed=st.integers(min_value=0, max_value=20),
@@ -766,12 +882,13 @@ class TestRunStatusRowsRoutedSplitPredicate:
     # ------------------------------------------------------------------
 
     def test_completed_without_success_indicator_raises(self) -> None:
-        """COMPLETED requires rows_succeeded > 0 OR rows_routed_success > 0.
-        With both at zero AND no failure indicator, the run should classify
-        as EMPTY (rows_processed == 0) or FAILED (rows_processed > 0) — NOT
+        """COMPLETED requires a clean terminal indicator (rows_succeeded > 0
+        OR rows_quarantined > 0). With all clean counters at zero AND no
+        failure indicator, the run should classify as EMPTY
+        (rows_processed == 0) or FAILED (rows_processed > 0) — NOT
         COMPLETED. The invariant must reject this construction.
         """
-        with pytest.raises(ValueError, match="status=COMPLETED requires a success indicator"):
+        with pytest.raises(ValueError, match="status=COMPLETED requires a clean terminal indicator"):
             self._build(
                 status=RunStatus.COMPLETED,
                 rows_processed=5,
@@ -780,23 +897,25 @@ class TestRunStatusRowsRoutedSplitPredicate:
             )
 
     def test_completed_with_failure_indicator_raises(self) -> None:
-        """COMPLETED requires NO failure indicator. If any failure counter is
-        non-zero, the status is COMPLETED_WITH_FAILURES, not COMPLETED.
+        """COMPLETED requires NO uncaught failure indicator. If any uncaught
+        failure counter is non-zero, the status is COMPLETED_WITH_FAILURES,
+        not COMPLETED.
         """
-        with pytest.raises(ValueError, match="status=COMPLETED requires no failures"):
+        with pytest.raises(ValueError, match="status=COMPLETED requires no uncaught failures"):
             self._build(
                 status=RunStatus.COMPLETED,
                 rows_processed=5,
                 rows_succeeded=4,
-                rows_failed=1,  # Failure indicator must trigger COMPLETED_WITH_FAILURES, not COMPLETED.
+                rows_failed=1,  # Uncaught failure must trigger COMPLETED_WITH_FAILURES, not COMPLETED.
             )
 
-    def test_completed_with_failures_without_success_indicator_raises(self) -> None:
-        """COMPLETED_WITH_FAILURES requires BOTH a success indicator AND a
-        failure indicator. With only failures present (no success path), the
-        status must be FAILED, not COMPLETED_WITH_FAILURES.
+    def test_completed_with_failures_without_clean_terminal_indicator_raises(self) -> None:
+        """COMPLETED_WITH_FAILURES requires a clean terminal indicator
+        (rows_succeeded > 0 OR rows_quarantined > 0). With only uncaught
+        failures present and no clean terminal, the status must be FAILED,
+        not COMPLETED_WITH_FAILURES.
         """
-        with pytest.raises(ValueError, match="COMPLETED_WITH_FAILURES requires a success indicator"):
+        with pytest.raises(ValueError, match="COMPLETED_WITH_FAILURES requires a clean terminal indicator"):
             self._build(
                 status=RunStatus.COMPLETED_WITH_FAILURES,
                 rows_processed=3,
@@ -804,11 +923,14 @@ class TestRunStatusRowsRoutedSplitPredicate:
             )
 
     def test_completed_with_failures_without_failure_indicator_raises(self) -> None:
-        """COMPLETED_WITH_FAILURES requires BOTH indicators. With only success
-        present (no failures), the status must be COMPLETED, not
-        COMPLETED_WITH_FAILURES.
+        """COMPLETED_WITH_FAILURES requires at least one failure-like
+        indicator: uncaught failure (rows_failed - rows_quarantined > 0),
+        rows_coalesce_failed > 0, OR rows_quarantined > 0 (quarantine is a
+        clean terminal outcome but still qualifies as a failure-like
+        indicator that warrants the operator-visible failures label). With
+        only succeeded rows and no quarantine the status must be COMPLETED.
         """
-        with pytest.raises(ValueError, match="COMPLETED_WITH_FAILURES requires at least one failure indicator"):
+        with pytest.raises(ValueError, match="COMPLETED_WITH_FAILURES requires at least one failure-like indicator"):
             self._build(
                 status=RunStatus.COMPLETED_WITH_FAILURES,
                 rows_processed=3,
@@ -826,13 +948,14 @@ class TestRunStatusRowsRoutedSplitPredicate:
             )
 
     def test_empty_with_success_indicator_raises(self) -> None:
-        """EMPTY requires no success indicator. A run with rows_succeeded > 0
-        or rows_routed_success > 0 is not EMPTY by definition.
+        """EMPTY requires no clean terminal indicator. A run with
+        rows_succeeded > 0 OR rows_quarantined > 0 is not EMPTY by
+        definition.
         """
-        with pytest.raises(ValueError, match="status=EMPTY requires no success indicator"):
+        with pytest.raises(ValueError, match="status=EMPTY requires no clean terminal indicator"):
             self._build(
                 status=RunStatus.EMPTY,
                 rows_processed=0,
                 rows_succeeded=1,
-                rows_routed_success=1,  # Success indicator contradicts EMPTY.
+                rows_routed_success=1,  # Clean terminal indicator contradicts EMPTY.
             )

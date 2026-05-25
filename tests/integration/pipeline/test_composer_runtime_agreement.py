@@ -2455,11 +2455,17 @@ class TestComposerRuntimeRunStatusAgreement:
         assert run_result.rows_quarantined == 1
         assert run_result.rows_coalesce_failed == 0
 
-    def test_agreement_runstatus_failed_engine_landscape(self, landscape_db: LandscapeDB, payload_store) -> None:
-        """All-rows-failed (S1B msg2 shape) — RunResult and Landscape both report FAILED.
+    def test_agreement_runstatus_all_discarded_engine_landscape(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """All-rows-discarded via ``on_error: discard`` — both report
+        COMPLETED_WITH_FAILURES.
 
-        Two rows, both fail via ``on_error: discard`` (quarantine terminal
-        state).  Predicate: rows_processed > 0 AND rows_succeeded == 0.
+        Two rows, both fail via ``on_error: discard`` (the engine's
+        quarantine terminal state).  Per CLAUDE.md Tier-3 data manifesto,
+        quarantine is a deliberate clean determination on every row, not a
+        framework failure. The predicate sees ``terminal_clean_indicator``
+        via ``rows_quarantined > 0`` with no uncaught ``failure_indicator``
+        (rows_failed - rows_quarantined == 0) and lifts the verdict from
+        FAILED to COMPLETED_WITH_FAILURES.
         """
         source = ListSource([{"value": 1, "fail": True}, {"value": 2, "fail": True}])
         transform = ConditionalErrorTransform(on_success="default", on_error="discard")
@@ -2473,7 +2479,7 @@ class TestComposerRuntimeRunStatusAgreement:
 
         run_result = Orchestrator(landscape_db).run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.FAILED)
+        self._assert_engine_landscape_agreement(landscape_db, run_result, RunStatus.COMPLETED_WITH_FAILURES)
         assert run_result.rows_processed == 2
         assert run_result.rows_succeeded == 0
         # ADR-019 records lifecycle failure independently from discard-mode

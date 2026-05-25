@@ -300,8 +300,11 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
-        assert result.status == RunStatus.FAILED
+        # Quarantine is a clean terminal outcome per CLAUDE.md Tier-3
+        # manifesto. All-quarantined run satisfies the
+        # ``terminal_clean_indicator`` (via rows_quarantined > 0) with no
+        # uncaught ``failure_indicator`` => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 1
 
         # Query node_states for the quarantined token
@@ -337,8 +340,11 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
-        assert result.status == RunStatus.FAILED
+        # Quarantine is a clean terminal outcome per CLAUDE.md Tier-3
+        # manifesto. All-quarantined run satisfies the
+        # ``terminal_clean_indicator`` (via rows_quarantined > 0) with no
+        # uncaught ``failure_indicator`` => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
 
         # Query routing events
         with db.engine.connect() as conn:
@@ -381,8 +387,11 @@ class TestQuarantineHappyPath:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
-        assert result.status == RunStatus.FAILED
+        # Quarantine is a clean terminal outcome per CLAUDE.md Tier-3
+        # manifesto. All-quarantined run satisfies the
+        # ``terminal_clean_indicator`` (via rows_quarantined > 0) with no
+        # uncaught ``failure_indicator`` => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 1
 
         # Verify the quarantine sink received the row
@@ -611,8 +620,11 @@ class TestQuarantineNonCanonicalData:
         orchestrator = Orchestrator(db)
         result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # Phase 2.2: all-quarantined run (rows_succeeded=0) => FAILED.
-        assert result.status == RunStatus.FAILED
+        # Quarantine is a clean terminal outcome per CLAUDE.md Tier-3
+        # manifesto. All-quarantined run satisfies the
+        # ``terminal_clean_indicator`` (via rows_quarantined > 0) with no
+        # uncaught ``failure_indicator`` => COMPLETED_WITH_FAILURES.
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert result.rows_quarantined == 2
         assert len(quarantine_sink.results) == 2
 

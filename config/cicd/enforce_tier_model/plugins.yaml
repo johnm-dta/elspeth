@@ -679,8 +679,8 @@ allow_hits:
   owner: source-boundary
   reason: Azure blob CSV decoding reads Tier 3 blob bytes; UnicodeDecodeError means
     external content does not match the configured encoding.
-  safety: Records file-level parse validation evidence, yields quarantine unless
-    discard, and returns before trusting decoded text.
+  safety: Records file-level parse validation evidence, yields quarantine unless discard,
+    and returns before trusting decoded text.
   expires: '2026-08-17'
 - key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=feb5a61fc7ca0a29
   owner: source-boundary
@@ -700,8 +700,8 @@ allow_hits:
   owner: source-boundary
   reason: Headerless Azure blob CSV without schema may legitimately contain no rows;
     StopIteration is the external end-of-file signal during first-row peeking.
-  safety: Returns without emitting rows or fabricating numeric column names from
-    absent data.
+  safety: Returns without emitting rows or fabricating numeric column names from absent
+    data.
   expires: '2026-08-17'
 - key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=39664fb9a4cb9fa2
   owner: source-boundary
@@ -735,8 +735,8 @@ allow_hits:
   owner: source-boundary
   reason: Azure blob JSONL line parsing handles Tier 3 input; JSONDecodeError and
     non-finite ValueError are malformed external rows.
-  safety: Records raw-line parse validation evidence with line metadata, yields
-    quarantine unless discard, and continues to the next line.
+  safety: Records raw-line parse validation evidence with line metadata, yields quarantine
+    unless discard, and continues to the next line.
   expires: '2026-08-17'
 - key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=501ead0ca19e6205
   owner: source-boundary
@@ -796,4 +796,26 @@ allow_hits:
   safety: Non-str sep skips the hint silently; the override returns () and the composer
     surfaces no coaching, which is the right failure mode for malformed config (the
     validator catches the real config error separately).
+  expires: null
+- key: plugins/infrastructure/config_base.py:R1:_format_validation_error_cause:fp=d62fb21952dcf3f2
+  owner: plugin-validation
+  reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
+    field is documented but Pydantic does not guarantee its presence in every error
+    dict shape across versions. error.get(''type'') == ''missing'' is the schema-required-on-DataPluginConfig
+    discriminator for the LLM-composer mode-guidance enrichment (cf. elspeth-861b0c58f5).
+    Bare error[''type''] would crash on any Pydantic version that omitted the key.'
+  safety: Default None compares unequal to 'missing', so the enrichment branch is
+    skipped and the original Pydantic msg passes through unchanged. No silent coercion
+    of error data.
+  expires: null
+- key: plugins/infrastructure/validation.py:R1:_extract_errors:fp=9240c6f6517a323b
+  owner: plugin-validation
+  reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
+    field is documented but Pydantic does not guarantee its presence in every error
+    dict shape across versions. error.get(''type'') == ''missing'' is the schema-required-on-DataPluginConfig
+    discriminator for the LLM-composer mode-guidance enrichment (cf. elspeth-861b0c58f5).
+    Bare error[''type''] would crash on any Pydantic version that omitted the key.'
+  safety: Default None compares unequal to 'missing', so the enrichment branch is
+    skipped and the original Pydantic msg passes through unchanged. No silent coercion
+    of error data.
   expires: null

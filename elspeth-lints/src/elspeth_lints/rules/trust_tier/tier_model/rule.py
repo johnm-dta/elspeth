@@ -27,7 +27,7 @@ import hashlib
 import json
 import sys
 from calendar import monthrange
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -53,7 +53,8 @@ from elspeth_lints.rules.trust_tier.tier_model.metadata import RULE_ID, RULE_MET
 from elspeth_lints.rules.trust_tier.tier_model.trust_boundary_suppress import (
     BoundaryFinding,
     BoundaryMetadata,
-    compute_derived_names,
+    DerivedNameState,
+    assignment_target_names,
     extract_boundary_metadata,
     subject_is_rooted,
 )
@@ -485,12 +486,12 @@ class TierModelVisitor(ast.NodeVisitor):
         self.node_stack: list[ast.AST] = []
         self._decorator_lines: set[int] = set()  # Track lines that are decorators
         self._import_aliases: dict[str, str] = {}
-        # Stack of (metadata, derived_names) pairs — one entry per nested
+        # Stack of (metadata, derived-name state) pairs — one entry per nested
         # function. ``None`` means the function has no ``@trust_boundary``
         # decorator. We push on entry to every function so popping is symmetric
         # and we can look at "the innermost enclosing decorated function" via
         # a reverse walk of the stack.
-        self._boundary_stack: list[tuple[BoundaryMetadata, frozenset[str]] | None] = []
+        self._boundary_stack: list[tuple[BoundaryMetadata, DerivedNameState] | None] = []
 
     def visit(self, node: ast.AST) -> Any:
         """Visit a node while retaining ancestor context for receiver-shape checks."""
@@ -525,7 +526,7 @@ class TierModelVisitor(ast.NodeVisitor):
         payload = f"{rule_id}|{ast_path}|{node_dump}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
-    def _current_boundary(self) -> tuple[BoundaryMetadata, frozenset[str]] | None:
+    def _current_boundary(self) -> tuple[BoundaryMetadata, DerivedNameState] | None:
         """Return the active ``@trust_boundary`` context, if any.
 
         Suppression is intentionally limited to the decorated function's own
@@ -538,6 +539,12 @@ class TierModelVisitor(ast.NodeVisitor):
         if not self._boundary_stack:
             return None
         return self._boundary_stack[-1]
+
+    def _current_derived_state(self) -> DerivedNameState | None:
+        boundary = self._current_boundary()
+        if boundary is None:
+            return None
+        return boundary[1]
 
     def _finding_subject_node(self, rule_id: str, node: ast.AST) -> ast.AST | None:
         """Return the AST node whose rootedness determines suppression.
@@ -581,13 +588,13 @@ class TierModelVisitor(ast.NodeVisitor):
         boundary = self._current_boundary()
         if boundary is None:
             return None
-        metadata, derived_names = boundary
+        metadata, derived_state = boundary
         if rule_id not in metadata.suppresses:
             return None
         subject = self._finding_subject_node(rule_id, node)
         if subject is None:
             return None
-        if not subject_is_rooted(subject, derived_names):
+        if not subject_is_rooted(subject, derived_state.snapshot()):
             return None
         return metadata
 
@@ -676,6 +683,9 @@ class TierModelVisitor(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Track class context."""
+        outer_state = self._current_derived_state()
+        if outer_state is not None:
+            outer_state.assign_target_names((node.name,), is_derived=False)
         self.symbol_stack.append(node.name)
         self.class_stack.append(node)
         self._boundary_stack.append(None)
@@ -699,6 +709,9 @@ class TierModelVisitor(ast.NodeVisitor):
         # Collect decorator lines — .get() calls here are not dict access
         for decorator in node.decorator_list:
             self._decorator_lines.add(decorator.lineno)
+        outer_state = self._current_derived_state()
+        if outer_state is not None:
+            outer_state.assign_target_names((node.name,), is_derived=False)
         self.symbol_stack.append(node.name)
         self.function_stack.append(node)
         self._enter_boundary_context(node)
@@ -714,6 +727,9 @@ class TierModelVisitor(ast.NodeVisitor):
         # Collect decorator lines — .get() calls here are not dict access
         for decorator in node.decorator_list:
             self._decorator_lines.add(decorator.lineno)
+        outer_state = self._current_derived_state()
+        if outer_state is not None:
+            outer_state.assign_target_names((node.name,), is_derived=False)
         self.symbol_stack.append(node.name)
         self.function_stack.append(node)
         self._enter_boundary_context(node)
@@ -776,8 +792,7 @@ class TierModelVisitor(ast.NodeVisitor):
             self._boundary_stack.append(None)
             return
 
-        derived_names = compute_derived_names(node, metadata.source_param)
-        self._boundary_stack.append((metadata, derived_names))
+        self._boundary_stack.append((metadata, DerivedNameState.from_source_param(metadata.source_param)))
 
     def _is_default_return_value(self, value: ast.expr | None) -> bool:
         """True if return value is a silent default (None, empty container, empty string, zero)."""
@@ -1048,6 +1063,174 @@ class TierModelVisitor(ast.NodeVisitor):
             and grandparent.func is parent
         )
 
+    def _visit_ast_child(self, field_name: str, node: ast.AST | None) -> None:
+        if node is None:
+            return
+        self.path_stack.append(field_name)
+        try:
+            self.visit(node)
+        finally:
+            self.path_stack.pop()
+
+    def _visit_ast_list_item(self, field_name: str, index: int, node: ast.AST) -> None:
+        self.path_stack.append(f"{field_name}[{index}]")
+        try:
+            self.visit(node)
+        finally:
+            self.path_stack.pop()
+
+    def _value_depends_on_boundary(self, value: ast.AST, snapshot: frozenset[str]) -> bool:
+        state = self._current_derived_state()
+        if state is None:
+            return False
+        return state.expression_depends_on_current_names(value, snapshot=snapshot)
+
+    def _assign_targets_from_value(self, targets: Iterable[ast.expr], value: ast.AST, snapshot: frozenset[str]) -> None:
+        state = self._current_derived_state()
+        if state is None:
+            return
+        state.assign_targets(targets, is_derived=self._value_depends_on_boundary(value, snapshot))
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        state = self._current_derived_state()
+        snapshot = frozenset() if state is None else state.snapshot()
+
+        self._visit_ast_child("value", node.value)
+        for index, target in enumerate(node.targets):
+            self._visit_ast_list_item("targets", index, target)
+
+        self._assign_targets_from_value(node.targets, node.value, snapshot)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        state = self._current_derived_state()
+        snapshot = frozenset() if state is None else state.snapshot()
+
+        if node.value is not None:
+            self._visit_ast_child("value", node.value)
+        self._visit_ast_child("target", node.target)
+        self._visit_ast_child("annotation", node.annotation)
+
+        if node.value is not None:
+            self._assign_targets_from_value((node.target,), node.value, snapshot)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        state = self._current_derived_state()
+        snapshot = frozenset() if state is None else state.snapshot()
+        is_derived = subject_is_rooted(node.target, snapshot) or self._value_depends_on_boundary(node.value, snapshot)
+
+        self._visit_ast_child("target", node.target)
+        self._visit_ast_child("value", node.value)
+
+        if state is not None:
+            state.assign_target(node.target, is_derived=is_derived)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        state = self._current_derived_state()
+        snapshot = frozenset() if state is None else state.snapshot()
+        is_derived = self._value_depends_on_boundary(node.value, snapshot)
+
+        self._visit_ast_child("value", node.value)
+        self._visit_ast_child("target", node.target)
+
+        if state is not None:
+            state.assign_target(node.target, is_derived=is_derived)
+
+    def _visit_for_like(self, node: ast.For | ast.AsyncFor) -> None:
+        state = self._current_derived_state()
+        snapshot = frozenset() if state is None else state.snapshot()
+        target_is_derived = subject_is_rooted(node.iter, snapshot)
+
+        self._visit_ast_child("iter", node.iter)
+        if state is not None:
+            state.assign_target(node.target, is_derived=target_is_derived)
+        self._visit_ast_child("target", node.target)
+        for index, statement in enumerate(node.body):
+            self._visit_ast_list_item("body", index, statement)
+        for index, statement in enumerate(node.orelse):
+            self._visit_ast_list_item("orelse", index, statement)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_for_like(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_for_like(node)
+
+    def _visit_with_like(self, node: ast.With | ast.AsyncWith) -> None:
+        state = self._current_derived_state()
+        for index, item in enumerate(node.items):
+            self.path_stack.append(f"items[{index}]")
+            try:
+                snapshot = frozenset() if state is None else state.snapshot()
+                optional_vars_is_derived = subject_is_rooted(item.context_expr, snapshot)
+                self._visit_ast_child("context_expr", item.context_expr)
+                if item.optional_vars is not None:
+                    if state is not None:
+                        state.assign_target(item.optional_vars, is_derived=optional_vars_is_derived)
+                    self._visit_ast_child("optional_vars", item.optional_vars)
+            finally:
+                self.path_stack.pop()
+        for index, statement in enumerate(node.body):
+            self._visit_ast_list_item("body", index, statement)
+
+    def _restore_comprehension_targets(self, original_names: set[str], target_names: set[str]) -> None:
+        state = self._current_derived_state()
+        if state is None:
+            return
+        for name in target_names:
+            if name in original_names:
+                state.names.add(name)
+            else:
+                state.names.discard(name)
+
+    def _visit_comprehension_generators(self, generators: list[ast.comprehension]) -> tuple[set[str], set[str]]:
+        state = self._current_derived_state()
+        original_names = set() if state is None else set(state.names)
+        target_names: set[str] = set()
+        for index, generator in enumerate(generators):
+            self.path_stack.append(f"generators[{index}]")
+            try:
+                snapshot = frozenset() if state is None else state.snapshot()
+                target_is_derived = subject_is_rooted(generator.iter, snapshot)
+                self._visit_ast_child("iter", generator.iter)
+                if state is not None:
+                    state.assign_target(generator.target, is_derived=target_is_derived)
+                target_names.update(assignment_target_names(generator.target))
+                self._visit_ast_child("target", generator.target)
+                for if_index, if_node in enumerate(generator.ifs):
+                    self._visit_ast_list_item("ifs", if_index, if_node)
+            finally:
+                self.path_stack.pop()
+        return original_names, target_names
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        original_names, target_names = self._visit_comprehension_generators(node.generators)
+        try:
+            self._visit_ast_child("elt", node.elt)
+        finally:
+            self._restore_comprehension_targets(original_names, target_names)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        original_names, target_names = self._visit_comprehension_generators(node.generators)
+        try:
+            self._visit_ast_child("elt", node.elt)
+        finally:
+            self._restore_comprehension_targets(original_names, target_names)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        original_names, target_names = self._visit_comprehension_generators(node.generators)
+        try:
+            self._visit_ast_child("key", node.key)
+            self._visit_ast_child("value", node.value)
+        finally:
+            self._restore_comprehension_targets(original_names, target_names)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        original_names, target_names = self._visit_comprehension_generators(node.generators)
+        try:
+            self._visit_ast_child("elt", node.elt)
+        finally:
+            self._restore_comprehension_targets(original_names, target_names)
+
     def visit_Call(self, node: ast.Call) -> None:
         """Detect R1 (dict.get), R2 (getattr), R3 (hasattr), R5 (isinstance), R8/R9 defaults."""
         # R1: dict.get() - Call(func=Attribute(attr="get"))
@@ -1117,7 +1300,7 @@ class TierModelVisitor(ast.NodeVisitor):
                         node,
                         f"contextlib.suppress() used: {self._get_code_snippet(node.lineno)}",
                     )
-        self.generic_visit(node)
+        self._visit_with_like(node)
 
     def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
         """Detect R7: contextlib.suppress usage in async context managers."""
@@ -1131,7 +1314,7 @@ class TierModelVisitor(ast.NodeVisitor):
                         node,
                         f"contextlib.suppress() used: {self._get_code_snippet(node.lineno)}",
                     )
-        self.generic_visit(node)
+        self._visit_with_like(node)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         """Detect R4: broad exception suppression."""

@@ -363,6 +363,51 @@ class TestSuppressionNegative:
         r1 = _findings_by_rule(findings, "R1")
         assert len(r1) >= 1
 
+    def test_later_source_assignment_does_not_suppress_earlier_safe_local(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="external payload",
+                source_param="payload",
+                suppresses=("R1",),
+                invariant="raises ValueError on malformed payload",
+            )
+            def handler(payload):
+                raw = {}
+                raw.get("safe")
+                raw = payload["raw"]
+                return raw["id"]
+        """)
+        findings = _findings(source)
+        r1 = _findings_by_rule(findings, "R1")
+        assert len(r1) == 1
+        assert 'raw.get("safe")' in r1[0].code_snippet
+
+    def test_safe_reassignment_clears_previously_derived_local(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="external payload",
+                source_param="payload",
+                suppresses=("R1",),
+                invariant="raises ValueError on malformed payload",
+            )
+            def handler(payload):
+                raw = payload["raw"]
+                raw.get("external")
+                raw = {}
+                raw.get("safe")
+                return raw
+        """)
+        findings = _findings(source)
+        r1 = _findings_by_rule(findings, "R1")
+        assert len(r1) == 1
+        assert 'raw.get("safe")' in r1[0].code_snippet
+
 
 # =============================================================================
 # Decorator-shape diagnostics
@@ -437,6 +482,28 @@ class TestDecoratorDiagnostics:
         findings = _findings(source)
         assert len(_findings_by_rule(findings, "R_TB_MALFORMED")) == 1
         # Inner R1 NOT suppressed.
+        assert len(_findings_by_rule(findings, "R1")) == 1
+
+    def test_non_string_source_and_invariant_are_malformed_and_inert(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source=42,
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant=42,
+                test_ref="tests/test_handler.py::test_rejects_bad_args",
+            )
+            def handler(arguments):
+                return arguments.get("k")
+        """)
+        findings = _findings(source)
+        malformed = _findings_by_rule(findings, "R_TB_MALFORMED")
+        assert len(malformed) == 1
+        assert "'source' must be a string" in malformed[0].message
+        assert "'invariant' must be a string" in malformed[0].message
         assert len(_findings_by_rule(findings, "R1")) == 1
 
     def test_stacked_trust_boundary_decorators_emit_stacked_and_do_not_suppress(self) -> None:

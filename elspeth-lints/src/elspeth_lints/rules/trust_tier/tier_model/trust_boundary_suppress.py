@@ -43,7 +43,7 @@ import ast
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from elspeth_lints.core.ast_walker import walk_function_own_scope
+from elspeth_lints.core.ast_walker import iter_own_scope, walk_function_own_scope
 
 # Closed set of rule IDs the ``@trust_boundary`` decorator is permitted to
 # silence. Mirrors the runtime decorator's ``BoundaryRule = Literal["R1",
@@ -101,6 +101,37 @@ class BoundaryFinding:
     rule_id: str  # "R_TB_NONLITERAL", "R_TB_MALFORMED", "R_TB_UNKNOWN_KWARG", or "R_TB_STACKED"
     message: str
     node: ast.Call
+
+
+@dataclass(slots=True)
+class DerivedNameState:
+    """Statement-local set of names currently rooted at a boundary parameter."""
+
+    names: set[str]
+
+    @classmethod
+    def from_source_param(cls, source_param: str) -> DerivedNameState:
+        return cls(names={source_param})
+
+    def snapshot(self) -> frozenset[str]:
+        return frozenset(self.names)
+
+    def assign_target_names(self, names: Iterable[str], *, is_derived: bool) -> None:
+        for name in names:
+            if is_derived:
+                self.names.add(name)
+            else:
+                self.names.discard(name)
+
+    def assign_target(self, target: ast.expr, *, is_derived: bool) -> None:
+        self.assign_target_names(_assignment_targets(target), is_derived=is_derived)
+
+    def assign_targets(self, targets: Iterable[ast.expr], *, is_derived: bool) -> None:
+        for target in targets:
+            self.assign_target(target, is_derived=is_derived)
+
+    def expression_depends_on_current_names(self, node: ast.AST, *, snapshot: frozenset[str] | None = None) -> bool:
+        return _expr_contains_derived_reference(node, self.snapshot() if snapshot is None else snapshot)
 
 
 _TRUST_BOUNDARY_NAME = "trust_boundary"
@@ -398,6 +429,13 @@ def extract_boundary_metadata(
     elif not source_param_raw:
         shape_errors.append("'source_param' is an empty string")
 
+    source_raw = parsed.get("source")
+    invariant_raw = parsed.get("invariant")
+    if source_raw is not None and not isinstance(source_raw, str):
+        shape_errors.append(f"'source' must be a string when present, got {type(source_raw).__name__}")
+    if invariant_raw is not None and not isinstance(invariant_raw, str):
+        shape_errors.append(f"'invariant' must be a string when present, got {type(invariant_raw).__name__}")
+
     if shape_errors:
         diagnostics.append(
             BoundaryFinding(
@@ -411,21 +449,19 @@ def extract_boundary_metadata(
     # mypy: the isinstance/shape checks above narrow these.
     assert isinstance(suppresses_raw, tuple)
     assert isinstance(source_param_raw, str)
+    assert source_raw is None or isinstance(source_raw, str)
+    assert invariant_raw is None or isinstance(invariant_raw, str)
     suppresses_strs: tuple[str, ...] = tuple(str(item) for item in suppresses_raw)
-    source = parsed.get("source")
-    invariant = parsed.get("invariant")
     test_ref = parsed.get("test_ref")
     test_fingerprint = parsed.get("test_fingerprint")
-    source_value = source if isinstance(source, str) else None
-    invariant_value = invariant if isinstance(invariant, str) else None
     test_ref_value = test_ref if isinstance(test_ref, str) else None
     test_fingerprint_value = test_fingerprint if isinstance(test_fingerprint, str) else None
     metadata = BoundaryMetadata(
         suppresses=frozenset(suppresses_strs),
         source_param=source_param_raw,
         decorator_node=call,
-        source=source_value,
-        invariant=invariant_value,
+        source=source_raw,
+        invariant=invariant_raw,
         test_ref=test_ref_value,
         test_fingerprint=test_fingerprint_value,
     )
@@ -457,6 +493,11 @@ def _assignment_targets(target: ast.expr) -> list[str]:
     if isinstance(target, ast.Starred):
         return _assignment_targets(target.value)
     return []
+
+
+def assignment_target_names(target: ast.expr) -> tuple[str, ...]:
+    """Return local names bound by an assignment target."""
+    return tuple(_assignment_targets(target))
 
 
 def subject_is_rooted(node: ast.AST, derived_names: frozenset[str]) -> bool:
@@ -517,7 +558,7 @@ def _expr_contains_derived_reference(node: ast.AST, derived_names: frozenset[str
     ``raw`` as derived, because removing the ``arguments`` reference would
     change the value).
     """
-    return any(isinstance(sub, ast.Name) and sub.id in derived_names for sub in ast.walk(node))
+    return any(isinstance(sub, ast.Name) and sub.id in derived_names for sub in iter_own_scope(node))
 
 
 def _comprehension_target_names(generator: ast.comprehension) -> list[str]:
@@ -528,20 +569,19 @@ def compute_derived_names(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
     source_param: str,
 ) -> frozenset[str]:
-    """Compute the set of local names derived from ``source_param``.
+    """Compute names derived from ``source_param`` at the end of a function.
 
-    Two-pass / fixed-point: a name assigned at line 30 from another derived
-    name should make a reference at line 15 "rooted" if the analyzer asks
-    later, so we don't rely on lexical assignment order. Iterate until the
-    set stops growing.
+    This helper is statement-order aware: a local name becomes derived only
+    after an assignment whose RHS depends on a currently derived name, and a
+    later safe assignment clears that local taint. Suppression during the
+    visitor walk uses :class:`DerivedNameState` directly so findings are checked
+    against the state at their own call site, not this final summary.
 
     Propagation rules:
 
     * ``Assign`` / ``AugAssign`` / ``AnnAssign``: if the RHS expression
       mentions any derived name (anywhere in the subtree), every LHS Name
-      target becomes derived. (We use *contains-reference*, not
-      *rooted-at*, because ``raw = something(arguments["x"])`` should still
-      taint ``raw``.)
+      target becomes derived; otherwise those targets are cleared.
     * ``For`` / ``AsyncFor``: if the iter is rooted at a derived name, the
       loop target name(s) become derived.
     * ``With`` / ``AsyncWith``: if the context expression is rooted, the
@@ -554,80 +594,44 @@ def compute_derived_names(
       in Python 3 have their own scope but we conservatively treat the
       target name as derived if it's later referenced.)
 
-    The iteration is monotone over a finite local-name set. Instead of an
-    arbitrary constant cap, the loop is bounded by the number of local names
-    that can be marked derived plus one final no-change pass.
+    The walk is deliberately not a fixed point. Future assignments must not
+    taint earlier findings, and safe reassignments must remove local taint.
     """
-    derived: set[str] = {source_param}
-    local_names = _local_bindable_names(func_node) | {source_param}
-    max_iterations = len(local_names) + 1
+    state = DerivedNameState.from_source_param(source_param)
 
-    for _iteration in range(max_iterations):
-        before = frozenset(derived)
-        snapshot = frozenset(derived)
+    # Walk only the outer function's own lexical scope. The previous
+    # implementation used ``ast.walk(func_node)`` with a ``sub is not
+    # func_node`` guard, but ``ast.walk`` had already yielded every descendant
+    # of any nested function *before* the guard could fire — only the inner
+    # FunctionDef AST node itself was skipped, not its body.
+    for sub in walk_function_own_scope(func_node):
+        if sub is func_node:
+            continue
+        snapshot = state.snapshot()
+        if isinstance(sub, ast.Assign):
+            state.assign_targets(sub.targets, is_derived=_expr_contains_derived_reference(sub.value, snapshot))
+        elif isinstance(sub, ast.AnnAssign):
+            if sub.value is not None:
+                state.assign_target(sub.target, is_derived=_expr_contains_derived_reference(sub.value, snapshot))
+        elif isinstance(sub, ast.AugAssign):
+            is_derived = subject_is_rooted(sub.target, snapshot) or _expr_contains_derived_reference(sub.value, snapshot)
+            state.assign_target(sub.target, is_derived=is_derived)
+        elif isinstance(sub, (ast.For, ast.AsyncFor)):
+            state.assign_target(sub.target, is_derived=subject_is_rooted(sub.iter, snapshot))
+        elif isinstance(sub, (ast.With, ast.AsyncWith)):
+            for item in sub.items:
+                if item.optional_vars is None:
+                    continue
+                state.assign_target(item.optional_vars, is_derived=subject_is_rooted(item.context_expr, snapshot))
+        elif isinstance(sub, ast.NamedExpr):
+            state.assign_target(sub.target, is_derived=_expr_contains_derived_reference(sub.value, snapshot))
+        elif isinstance(sub, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            for generator in sub.generators:
+                if subject_is_rooted(generator.iter, snapshot):
+                    for name in _comprehension_target_names(generator):
+                        state.assign_target_names((name,), is_derived=True)
 
-        # Walk only the outer function's own lexical scope. The previous
-        # implementation used ``ast.walk(func_node)`` with a ``sub is not
-        # func_node`` guard, but ``ast.walk`` had already yielded every
-        # descendant of any nested function *before* the guard could fire —
-        # only the inner FunctionDef AST node itself was skipped, not its
-        # body. That leaked taint from inner-scope ``raw = arguments["x"]``
-        # assignments into the outer function's ``derived`` set, falsely
-        # suppressing R1/R5 findings on unrelated outer-scope ``raw``
-        # variables. ``walk_function_own_scope`` short-circuits at the
-        # nested-scope AST boundary so inner bodies are not visited at all.
-        for sub in walk_function_own_scope(func_node):
-            if isinstance(sub, ast.Assign):
-                value = sub.value
-                if _expr_contains_derived_reference(value, snapshot):
-                    for target in sub.targets:
-                        for name in _assignment_targets(target):
-                            derived.add(name)
-            elif isinstance(sub, ast.AnnAssign):
-                if sub.value is not None and _expr_contains_derived_reference(sub.value, snapshot):
-                    for name in _assignment_targets(sub.target):
-                        derived.add(name)
-            elif isinstance(sub, ast.AugAssign):
-                # ``x += derived`` does not REBIND x to derived in a
-                # boundary-parameter sense (x already existed). But for
-                # taint-style propagation, x's new value depends on derived,
-                # so be conservative and mark it.
-                if _expr_contains_derived_reference(sub.value, snapshot):
-                    for name in _assignment_targets(sub.target):
-                        derived.add(name)
-            elif isinstance(sub, (ast.For, ast.AsyncFor)):
-                if subject_is_rooted(sub.iter, snapshot):
-                    for name in _assignment_targets(sub.target):
-                        derived.add(name)
-            elif isinstance(sub, (ast.With, ast.AsyncWith)):
-                for item in sub.items:
-                    if item.optional_vars is None:
-                        continue
-                    if subject_is_rooted(item.context_expr, snapshot):
-                        for name in _assignment_targets(item.optional_vars):
-                            derived.add(name)
-            elif isinstance(sub, ast.NamedExpr):
-                if _expr_contains_derived_reference(sub.value, snapshot):
-                    for name in _assignment_targets(sub.target):
-                        derived.add(name)
-            elif isinstance(sub, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-                for generator in sub.generators:
-                    if subject_is_rooted(generator.iter, snapshot):
-                        for name in _comprehension_target_names(generator):
-                            derived.add(name)
-
-        if frozenset(derived) == before:
-            return frozenset(derived)
-
-    # Function bodies are bounded and derivation is monotone over a finite
-    # name space, so this loop must converge. If we hit the iteration cap,
-    # something has gone wrong — raise so the bug doesn't silently underrun
-    # the suppression analysis (per the project's offensive-programming
-    # doctrine, an unconverged fixed-point is a bug, not a recoverable case).
-    raise RuntimeError(
-        f"compute_derived_names did not converge within {max_iterations} iterations for "
-        f"function {func_node.name!r}; this is a bug in the dataflow walk."
-    )
+    return state.snapshot()
 
 
 def _local_bindable_names(func_node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:

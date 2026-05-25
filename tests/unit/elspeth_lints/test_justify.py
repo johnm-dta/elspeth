@@ -678,6 +678,8 @@ def test_justify_can_write_trust_boundary_honesty_gate_entry(tmp_path: Path) -> 
     root.mkdir()
     (root / "boundary.py").write_text(
         """\
+from elspeth.contracts.trust_boundary import trust_boundary
+
 @trust_boundary(
     tier=3,
     source="external payload",

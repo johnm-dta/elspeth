@@ -20,7 +20,7 @@ _POLICY_HASH = "sha256:" + ("ab" * 32)
 def _write_source(root: Path, relative: str, body: str) -> Path:
     target = root / relative
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(body, encoding="utf-8")
+    target.write_text("from elspeth.contracts.trust_boundary import trust_boundary\n\n" + body.lstrip(), encoding="utf-8")
     return target
 
 

@@ -11,7 +11,7 @@ from elspeth_lints.rules.trust_boundary.tier import RULE as TIER_RULE
 
 
 def _analyze(source: str) -> list[Finding]:
-    tree = ast.parse(textwrap.dedent(source))
+    tree = ast.parse("from elspeth.contracts.trust_boundary import trust_boundary\n" + textwrap.dedent(source))
     return list(TIER_RULE.analyze(tree, Path("example.py"), RuleContext(root=Path("."))))
 
 

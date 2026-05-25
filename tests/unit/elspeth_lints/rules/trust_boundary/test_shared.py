@@ -18,6 +18,8 @@ def test_make_decorator_finding_uses_single_fingerprint_shape() -> None:
     tree = ast.parse(
         textwrap.dedent(
             """
+            from elspeth.contracts.trust_boundary import trust_boundary
+
             @trust_boundary(
                 tier=2,
                 source="x",
@@ -62,3 +64,92 @@ def test_runtime_boundary_rule_literal_matches_analyzer_allowlist() -> None:
     """The runtime decorator and analyzer must agree on suppressible rule IDs."""
     runtime_rules = frozenset(get_args(BoundaryRule.__value__))
     assert runtime_rules == _ALLOWED_BOUNDARY_RULES
+
+
+def test_iter_trust_boundary_decorators_ignores_unrelated_attribute_decorator() -> None:
+    tree = ast.parse(
+        textwrap.dedent(
+            """
+            import other
+
+            @other.trust_boundary(
+                tier=3,
+                source="x",
+                source_param="data",
+                suppresses=("R1",),
+                invariant="y",
+            )
+            def handler(data):
+                return data
+            """
+        )
+    )
+
+    assert list(iter_trust_boundary_decorators(tree)) == []
+
+
+def test_iter_trust_boundary_decorators_ignores_unrelated_bare_import() -> None:
+    tree = ast.parse(
+        textwrap.dedent(
+            """
+            from other import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="data",
+                suppresses=("R1",),
+                invariant="y",
+            )
+            def handler(data):
+                return data
+            """
+        )
+    )
+
+    assert list(iter_trust_boundary_decorators(tree)) == []
+
+
+def test_iter_trust_boundary_decorators_accepts_elspeth_import_surfaces() -> None:
+    tree = ast.parse(
+        textwrap.dedent(
+            """
+            from elspeth.contracts.trust_boundary import trust_boundary
+            import elspeth.contracts as contracts
+            import elspeth.contracts.trust_boundary as tb_mod
+
+            @trust_boundary(
+                tier=3,
+                source="x",
+                source_param="data",
+                suppresses=("R1",),
+                invariant="y",
+            )
+            def bare(data):
+                return data
+
+            @contracts.trust_boundary(
+                tier=3,
+                source="x",
+                source_param="data",
+                suppresses=("R1",),
+                invariant="y",
+            )
+            def contracts_alias(data):
+                return data
+
+            @tb_mod.trust_boundary(
+                tier=3,
+                source="x",
+                source_param="data",
+                suppresses=("R1",),
+                invariant="y",
+            )
+            def module_alias(data):
+                return data
+            """
+        )
+    )
+
+    names = [func.name for func, _call in iter_trust_boundary_decorators(tree)]
+    assert names == ["bare", "contracts_alias", "module_alias"]

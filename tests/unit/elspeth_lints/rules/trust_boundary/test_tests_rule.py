@@ -29,7 +29,7 @@ def _analyze_at(source: str, *, repo_root: Path) -> list[Finding]:
     itself). Tests use the plain ``repo_root`` form so ``tests/...`` paths
     inside ``test_ref`` resolve directly.
     """
-    tree = ast.parse(textwrap.dedent(source))
+    tree = ast.parse("from elspeth.contracts.trust_boundary import trust_boundary\n" + textwrap.dedent(source))
     return list(TESTS_RULE.analyze(tree, Path("decorated.py"), RuleContext(root=repo_root)))
 
 
@@ -298,7 +298,8 @@ def test_accepts_assertRaises_unittest(tmp_path: Path) -> None:
 def test_missing_test_ref_fires_MISSING() -> None:
     """No test_ref kwarg at all -> TBE1."""
     tree = ast.parse(
-        textwrap.dedent(
+        "from elspeth.contracts.trust_boundary import trust_boundary\n"
+        + textwrap.dedent(
             """
             @trust_boundary(
                 tier=3,

@@ -11,7 +11,7 @@ from elspeth_lints.rules.trust_boundary.scope import RULE as SCOPE_RULE
 
 
 def _analyze(source: str) -> list[Finding]:
-    tree = ast.parse(textwrap.dedent(source))
+    tree = ast.parse("from elspeth.contracts.trust_boundary import trust_boundary\n" + textwrap.dedent(source))
     return list(SCOPE_RULE.analyze(tree, Path("example.py"), RuleContext(root=Path("."))))
 
 

@@ -12,6 +12,7 @@ Recognised decorator spellings (matching the runtime import surface):
 * ``@trust_boundary(...)`` after ``from elspeth.contracts.trust_boundary import trust_boundary``;
 * ``@elspeth.contracts.trust_boundary(...)`` (fully qualified attribute chain);
 * ``@contracts.trust_boundary(...)`` (shortened attribute chain).
+* ``@tb_mod.trust_boundary(...)`` after importing the decorator module as an alias.
 
 Bare-decorator usage (``@trust_boundary`` without a call) is not recognised:
 the runtime decorator is keyword-only and never appears without arguments.
@@ -26,7 +27,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,11 +35,47 @@ from pathlib import Path
 from elspeth_lints.core.allowlist import Allowlist, AllowlistEntry, FindingKey, load_allowlist, verify_entry_binding_against_finding
 from elspeth_lints.core.protocols import Finding, RuleMetadata
 
-_TRUST_BOUNDARY_NAME = "trust_boundary"
+_TRUST_BOUNDARY_EXPORT = "elspeth.contracts.trust_boundary"
+_TRUST_BOUNDARY_FUNCTION = "elspeth.contracts.trust_boundary.trust_boundary"
+_TRUST_BOUNDARY_QUALIFIED_NAMES: frozenset[str] = frozenset(
+    {
+        _TRUST_BOUNDARY_EXPORT,
+        _TRUST_BOUNDARY_FUNCTION,
+    }
+)
 TRUST_BOUNDARY_ALLOWLIST_DIR = "enforce_trust_boundary_honesty"
 
 
-def _is_trust_boundary_decorator(decorator: ast.expr) -> ast.Call | None:
+def _dotted_name(expr: ast.expr) -> tuple[str, ...] | None:
+    if isinstance(expr, ast.Name):
+        return (expr.id,)
+    if isinstance(expr, ast.Attribute):
+        base = _dotted_name(expr.value)
+        if base is None:
+            return None
+        return (*base, expr.attr)
+    return None
+
+
+def _matches_elspeth_trust_boundary_import(func: ast.expr, import_aliases: Mapping[str, str]) -> bool:
+    parts = _dotted_name(func)
+    if parts is None:
+        return False
+
+    alias_target = import_aliases.get(parts[0])
+    dotted = ".".join(parts)
+    if alias_target is None:
+        return dotted in _TRUST_BOUNDARY_QUALIFIED_NAMES
+
+    target_parts = tuple(alias_target.split("."))
+    if parts[: len(target_parts)] == target_parts:
+        resolved = dotted
+    else:
+        resolved = ".".join((*target_parts, *parts[1:]))
+    return resolved in _TRUST_BOUNDARY_QUALIFIED_NAMES
+
+
+def _is_trust_boundary_decorator(decorator: ast.expr, *, import_aliases: Mapping[str, str]) -> ast.Call | None:
     """Return the ``ast.Call`` if ``decorator`` references ``trust_boundary``.
 
     See module docstring for the recognised spellings. Returns ``None`` for any
@@ -46,12 +83,69 @@ def _is_trust_boundary_decorator(decorator: ast.expr) -> ast.Call | None:
     """
     if not isinstance(decorator, ast.Call):
         return None
-    func = decorator.func
-    if isinstance(func, ast.Name) and func.id == _TRUST_BOUNDARY_NAME:
-        return decorator
-    if isinstance(func, ast.Attribute) and func.attr == _TRUST_BOUNDARY_NAME:
-        return decorator
-    return None
+    return decorator if _matches_elspeth_trust_boundary_import(decorator.func, import_aliases) else None
+
+
+class _TrustBoundaryDecoratorVisitor(ast.NodeVisitor):
+    """Find Elspeth trust-boundary decorators with lexical import awareness."""
+
+    def __init__(self) -> None:
+        self.matches: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.Call]] = []
+        self._import_alias_stack: list[dict[str, str]] = [{}]
+
+    @property
+    def _import_aliases(self) -> dict[str, str]:
+        return self._import_alias_stack[-1]
+
+    def _push_scope(self) -> None:
+        self._import_alias_stack.append(dict(self._import_aliases))
+
+    def _pop_scope(self) -> None:
+        self._import_alias_stack.pop()
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            root_name = alias.name.split(".", 1)[0]
+            self._import_aliases[alias.asname or root_name] = alias.name
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module is None or node.level != 0:
+            return
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            self._import_aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._push_scope()
+        try:
+            for statement in node.body:
+                self.visit(statement)
+        finally:
+            self._pop_scope()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for decorator in node.decorator_list:
+            call = _is_trust_boundary_decorator(decorator, import_aliases=self._import_aliases)
+            if call is not None:
+                self.matches.append((node, call))
+                # A function should have at most one @trust_boundary; if a
+                # malformed decorator stack accidentally repeats it, we still
+                # yield the first only — duplicate findings would be noise.
+                break
+
+        self._push_scope()
+        try:
+            for statement in node.body:
+                self.visit(statement)
+        finally:
+            self._pop_scope()
 
 
 def iter_trust_boundary_decorators(
@@ -63,20 +157,12 @@ def iter_trust_boundary_decorators(
     call yielded is the ``ast.Call`` node — callers use
     :func:`extract_keywords` to read its kwargs.
 
-    Ordering is deterministic (``ast.walk`` is depth-first, and Python's AST
-    walk order is stable across runs).
+    Ordering is deterministic: statements are visited in lexical order while
+    preserving import aliases visible at each decorator site.
     """
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for decorator in node.decorator_list:
-            call = _is_trust_boundary_decorator(decorator)
-            if call is not None:
-                yield node, call
-                # A function should have at most one @trust_boundary; if a
-                # malformed decorator stack accidentally repeats it, we still
-                # yield the first only — duplicate findings would be noise.
-                break
+    visitor = _TrustBoundaryDecoratorVisitor()
+    visitor.visit(tree)
+    yield from visitor.matches
 
 
 def _literal_value(node: ast.expr) -> tuple[bool, object]:

@@ -1329,10 +1329,7 @@ _PATTERN_CONTRACT_CASES: tuple[tuple[str, str, str], ...] = (
     (
         "slack_webhook_url",
         "mod.py",
-        'x = 1\nurl = "https://hooks.slack.com/services/'
-        + "T01ABCDEFGH/B02ZYXWVUTSR/"
-        + "F" * 24
-        + '"\ny = 2\n',
+        'x = 1\nurl = "https://hooks.slack.com/services/' + "T01ABCDEFGH/B02ZYXWVUTSR/" + "F" * 24 + '"\ny = 2\n',
     ),
     (
         "authorization_bearer",

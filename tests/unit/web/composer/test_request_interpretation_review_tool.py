@@ -67,7 +67,10 @@ from elspeth.web.composer.tools import (
     get_tool_definitions,
     is_session_aware_tool,
 )
-from elspeth.web.composer.tools.sessions import _assert_affected_component
+from elspeth.web.composer.tools.sessions import (
+    DUPLICATE_RESOLVED_INTERPRETATION_CODE,
+    _assert_affected_component,
+)
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     PROMPT_TEMPLATE_PARTS_KEY,
@@ -1104,20 +1107,62 @@ def test_07_proposal_summary_text() -> None:
 
 @pytest.mark.asyncio
 async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServiceImpl) -> None:
-    """Spec test 8: 4th call with same (session_id, user_term) raises."""
+    """Spec test 8: 4th surfacing of the same ``user_term`` raises per-term cap.
+
+    The legitimate per-term-cap scenario surfaces the same term across DIFFERENT
+    ``affected_node_id`` values (e.g. four LLM nodes all referencing the
+    same vague term ``"cool"``). Under the duplicate-staging defence, three
+    re-stages of the same (kind, user_term, affected_node_id) tuple are
+    idempotent — they do NOT advance the per-term count, which is reserved
+    for legitimate per-site churn.
+    """
     session_id = uuid4()
-    state_id = await _seed_session(service, session_id)
-    state = _state_with(_llm_node())
+
+    # Seed a composition state with 4 LLM nodes, all carrying placeholders for
+    # ``"cool"``. The writer-boundary check at create_pending_interpretation_event
+    # reads composition_states.nodes inside its locked transaction and validates
+    # each affected_node_id; all four must be present from the outset because
+    # ``composition_state_id`` is fixed across the iterations.
+    with service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Per-term rate cap test",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+    multi_node_state = CompositionState(
+        source=None,
+        nodes=tuple(_llm_node(node_id=f"rate_node_{i}") for i in range(4)),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    state_dict = multi_node_state.to_dict()
+    persisted = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            nodes=state_dict["nodes"],
+            metadata_=state_dict["metadata"],
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+    state_id = persisted.id
 
     for i in range(3):
         result = await _handle_request_interpretation_review(
             arguments={
-                "affected_node_id": "rate_node",
+                "affected_node_id": f"rate_node_{i}",
                 "kind": "vague_term",
                 "user_term": "cool",
                 "llm_draft": f"Draft {i}",
             },
-            state=state,
+            state=multi_node_state,
             session_id=session_id,
             composition_state_id=state_id,
             tool_call_id=f"call_{i}",
@@ -1129,16 +1174,19 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
             **_provenance_kwargs(),
         )
         assert result.success is True
+        assert result.data["_kind"] == "interpretation_review_pending"
 
+    # 4th surfacing — distinct affected_node_id so dedup does not catch it.
+    # The per-term cap is the structural bound that fires.
     with pytest.raises(ToolArgumentError, match=r"per term|user_term"):
         await _handle_request_interpretation_review(
             arguments={
-                "affected_node_id": "rate_node",
+                "affected_node_id": "rate_node_3",
                 "kind": "vague_term",
                 "user_term": "cool",
                 "llm_draft": "Draft 4",
             },
-            state=state,
+            state=multi_node_state,
             session_id=session_id,
             composition_state_id=state_id,
             tool_call_id="call_4",
@@ -1284,6 +1332,211 @@ def test_15b_utc_day_start_helper() -> None:
     # Naive input is interpreted as UTC by the helper (offensive normalisation).
     naive = datetime(2026, 5, 18, 23, 59, 59)  # noqa: DTZ001 — intentional naive-input test
     assert _utc_day_start(naive) == datetime(2026, 5, 18, 0, 0, 0, tzinfo=UTC)
+
+
+# --------------------------------------------------------------------------- #
+# Dedup gate — duplicate-staging defence (session 2766a814 fix history)
+# --------------------------------------------------------------------------- #
+# The composer LLM was observed to emit ``request_interpretation_review`` twice
+# for the same logical review within seconds, surfacing two cards for the same
+# (kind, user_term, affected_node_id) tuple. The dedup gate at the staging
+# handler raises on resolved re-stages and returns idempotently on pending
+# re-stages. These tests pin all three branches.
+
+
+@pytest.mark.asyncio
+async def test_dedup_first_call_creates_pending_row_normally(service: SessionServiceImpl) -> None:
+    """Regression: dedup gate does NOT interfere with the first call for a
+    given (kind, user_term, affected_node_id) tuple.
+
+    Identical to test_02 in shape — proves the gate is a no-op when no prior
+    event with the same key exists.
+    """
+    session_id = uuid4()
+    state_id = await _seed_session(service, session_id)
+    state = _state_with(_llm_node())
+
+    result = await _handle_request_interpretation_review(
+        arguments={
+            "affected_node_id": "rate_node",
+            "kind": "vague_term",
+            "user_term": "cool",
+            "llm_draft": "Visually appealing.",
+        },
+        state=state,
+        session_id=session_id,
+        composition_state_id=state_id,
+        tool_call_id="call_first",
+        now=_now(),
+        per_term_cap=3,
+        per_session_day_cap=10,
+        create_pending_interpretation_event=service.create_pending_interpretation_event,
+        list_interpretation_events=service.list_interpretation_events,
+        **_provenance_kwargs(),
+    )
+    assert result.success is True
+    assert result.data["_kind"] == "interpretation_review_pending"
+
+    rows = await service.list_interpretation_events(session_id, status="pending")
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_dedup_second_pending_restage_is_idempotent(service: SessionServiceImpl) -> None:
+    """Branch 2: re-stage while original is still ``pending`` → idempotent return.
+
+    The duplicate must NOT create a second DB row. The returned payload must
+    surface the existing event id and the distinct ``_kind`` discriminant so
+    the frontend can render the existing review card without a duplicate badge.
+
+    This is the exact bug scenario from session
+    2766a814-2112-4a5c-b1f0-62f85169281a (two ``llm_prompt_template`` events
+    for the same ``affected_node_id``).
+    """
+    session_id = uuid4()
+    state_id = await _seed_session(service, session_id)
+    state = _state_with(_llm_node())
+
+    first = await _handle_request_interpretation_review(
+        arguments={
+            "affected_node_id": "rate_node",
+            "kind": "vague_term",
+            "user_term": "cool",
+            "llm_draft": "Visually appealing.",
+        },
+        state=state,
+        session_id=session_id,
+        composition_state_id=state_id,
+        tool_call_id="call_first",
+        now=_now(),
+        per_term_cap=3,
+        per_session_day_cap=10,
+        create_pending_interpretation_event=service.create_pending_interpretation_event,
+        list_interpretation_events=service.list_interpretation_events,
+        **_provenance_kwargs(),
+    )
+    first_event_id = first.data["event_id"]
+    assert first.data["_kind"] == "interpretation_review_pending"
+
+    # Duplicate re-stage — same (kind, user_term, affected_node_id).
+    second = await _handle_request_interpretation_review(
+        arguments={
+            "affected_node_id": "rate_node",
+            "kind": "vague_term",
+            "user_term": "cool",
+            "llm_draft": "Visually appealing (resubmitted by the LLM).",
+        },
+        state=state,
+        session_id=session_id,
+        composition_state_id=state_id,
+        tool_call_id="call_duplicate",
+        now=_now(),
+        per_term_cap=3,
+        per_session_day_cap=10,
+        create_pending_interpretation_event=service.create_pending_interpretation_event,
+        list_interpretation_events=service.list_interpretation_events,
+        **_provenance_kwargs(),
+    )
+    assert second.success is True
+    assert second.data["_kind"] == "interpretation_review_pending_idempotent"
+    # Idempotent return MUST echo the original event id, not a fresh one.
+    assert second.data["event_id"] == first_event_id
+    # Affected node + kind + user_term flow through for frontend rendering.
+    assert second.data["affected_node_id"] == "rate_node"
+    assert second.data["kind"] == "vague_term"
+    assert second.data["user_term"] == "cool"
+    assert second.affected_nodes == ("rate_node",)
+    # Message names the user_term so the LLM/frontend can attribute the
+    # idempotent response.
+    assert "cool" in second.data["message"]
+    assert "reusing" in second.data["message"]
+
+    # Critically: only ONE pending row in the DB. No duplicate persisted.
+    pending_rows = await service.list_interpretation_events(session_id, status="pending")
+    assert len(pending_rows) == 1
+    assert str(pending_rows[0].id) == first_event_id
+    # Llm_draft on the persisted row remains the first call's value — the
+    # second call's draft is dropped, not silently overwritten.
+    assert pending_rows[0].llm_draft == "Visually appealing."
+
+
+@pytest.mark.asyncio
+async def test_dedup_third_restage_after_resolve_raises_arg_error(service: SessionServiceImpl) -> None:
+    """Branch 3: re-stage after the original was resolved → ToolArgumentError.
+
+    Any resolution choice (``ACCEPTED_AS_DRAFTED``, ``AMENDED``, …) counts —
+    the dedup branches only on ``choice IS PENDING`` vs not-pending. The
+    error code is ``DUPLICATE_RESOLVED_INTERPRETATION_CODE`` and no second
+    row is written.
+    """
+    session_id = uuid4()
+    state_id = await _seed_session(service, session_id)
+    state = _state_with(_llm_node())
+
+    first = await _handle_request_interpretation_review(
+        arguments={
+            "affected_node_id": "rate_node",
+            "kind": "vague_term",
+            "user_term": "cool",
+            "llm_draft": "Visually appealing.",
+        },
+        state=state,
+        session_id=session_id,
+        composition_state_id=state_id,
+        tool_call_id="call_first",
+        now=_now(),
+        per_term_cap=3,
+        per_session_day_cap=10,
+        create_pending_interpretation_event=service.create_pending_interpretation_event,
+        list_interpretation_events=service.list_interpretation_events,
+        **_provenance_kwargs(),
+    )
+    first_event_id = UUID(first.data["event_id"])
+
+    # Resolve the first event (user accepts the draft) — this transitions the
+    # row's ``choice`` from PENDING to ACCEPTED_AS_DRAFTED and stamps
+    # ``resolved_at``.
+    await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=first_event_id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+
+    # Re-stage attempt after resolution — same (kind, user_term, affected_node_id).
+    # The dedup gate must raise ToolArgumentError; the compose loop's
+    # ARG_ERROR routing surfaces the error back to the LLM.
+    with pytest.raises(ToolArgumentError) as excinfo:
+        await _handle_request_interpretation_review(
+            arguments={
+                "affected_node_id": "rate_node",
+                "kind": "vague_term",
+                "user_term": "cool",
+                "llm_draft": "Visually appealing (re-staged by the LLM after accept).",
+            },
+            state=state,
+            session_id=session_id,
+            composition_state_id=state_id,
+            tool_call_id="call_after_resolve",
+            now=_now(),
+            per_term_cap=3,
+            per_session_day_cap=10,
+            create_pending_interpretation_event=service.create_pending_interpretation_event,
+            list_interpretation_events=service.list_interpretation_events,
+            **_provenance_kwargs(),
+        )
+    assert excinfo.value.code == DUPLICATE_RESOLVED_INTERPRETATION_CODE
+    assert excinfo.value.argument == "user_term"
+    # The actual_type / expected strings tell the LLM what went wrong without
+    # echoing any LLM-supplied value (safe-by-construction echo).
+    assert "already-resolved" in excinfo.value.actual_type or "already" in excinfo.value.expected
+
+    # No second row was written — the only row remains the resolved one.
+    all_rows = await service.list_interpretation_events(session_id, status="all")
+    assert len(all_rows) == 1
+    assert all_rows[0].id == first_event_id
+    assert all_rows[0].choice is InterpretationChoice.ACCEPTED_AS_DRAFTED
 
 
 # --------------------------------------------------------------------------- #
@@ -1679,21 +1932,55 @@ async def test_16_rate_cap_breach_writes_no_audit_row(service: SessionServiceImp
     no DB write is testable at this layer: the handler raises
     ToolArgumentError BEFORE the create_pending_interpretation_event call,
     so the interpretation_events table is unchanged for the rejected call.
+
+    Uses distinct ``affected_node_id`` values across the three saturating
+    calls — same-tuple re-stages are intercepted by the dedup gate (see
+    test_dedup_second_pending_restage_is_idempotent) and would not
+    accumulate per-term budget.
     """
     session_id = uuid4()
-    state_id = await _seed_session(service, session_id)
-    state = _state_with(_llm_node())
 
-    # Saturate the per-term cap.
+    with service._engine.begin() as conn:
+        conn.execute(
+            insert(sessions_table).values(
+                id=str(session_id),
+                user_id="alice",
+                auth_provider_type="local",
+                title="Rate-cap breach test",
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+    multi_node_state = CompositionState(
+        source=None,
+        nodes=tuple(_llm_node(node_id=f"rate_node_{i}") for i in range(4)),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    state_dict = multi_node_state.to_dict()
+    persisted = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            nodes=state_dict["nodes"],
+            metadata_=state_dict["metadata"],
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+    state_id = persisted.id
+
+    # Saturate the per-term cap with three distinct sites.
     for i in range(3):
         await _handle_request_interpretation_review(
             arguments={
-                "affected_node_id": "rate_node",
+                "affected_node_id": f"rate_node_{i}",
                 "kind": "vague_term",
                 "user_term": "cool",
                 "llm_draft": f"Draft {i}",
             },
-            state=state,
+            state=multi_node_state,
             session_id=session_id,
             composition_state_id=state_id,
             tool_call_id=f"call_{i}",
@@ -1711,12 +1998,12 @@ async def test_16_rate_cap_breach_writes_no_audit_row(service: SessionServiceImp
     with pytest.raises(ToolArgumentError):
         await _handle_request_interpretation_review(
             arguments={
-                "affected_node_id": "rate_node",
+                "affected_node_id": "rate_node_3",
                 "kind": "vague_term",
                 "user_term": "cool",
                 "llm_draft": "Draft 4",
             },
-            state=state,
+            state=multi_node_state,
             session_id=session_id,
             composition_state_id=state_id,
             tool_call_id="call_4",

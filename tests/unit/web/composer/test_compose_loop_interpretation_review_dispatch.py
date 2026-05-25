@@ -226,6 +226,30 @@ def _llm_node_spec(term: str = "cool") -> NodeSpec:
     )
 
 
+def _llm_node_spec_with_id(node_id: str, *, term: str = "cool") -> NodeSpec:
+    """Build an LLM-transform NodeSpec with a caller-chosen id and an
+    ``{{interpretation:<term>}}`` placeholder. Used by the rate-cap tests
+    that need multiple distinct sites sharing one user_term — the dedup
+    gate keys on (kind, user_term, affected_node_id) so distinct ids
+    accumulate the per-term count without idempotent intercepts.
+    """
+    return NodeSpec(
+        id=node_id,
+        node_type="transform",
+        plugin="llm",
+        input="rows",
+        on_success="out",
+        on_error=None,
+        options={"prompt_template": f"Rate how {{{{interpretation:{term}}}}} this row is."},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
 def _state_with_llm_node(term: str = "cool") -> CompositionState:
     return CompositionState(
         source=None,
@@ -1253,16 +1277,28 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
     telemetry = build_sessions_telemetry()
     composer._telemetry = telemetry  # type: ignore[attr-defined]
 
-    state = _state_with_prompt_template_review_node()
+    # Multi-node state — the rate cap is keyed on ``user_term``, NOT
+    # ``affected_node_id``. Three distinct sites all reference the same
+    # vague term ``"cool"``, accumulating the per-term count without
+    # triggering the dedup gate (which keys on the tuple
+    # ``(kind, user_term, affected_node_id)``).
+    state = CompositionState(
+        source=None,
+        nodes=tuple(_llm_node_spec_with_id(f"rate_node_{i}", term="cool") for i in range(4)),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
     session_id, state_id = await _seed_session_and_state(
         sessions_service,
         state=state,
     )
 
     # Saturate the per-term cap by issuing three successful compose-loop
-    # turns with the same (session_id, user_term). Each turn = one fake
-    # response that calls request_interpretation_review followed by a
-    # terminating text response. The per-term cap default is 3 — the
+    # turns with the same ``user_term`` across DISTINCT sites. Each turn =
+    # one fake response that calls request_interpretation_review followed
+    # by a terminating text response. The per-term cap default is 3 — the
     # 4th call below trips the cap.
     for i in range(3):
         llm = _ScriptedLLM(
@@ -1271,10 +1307,10 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
                     tool_call_id=f"call_{i}",
                     tool_name="request_interpretation_review",
                     arguments={
-                        "affected_node_id": "rate_node",
-                        "kind": "llm_prompt_template",
-                        "user_term": "llm_prompt_template:rate_node",
-                        "llm_draft": "Read {{ row.html }} and return JSON.",
+                        "affected_node_id": f"rate_node_{i}",
+                        "kind": "vague_term",
+                        "user_term": "cool",
+                        "llm_draft": f"Visually appealing {i}.",
                     },
                 ),
                 _fake_text_response(f"Surfaced #{i}."),
@@ -1293,17 +1329,19 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
     # No telemetry yet — no caps breached.
     assert observed_value(telemetry.interpretation_rate_cap_exceeded_total) == 0
 
-    # The fourth call trips the per-term cap.
+    # The fourth call trips the per-term cap. Uses the 4th distinct site
+    # so the dedup gate does not intercept — the per-term count (3 prior
+    # rows with user_term="cool") is what fires.
     llm = _ScriptedLLM(
         [
             _fake_response_with_tool_call(
                 tool_call_id="call_capped",
                 tool_name="request_interpretation_review",
                 arguments={
-                    "affected_node_id": "rate_node",
-                    "kind": "llm_prompt_template",
-                    "user_term": "llm_prompt_template:rate_node",
-                    "llm_draft": "Read {{ row.html }} and return JSON.",
+                    "affected_node_id": "rate_node_3",
+                    "kind": "vague_term",
+                    "user_term": "cool",
+                    "llm_draft": "Visually appealing 3.",
                 },
             ),
             _fake_text_response("Falling back to baked interpretation."),
@@ -1342,7 +1380,7 @@ async def test_f6_rate_cap_branch_emits_telemetry_and_writes_audit_row(
     assert auto.tool_call_id is None
     assert auto.user_term is None
     assert auto.llm_draft is None
-    assert auto.kind is InterpretationKind.LLM_PROMPT_TEMPLATE
+    assert auto.kind is InterpretationKind.VAGUE_TERM
     assert auto.choice is InterpretationChoice.OPTED_OUT
     assert auto.model_identifier == "anthropic/claude-opus-4-7"
     assert auto.provider == "anthropic"

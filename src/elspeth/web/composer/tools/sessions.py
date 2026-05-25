@@ -12,7 +12,12 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
-from elspeth.contracts.composer_interpretation import InterpretationEventRecord, InterpretationKind, InterpretationSource
+from elspeth.contracts.composer_interpretation import (
+    InterpretationChoice,
+    InterpretationEventRecord,
+    InterpretationKind,
+    InterpretationSource,
+)
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.recipes import (
     RecipeValidationError,
@@ -1344,6 +1349,14 @@ RATE_CAP_PER_TERM_CODE: Final[str] = "RATE_CAP_PER_TERM"
 
 RATE_CAP_PER_SESSION_DAY_CODE: Final[str] = "RATE_CAP_PER_SESSION_DAY"
 
+# Dispatch discriminant for the dedup-on-resolved branch. Mirrors the
+# RATE_CAP_* code constants: the compose loop and downstream telemetry
+# read ``ToolArgumentError.code`` to distinguish branches without grepping
+# the message string. Set when the LLM tries to re-stage a logical review
+# (same kind + user_term + affected_node_id) that the user has already
+# resolved in this composition branch.
+DUPLICATE_RESOLVED_INTERPRETATION_CODE: Final[str] = "DUPLICATE_RESOLVED_INTERPRETATION"
+
 RATE_CAP_CODE_TO_TELEMETRY_CAP_TYPE: Final[Mapping[str, str]] = MappingProxyType(
     {
         RATE_CAP_PER_TERM_CODE: "per_term",
@@ -1363,6 +1376,102 @@ def _utc_day_start(now: datetime) -> datetime:
     aware_now = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
     aware_now_utc = aware_now.astimezone(UTC)
     return aware_now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+async def _check_duplicate_interpretation(
+    *,
+    session_id: UUID,
+    composition_state_id: UUID,
+    kind: InterpretationKind,
+    user_term: str,
+    affected_node_id: str,
+    state: CompositionState,
+    list_events_fn: Callable[..., Awaitable[list[InterpretationEventRecord]]],
+) -> ToolResult | None:
+    """Dedup a re-stage of an existing logical interpretation review.
+
+    The dedup key is the tuple ``(kind, user_term, affected_node_id)``
+    within the active composition branch. The composer skill prompt tells
+    the LLM to "carry pending interpretation requirements forward
+    unchanged"; this is the staging-side defence against the LLM emitting
+    ``request_interpretation_review`` twice for the same logical review
+    within one tool-loop turn (observed in session
+    2766a814-2112-4a5c-b1f0-62f85169281a — see fix history).
+
+    ``AUTO_INTERPRETED_OPT_OUT`` and ``AUTO_INTERPRETED_NO_SURFACES`` rows
+    are excluded from the lookup because they are suppression / cap-hit
+    audit records, not reviews — each such attempt is its own audit fact
+    and must not be deduplicated against. The DB-side filter
+    ``sources=[USER_APPROVED]`` excludes both.
+
+    Three outcomes:
+
+    - **No prior match** → returns ``None``; caller continues to the
+      rate-limit gate and normal pending-row creation.
+    - **Prior match still ``pending``** → returns a SUCCESS ``ToolResult``
+      whose ``data`` payload reuses the existing event id and signals an
+      idempotent re-stage via ``_kind='interpretation_review_pending_idempotent'``.
+      No new DB row is written.
+    - **Prior match already resolved** (any choice in
+      ``{accepted_as_drafted, accepted_with_amendment, dismissed, …}``)
+      → raises :class:`ToolArgumentError` with
+      ``code=DUPLICATE_RESOLVED_INTERPRETATION_CODE``. This is a contract
+      violation by the LLM and the compose loop's ARG_ERROR routing
+      surfaces the error back to it for a retry that drops the duplicate.
+
+    Async because ``list_events_fn`` (the injected
+    ``list_interpretation_events`` service method) is async — it reads
+    the session DB.
+    """
+    # Filter at the DB by interpretation_source — opt-out rows are
+    # excluded so repeated opt-out audit events keep flowing through
+    # unimpeded. ``status='all'`` returns both pending and resolved rows;
+    # we need both branches.
+    prior_events = await list_events_fn(
+        session_id,
+        status="all",
+        composition_state_id=composition_state_id,
+        sources=[InterpretationSource.USER_APPROVED],
+    )
+    matches = [
+        event
+        for event in prior_events
+        if event.kind is kind and event.user_term == user_term and event.affected_node_id == affected_node_id
+    ]
+    if not matches:
+        return None
+    # ``list_interpretation_events`` orders by ``(created_at, id)`` —
+    # the earliest match is the original event whose id the idempotent
+    # response must echo so the frontend correlates with the existing card.
+    original = matches[0]
+    if original.choice is InterpretationChoice.PENDING:
+        return ToolResult(
+            success=True,
+            updated_state=state,  # no state change — original review is still pending
+            validation=state.validate(),
+            affected_nodes=(affected_node_id,),
+            data={
+                "_kind": "interpretation_review_pending_idempotent",
+                "event_id": str(original.id),
+                "affected_node_id": affected_node_id,
+                "kind": kind.value,
+                "user_term": user_term,
+                "llm_draft": original.llm_draft,
+                "interpretation_source": original.interpretation_source.value,
+                "message": (f"Interpretation review for '{user_term}' is already pending; reusing the existing event."),
+            },
+        )
+    # Resolved — re-staging an already-decided review is forbidden.
+    raise ToolArgumentError(
+        argument="user_term",
+        expected=(
+            "a fresh interpretation review (this kind+user_term+affected_node_id "
+            "tuple has already been resolved in this composition branch — carry "
+            "the resolved value forward, do not re-stage)"
+        ),
+        actual_type="re-staging an already-resolved interpretation review",
+        code=DUPLICATE_RESOLVED_INTERPRETATION_CODE,
+    )
 
 
 async def _check_interpretation_rate_limits(
@@ -1536,6 +1645,25 @@ async def _handle_request_interpretation_review(
     # happen before rate limiting so cap-exceeded audit rows are emitted only
     # for valid pending review sites.
     _assert_affected_component(state, parsed.affected_node_id, parsed.kind, parsed.user_term, parsed.llm_draft)
+    # Dedup gate. Runs BEFORE the rate-limit check on purpose: a duplicate
+    # re-stage is zero logical progress and must not consume the per-term
+    # budget, which is reserved for legitimate user-resolved churn (accept,
+    # then LLM re-surfaces a refined draft, etc.). Scoped to the active
+    # composition branch (same ``composition_state_id``) so an edit that
+    # changes the pipeline can legitimately re-surface a review.
+    # ``AUTO_INTERPRETED_OPT_OUT`` rows are excluded — those are suppression
+    # audit records, not reviews; each opt-out attempt is its own audit fact.
+    idempotent_result = await _check_duplicate_interpretation(
+        session_id=session_id,
+        composition_state_id=composition_state_id,
+        kind=parsed.kind,
+        user_term=parsed.user_term,
+        affected_node_id=parsed.affected_node_id,
+        state=state,
+        list_events_fn=list_interpretation_events,
+    )
+    if idempotent_result is not None:
+        return idempotent_result
     # Rate-limit gate. Cap-exceeded raises ToolArgumentError; the compose
     # loop is expected to react by writing an AUTO_INTERPRETED_NO_SURFACES
     # event (handled in service.py — see ``record_auto_interpreted_no_surfaces_event``).

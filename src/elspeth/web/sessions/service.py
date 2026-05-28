@@ -55,6 +55,7 @@ from elspeth.web.interpretation_state import (
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
     pipeline_decision_artifact_hash,
+    prompt_structure_hash_from_options,
     validate_pipeline_decision_semantics,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
@@ -1087,12 +1088,22 @@ def _resolve_prompt_template_review(
         user_term=user_term,
         context="resolve_interpretation_event",
     )
+    # Node-level / returned hash stays the final-prompt-string hash (the runtime
+    # LLM plugin reads options.resolved_prompt_template_hash to populate
+    # calls.resolved_prompt_template_hash). The REQUIREMENT-level attestation
+    # anchor, by contrast, is the prompt *skeleton* for structured nodes: the
+    # prompt-template review approves the LLM-authored structure, while the
+    # vague-term reviews approve the slot values. Anchoring the requirement to
+    # the skeleton keeps it invariant under vague-term resolution (which rewrites
+    # the rendered prompt) — see interpretation_state.prompt_structure_hash.
     resolved_prompt_template_hash = stable_hash(prompt_template)
+    structure_hash = prompt_structure_hash_from_options(options)
+    requirement_anchor_hash = structure_hash if structure_hash is not None else resolved_prompt_template_hash
     requirement = dict(requirements[matching_index])
     requirement["status"] = "resolved"
     requirement["event_id"] = event_id
     requirement["accepted_value"] = accepted_value
-    requirement["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+    requirement["resolved_prompt_template_hash"] = requirement_anchor_hash
     requirements[matching_index] = requirement
 
     final_nodes: list[Mapping[str, Any]] = []

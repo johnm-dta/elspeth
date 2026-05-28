@@ -801,7 +801,18 @@ def _validate_prompt_template_review(node: NodeSpec, prompt_template: str) -> No
     resolved = _resolved_requirement_for_kind(requirements, InterpretationKind.LLM_PROMPT_TEMPLATE)
     if resolved is None:
         return
-    expected_hash = stable_hash(prompt_template)
+    parts = _prompt_parts(node.options)
+    if parts is not None:
+        # Structured nodes attest the prompt *skeleton*, not the substituted
+        # text. The vague-term slot values are reviewed independently, so the
+        # prompt-template review must be invariant under their resolution —
+        # otherwise resolving a vague term (which rewrites the rendered prompt)
+        # spuriously drifts a prompt-template review the operator already
+        # approved. A genuine edit to a fixed text segment, or re-pointing a
+        # slot to a different requirement, still changes the skeleton and drifts.
+        expected_hash = prompt_structure_hash(parts)
+    else:
+        expected_hash = stable_hash(prompt_template)
     if resolved["resolved_prompt_template_hash"] != expected_hash:
         raise ValueError(f"llm node {node.id!r} prompt-template review hash drifted")
 
@@ -973,6 +984,44 @@ def _prompt_parts(options: Mapping[str, Any]) -> tuple[PromptPart, ...] | None:
         else:
             raise ValueError(f"unknown prompt_template_parts kind {kind!r}")
     return tuple(parts)
+
+
+def prompt_structure_hash(parts: tuple[PromptPart, ...]) -> str:
+    """Canonical hash of a prompt's *structure* — text segments and the
+    requirement each interpretation slot references — independent of whether
+    those slots are pending or resolved and of their accepted values.
+
+    This is the attestation domain for the ``llm_prompt_template`` review: that
+    review approves the LLM-authored prompt skeleton. The vague-term reviews
+    approve the slot *values* separately. Anchoring the prompt-template review
+    to this skeleton makes it invariant under interpretation resolution — so
+    resolving a vague term (which rewrites the rendered ``prompt_template``)
+    does not drift the prompt-template review, while a genuine edit to a fixed
+    text segment or a re-pointed slot still does.
+
+    The projection deliberately excludes requirement status and accepted_value:
+    those belong to the vague-term reviews' own attestations.
+    """
+    skeleton: list[tuple[str, str]] = []
+    for part in parts:
+        kind = part["kind"]
+        if kind == "text":
+            skeleton.append(("text", part["text"]))
+        elif kind == "interpretation_ref":
+            skeleton.append(("interpretation_ref", part["requirement_id"]))
+        else:
+            raise ValueError(f"unknown prompt part kind {kind!r}")
+    return stable_hash(skeleton)
+
+
+def prompt_structure_hash_from_options(options: Mapping[str, Any]) -> str | None:
+    """Skeleton hash for a node's prompt parts, or ``None`` for a legacy
+    (no-parts) node. Single derivation shared by the resolve-time anchor and the
+    execution-time drift guard so they cannot diverge."""
+    parts = _prompt_parts(options)
+    if parts is None:
+        return None
+    return prompt_structure_hash(parts)
 
 
 def _render_prompt_parts(

@@ -20,6 +20,7 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
     pipeline_decision_artifact_hash,
+    prompt_structure_hash_from_options,
     strip_authoring_options,
     vague_term_wiring_count,
 )
@@ -254,6 +255,10 @@ def test_resolved_requirement_materializes_prompt_and_hash() -> None:
     requirement["status"] = "resolved"
     requirement["accepted_value"] = "well-designed and useful"
     prompt = "Rate well-designed and useful: {{ row.text }}"
+    # The prompt-template review anchors to the prompt SKELETON (parts structure),
+    # not the substituted text — so it stays valid after the vague term resolves.
+    skeleton_hash = prompt_structure_hash_from_options(options)
+    assert skeleton_hash is not None
     options[INTERPRETATION_REQUIREMENTS_KEY] = [
         requirement,
         {
@@ -265,7 +270,7 @@ def test_resolved_requirement_materializes_prompt_and_hash() -> None:
             "event_id": "event-2",
             "accepted_value": prompt,
             "accepted_artifact_hash": None,
-            "resolved_prompt_template_hash": stable_hash(prompt),
+            "resolved_prompt_template_hash": skeleton_hash,
         },
     ]
     state = _state_with_llm(options)
@@ -275,6 +280,7 @@ def test_resolved_requirement_materializes_prompt_and_hash() -> None:
     assert isinstance(materialized, CompositionState)
     materialized_prompt = materialized.nodes[0].options["prompt_template"]
     assert materialized_prompt == prompt
+    # Node-level hash remains the final-prompt-string hash (runtime reads it).
     assert materialized.nodes[0].options["resolved_prompt_template_hash"] == stable_hash(prompt)
 
 

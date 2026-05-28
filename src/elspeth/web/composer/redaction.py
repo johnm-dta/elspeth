@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType, UnionType
 from typing import Annotated, Any, Union, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.errors import AuditIntegrityError
@@ -797,6 +797,58 @@ def _summarize_set_source_options(options: dict[str, Any]) -> str:
     )
 
 
+def _coerce_stringified_json_object(value: Any) -> Any:
+    """Tier-3 boundary deserialisation for LLM-supplied object arguments.
+
+    Some models — notably ``openrouter/openai/gpt-5.4-mini``, the deployed
+    composer model — intermittently serialise a nested-object tool-call
+    parameter as a JSON *string* (``options="{}"``,
+    ``patch="{\\"column\\":\\"url\\"}"``) instead of emitting a JSON object
+    (``options={}``). This was proven from the staging audit trail (sessions
+    ``fd551d98`` / ``71d57b4f``): every free-form ``options`` / ``patch`` field
+    arrived as a string while typed sibling fields (``blob_id``, ``nodes``)
+    arrived correctly, so the build failed wholesale on a ``dict[str, Any]``
+    ``ValidationError`` whenever the model stringified.
+
+    A JSON string is an equivalent wire encoding of the object it encodes;
+    parsing it back is *meaning-preserving coercion*, not fabrication
+    (CLAUDE.md "Data Manifesto" — Tier-3 boundary, the ``"42" -> 42`` class),
+    and is therefore exempt from the defensive-programming ban as a documented
+    trust-boundary deserialisation. The raw stringified form is recorded in the
+    per-dispatch audit envelope (``service.py`` ``begin_dispatch_or_arg_error``,
+    opened from the pre-coercion ``json.loads`` result) BEFORE this validator
+    runs, so the audit trail still records exactly what the model emitted.
+
+    The coercion is deliberately narrow: only a string that decodes to a JSON
+    *object* is coerced. A non-string, a string that is not valid JSON, or a
+    string that decodes to a non-object (list, scalar, ``null``) is returned
+    untouched so the field's ``dict[str, Any]`` validation still rejects
+    genuinely malformed input (fails closed).
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        decoded = json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
+    return decoded if isinstance(decoded, dict) else value
+
+
+# Reusable annotation for every LLM-supplied free-form object argument
+# (``options`` on the source/node/output binding tools; ``patch`` on the
+# patch_* tools). Combines the existing ``Sensitive`` redaction marker with the
+# stringified-object coercion above. The redaction walker selects the
+# ``_SensitiveMarker`` by ``isinstance`` (``_has_sensitive`` /
+# ``_count_sensitive``), so the extra ``BeforeValidator`` metadata entry is
+# transparent to the adequacy guard; pydantic's ``BeforeValidator`` is a frozen
+# dataclass, so it does not introduce mutable metadata.
+_LlmJsonObject = Annotated[
+    dict[str, Any],
+    Sensitive(summarizer=_summarize_set_source_options),
+    BeforeValidator(_coerce_stringified_json_object),
+]
+
+
 class SetSourceArgumentsModel(BaseModel):
     """Redaction-bearing argument model for the ``set_source`` tool.
 
@@ -822,7 +874,7 @@ class SetSourceArgumentsModel(BaseModel):
 
     plugin: str
     on_success: str
-    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    options: _LlmJsonObject
     on_validation_failure: str
 
     model_config = ConfigDict(extra="forbid")
@@ -951,7 +1003,7 @@ class SetSourceFromBlobArgumentsModel(BaseModel):
     on_success: str
     plugin: str | None = None
     on_validation_failure: str | None = None
-    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    options: _LlmJsonObject = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1174,7 +1226,7 @@ class _SetPipelineSourceModel(BaseModel):
     plugin: str
     on_success: str
     blob_id: str | None = None
-    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    options: _LlmJsonObject = Field(default_factory=dict)
     on_validation_failure: str | None = None
     inline_blob: _InlineBlobModel | None = None
 
@@ -1275,7 +1327,7 @@ class _PipelineNodeModel(BaseModel):
     plugin: str | None = None
     on_success: str | None = None
     on_error: str | None = None
-    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    options: _LlmJsonObject = Field(default_factory=dict)
     condition: str | None = None
     routes: dict[str, str] | None = None
     fork_to: list[str] | None = None
@@ -1332,7 +1384,7 @@ class _PipelineOutputModel(BaseModel):
 
     sink_name: str
     plugin: str
-    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    options: _LlmJsonObject = Field(default_factory=dict)
     on_write_failure: str | None = None
 
     model_config = ConfigDict(extra="forbid")
@@ -1406,7 +1458,7 @@ class ApplyPipelineRecipeArgumentsModel(BaseModel):
     """
 
     recipe_name: str
-    slots: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    slots: _LlmJsonObject
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1512,7 +1564,7 @@ class PatchSourceOptionsArgumentsModel(BaseModel):
     rejects misrouted argument shapes early.
     """
 
-    patch: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    patch: _LlmJsonObject
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1548,7 +1600,7 @@ class PatchNodeOptionsArgumentsModel(BaseModel):
     """
 
     node_id: str
-    patch: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    patch: _LlmJsonObject
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1575,7 +1627,7 @@ class PatchOutputOptionsArgumentsModel(BaseModel):
     """
 
     sink_name: str
-    patch: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    patch: _LlmJsonObject
 
     model_config = ConfigDict(extra="forbid")
 

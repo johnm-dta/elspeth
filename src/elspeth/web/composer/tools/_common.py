@@ -951,7 +951,11 @@ def _apply_merge_patch(
     result = dict(target)
     for key, value in patch.items():
         if value is None:
-            result.pop(key, None)
+            # Delete-if-present: a None patch value removes the key. Access the
+            # key directly (R9 remediation) rather than pop-with-default; the
+            # membership guard preserves the silent no-op on an absent key.
+            if key in result:
+                del result[key]
         else:
             result[key] = value
     return result

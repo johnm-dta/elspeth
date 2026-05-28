@@ -5197,6 +5197,14 @@ class TestMergePatch:
         assert result == {"a": 1}
         assert "b" not in result
 
+    def test_merge_patch_null_for_absent_key_is_noop(self) -> None:
+        # Delete-if-present semantics: setting an absent key to None must be a
+        # silent no-op, never a KeyError. This pins the edge case that
+        # distinguishes the delete-if-present idiom from an unguarded ``del``.
+        result = _apply_merge_patch({"a": 1}, {"b": None})
+        assert result == {"a": 1}
+        assert "b" not in result
+
     def test_merge_patch_preserves_unmentioned(self) -> None:
         result = _apply_merge_patch({"a": 1, "b": 2}, {"a": 3})
         assert result == {"a": 3, "b": 2}

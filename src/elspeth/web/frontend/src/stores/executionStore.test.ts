@@ -1,8 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useExecutionStore } from "./executionStore";
+import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { useSessionStore } from "./sessionStore";
 import { connectToRun } from "@/api/websocket";
+import { resetStore } from "@/test/store-helpers";
 import type { Run, RunAccounting, RunDiagnostics, RunEvent, ValidationResult } from "@/types/index";
+import type { InterpretationEvent } from "@/types/interpretation";
 
 // Mock the API client
 vi.mock("@/api/client", () => ({
@@ -31,10 +34,15 @@ const BLOCKED_READINESS = {
   blockers: [],
 };
 
+function resetInterpretationStore(): void {
+  resetStore(useInterpretationEventsStore);
+}
+
 describe("executionStore.validate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    resetInterpretationStore();
     useSessionStore.setState({
       activeSessionId: "session-1",
       compositionState: { version: 1, source: null, nodes: [], outputs: [] },
@@ -99,6 +107,34 @@ describe("executionStore.validate", () => {
     expect(state.validationResult).toEqual(failedResult);
     expect(state.isValidating).toBe(false);
     expect(state.error).toBeNull();
+  });
+
+  it("blocks execution until the pending interpretation review is resolved", async () => {
+    const { executePipeline } = await import("@/api/client");
+    useInterpretationEventsStore.setState({
+      pendingBySession: {
+        "session-1": {
+          "evt-1": makeInterpretationEvent({
+            kind: "llm_model_choice",
+            affected_node_id: "label_colors",
+            llm_draft: "openai/gpt-4.1",
+          }),
+        },
+      },
+      resolvedCountBySession: {},
+      resolvedBySession: {},
+      optedOutBySession: {},
+    });
+
+    const runId = await useExecutionStore.getState().execute("session-1");
+
+    const state = useExecutionStore.getState();
+    expect(runId).toBeNull();
+    expect(executePipeline).not.toHaveBeenCalled();
+    expect(state.isExecuting).toBe(false);
+    expect(state.error).toBe(
+      "Set the LLM model choice for label_colors before running.",
+    );
   });
 
   it("sets error state when API call fails", async () => {
@@ -204,6 +240,37 @@ function makeRun(overrides: Partial<Run> & { error?: string | null } = {}): Run 
   } as Run;
 }
 
+function makeInterpretationEvent(
+  overrides: Partial<InterpretationEvent> = {},
+): InterpretationEvent {
+  return {
+    id: "evt-1",
+    session_id: "session-1",
+    composition_state_id: "state-1",
+    affected_node_id: "llm_classify",
+    tool_call_id: "tc-1",
+    user_term: "cool",
+    kind: "vague_term",
+    llm_draft: "engaging",
+    accepted_value: null,
+    choice: "pending",
+    created_at: "2026-04-26T05:31:57.000Z",
+    resolved_at: null,
+    actor: "user:owner:u-1",
+    interpretation_source: "user_approved",
+    model_identifier: "anthropic/claude-opus-4-7",
+    model_version: "20260518",
+    provider: "anthropic",
+    composer_skill_hash: "deadbeef",
+    arguments_hash: null,
+    hash_domain_version: null,
+    runtime_model_identifier_at_resolve: null,
+    runtime_model_version_at_resolve: null,
+    resolved_prompt_template_hash: null,
+    ...overrides,
+  };
+}
+
 function makeAccounting(overrides: Partial<RunAccounting> = {}): RunAccounting {
   return {
     source: { rows_processed: 1 },
@@ -284,6 +351,7 @@ describe("executionStore failed run events", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    resetInterpretationStore();
   });
 
   it("preserves terminal failed event detail in progress and run list", () => {
@@ -338,6 +406,7 @@ describe("executionStore fanout guard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    resetInterpretationStore();
   });
 
   const guard = {
@@ -409,6 +478,7 @@ describe("executionStore.cancel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    resetInterpretationStore();
   });
 
   it("marks an active run as cancelling while the backend drains work", async () => {
@@ -449,6 +519,7 @@ describe("executionStore progress events advance live accounting", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    resetInterpretationStore();
   });
 
   it("advances live source/token counters without reintroducing legacy run rows", () => {

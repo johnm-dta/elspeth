@@ -8165,6 +8165,30 @@ class TestPrevalidatePluginOptions:
         assert "api_key" in result
         assert "template" in result
 
+    def test_llm_openrouter_invalid_model_surfaces_list_models_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Composer prevalidation must reject unknown OpenRouter models with a repair hint."""
+        monkeypatch.setattr(
+            "elspeth.plugins.transforms.llm.providers.openrouter.get_catalog_values",
+            lambda catalog_id: frozenset({"openai/gpt-4o"}),
+        )
+
+        result = _prevalidate_plugin_options(
+            "transform",
+            "llm",
+            {
+                "provider": "openrouter",
+                "api_key": "sk-test-key",
+                "model": "anthropic/claude-3-opus",
+                "prompt_template": "Analyze: {{ row.text }}",
+                "schema": {"mode": "observed"},
+                "required_input_fields": [],
+            },
+        )
+        assert result is not None
+        assert result.startswith("Invalid options for transform 'llm':")
+        assert "list_models" in result
+        assert "anthropic/claude-3-opus" in result
+
     def test_unreachable_plugin_type_raises_assertion(self) -> None:
         """Passing an invalid plugin_type triggers the unreachable-branch assertion (not silent bypass)."""
         with pytest.raises(AssertionError, match="unexpected plugin_type"):

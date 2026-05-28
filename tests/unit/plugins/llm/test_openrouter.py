@@ -27,6 +27,8 @@ from .conftest import chaosllm_openrouter_http_responses, chaosllm_openrouter_ht
 
 # Common schema config for dynamic field handling (accepts any fields)
 DYNAMIC_SCHEMA = {"mode": "observed"}
+_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
+_OPENROUTER_INVALID_MODEL = "anthropic/this-model-does-not-exist"
 
 
 def _create_mock_response(
@@ -102,7 +104,7 @@ def _openrouter_config(**overrides: Any) -> dict[str, Any]:
     config: dict[str, Any] = {
         "provider": "openrouter",
         "api_key": "sk-test-key",
-        "model": "anthropic/claude-3-opus",
+        "model": _OPENROUTER_MODEL,
         "prompt_template": "Analyze: {{ row.text }}",
         "schema": DYNAMIC_SCHEMA,
         "required_input_fields": [],
@@ -119,7 +121,7 @@ class TestOpenRouterConfig:
         with pytest.raises(PluginConfigError):
             OpenRouterConfig.from_dict(
                 {
-                    "model": "anthropic/claude-3-opus",
+                    "model": _OPENROUTER_MODEL,
                     "prompt_template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                     "required_input_fields": [],  # Explicit opt-out for this test
@@ -144,7 +146,7 @@ class TestOpenRouterConfig:
             OpenRouterConfig.from_dict(
                 {
                     "api_key": "sk-test-key",
-                    "model": "anthropic/claude-3-opus",
+                    "model": _OPENROUTER_MODEL,
                     "schema": DYNAMIC_SCHEMA,
                 }
             )  # Missing 'template'
@@ -155,7 +157,7 @@ class TestOpenRouterConfig:
             OpenRouterConfig.from_dict(
                 {
                     "api_key": "sk-test-key",
-                    "model": "anthropic/claude-3-opus",
+                    "model": _OPENROUTER_MODEL,
                     "prompt_template": "Analyze: {{ row.text }}",
                 }
             )  # Missing 'schema'
@@ -165,22 +167,69 @@ class TestOpenRouterConfig:
         config = OpenRouterConfig.from_dict(
             {
                 "api_key": "sk-test-key",
-                "model": "anthropic/claude-3-opus",
+                "model": _OPENROUTER_MODEL,
                 "prompt_template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
             }
         )
         assert config.api_key == "sk-test-key"
-        assert config.model == "anthropic/claude-3-opus"
+        assert config.model == _OPENROUTER_MODEL
         assert config.prompt_template == "Analyze: {{ row.text }}"
+
+    def test_config_rejects_unknown_model_on_canonical_openrouter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Canonical OpenRouter configs must choose a model from the catalog."""
+        monkeypatch.setattr(
+            "elspeth.plugins.transforms.llm.providers.openrouter.get_catalog_values",
+            lambda catalog_id: frozenset({"openai/gpt-4o"}),
+        )
+
+        with pytest.raises(PluginConfigError) as exc_info:
+            OpenRouterConfig.from_dict(
+                {
+                    "api_key": "sk-test-key",
+                    "model": _OPENROUTER_INVALID_MODEL,
+                    "prompt_template": "Analyze: {{ row.text }}",
+                    "schema": DYNAMIC_SCHEMA,
+                    "required_input_fields": [],
+                }
+            )
+
+        assert exc_info.value.cause is not None
+        assert "list_models" in exc_info.value.cause
+        assert _OPENROUTER_INVALID_MODEL in exc_info.value.cause
+
+    def test_config_allows_custom_base_url_without_catalog_membership(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-canonical endpoints own model semantics, so the OpenRouter catalog is skipped."""
+        called = False
+
+        def fake_catalog_values(catalog_id: str) -> frozenset[str]:
+            nonlocal called
+            called = True
+            return frozenset({"openai/gpt-4o"})
+
+        monkeypatch.setattr("elspeth.plugins.transforms.llm.providers.openrouter.get_catalog_values", fake_catalog_values)
+
+        config = OpenRouterConfig.from_dict(
+            {
+                "api_key": "sk-test-key",
+                "model": "totally/custom-model",
+                "prompt_template": "Analyze: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "required_input_fields": [],
+                "base_url": "https://custom.proxy.com/api/v1",
+            }
+        )
+
+        assert config.model == "totally/custom-model"
+        assert called is False
 
     def test_config_default_values(self) -> None:
         """Config has sensible defaults."""
         config = OpenRouterConfig.from_dict(
             {
                 "api_key": "sk-test-key",
-                "model": "anthropic/claude-3-opus",
+                "model": _OPENROUTER_MODEL,
                 "prompt_template": "Hello, {{ row.name }}!",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
@@ -289,7 +338,7 @@ class TestLLMTransformOpenRouterInit:
             )
         )
 
-        assert transform._model == "anthropic/claude-3-opus"
+        assert transform._model == _OPENROUTER_MODEL
         assert isinstance(transform._config, OpenRouterConfig)
         assert transform._config.api_key == "sk-test-key"
         assert transform._config.base_url == "https://custom.example.com/api/v1"

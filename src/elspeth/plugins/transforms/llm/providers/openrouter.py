@@ -23,13 +23,13 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts import CallStatus, CallType
 from elspeth.contracts.audit_protocols import PluginAuditWriter
 from elspeth.contracts.call_data import LLMCallError, LLMCallRequest, LLMCallResponse
 from elspeth.contracts.token_usage import TokenUsage
-from elspeth.contracts.value_source import CatalogValueSource, ValueSource
+from elspeth.contracts.value_source import CatalogValueSource, ValueSource, get_catalog_missing_dep_hint, get_catalog_values
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
 from elspeth.plugins.infrastructure.clients.llm import (
     CONTEXT_LENGTH_PATTERNS,
@@ -176,6 +176,31 @@ class OpenRouterConfig(LLMConfig):
     @classmethod
     def _normalize_base_url(cls, value: str) -> str:
         return normalize_openrouter_base_url(_validate_openrouter_base_url(value))
+
+    @model_validator(mode="after")
+    def _validate_model_against_openrouter_catalog(self) -> OpenRouterConfig:
+        if self.base_url != OPENROUTER_BASE_URL:
+            return self
+
+        catalog = get_catalog_values(MODEL_CATALOG_OPENROUTER)
+        if not catalog:
+            hint = get_catalog_missing_dep_hint(MODEL_CATALOG_OPENROUTER)
+            remediation = (
+                hint
+                if hint is not None
+                else "install the optional dependency that provides the catalog or pin a static catalog snapshot"
+            )
+            raise ValueError(
+                f"catalog '{MODEL_CATALOG_OPENROUTER}' is empty or unavailable; cannot verify field value "
+                f"({remediation})"
+            )
+
+        if self.model not in catalog:
+            raise ValueError(
+                f"value {self.model!r} is not in catalog '{MODEL_CATALOG_OPENROUTER}' "
+                f"(catalog has {len(catalog)} entries; pick a valid value via the list_models composer tool)"
+            )
+        return self
 
     # Tier 2: Plugin-internal tracing (optional, Langfuse only)
     # Azure AI tracing is NOT supported - it auto-instruments the OpenAI SDK,

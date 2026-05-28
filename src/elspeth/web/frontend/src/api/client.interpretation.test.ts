@@ -228,6 +228,31 @@ describe("api/client interpretation functions", () => {
       });
     });
 
+    it("maps nested detail.code onto ApiError.error_type", async () => {
+      fetchSpy.mockResolvedValue({
+        ok: false,
+        status: 422,
+        statusText: "Unprocessable Entity",
+        json: async () => ({
+          detail: {
+            code: "interpretation_placeholder_unavailable",
+            detail: "The affected LLM prompt no longer contains the expected interpretation placeholder.",
+          },
+        }),
+      } as Response);
+
+      await expect(
+        resolveInterpretation("sess-1", "evt-1", {
+          choice: "accepted_as_drafted",
+        }),
+      ).rejects.toMatchObject({
+        status: 422,
+        error_type: "interpretation_placeholder_unavailable",
+        detail:
+          "The affected LLM prompt no longer contains the expected interpretation placeholder.",
+      });
+    });
+
     it("surfaces 409 conflict (already-resolved event) as typed ApiError", async () => {
       fetchSpy.mockResolvedValue({
         ok: false,

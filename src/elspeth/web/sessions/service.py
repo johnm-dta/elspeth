@@ -717,11 +717,6 @@ def _patch_structured_interpretation_prompt(
         raise InterpretationPlaceholderConsumedError(
             f"_patch_llm_transform_prompt: node {affected_node_id!r} options.interpretation_requirements is not a list"
         )
-    parts_value = options[PROMPT_TEMPLATE_PARTS_KEY] if PROMPT_TEMPLATE_PARTS_KEY in options else None
-    if not isinstance(parts_value, (list, tuple)):
-        raise InterpretationPlaceholderConsumedError(
-            f"_patch_llm_transform_prompt: node {affected_node_id!r} options.prompt_template_parts is required for structured interpretation resolution"
-        )
 
     matching_indexes: list[int] = []
     normalized_user_term = user_term.strip()
@@ -757,16 +752,35 @@ def _patch_structured_interpretation_prompt(
             matching_indexes.append(index)
         requirements.append(requirement)
 
+    # A node can legitimately carry interpretation_requirements for OTHER kinds
+    # (the prompt-template and model-choice auto-stagers add one each to every
+    # LLM node) while its vague term is wired by a legacy
+    # ``{{interpretation:<term>}}`` placeholder. When no pending vague_term
+    # requirement matches this user_term, the structured path does not apply —
+    # fall back to the legacy placeholder path rather than demanding
+    # prompt_template_parts the node never needed.
+    if not matching_indexes:
+        return None
     if len(matching_indexes) != 1:
         raise InterpretationPlaceholderConsumedError(
             f"_patch_llm_transform_prompt: node {affected_node_id!r} does not contain exactly one pending "
             f"interpretation requirement for {user_term!r}; found {len(matching_indexes)}"
         )
+
+    # The vague term is structured (a matching requirement exists); the prompt
+    # parts that carry its substitution are now required.
+    parts_value = options[PROMPT_TEMPLATE_PARTS_KEY] if PROMPT_TEMPLATE_PARTS_KEY in options else None
+    if not isinstance(parts_value, (list, tuple)):
+        raise InterpretationPlaceholderConsumedError(
+            f"_patch_llm_transform_prompt: node {affected_node_id!r} options.prompt_template_parts is required for structured interpretation resolution"
+        )
+
     matching_index = matching_indexes[0]
     matching_requirement = requirements[matching_index]
     matching_requirement_id = matching_requirement["id"]
 
     rendered: list[str] = []
+    matched_ref_count = 0
     for part_value in parts_value:
         if not isinstance(part_value, Mapping):
             raise InterpretationPlaceholderConsumedError(
@@ -800,6 +814,7 @@ def _patch_structured_interpretation_prompt(
                         f"{affected_node_id!r} is immediately preceded by structural directive {directive!r}; "
                         f"substituting into a directive position would produce a broken prompt"
                     )
+            matched_ref_count += 1
             rendered.append(accepted_value)
             continue
         if stored_requirement.get("status") == "resolved":
@@ -811,6 +826,19 @@ def _patch_structured_interpretation_prompt(
             rendered.append(accepted)
             continue
         rendered.append(PENDING_INTERPRETATION_AUTHORING_TEXT)
+
+    # Defense-in-depth backstop: the matched requirement must be referenced by
+    # at least one ``interpretation_ref`` part, or the accepted value never
+    # lands in the rendered prompt — a "resolved" review whose decision silently
+    # never reaches the runtime, i.e. the exact audit divergence CLAUDE.md
+    # forbids. Unreachable once the staging gate (vague_term_wiring_count) holds;
+    # present so a bypass crashes loudly instead of corrupting the prompt.
+    if matched_ref_count == 0:
+        raise InterpretationPlaceholderConsumedError(
+            f"_patch_llm_transform_prompt: node {affected_node_id!r} prompt_template_parts contains no "
+            f"interpretation_ref part referencing the resolved requirement {matching_requirement_id!r}; "
+            "the accepted interpretation value would be silently dropped from the prompt"
+        )
 
     new_template = "".join(rendered)
     resolved_prompt_template_hash = stable_hash(new_template)

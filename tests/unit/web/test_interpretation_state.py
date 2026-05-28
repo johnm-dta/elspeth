@@ -21,6 +21,7 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_execution,
     pipeline_decision_artifact_hash,
     strip_authoring_options,
+    vague_term_wiring_count,
 )
 
 
@@ -910,7 +911,9 @@ def test_prompt_shield_hash_survives_model_swap() -> None:
 
 def test_prompt_shield_warning_is_advisory_not_blocking() -> None:
     state = _state_with_web_scrape_llm_pair(
-        _unshielded_review_llm_options(model="anthropic/claude-3.7-sonnet", prompt_template="Identify colours: {{ row.url }} {{ row.content }}")
+        _unshielded_review_llm_options(
+            model="anthropic/claude-3.7-sonnet", prompt_template="Identify colours: {{ row.url }} {{ row.content }}"
+        )
     )
 
     validation = state.validate()
@@ -979,3 +982,91 @@ def test_pipeline_decision_artifact_hash_rejects_unknown_user_term() -> None:
 
     with pytest.raises(ValueError, match="unknown pipeline_decision user_term"):
         pipeline_decision_artifact_hash(state.nodes[0], state.nodes, user_term="some_new_review_we_havent_implemented")
+
+
+# --------------------------------------------------------------------------- #
+# vague_term_wiring_count — the single resolvability contract shared by the
+# tool boundary, the staging repair loop, and (mirrored) the resolver.
+# --------------------------------------------------------------------------- #
+
+
+def _vague_requirement(*, term: str = "cool", status: str = "pending") -> dict[str, object]:
+    return {
+        "id": term,
+        "kind": InterpretationKind.VAGUE_TERM.value,
+        "user_term": term,
+        "status": status,
+        "draft": "visually appealing",
+        "event_id": None,
+        "accepted_value": None,
+        "resolved_prompt_template_hash": None,
+    }
+
+
+def test_wiring_count_structured_with_ref_is_resolvable() -> None:
+    options = {
+        "prompt_template": "Rate pending: {{ row.text }}",
+        PROMPT_TEMPLATE_PARTS_KEY: [
+            {"kind": "text", "text": "Rate "},
+            {"kind": "interpretation_ref", "requirement_id": "cool"},
+            {"kind": "text", "text": ": {{ row.text }}"},
+        ],
+        INTERPRETATION_REQUIREMENTS_KEY: [_vague_requirement()],
+    }
+    assert vague_term_wiring_count(options, user_term="cool") == 1
+
+
+def test_wiring_count_structured_requirement_without_parts_is_unresolvable() -> None:
+    """The demo-blocking shape: a requirement with no prompt_template_parts."""
+    options = {
+        "prompt_template": "Rate pending: {{ row.text }}",
+        INTERPRETATION_REQUIREMENTS_KEY: [_vague_requirement()],
+    }
+    assert vague_term_wiring_count(options, user_term="cool") == 0
+
+
+def test_wiring_count_structured_parts_without_ref_is_unresolvable() -> None:
+    """Parts present but no interpretation_ref → the resolver would silent-drop."""
+    options = {
+        "prompt_template": "Rate pending: {{ row.text }}",
+        PROMPT_TEMPLATE_PARTS_KEY: [{"kind": "text", "text": "Rate this row"}],
+        INTERPRETATION_REQUIREMENTS_KEY: [_vague_requirement()],
+    }
+    assert vague_term_wiring_count(options, user_term="cool") == 0
+
+
+def test_wiring_count_legacy_placeholder_coexists_with_autostaged_requirements() -> None:
+    """A legacy {{interpretation:cool}} placeholder is resolvable even when the
+    node carries auto-staged prompt-template / model-choice requirements (which
+    are NOT vague_term). This is the production hello-world shape.
+    """
+    options = {
+        "prompt_template": "Rate how {{interpretation:cool}} this row is.",
+        INTERPRETATION_REQUIREMENTS_KEY: [
+            {
+                "id": "prompt_template_review:rate_node",
+                "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                "user_term": "llm_prompt_template:rate_node",
+                "status": "pending",
+            },
+            {
+                "id": "model_choice_review:rate_node",
+                "kind": InterpretationKind.LLM_MODEL_CHOICE.value,
+                "user_term": "llm_model_choice:rate_node",
+                "status": "pending",
+            },
+        ],
+    }
+    assert vague_term_wiring_count(options, user_term="cool") == 1
+
+
+def test_wiring_count_no_wiring_at_all_is_unresolvable() -> None:
+    options = {"prompt_template": "Rate how this row is."}
+    assert vague_term_wiring_count(options, user_term="cool") == 0
+
+
+def test_wiring_count_wrong_term_is_unresolvable() -> None:
+    options = {
+        "prompt_template": "Rate how {{interpretation:important}} this row is.",
+    }
+    assert vague_term_wiring_count(options, user_term="cool") == 0

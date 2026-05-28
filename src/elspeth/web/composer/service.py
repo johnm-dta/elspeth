@@ -139,17 +139,16 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.interpretation_state import (
-    INTERPRETATION_REQUIREMENTS_KEY,
     INTERPRETATION_REVIEW_PENDING_CODE,
     PROMPT_SHIELD_USER_TERM,
     PROMPT_SHIELD_WARNING_DRAFT,
     RAW_HTML_CLEANUP_REVIEW_DRAFT,
     RAW_HTML_CLEANUP_USER_TERM,
     interpretation_sites,
+    vague_term_wiring_count,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, _ToolOutcome
 from elspeth.web.sessions.models import sessions_table
-from elspeth.web.validation import INTERPRETATION_PLACEHOLDER_RE
 
 slog = structlog.get_logger()
 
@@ -650,9 +649,13 @@ def _pending_interpretation_review_repair_message(
         "kind, and user_term. If more than one handoff is listed, issue one "
         "request_interpretation_review tool call per listed handoff in this same "
         "assistant turn before stopping. For vague_term handoffs, first make sure "
-        "the target LLM node contains exactly one matching pending vague_term "
-        "interpretation_requirements entry or exactly one legacy "
-        "{{interpretation:<term>}} token; if it does not, patch the node before "
+        "the target LLM node both (a) contains exactly one matching pending vague_term "
+        "interpretation_requirements entry and (b) wires that requirement into the prompt — "
+        "either a single prompt_template_parts entry "
+        '{"kind": "interpretation_ref", "requirement_id": "<the requirement id>"} '
+        "referencing it, or exactly one legacy {{interpretation:<term>}} token in "
+        "options.prompt_template. A requirement with no wiring cannot be resolved, so the "
+        "review would dead-end; if either is missing, patch the node before "
         "calling request_interpretation_review. Use the matching interpretation_requirements "
         "draft as llm_draft. For llm_prompt_template, llm_draft must equal the current "
         "options.prompt_template. For invented_source, llm_draft must equal the "
@@ -670,28 +673,27 @@ def _pending_interpretation_review_repair_message(
     )
 
 
-def _matching_interpretation_placeholder_count(
+def _resolvable_vague_term_count(
     state: CompositionState,
     *,
     node_id: str,
     term: str,
 ) -> int:
+    """Count *resolvable* vague_term wirings for ``term`` on LLM node ``node_id``.
+
+    Delegates to :func:`vague_term_wiring_count` so the repair loop's
+    resolvability test cannot drift from the tool-boundary gate or the resolver
+    contract. A pending requirement counts only when its substitution wiring (a
+    ``prompt_template_parts`` ``interpretation_ref`` or a legacy
+    ``{{interpretation:<term>}}`` placeholder) is present — which is what lets
+    the loop catch a requirement whose wiring was stripped by a later mutation
+    *after* its review event already existed (drift the tool boundary cannot
+    re-check once the event is persisted).
+    """
     for node in state.nodes:
         if node.id != node_id or node.plugin != "llm":
             continue
-        requirements = node.options.get(INTERPRETATION_REQUIREMENTS_KEY)
-        if isinstance(requirements, (list, tuple)):
-            return sum(
-                1
-                for requirement in requirements
-                if isinstance(requirement, Mapping)
-                and requirement.get("status") == "pending"
-                and requirement.get("user_term") == term
-                and requirement.get("kind", InterpretationKind.VAGUE_TERM.value) == InterpretationKind.VAGUE_TERM.value
-            )
-        prompt_template = node.options.get("prompt_template")
-        if isinstance(prompt_template, str):
-            return sum(1 for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template) if match.group(1).strip() == term)
+        return vague_term_wiring_count(node.options, user_term=term)
     return 0
 
 
@@ -1192,12 +1194,12 @@ class ComposerServiceImpl:
             if event.kind is not InterpretationKind.VAGUE_TERM or event.affected_node_id is None or event.user_term is None:
                 continue
             event_site_key = (event.affected_node_id, event.user_term.strip(), event.kind)
-            placeholder_count = _matching_interpretation_placeholder_count(
+            wiring_count = _resolvable_vague_term_count(
                 state,
                 node_id=event_site_key[0],
                 term=event_site_key[1],
             )
-            if placeholder_count != 1:
+            if wiring_count != 1:
                 missing_or_unresolvable[event_site_key] = None
         return tuple(missing_or_unresolvable)
 

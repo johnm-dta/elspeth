@@ -1007,3 +1007,67 @@ def _render_prompt_parts(
 
 def _legacy_terms(prompt_template: str) -> tuple[str, ...]:
     return tuple(match.group(1).strip() for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template))
+
+
+def vague_term_wiring_count(options: Mapping[str, Any], *, user_term: str) -> int:
+    """Count the resolvable ``vague_term`` wirings for ``user_term`` in a node's options.
+
+    This is the single source of truth for "is a vague-term review actually
+    resolvable?", shared by every staging-time gate so they cannot drift from
+    the resolver contract. It mirrors the substitution wiring the resolver
+    consumes in ``sessions/service.py::_patch_llm_transform_prompt``:
+
+    * **Structured form** (``interpretation_requirements`` present): there must
+      be exactly one *pending* ``vague_term`` requirement whose ``user_term``
+      matches, AND a well-formed ``prompt_template_parts`` carrying at least one
+      ``interpretation_ref`` part that references that requirement's ``id``.
+      Returns ``1`` when wired; ``0`` when the requirement exists but no part
+      references it (``prompt_template_parts`` absent, malformed, or missing the
+      ref) — the deterministic root cause of the resolve-time 422 and the
+      latent silent-drop; or the count of matching requirements when that count
+      is not exactly one (caller treats any value ``!= 1`` as unresolvable).
+    * **Legacy form** (no ``interpretation_requirements``): the number of
+      ``{{interpretation:<user_term>}}`` placeholders in
+      ``options.prompt_template``.
+
+    Reads are lenient (Tier-3 staging idiom): a malformed sub-shape contributes
+    ``0`` so the node reads as *unresolvable* and is routed back to the composer
+    for repair, rather than crashing the request. Strict offensive validation
+    lives at the resolve boundary, where the operator-approved mutation runs.
+    """
+    normalized_user_term = user_term.strip()
+    requirements = options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None
+    matching_ids: list[Any] = []
+    if isinstance(requirements, (list, tuple)):
+        matching_ids = [
+            requirement["id"]
+            for requirement in requirements
+            if isinstance(requirement, Mapping)
+            and requirement.get("status") == "pending"
+            and isinstance(requirement.get("user_term"), str)
+            and requirement["user_term"].strip() == normalized_user_term
+            and requirement.get("kind", InterpretationKind.VAGUE_TERM.value) == InterpretationKind.VAGUE_TERM.value
+        ]
+    if len(matching_ids) == 1:
+        requirement_id = matching_ids[0]
+        if not isinstance(requirement_id, str) or not requirement_id:
+            return 0
+        parts = options[PROMPT_TEMPLATE_PARTS_KEY] if PROMPT_TEMPLATE_PARTS_KEY in options else None
+        if not isinstance(parts, (list, tuple)):
+            return 0
+        ref_count = sum(
+            1
+            for part in parts
+            if isinstance(part, Mapping) and part.get("kind") == "interpretation_ref" and part.get("requirement_id") == requirement_id
+        )
+        return 1 if ref_count >= 1 else 0
+    if len(matching_ids) > 1:
+        return len(matching_ids)
+    # No matching pending vague_term requirement: the term is either wired by a
+    # legacy ``{{interpretation:<term>}}`` placeholder (which coexists with the
+    # auto-staged prompt-template / model-choice requirements) or not wired at
+    # all. Mirror the resolver's legacy fall-back and count placeholders.
+    prompt_template = options["prompt_template"] if "prompt_template" in options else None
+    if isinstance(prompt_template, str):
+        return sum(1 for term in _legacy_terms(prompt_template) if term == normalized_user_term)
+    return 0

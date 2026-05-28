@@ -1635,6 +1635,75 @@ def test_14_patch_helper_succeeds_on_clean_template() -> None:
     assert "kind" not in patched
 
 
+def test_15_patch_helper_legacy_placeholder_resolves_with_autostaged_nonvague_requirements() -> None:
+    """Regression: the production hello-world shape resolves via the legacy path.
+
+    Every LLM node carries auto-staged ``llm_prompt_template`` and
+    ``llm_model_choice`` requirements, so ``interpretation_requirements`` is
+    non-empty even when the vague term is wired only by a legacy
+    ``{{interpretation:cool}}`` placeholder. The resolver must fall back to the
+    placeholder path for the vague term rather than demanding
+    ``prompt_template_parts`` — the exact omission that 422'd the composer.
+    """
+    node = _llm_node(prompt_template="Rate how {{interpretation:cool}} this is.")
+    node["options"]["interpretation_requirements"] = [
+        {
+            "id": "prompt_template_review:llm_transform_1",
+            "kind": "llm_prompt_template",
+            "user_term": "llm_prompt_template:llm_transform_1",
+            "status": "pending",
+        },
+        {
+            "id": "model_choice_review:llm_transform_1",
+            "kind": "llm_model_choice",
+            "user_term": "llm_model_choice:llm_transform_1",
+            "status": "pending",
+        },
+    ]
+    state = _state_with_node(node)
+
+    nodes_out = list(
+        _patch_llm_transform_prompt(
+            state,
+            affected_node_id="llm_transform_1",
+            user_term="cool",
+            accepted_value="Innovative and creative",
+        )
+    )
+
+    assert nodes_out[0]["options"]["prompt_template"] == "Rate how Innovative and creative this is."
+
+
+def test_16_patch_helper_structured_requirement_without_ref_part_raises() -> None:
+    """Backstop: a matched vague_term requirement with no interpretation_ref part
+    would silently drop the accepted value from the rendered prompt — a resolved
+    review whose decision never reaches the runtime. The resolver must raise.
+    """
+    node = _llm_node(prompt_template="Rate this row.")
+    node["options"]["prompt_template_parts"] = [{"kind": "text", "text": "Rate this row."}]
+    node["options"]["interpretation_requirements"] = [
+        {
+            "id": "cool",
+            "kind": "vague_term",
+            "user_term": "cool",
+            "status": "pending",
+            "draft": "well-designed",
+            "event_id": None,
+            "accepted_value": None,
+            "resolved_prompt_template_hash": None,
+        }
+    ]
+    state = _state_with_node(node)
+
+    with pytest.raises(ValueError, match=r"interpretation_ref|silently dropped"):
+        _patch_llm_transform_prompt(
+            state,
+            affected_node_id="llm_transform_1",
+            user_term="cool",
+            accepted_value="Innovative",
+        )
+
+
 def test_patch_helper_resolves_structured_requirement_without_legacy_placeholder() -> None:
     state = _state_with_node(_structured_llm_node())
 

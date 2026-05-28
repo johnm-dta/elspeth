@@ -98,6 +98,7 @@ from elspeth.web.interpretation_state import (
     interpretation_sites,
     raw_html_cleanup_review_contract_error,
     transform_vague_term_site_tuples,
+    vague_term_wiring_count,
     validate_pipeline_decision_semantics,
 )
 from elspeth.web.validation import (
@@ -1237,6 +1238,28 @@ def _assert_affected_component(
             argument="affected_node_id",
             expected=(f"node {affected_node_id!r} to contain a pending {expected_kind} requirement or placeholder for {user_term!r}"),
             actual_type=f"missing pending {expected_kind} review site",
+        )
+    # A pending vague_term requirement is only a *resolvable* handoff when the
+    # prompt actually carries the substitution wiring the resolver consumes. A
+    # requirement staged without a matching ``prompt_template_parts``
+    # ``interpretation_ref`` (or legacy placeholder) produces a review the
+    # operator can approve but never resolve — the resolver raises at
+    # ``prompt_template_parts is required`` (a dead-end 422) or, worse, silently
+    # drops the accepted value from the prompt. Reject at the Tier-3 boundary so
+    # the dead event is never created; the LLM can recover by wiring the node.
+    if kind is InterpretationKind.VAGUE_TERM and vague_term_wiring_count(options, user_term=user_term) != 1:
+        raise ToolArgumentError(
+            argument="affected_node_id",
+            expected=(
+                f"node {affected_node_id!r} to wire the {user_term!r} interpretation into the prompt — "
+                "exactly one prompt_template_parts entry "
+                '{"kind": "interpretation_ref", "requirement_id": "<the pending requirement id>"} '
+                f"referencing the requirement, or exactly one legacy {{{{interpretation:{user_term}}}}} "
+                "placeholder in options.prompt_template"
+            ),
+            actual_type=(
+                f"pending vague_term requirement for {user_term!r} with no resolvable prompt wiring (the operator's resolve would dead-end)"
+            ),
         )
     if kind is InterpretationKind.LLM_PROMPT_TEMPLATE and llm_draft is not None and llm_draft != prompt_template:
         raise ToolArgumentError(

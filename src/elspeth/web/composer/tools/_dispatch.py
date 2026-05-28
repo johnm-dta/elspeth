@@ -226,7 +226,7 @@ _REQUEST_INTERPRETATION_REVIEW_DEFINITION: Final[Mapping[str, Any]] = _validate_
                 },
                 "kind": {
                     "type": "string",
-                    "enum": ["vague_term", "invented_source", "llm_prompt_template", "pipeline_decision"],
+                    "enum": ["vague_term", "invented_source", "llm_prompt_template", "pipeline_decision", "llm_model_choice"],
                     "description": "Class of assumption being surfaced for review.",
                 },
                 "user_term": {

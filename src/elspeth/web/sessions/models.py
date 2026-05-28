@@ -691,7 +691,7 @@ interpretation_events_table = Table(
     # InterpretationKind contract enum: contract amendment, schema update,
     # closed-enum tests, and writer-path audit.
     CheckConstraint(
-        "kind IS NULL OR kind IN ('vague_term', 'invented_source', 'llm_prompt_template', 'pipeline_decision')",
+        "kind IS NULL OR kind IN ('vague_term', 'invented_source', 'llm_prompt_template', 'pipeline_decision', 'llm_model_choice')",
         name="ck_interpretation_events_kind",
     ),
     # Auto-interpreted rows are born resolved by definition. They never

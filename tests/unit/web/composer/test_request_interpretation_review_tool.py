@@ -449,6 +449,7 @@ def test_01_tool_registered_in_get_tool_definitions() -> None:
         "invented_source",
         "llm_prompt_template",
         "pipeline_decision",
+        "llm_model_choice",
     ]
     assert "Do not ask the user in assistant prose" in tool["description"]
     assert "review surface" in tool["description"]

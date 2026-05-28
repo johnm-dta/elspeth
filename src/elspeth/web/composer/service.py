@@ -141,8 +141,8 @@ from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
     INTERPRETATION_REVIEW_PENDING_CODE,
-    PROMPT_SHIELD_REVIEW_DRAFT,
     PROMPT_SHIELD_USER_TERM,
+    PROMPT_SHIELD_WARNING_DRAFT,
     RAW_HTML_CLEANUP_REVIEW_DRAFT,
     RAW_HTML_CLEANUP_USER_TERM,
     interpretation_sites,
@@ -664,8 +664,8 @@ def _pending_interpretation_review_repair_message(
         f"{RAW_HTML_CLEANUP_REVIEW_DRAFT!r}. "
         f"If user_term is {PROMPT_SHIELD_USER_TERM!r}, patch the target LLM node first "
         "with an interpretation_requirements entry whose kind is 'pipeline_decision', "
-        f"status is 'pending', and draft is {PROMPT_SHIELD_REVIEW_DRAFT!r}; do not add "
-        "azure_prompt_shield or azure_content_safety to the graph for this requirement. "
+        f"status is 'pending', and draft is {PROMPT_SHIELD_WARNING_DRAFT!r}; if the "
+        "workflow cannot add the shield, keep going with the warning instead of blocking. "
         f"This is forced repair turn {next_turn} of {_MAX_REPAIR_TURNS}."
     )
 

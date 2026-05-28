@@ -783,6 +783,39 @@ def _shield_review_llm_options(*, model: str, prompt_template: str) -> dict[str,
     }
 
 
+def _unshielded_review_llm_options(*, model: str, prompt_template: str) -> dict[str, Any]:
+    return {
+        "provider": "openrouter",
+        "model": model,
+        "prompt_template": prompt_template,
+        "temperature": 0,
+        INTERPRETATION_REQUIREMENTS_KEY: [
+            {
+                "id": "prompt_template_review:identify_colours",
+                "kind": "llm_prompt_template",
+                "user_term": "llm_prompt_template:identify_colours",
+                "status": "resolved",
+                "draft": prompt_template,
+                "event_id": "prompt-resolve-1",
+                "accepted_value": prompt_template,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(prompt_template),
+            },
+            {
+                "id": "model_choice_review:identify_colours",
+                "kind": "llm_model_choice",
+                "user_term": "llm_model_choice:identify_colours",
+                "status": "resolved",
+                "draft": model,
+                "event_id": "model-resolve-1",
+                "accepted_value": model,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(model),
+            },
+        ],
+    }
+
+
 def test_prompt_shield_hash_is_stable_across_model_swap() -> None:
     """Regression: changing the LLM model after the shield review must not drift the hash.
 
@@ -873,6 +906,21 @@ def test_prompt_shield_hash_survives_model_swap() -> None:
     post_swap_hash = pipeline_decision_artifact_hash(post_swap.nodes[1], post_swap.nodes, user_term=PROMPT_SHIELD_USER_TERM)
 
     assert pre_swap_hash == post_swap_hash
+
+
+def test_prompt_shield_warning_is_advisory_not_blocking() -> None:
+    state = _state_with_web_scrape_llm_pair(
+        _unshielded_review_llm_options(model="anthropic/claude-3.7-sonnet", prompt_template="Identify colours: {{ row.url }} {{ row.content }}")
+    )
+
+    validation = state.validate()
+    warning_text = " ".join(w.message for w in validation.warnings)
+
+    assert "prompt_injection_shield_recommendation" in warning_text
+    assert "continuing without it is allowed" in warning_text
+
+    materialized = materialize_state_for_execution(state)
+    assert isinstance(materialized, CompositionState)
 
 
 def test_raw_html_cleanup_hash_includes_upstream_raw_field_set() -> None:

@@ -47,6 +47,7 @@ from elspeth.web.interpretation_state import (
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
     InterpretationReviewPending,
+    _validate_model_choice_review,
     materialize_state_for_execution,
 )
 from elspeth.web.sessions.converters import state_from_record
@@ -2361,6 +2362,12 @@ async def test_resolve_llm_model_choice_accepted_as_drafted(service) -> None:
     assert req["status"] == "resolved"
     assert req["accepted_value"] == model
     assert req["event_id"] == str(event.id)
+    # Read-side drift guard (_validate_model_choice_review) compares this hash
+    # to stable_hash(options.model); they must match or execution 404s
+    # ("model-choice review hash drifted").
+    assert req["resolved_prompt_template_hash"] == stable_hash(model)
+    node_spec = next(n for n in state_from_record(new_state).nodes if n.id == "rate_node")
+    _validate_model_choice_review(node_spec, model)  # must not raise
 
 
 @pytest.mark.asyncio
@@ -2400,3 +2407,6 @@ async def test_resolve_llm_model_choice_amended_patches_options_model(service) -
     assert resolved.accepted_value == chosen
     patched = next(n for n in new_state.nodes if n["id"] == "rate_node")
     assert patched["options"]["model"] == chosen
+    # Drift guard must follow the amended model, not the drafted one.
+    node_spec = next(n for n in state_from_record(new_state).nodes if n.id == "rate_node")
+    _validate_model_choice_review(node_spec, chosen)  # must not raise

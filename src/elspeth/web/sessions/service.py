@@ -1263,6 +1263,12 @@ def _resolve_model_choice_review(
     requirement["status"] = "resolved"
     requirement["event_id"] = event_id
     requirement["accepted_value"] = accepted_value
+    # Read-side drift guard (_validate_model_choice_review) recomputes
+    # stable_hash(options.model) and compares it to this field, so the
+    # resolved requirement must carry the hash of the accepted model. The
+    # field is named for the prompt-template case but is reused here as the
+    # model-choice review's anchor hash (mirroring _resolve_prompt_template_review).
+    requirement["resolved_prompt_template_hash"] = stable_hash(accepted_value)
     requirements[matching_index] = requirement
 
     final_nodes: list[Mapping[str, Any]] = []

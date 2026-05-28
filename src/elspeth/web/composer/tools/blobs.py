@@ -336,7 +336,7 @@ def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: 
     keys = rest.split(".")
 
     if prefix == "source":
-        source = state.sources.get("source")
+        source = state.sources["source"] if "source" in state.sources else None
         if source is None:
             raise ValueError("Cannot wire source ref: no source has been set")
         patched_options = _set_nested_option(dict(deep_thaw(source.options)), keys, marker)

@@ -373,7 +373,7 @@ def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewS
     # hardcode that component id, so only the default named source carries a
     # resolvable review site; named non-default sources are not reviewable
     # through this subsystem.
-    default_source = state.sources.get(SOURCE_COMPONENT_ID)
+    default_source = state.sources[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in state.sources else None
     if default_source is not None:
         sites.extend(_pending_source_sites(default_source))
     web_scrape_raw_fields = _web_scrape_raw_fields(state.nodes)
@@ -431,7 +431,7 @@ def materialize_state_for_execution(state: CompositionState) -> CompositionState
     # carries reviewable composer-authored metadata, so materialization (which
     # enforces the reviewed-content-hash drift check) operates on it alone.
     materialized_sources = dict(state.sources)
-    default_source = materialized_sources.get(SOURCE_COMPONENT_ID)
+    default_source = materialized_sources[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in materialized_sources else None
     if default_source is not None:
         materialized_default = _materialize_source_for_execution(default_source)
         if materialized_default is not default_source:

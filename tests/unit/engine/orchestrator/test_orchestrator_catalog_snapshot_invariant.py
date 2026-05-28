@@ -50,13 +50,13 @@ def _build_minimal_pipeline() -> tuple[PipelineConfig, ExecutionGraph]:
         options={},
     )
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"source": as_source(source)},
         transforms=[],
         sinks={"default": as_sink(sink)},
     )
     graph = ExecutionGraph.from_plugin_instances(
-        source=cast(SourceProtocol, source),
-        source_settings=source_settings,
+        sources={"source": cast(SourceProtocol, source)},
+        source_settings_map={"source": source_settings},
         transforms=[],
         sinks=cast("dict[str, SinkProtocol]", {"default": sink}),
         aggregations={},

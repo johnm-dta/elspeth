@@ -999,6 +999,8 @@ class TestResumeFinalizesAsFailed:
             restored_coalesce_state=None,
             unprocessed_rows=(),
             schema_contracts_by_source={NodeID("source"): MagicMock()},
+            source_names_by_source={NodeID("source"): "source"},
+            source_lifecycle_by_source={NodeID("source"): "exhausted"},
         )
 
         with (

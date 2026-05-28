@@ -44,6 +44,8 @@ def _create_row_token(
         source_node_id=source_node_id or setup.source_node_id,
         row_index=row_index,
         data=data or {"row_index": row_index},
+        source_row_index=row_index,
+        ingest_sequence=row_index,
     )
     token = setup.data_flow.create_token(row.row_id, token_id=token_id)
     return row, token
@@ -152,6 +154,8 @@ def test_explain_rejects_persisted_group_id_without_parent_relationship() -> Non
         source_node_id=setup.source_node_id,
         row_index=0,
         data={"case": "orphan-group"},
+        source_row_index=0,
+        ingest_sequence=0,
     )
     token = setup.data_flow.create_token(
         row.row_id,
@@ -195,6 +199,8 @@ def test_explain_rejects_cross_run_parent_relationship_from_corruption() -> None
         source_node_id=setup.source_node_id,
         row_index=0,
         data={"case": "cross-run-child"},
+        source_row_index=0,
+        ingest_sequence=0,
     )
     child = setup.data_flow.create_token(
         row.row_id,

@@ -29,7 +29,7 @@ from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 
 if TYPE_CHECKING:
-    from elspeth.contracts import PendingOutcome, SinkProtocol, SourceProtocol, TokenInfo
+    from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.checkpoint import ResumedRow
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
@@ -60,6 +60,11 @@ class RowProcessorHandle(Protocol):
     """Orchestrator-facing processor contract stored in run/loop contexts."""
 
     @property
+    def run_id(self) -> str:
+        """Expose the run identifier for scheduler recovery diagnostics."""
+        ...
+
+    @property
     def token_manager(self) -> Any:
         raise NotImplementedError
 
@@ -80,6 +85,14 @@ class RowProcessorHandle(Protocol):
 
     def handle_timeout_flush(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
+
+    def drain_scheduled_work(self, ctx: PluginContext) -> list[RowResult]:
+        """Drain recoverable durable scheduler work during resume."""
+        ...
+
+    def has_scheduled_work(self) -> bool:
+        """Return whether the durable scheduler has active non-terminal work."""
+        ...
 
     def active_scheduled_row_ids(self) -> frozenset[str]:
         """Return row IDs represented by active durable scheduler work."""

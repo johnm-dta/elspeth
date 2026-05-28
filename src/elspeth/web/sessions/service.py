@@ -1202,6 +1202,83 @@ def _resolve_pipeline_decision_review(
     return state_record.source, final_nodes, None
 
 
+def _resolve_model_choice_review(
+    state_record: CompositionStateRecord,
+    *,
+    event_id: str,
+    affected_node_id: str,
+    user_term: str,
+    llm_draft: str,
+    accepted_value: str,
+) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], None]:
+    """Resolve an ``llm_model_choice`` review on an LLM node.
+
+    Parallel to :func:`_resolve_pipeline_decision_review`. The reviewed
+    artifact is the LLM node's ``options.model`` identifier, which the
+    composer authored and the mutation-time auto-stager
+    (:func:`elspeth.web.interpretation_state._options_with_default_model_choice_review`)
+    surfaced for review. Resolving stamps the requirement and writes
+    ``accepted_value`` into ``options.model`` so the audit record (what the
+    operator approved) and the runnable pipeline (what executes) cannot
+    diverge:
+
+    * ``accepted_as_drafted`` — ``accepted_value`` equals the existing
+      ``options.model`` (the drafted identifier); the write is idempotent.
+    * ``amended`` — ``accepted_value`` is the operator's substituted model
+      identifier; the write applies it so the node runs the approved model.
+
+    No prompt-template patch occurs (model choice is a different field than
+    the prompt), so the resolved-prompt-template hash is ``None``.
+    """
+    node = _find_interpretation_review_node(
+        state_record,
+        affected_node_id=affected_node_id,
+        context="resolve_interpretation_event",
+    )
+    plugin = node["plugin"] if "plugin" in node else None
+    if plugin != "llm":
+        # Tier 1 invariant: an llm_model_choice requirement is only ever
+        # auto-staged on an llm node. A resolve targeting any other plugin
+        # means our own state is corrupt — fail loud, do not coerce.
+        raise AuditIntegrityError(
+            f"resolve_interpretation_event: llm_model_choice review targets node "
+            f"{affected_node_id!r} with plugin {plugin!r}; expected 'llm'"
+        )
+    options = _require_mapping(
+        node["options"] if "options" in node else None,
+        message=f"resolve_interpretation_event: node {affected_node_id!r} options is not a mapping",
+    )
+    requirements, matching_index = _matching_pending_requirement_index(
+        options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None,
+        kind=InterpretationKind.LLM_MODEL_CHOICE,
+        user_term=user_term,
+        context="resolve_interpretation_event",
+    )
+    requirement = dict(requirements[matching_index])
+    draft = requirement["draft"] if "draft" in requirement else None
+    if isinstance(draft, str) and draft != llm_draft:
+        raise InterpretationPlaceholderConsumedError(
+            "resolve_interpretation_event: llm_model_choice event draft does not match the node review requirement draft"
+        )
+    requirement["status"] = "resolved"
+    requirement["event_id"] = event_id
+    requirement["accepted_value"] = accepted_value
+    requirements[matching_index] = requirement
+
+    final_nodes: list[Mapping[str, Any]] = []
+    for current_node in state_record.nodes or ():
+        if current_node["id"] == affected_node_id:
+            patched_node = dict(current_node)
+            patched_options = dict(options)
+            patched_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
+            patched_options["model"] = accepted_value
+            patched_node["options"] = patched_options
+            final_nodes.append(patched_node)
+        else:
+            final_nodes.append(current_node)
+    return state_record.source, final_nodes, None
+
+
 class SessionServiceImpl:
     """Concrete session service backed by SQLAlchemy Core.
 
@@ -2763,6 +2840,15 @@ class SessionServiceImpl:
                             llm_draft=llm_draft,
                             accepted_value=llm_draft,
                         )
+                    elif kind is InterpretationKind.LLM_MODEL_CHOICE:
+                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_model_choice_review(
+                            live_state_record,
+                            event_id=event_id,
+                            affected_node_id=affected_node_id,
+                            user_term=user_term,
+                            llm_draft=llm_draft,
+                            accepted_value=llm_draft,
+                        )
                     else:
                         raise AssertionError(f"unhandled InterpretationKind {kind!r}")
 
@@ -3049,6 +3135,15 @@ class SessionServiceImpl:
                     )
                 elif kind is InterpretationKind.PIPELINE_DECISION:
                     final_source, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
+                        state_record,
+                        event_id=eid,
+                        affected_node_id=event_row.affected_node_id,
+                        user_term=event_row.user_term,
+                        llm_draft=event_row.llm_draft,
+                        accepted_value=accepted_value,
+                    )
+                elif kind is InterpretationKind.LLM_MODEL_CHOICE:
+                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_model_choice_review(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,

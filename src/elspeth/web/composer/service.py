@@ -45,6 +45,7 @@ from elspeth.contracts.composer_llm_audit import (
 from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.plugins.transforms.llm.model_catalog import OPENROUTER_LITELLM_PREFIX
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer import yaml_generator
@@ -248,10 +249,55 @@ class _BadRequestLLMError(ComposerServiceError):
         self.provider_status_code = provider_status_code
 
 
+def _apply_openrouter_app_identity(kwargs: dict[str, Any]) -> None:
+    """Brand OpenRouter-routed composer calls as ELSPETH, not LiteLLM.
+
+    LiteLLM injects its own OpenRouter attribution headers on every request
+    unless the caller overrides them — ``HTTP-Referer: https://litellm.ai`` and
+    ``X-Title: liteLLM`` (litellm/main.py). Without this the OpenRouter
+    dashboard attributes all composer ("orchestrator") traffic to LiteLLM. The
+    LLM transform plugins speak raw HTTP and set the same identity directly
+    (``OPENROUTER_APP_REFERER`` / ``OPENROUTER_APP_TITLE`` in
+    ``plugins/transforms/llm/providers/openrouter.py``); this brings the
+    composer's LiteLLM-routed calls to parity using the one canonical source.
+
+    Scoped to OpenRouter by the ``openrouter/`` routing prefix so the headers
+    are never sent to other providers. ``HTTP-Referer`` is OpenRouter's primary
+    ranking identifier; ``X-OpenRouter-Title`` is its current display-name
+    header (what the plugins send) and ``X-Title`` is the legacy spelling
+    LiteLLM defaults to ``liteLLM`` — we override both so no LiteLLM branding
+    survives whichever one OpenRouter honours. Caller-supplied headers win: we
+    only fill the identity keys we own (``setdefault``).
+    """
+    model = kwargs["model"] if "model" in kwargs else None
+    if model is None or not model.startswith(OPENROUTER_LITELLM_PREFIX):
+        return
+
+    # Lazy import: providers/openrouter.py pulls httpx and the provider stack,
+    # and the composer keeps that off the app-startup path.
+    from elspeth.plugins.transforms.llm.providers.openrouter import (
+        OPENROUTER_APP_REFERER,
+        OPENROUTER_APP_TITLE,
+    )
+
+    existing = kwargs["extra_headers"] if "extra_headers" in kwargs else None
+    headers: dict[str, str] = dict(existing) if existing else {}
+    headers.setdefault("HTTP-Referer", OPENROUTER_APP_REFERER)
+    headers.setdefault("X-OpenRouter-Title", OPENROUTER_APP_TITLE)
+    headers.setdefault("X-Title", OPENROUTER_APP_TITLE)
+    kwargs["extra_headers"] = headers
+
+
 async def _litellm_acompletion(**kwargs: Any) -> Any:
-    """Call LiteLLM lazily so app startup never imports provider machinery."""
+    """Call LiteLLM lazily so app startup never imports provider machinery.
+
+    Brands OpenRouter-routed calls with ELSPETH's app-attribution headers (see
+    :func:`_apply_openrouter_app_identity`) so the OpenRouter dashboard credits
+    composer traffic to ELSPETH rather than LiteLLM's defaults.
+    """
     import litellm
 
+    _apply_openrouter_app_identity(kwargs)
     return await litellm.acompletion(**kwargs)
 
 

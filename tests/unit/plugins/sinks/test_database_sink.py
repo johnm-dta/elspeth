@@ -1088,3 +1088,209 @@ class TestDDLAuditRecording:
         assert drop_call["status"] == CallStatus.SUCCESS
         assert drop_call["request_data"]["table"] == "replace_test"
         assert drop_call["response_data"]["table_dropped"] == "replace_test"
+
+
+class TestPerRowConstraintDiversion:
+    """Per-row diversion for per-row-attributable constraint failures.
+
+    A bulk INSERT cannot say WHICH row violated a UNIQUE/NOT-NULL/CHECK/FK
+    constraint. The sink attempts the batch inside a SAVEPOINT; on
+    IntegrityError it rolls the savepoint back and re-executes the batch
+    row-by-row (each in its own SAVEPOINT) so the offending row(s) can be
+    diverted via _divert_row while the good rows commit. The whole sequence
+    runs inside one outer engine.begin() transaction: nothing is durable
+    until the outer commit, so a connection/operational failure mid-fallback
+    rolls back EVERYTHING and is re-raised — never leaving committed-but-
+    unrecorded rows.
+
+    Connection/operational/programming errors are NOT per-row attributable
+    and still raise (batch integrity).
+    """
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        return make_operation_context(
+            node_id="sink-0",
+            plugin_name="database",
+            node_type="SINK",
+            operation_type="sink_write",
+        )
+
+    def _read_rows(self, db_url: str, table: str) -> list[dict[str, Any]]:
+        engine = create_engine(db_url)
+        metadata = MetaData()
+        tbl = Table(table, metadata, autoload_with=engine)
+        with engine.connect() as conn:
+            result = [dict(r._mapping) for r in conn.execute(select(tbl))]
+        engine.dispose()
+        return result
+
+    def test_not_null_violation_in_middle_row_diverts_only_that_row(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A NOT NULL violation on row index 1 diverts row 1 only; rows 0 and 2 persist.
+
+        A required field maps to a NOT NULL column. Row 1 supplies None for it,
+        which is a per-row-attributable constraint failure (one row's value),
+        not a batch-integrity failure. The good rows must commit and the run
+        must not crash.
+        """
+        from unittest.mock import patch
+
+        from elspeth.contracts import CallStatus
+
+        db_url = f"sqlite:///{tmp_path / 'test.db'}"
+        # 'name' is required -> NOT NULL column. id is the PK.
+        schema = {"mode": "fixed", "fields": ["id: int", "name: str"]}
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": schema}))
+
+        # Capture the audit calls so we can assert the recorded INSERT row_count
+        # (the legal record) reflects the actual write, not the input batch.
+        original_record_call = ctx.record_call
+        recorded_calls: list[dict[str, Any]] = []
+
+        def tracking_record_call(**kwargs: object) -> None:
+            recorded_calls.append(dict(kwargs))
+            original_record_call(**kwargs)  # type: ignore[arg-type]
+
+        with patch.object(ctx, "record_call", side_effect=tracking_record_call):
+            result = sink.write(
+                [
+                    {"id": 0, "name": "alice"},
+                    {"id": 1, "name": None},  # NOT NULL violation
+                    {"id": 2, "name": "carol"},
+                ],
+                ctx,
+            )
+        sink.close()
+
+        # Good rows persisted, bad row absent.
+        persisted = self._read_rows(db_url, "output")
+        ids = sorted(r["id"] for r in persisted)
+        assert ids == [0, 2], f"Expected rows 0 and 2 persisted, got {ids}"
+
+        # Bad row diverted with correct input-batch index.
+        assert len(result.diversions) == 1
+        diversion = result.diversions[0]
+        assert diversion.row_index == 1
+        assert diversion.row_data["id"] == 1
+        assert diversion.row_data["name"] is None
+
+        # Artifact reflects what was actually written (2 rows), not the input batch (3).
+        assert result.artifact.metadata is not None
+        assert result.artifact.metadata["row_count"] == 2
+
+        # The recorded SUCCESS INSERT call (the audit trail / legal record) must
+        # pin the actual committed count, not the full batch. A regression to
+        # len(rows) would slip past the artifact-only assertion above.
+        insert_calls = [
+            c for c in recorded_calls if c.get("request_data", {}).get("operation") == "INSERT" and c.get("status") == CallStatus.SUCCESS
+        ]
+        assert len(insert_calls) == 1
+        assert insert_calls[0]["request_data"]["row_count"] == 2
+        assert insert_calls[0]["response_data"]["rows_inserted"] == 2
+
+    def test_unique_violation_diverts_offending_row(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A duplicate value against a pre-existing UNIQUE constraint diverts the duplicate.
+
+        The sink's own schema config does not emit UNIQUE/PK constraints, so we
+        pre-create the table with a UNIQUE constraint on `id` (the realistic
+        case: appending to a table whose DDL was managed elsewhere). The sink
+        appends in observed mode; row 0 collides with the seeded value and must
+        be diverted while row 1 commits.
+        """
+        from sqlalchemy import Column, Integer, MetaData, Table, Text, create_engine, insert
+
+        db_path = tmp_path / "test.db"
+        db_url = f"sqlite:///{db_path}"
+
+        # Pre-create the table with a UNIQUE constraint and seed id=1.
+        engine = create_engine(db_url)
+        md = MetaData()
+        Table("output", md, Column("id", Integer, unique=True), Column("name", Text))
+        md.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(insert(md.tables["output"]), [{"id": 1, "name": "first"}])
+        engine.dispose()
+
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": {"mode": "observed"}}))
+
+        # Row 0: id=1 duplicates the UNIQUE value. Row 1: id=2 is new.
+        result = sink.write([{"id": 1, "name": "dup"}, {"id": 2, "name": "second"}], ctx)
+        sink.close()
+
+        persisted = self._read_rows(db_url, "output")
+        by_id = {r["id"]: r["name"] for r in persisted}
+        # Original id=1 untouched; id=2 added; "dup" never landed.
+        assert by_id == {1: "first", 2: "second"}
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 0
+        assert result.diversions[0].row_data["name"] == "dup"
+
+    def test_all_good_rows_take_batch_fast_path(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """When no row violates a constraint, the batch fast-path commits all rows with no diversions."""
+        db_url = f"sqlite:///{tmp_path / 'test.db'}"
+        schema = {"mode": "fixed", "fields": ["id: int", "name: str"]}
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": schema}))
+
+        result = sink.write([{"id": 0, "name": "a"}, {"id": 1, "name": "b"}], ctx)
+        sink.close()
+
+        persisted = self._read_rows(db_url, "output")
+        assert sorted(r["id"] for r in persisted) == [0, 1]
+        assert result.diversions == ()
+        assert result.artifact.metadata is not None
+        assert result.artifact.metadata["row_count"] == 2
+
+    def test_operational_error_mid_fallback_raises_and_commits_nothing(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A connection/operational failure during row-by-row fallback raises and leaves zero rows committed.
+
+        The savepoint fallback runs inside one outer engine.begin() transaction.
+        If an OperationalError (not per-row attributable) surfaces mid-fallback,
+        the outer transaction rolls back EVERYTHING — including rows whose
+        savepoints had already committed — so the audit trail's recorded ERROR
+        is accurate and a retry starts from a clean slate (no double-write).
+        """
+        from unittest.mock import patch
+
+        from sqlalchemy.exc import OperationalError
+
+        db_url = f"sqlite:///{tmp_path / 'test.db'}"
+        schema = {"mode": "fixed", "fields": ["id: int", "name: str"]}
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": schema}))
+
+        # Create the table with a first clean write.
+        sink.write([{"id": 100, "name": "seed"}], ctx)
+
+        # Batch where row 1 trips a NOT NULL violation (forces the row-by-row
+        # fallback) and a later row will trip a simulated OperationalError.
+        rows: list[dict[str, Any]] = [
+            {"id": 0, "name": "good0"},
+            {"id": 1, "name": None},  # IntegrityError -> forces fallback
+            {"id": 2, "name": "good2"},
+            {"id": 3, "name": "good3"},
+        ]
+
+        # Make the per-row execute for id=3 raise an OperationalError. The
+        # batch fast-path raises IntegrityError (row 1's None) which forces the
+        # row-by-row fallback; the simulated connection loss is then targeted at
+        # the row carrying id=3, after good0/good2 savepoints have committed.
+        from sqlalchemy.engine import Connection
+
+        original_execute = Connection.execute
+
+        def flaky_execute(self: Connection, statement: Any, parameters: Any = None, *args: Any, **kwargs: Any) -> Any:
+            params = parameters
+            if isinstance(params, list) and len(params) == 1 and params[0].get("id") == 3:
+                raise OperationalError("simulated connection loss", None, Exception("db gone"))
+            return original_execute(self, statement, parameters, *args, **kwargs)
+
+        with patch.object(Connection, "execute", flaky_execute), pytest.raises(OperationalError, match="simulated connection loss"):
+            sink.write(rows, ctx)
+
+        sink.close()
+
+        # Only the seed row from the prior successful write survives. None of the
+        # second batch's rows (including good0/good2 whose savepoints committed)
+        # are durable, because the outer transaction rolled back.
+        persisted = self._read_rows(db_url, "output")
+        assert [r["id"] for r in persisted] == [100], f"Expected only seed row, got {[r['id'] for r in persisted]}"

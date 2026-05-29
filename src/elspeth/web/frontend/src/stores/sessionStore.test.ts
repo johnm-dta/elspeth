@@ -79,6 +79,34 @@ function makeCompositionState(version: number, nodeIds: string[] = []): Composit
   };
 }
 
+function makePendingInterpretationEvent(id: string): InterpretationEvent {
+  return {
+    id,
+    session_id: "session-1",
+    composition_state_id: "state-1",
+    affected_node_id: "analyze_colors",
+    tool_call_id: "call-1",
+    user_term: "llm_model_choice:analyze_colors",
+    kind: "llm_model_choice",
+    llm_draft: "openrouter/openai/gpt-5.4-mini",
+    accepted_value: null,
+    choice: "pending",
+    created_at: "2026-05-29T12:00:00Z",
+    resolved_at: null,
+    actor: "system:composer",
+    interpretation_source: "user_approved",
+    model_identifier: null,
+    model_version: null,
+    provider: null,
+    composer_skill_hash: null,
+    arguments_hash: null,
+    hash_domain_version: null,
+    runtime_model_identifier_at_resolve: null,
+    runtime_model_version_at_resolve: null,
+    resolved_prompt_template_hash: null,
+  };
+}
+
 function makeRecoveryError(
   partialState = makeCompositionState(2),
 ): ComposerRecoveryError {
@@ -253,33 +281,8 @@ describe("sessionStore", () => {
         },
         state: null,
       });
-      const pending: InterpretationEvent = {
-        id: "evt-1",
-        session_id: "session-1",
-        composition_state_id: "state-1",
-        affected_node_id: "analyze_colors",
-        tool_call_id: "call-1",
-        user_term: "llm_model_choice:analyze_colors",
-        kind: "llm_model_choice",
-        llm_draft: "openrouter/openai/gpt-5.4-mini",
-        accepted_value: null,
-        choice: "pending",
-        created_at: "2026-05-29T12:00:00Z",
-        resolved_at: null,
-        actor: "system:composer",
-        interpretation_source: "user_approved",
-        model_identifier: null,
-        model_version: null,
-        provider: null,
-        composer_skill_hash: null,
-        arguments_hash: null,
-        hash_domain_version: null,
-        runtime_model_identifier_at_resolve: null,
-        runtime_model_version_at_resolve: null,
-        resolved_prompt_template_hash: null,
-      };
       (apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>).mockResolvedValue([
-        pending,
+        makePendingInterpretationEvent("evt-1"),
       ]);
 
       useSessionStore.setState({ activeSessionId: "session-1" });
@@ -290,6 +293,72 @@ describe("sessionStore", () => {
         const map =
           useInterpretationEventsStore.getState().pendingBySession["session-1"];
         expect(map?.["evt-1"]).toBeDefined();
+      });
+    });
+
+    it("refreshes pending interpretation events after a successful recompose (retry)", async () => {
+      // Same bug class as the freeform sendMessage path: recompose can mint new
+      // interpretive decisions, and without a refresh the inline review widgets
+      // never surface mid-session.
+      resetStore(useInterpretationEventsStore);
+      const apiMod = await import("@/api/client");
+      (apiMod.recompose as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        message: {
+          id: "asst-r",
+          session_id: "session-1",
+          role: "assistant",
+          content: "Redone.",
+          tool_calls: null,
+          created_at: new Date().toISOString(),
+        },
+        state: null,
+      });
+      (apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makePendingInterpretationEvent("evt-recompose"),
+      ]);
+
+      const userMessage: ChatMessage = {
+        id: "user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "hello",
+        tool_calls: null,
+        created_at: new Date().toISOString(),
+      };
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        messages: [userMessage],
+      });
+      await useSessionStore.getState().retryMessage("user-1");
+
+      await vi.waitFor(() => {
+        const map =
+          useInterpretationEventsStore.getState().pendingBySession["session-1"];
+        expect(map?.["evt-recompose"]).toBeDefined();
+      });
+    });
+
+    it("refreshes pending interpretation events after accepting a proposal", async () => {
+      // Same bug class: accepting a proposal (explicit_approve path) can create
+      // interpretation events that must surface their review widgets.
+      resetStore(useInterpretationEventsStore);
+      const apiMod = await import("@/api/client");
+      (apiMod.acceptCompositionProposal as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "proposal-1",
+      });
+      (apiMod.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makePendingInterpretationEvent("evt-accept"),
+      ]);
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      await useSessionStore.getState().acceptProposal("proposal-1");
+
+      await vi.waitFor(() => {
+        const map =
+          useInterpretationEventsStore.getState().pendingBySession["session-1"];
+        expect(map?.["evt-accept"]).toBeDefined();
       });
     });
 

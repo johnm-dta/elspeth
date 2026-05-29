@@ -123,6 +123,30 @@ function formatLlmAuthError(apiErr: ApiError): string {
   return `${LLM_AUTH_ERROR_MESSAGE}${formatProviderDiagnostic(apiErr)}`;
 }
 
+/**
+ * Pull any interpretation events a compose action created into the
+ * interpretationEventsStore.
+ *
+ * INVARIANT: every compose entry point that can mint interpretive decisions
+ * (sendMessage, recompose, acceptCompositionProposal) MUST call this after a
+ * successful turn. Interpretation events (invented_source / llm_prompt_template
+ * / llm_model_choice / pipeline_decision) live in their own store, populated
+ * only by listInterpretationEvents. In freeform mode there is no other trigger
+ * to surface the inline review widgets — and their sign-off buttons — while the
+ * run-gate blocks execution on unresolved pending rows. Guided mode delivers
+ * review as a guided turn and the tutorial refreshes explicitly; this is the
+ * freeform-surface equivalent. Only selectSession (session load / deep-link)
+ * otherwise refreshes, so without this a mid-session compose deadlocks the user.
+ *
+ * Fire-and-forget and idempotent (the store keys by session_id and reconciles
+ * resolved events across surfaces), so it is safe to call on any compose
+ * completion. A new compose entry point that omits this call reintroduces the
+ * freeform deadlock.
+ */
+function refreshInterpretationEventsForSession(sessionId: string): void {
+  void useInterpretationEventsStore.getState().refreshAll(sessionId);
+}
+
 function mergeCompositionProposals(
   existing: CompositionProposal[],
   incoming: CompositionProposal[],
@@ -598,17 +622,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // before send_message returns). Refreshing keeps the session switcher
       // title in step with the DB without a manual reload.
       void get().loadSessions();
-      // Fire-and-forget: a freeform compose turn may have created new pending
-      // interpretation events (invented_source / llm_prompt_template /
-      // llm_model_choice / pipeline_decision). Guided mode delivers the review
-      // as a guided turn and the tutorial refreshes explicitly; the freeform
-      // surface has no other trigger to pull them into the
-      // interpretationEventsStore. Without this the inline review widgets — and
-      // their sign-off buttons — never render mid-session, while the run-gate
-      // still blocks execution on the pending rows. (selectSession refreshes on
-      // reload, which previously masked the gap.) The store keys by session_id
-      // and resolved events on either surface stay in step automatically.
-      void useInterpretationEventsStore.getState().refreshAll(activeSessionId);
+      // Surface any interpretation reviews this compose turn created (see the
+      // invariant on refreshInterpretationEventsForSession). Without this the
+      // freeform inline review widgets never render mid-session.
+      refreshInterpretationEventsForSession(activeSessionId);
     } catch (err) {
       let errorMessage: string;
       // Client-side abort (the useComposer COMPOSE_TIMEOUT_MS guard or any
@@ -711,6 +728,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           [proposal],
         ),
       });
+      // Surface any interpretation reviews accepting this proposal created
+      // (see the invariant on refreshInterpretationEventsForSession).
+      refreshInterpretationEventsForSession(activeSessionId);
     } catch (err) {
       if (isHttpConflict(err)) {
         await get().loadCompositionProposals(activeSessionId);
@@ -1016,6 +1036,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
       // Fire-and-forget: refresh blob list in case the LLM created files
       useBlobStore.getState().loadBlobs(activeSessionId);
+      // Surface any interpretation reviews this recompose created (see the
+      // invariant on refreshInterpretationEventsForSession).
+      refreshInterpretationEventsForSession(activeSessionId);
     } catch (err) {
       let errorMessage: string;
       if (isAbortError(err)) {

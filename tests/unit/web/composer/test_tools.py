@@ -7596,7 +7596,7 @@ class TestGetPluginAssistance:
         assert "If an LLM routes directly to a JSON sink whose name sounds like cleanup" in hints
         assert "the LLM passes through raw scrape fields until this field_mapper whitelists them" in hints
         assert "route the mapper directly to the existing sink" in hints
-        assert "Do not remove the cleanup mapper or output" in hints
+        assert "do not remove the cleanup mapper or output" in hints
         assert "before raw scraped fields exist cannot satisfy scraped-content cleanup" in hints
         assert "preserve requested enrichment, extraction, scoring, or LLM response fields" in hints
         assert "stage a pipeline_decision interpretation requirement" in hints

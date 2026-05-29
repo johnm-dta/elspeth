@@ -208,7 +208,20 @@ defaults:
     # TODO-corpus cleanup; one per-file-rule entry no longer needed after
     # the cleanup absorbed its coverage into individual fingerprinted
     # entries with source-line-specific justifications.
-    max_per_file_rules: 92
+    #
+    # Bumped from 92 → 94 on 2026-05-29 (net +2) to collapse the R1/R5
+    # fingerprint corpus of two high-edit-cadence Tier-3 files —
+    # ``web/interpretation_state.py`` (max_hits=71) and
+    # ``web/sessions/service.py`` (max_hits=41) — into one bounded per-file
+    # rule each. These files churn ~6 commits/month; every AST shift rotated
+    # all their fingerprints, so the prior individual entries re-broke CI on
+    # each edit. The two rules REMOVED 112 individual allow_hits entries
+    # (net allow_hits −112, far under the 652 ceiling), so this is a net
+    # tightening of the suppression surface, not new debt; max_hits caps each
+    # rule so a NEW R1/R5 in either file still trips review. R6/R7 in
+    # sessions/service.py remain individually fingerprinted for per-site
+    # scrutiny and are NOT covered by the rule.
+    max_per_file_rules: 94
     # Bumped from 485 → 486 on 2026-05-19 for the same Phase 8 PR-review
     # S4 entry as ``max_allow_hits`` above.
     #
@@ -315,7 +328,13 @@ defaults:
     # lifespan (documented graceful-degradation for the OpenRouter catalog
     # probe) are permanent (expires: null) with full rationale.
     max_permanent_allow_hits: 320
-    max_permanent_per_file_rules: 92
+    # Bumped from 92 → 94 on 2026-05-29 (net +2) for the two permanent
+    # (expires: null) per-file rules collapsing R1/R5 in
+    # web/interpretation_state.py and web/sessions/service.py — same change as
+    # the ``max_per_file_rules`` bump above. The 112 removed allow_hits were
+    # likewise permanent, so the permanent exact-hit and total subsets both
+    # fall well below their ceilings; only the per-file-rule subset rises.
+    max_permanent_per_file_rules: 94
     # Ratcheted to 410 on 2026-05-25 after stale-fingerprint pruning in the
     # tutorial-assumption-surfacing rebase reduced the permanent total corpus
     # below the prior ceiling.

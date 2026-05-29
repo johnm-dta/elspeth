@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useSessionStore } from "./sessionStore";
+import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
 import type {
   ChatMessage,
@@ -8,6 +9,7 @@ import type {
   CompositionState,
   CompositionProposal,
 } from "@/types/api";
+import type { InterpretationEvent } from "@/types/interpretation";
 
 const clearValidationMock = vi.hoisted(() => vi.fn());
 
@@ -226,6 +228,69 @@ describe("sessionStore", () => {
       // Assistant message should be appended
       const asstMsg = state.messages.find((m) => m.role === "assistant");
       expect(asstMsg?.content).toBe("Hello back");
+    });
+
+    it("refreshes pending interpretation events after a successful freeform compose turn", async () => {
+      // Regression: a freeform compose turn can create new pending
+      // interpretation events (invented_source / llm_prompt_template /
+      // llm_model_choice / pipeline_decision). Unlike guided mode (review
+      // delivered as a guided turn) and the tutorial (explicit refreshAll),
+      // the freeform path had no trigger to pull them into the
+      // interpretationEventsStore — so the inline review widgets and their
+      // sign-off buttons never rendered mid-session, while the run-gate still
+      // blocked execution on the pending rows. selectSession refreshes on
+      // reload, which previously masked the gap.
+      resetStore(useInterpretationEventsStore);
+      const apiMod = await import("@/api/client");
+      (apiMod.sendMessage as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        message: {
+          id: "asst-1",
+          session_id: "session-1",
+          role: "assistant",
+          content: "Drafted.",
+          tool_calls: null,
+          created_at: new Date().toISOString(),
+        },
+        state: null,
+      });
+      const pending: InterpretationEvent = {
+        id: "evt-1",
+        session_id: "session-1",
+        composition_state_id: "state-1",
+        affected_node_id: "analyze_colors",
+        tool_call_id: "call-1",
+        user_term: "llm_model_choice:analyze_colors",
+        kind: "llm_model_choice",
+        llm_draft: "openrouter/openai/gpt-5.4-mini",
+        accepted_value: null,
+        choice: "pending",
+        created_at: "2026-05-29T12:00:00Z",
+        resolved_at: null,
+        actor: "system:composer",
+        interpretation_source: "user_approved",
+        model_identifier: null,
+        model_version: null,
+        provider: null,
+        composer_skill_hash: null,
+        arguments_hash: null,
+        hash_domain_version: null,
+        runtime_model_identifier_at_resolve: null,
+        runtime_model_version_at_resolve: null,
+        resolved_prompt_template_hash: null,
+      };
+      (apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>).mockResolvedValue([
+        pending,
+      ]);
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      await useSessionStore.getState().sendMessage("rate these pages");
+
+      // refreshAll is fire-and-forget inside sendMessage; await the microtask.
+      await vi.waitFor(() => {
+        const map =
+          useInterpretationEventsStore.getState().pendingBySession["session-1"];
+        expect(map?.["evt-1"]).toBeDefined();
+      });
     });
 
     it("handles convergence error with specific message", async () => {

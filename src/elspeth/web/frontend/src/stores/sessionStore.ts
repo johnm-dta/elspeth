@@ -598,6 +598,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // before send_message returns). Refreshing keeps the session switcher
       // title in step with the DB without a manual reload.
       void get().loadSessions();
+      // Fire-and-forget: a freeform compose turn may have created new pending
+      // interpretation events (invented_source / llm_prompt_template /
+      // llm_model_choice / pipeline_decision). Guided mode delivers the review
+      // as a guided turn and the tutorial refreshes explicitly; the freeform
+      // surface has no other trigger to pull them into the
+      // interpretationEventsStore. Without this the inline review widgets — and
+      // their sign-off buttons — never render mid-session, while the run-gate
+      // still blocks execution on the pending rows. (selectSession refreshes on
+      // reload, which previously masked the gap.) The store keys by session_id
+      // and resolved events on either surface stay in step automatically.
+      void useInterpretationEventsStore.getState().refreshAll(activeSessionId);
     } catch (err) {
       let errorMessage: string;
       // Client-side abort (the useComposer COMPOSE_TIMEOUT_MS guard or any

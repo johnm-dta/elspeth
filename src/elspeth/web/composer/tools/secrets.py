@@ -179,7 +179,7 @@ def _execute_wire_secret_ref(
                 return _failure_result(state, "target_id is required for source targets when multiple sources are configured.")
         else:
             source_name = str(target_id)
-        source = state.sources.get(source_name)
+        source = state.sources[source_name] if source_name in state.sources else None
         if source is None:
             return _failure_result(state, f"Source '{source_name}' not found.")
         patched_options = dict(deep_thaw(source.options))

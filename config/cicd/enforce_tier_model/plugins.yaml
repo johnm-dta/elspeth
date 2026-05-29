@@ -149,40 +149,12 @@ per_file_rules:
   expires: null
   max_hits: 2
 allow_hits:
-- key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=efb42c44febf0c23
-  owner: source-boundary
-  reason: Local CSV file opening decodes Tier 3 file bytes; UnicodeDecodeError is
-    an external parse failure.
-  safety: Records parse validation evidence with file path and encoding, yields quarantine
-    unless discard, and stops loading.
-  expires: '2026-08-17'
-- key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=feb345d977d9991e
-  owner: source-boundary
-  reason: Local CSV row reading decodes Tier 3 file bytes; UnicodeDecodeError is an
-    external parse failure after open.
-  safety: Records parse validation evidence with file path and encoding, yields quarantine
-    unless discard, and stops loading.
-  expires: '2026-08-17'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=054e76166ade23bc
-  owner: source-boundary
-  reason: CSV skip_rows parsing reads Tier 3 input; csv.Error means malformed preamble
-    content may corrupt parser state.
-  safety: Records parse validation evidence, yields quarantine unless discard, and
-    returns before trusting subsequent rows.
-  expires: '2026-08-17'
 - key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=0fb2b154fb016195
   owner: source-boundary
   reason: CSV header discovery reads Tier 3 input; StopIteration means skip_rows consumed
     all content before a header.
   safety: Records an audited parse validation error when skip_rows caused exhaustion,
     otherwise emits no fabricated row.
-  expires: '2026-08-17'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=122485b351a8f172
-  owner: source-boundary
-  reason: CSV header parsing reads Tier 3 input; csv.Error means malformed external
-    CSV syntax.
-  safety: Records parse validation evidence, yields quarantine unless discard, and
-    returns before emitting rows.
   expires: '2026-08-17'
 - key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=21b69c7fe66e0a1b
   owner: source-boundary
@@ -191,60 +163,12 @@ allow_hits:
   safety: Loop exits cleanly only after prior rows have gone through parse and schema
     validation paths.
   expires: '2026-08-17'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=55805867c8844172
-  owner: source-boundary
-  reason: CSV row iteration reads Tier 3 input; csv.Error can leave parser state untrustworthy.
-  safety: Records parse validation evidence, yields quarantine unless discard, and
-    returns to avoid silent data loss.
-  expires: '2026-08-17'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=bb231ad98805d136
-  owner: source-boundary
-  reason: CSV source schema validation handles Tier 3 rows; ValidationError means
-    external row data violates the configured source schema.
-  safety: Records schema validation evidence and yields quarantine unless discard;
-    programmer errors still propagate.
-  expires: '2026-08-17'
 - key: plugins/sources/dataverse.py:R1:DataverseSource:_normalize_row_fields:fp=b9db16c1b599becb
   owner: source-boundary
   reason: Dataverse rows are Tier 3 and may be sparse; fields absent from the first-row
     mapping must be normalized individually.
   safety: Unmapped fields are normalized with normalize_field_name(), trigger field-resolution
     rebuild, and still pass through schema validation.
-  expires: '2026-08-17'
-- key: plugins/sources/dataverse.py:R1:DataverseSource:load:fp=5e69d62057bf8bb7
-  owner: source-boundary
-  reason: FetchXML is Tier 3 source configuration; the entity name attribute is optional
-    in parsed XML and must be checked explicitly.
-  safety: Missing entity name raises RuntimeError before any Dataverse request is
-    made; no fallback entity is fabricated.
-  expires: '2026-08-17'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=b8ab7237d10474f3
-  owner: source-boundary
-  reason: Dataverse formatted-value stripping handles Tier 3 API rows; ValueError
-    means external metadata would collide with real fields.
-  safety: Records validation evidence and yields quarantine unless discard; the row
-    is not emitted as valid.
-  expires: '2026-08-17'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=dfad59c5d97e602a
-  owner: source-boundary
-  reason: Dataverse field normalization handles Tier 3 API rows; ValueError means
-    an external field name cannot be normalized safely.
-  safety: Records field-normalization validation evidence and yields quarantine unless
-    discard.
-  expires: '2026-08-17'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=d31e59f727e94dff
-  owner: source-boundary
-  reason: Dataverse source schema validation handles Tier 3 API rows; ValidationError
-    means external row data violates the configured schema.
-  safety: Records schema validation evidence and yields quarantine unless discard;
-    programmer errors still propagate.
-  expires: '2026-08-17'
-- key: plugins/sources/json_source.py:R6:JSONSource:_load_jsonl:fp=cd3cc8680d23c268
-  owner: source-boundary
-  reason: JSONL line parsing handles Tier 3 file input; JSONDecodeError and non-finite
-    ValueError are malformed external rows.
-  safety: Records line-level parse validation evidence and yields quarantine unless
-    discard, then continues to the next independent line.
   expires: '2026-08-17'
 - key: plugins/sources/json_source.py:R6:JSONSource:_load_jsonl:fp=ce254b64675c2272
   owner: source-boundary
@@ -266,19 +190,6 @@ allow_hits:
     parse failure.
   safety: Records file-level parse validation evidence, yields quarantine unless discard,
     and returns.
-  expires: '2026-08-17'
-- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=624f4fc7fffa80de
-  owner: source-boundary
-  reason: JSON source row normalization handles Tier 3 rows; ValueError means the
-    external row is not an object with usable fields.
-  safety: Records validation evidence and yields quarantine unless discard.
-  expires: '2026-08-17'
-- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=6650d40e380ee359
-  owner: source-boundary
-  reason: JSON source schema validation handles Tier 3 rows; ValidationError means
-    external row data violates the configured schema.
-  safety: Records schema validation evidence and yields quarantine unless discard;
-    programmer errors still propagate.
   expires: '2026-08-17'
 - key: plugins/infrastructure/schema_factory.py:R6:_find_non_finite_value_path:fp=b5937945437c8045
   owner: bugfix
@@ -675,27 +586,6 @@ allow_hits:
   safety: Non-finite float rows diverted via _divert_row() with per-field detail;
     valid rows written normally; no silent data loss
   expires: null
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=7be036c024aeeefe
-  owner: source-boundary
-  reason: Azure blob CSV decoding reads Tier 3 blob bytes; UnicodeDecodeError means
-    external content does not match the configured encoding.
-  safety: Records file-level parse validation evidence, yields quarantine unless discard,
-    and returns before trusting decoded text.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=feb5a61fc7ca0a29
-  owner: source-boundary
-  reason: Azure blob CSV header discovery reads Tier 3 input; StopIteration means
-    the external file is empty and cannot provide a header row.
-  safety: Records parse validation evidence, yields quarantine unless discard, and
-    returns before emitting fabricated headers.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=97a1ef9c4fc676bd
-  owner: source-boundary
-  reason: Azure blob CSV header parsing reads Tier 3 input; csv.Error means malformed
-    external CSV syntax before any row can be trusted.
-  safety: Records parse validation evidence, yields quarantine unless discard, and
-    returns before emitting rows.
-  expires: '2026-08-17'
 - key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=431d28180bca26dd
   owner: source-boundary
   reason: Headerless Azure blob CSV without schema may legitimately contain no rows;
@@ -709,13 +599,6 @@ allow_hits:
     end-of-file signal after prior rows have been parsed.
   safety: Loop exits cleanly only after all emitted rows have gone through parse and
     schema validation paths.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=ebcdf378c1b17bc6
-  owner: source-boundary
-  reason: Azure blob CSV row iteration reads Tier 3 input; csv.Error means parser
-    state may be corrupted by malformed external CSV.
-  safety: Records parse validation evidence, yields quarantine unless discard, and
-    breaks to avoid trusting subsequent parser state.
   expires: '2026-08-17'
 - key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=f7674d7898065886
   owner: source-boundary
@@ -731,47 +614,12 @@ allow_hits:
   safety: Records file-level parse validation evidence and yields quarantine unless
     discard before returning.
   expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=72e6ca8223767db9
-  owner: source-boundary
-  reason: Azure blob JSONL line parsing handles Tier 3 input; JSONDecodeError and
-    non-finite ValueError are malformed external rows.
-  safety: Records raw-line parse validation evidence with line metadata, yields quarantine
-    unless discard, and continues to the next line.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=501ead0ca19e6205
-  owner: source-boundary
-  reason: Azure blob JSONL streaming decodes Tier 3 input; UnicodeDecodeError is an
-    external parse failure.
-  safety: Records parse validation evidence with line metadata and yields quarantine
-    unless discard before returning.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=3c529a5cd371be8f
-  owner: source-boundary
-  reason: Azure blob JSON/JSONL field normalization handles Tier 3 row keys; ValueError
-    means an external field name cannot be normalized safely.
-  safety: Records field-normalization validation evidence and yields quarantine unless
-    discard; no normalized field name is fabricated.
-  expires: '2026-08-17'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=06c8cb35688214ff
-  owner: source-boundary
-  reason: Azure blob source schema validation handles Tier 3 rows; ValidationError
-    means external row data violates the configured source schema.
-  safety: Records schema validation evidence and yields quarantine unless discard;
-    programmer errors still propagate.
-  expires: '2026-08-17'
 - key: plugins/sources/text_source.py:R6:TextSource:load:fp=75958c4926a6eef7
   owner: source-boundary
   reason: Text source line streaming decodes Tier 3 file input; UnicodeDecodeError
     is an external parse failure.
   safety: Records parse validation evidence with file path and line metadata and yields
     quarantine unless discard.
-  expires: '2026-08-17'
-- key: plugins/sources/text_source.py:R6:TextSource:_validate_and_yield:fp=57eaf7e1d1239212
-  owner: source-boundary
-  reason: Text source schema validation handles Tier 3 rows; ValidationError means
-    external row data violates the configured schema.
-  safety: Records schema validation evidence and yields quarantine unless discard;
-    programmer errors still propagate.
   expires: '2026-08-17'
 - key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=d90958e285a74a8e
   owner: bugfix
@@ -797,3 +645,155 @@ allow_hits:
     surfaces no coaching, which is the right failure mode for malformed config (the
     validator catches the real config error separately).
   expires: null
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=fef0f308eba70a59
+  owner: source-boundary
+  reason: Azure blob CSV decoding reads Tier 3 blob bytes; UnicodeDecodeError means
+    external content does not match the configured encoding.
+  safety: Records file-level parse validation evidence, yields quarantine unless discard,
+    and returns before trusting decoded text.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=5bffe4e4bd0f4cbb
+  owner: source-boundary
+  reason: Azure blob CSV header discovery reads Tier 3 input; StopIteration means
+    the external file is empty and cannot provide a header row.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    returns before emitting fabricated headers.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=4802689f1924472e
+  owner: source-boundary
+  reason: Azure blob CSV header parsing reads Tier 3 input; csv.Error means malformed
+    external CSV syntax before any row can be trusted.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    returns before emitting rows.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=1979caa13b0e493f
+  owner: source-boundary
+  reason: Azure blob CSV row iteration reads Tier 3 input; csv.Error means parser
+    state may be corrupted by malformed external CSV.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    breaks to avoid trusting subsequent parser state.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=c0943914a2dbeffe
+  owner: source-boundary
+  reason: Azure blob JSONL line parsing handles Tier 3 input; JSONDecodeError and
+    non-finite ValueError are malformed external rows.
+  safety: Records raw-line parse validation evidence with line metadata, yields quarantine
+    unless discard, and continues to the next line.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=1f4d4350b3849a2d
+  owner: source-boundary
+  reason: Azure blob JSONL streaming decodes Tier 3 input; UnicodeDecodeError is an
+    external parse failure.
+  safety: Records parse validation evidence with line metadata and yields quarantine
+    unless discard before returning.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=01087ab0eb781db4
+  owner: source-boundary
+  reason: Azure blob JSON/JSONL field normalization handles Tier 3 row keys; ValueError
+    means an external field name cannot be normalized safely.
+  safety: Records field-normalization validation evidence and yields quarantine unless
+    discard; no normalized field name is fabricated.
+  expires: '2026-08-17'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=3515a2b82d7d34d0
+  owner: source-boundary
+  reason: Azure blob source schema validation handles Tier 3 rows; ValidationError
+    means external row data violates the configured source schema.
+  safety: Records schema validation evidence and yields quarantine unless discard;
+    programmer errors still propagate.
+  expires: '2026-08-17'
+- key: plugins/sources/dataverse.py:R1:DataverseSource:load:fp=54c5b7343bd268b5
+  owner: source-boundary
+  reason: FetchXML is Tier 3 source configuration; the entity name attribute is optional
+    in parsed XML and must be checked explicitly.
+  safety: Missing entity name raises RuntimeError before any Dataverse request is
+    made; no fallback entity is fabricated.
+  expires: '2026-08-17'
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=7453e6ed0299b7a0
+  owner: source-boundary
+  reason: Dataverse formatted-value stripping handles Tier 3 API rows; ValueError
+    means external metadata would collide with real fields.
+  safety: Records validation evidence and yields quarantine unless discard; the row
+    is not emitted as valid.
+  expires: '2026-08-17'
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=e9ad65a49eeacbe0
+  owner: source-boundary
+  reason: Dataverse field normalization handles Tier 3 API rows; ValueError means
+    an external field name cannot be normalized safely.
+  safety: Records field-normalization validation evidence and yields quarantine unless
+    discard.
+  expires: '2026-08-17'
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=fc6f4a824dc6b094
+  owner: source-boundary
+  reason: Dataverse source schema validation handles Tier 3 API rows; ValidationError
+    means external row data violates the configured schema.
+  safety: Records schema validation evidence and yields quarantine unless discard;
+    programmer errors still propagate.
+  expires: '2026-08-17'
+- key: plugins/sources/text_source.py:R6:TextSource:_validate_and_yield:fp=e2ad6e5d9260b13c
+  owner: source-boundary
+  reason: Text source schema validation handles Tier 3 rows; ValidationError means
+    external row data violates the configured schema.
+  safety: Records schema validation evidence and yields quarantine unless discard;
+    programmer errors still propagate.
+  expires: '2026-08-17'
+- key: plugins/sources/json_source.py:R6:JSONSource:_load_jsonl:fp=f31f9a038a08b359
+  owner: source-boundary
+  reason: JSONL line parsing handles Tier 3 file input; JSONDecodeError and non-finite
+    ValueError are malformed external rows.
+  safety: Records line-level parse validation evidence and yields quarantine unless
+    discard, then continues to the next independent line.
+  expires: '2026-08-17'
+- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=0f4614224ff9e32b
+  owner: source-boundary
+  reason: JSON source row normalization handles Tier 3 rows; ValueError means the
+    external row is not an object with usable fields.
+  safety: Records validation evidence and yields quarantine unless discard.
+  expires: '2026-08-17'
+- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=5500503febb7f02e
+  owner: source-boundary
+  reason: JSON source schema validation handles Tier 3 rows; ValidationError means
+    external row data violates the configured schema.
+  safety: Records schema validation evidence and yields quarantine unless discard;
+    programmer errors still propagate.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=9d56af854588542e
+  owner: source-boundary
+  reason: Local CSV file opening decodes Tier 3 file bytes; UnicodeDecodeError is
+    an external parse failure.
+  safety: Records parse validation evidence with file path and encoding, yields quarantine
+    unless discard, and stops loading.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=b34be06cb6ed5bf9
+  owner: source-boundary
+  reason: Local CSV row reading decodes Tier 3 file bytes; UnicodeDecodeError is an
+    external parse failure after open.
+  safety: Records parse validation evidence with file path and encoding, yields quarantine
+    unless discard, and stops loading.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=f164d02404de5105
+  owner: source-boundary
+  reason: CSV skip_rows parsing reads Tier 3 input; csv.Error means malformed preamble
+    content may corrupt parser state.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    returns before trusting subsequent rows.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=3ac723f332e7840d
+  owner: source-boundary
+  reason: CSV header parsing reads Tier 3 input; csv.Error means malformed external
+    CSV syntax.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    returns before emitting rows.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=4ab75e8fa6844c43
+  owner: source-boundary
+  reason: CSV row iteration reads Tier 3 input; csv.Error can leave parser state untrustworthy.
+  safety: Records parse validation evidence, yields quarantine unless discard, and
+    returns to avoid silent data loss.
+  expires: '2026-08-17'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=674289886d8f4166
+  owner: source-boundary
+  reason: CSV source schema validation handles Tier 3 rows; ValidationError means
+    external row data violates the configured source schema.
+  safety: Records schema validation evidence and yields quarantine unless discard;
+    programmer errors still propagate.
+  expires: '2026-08-17'

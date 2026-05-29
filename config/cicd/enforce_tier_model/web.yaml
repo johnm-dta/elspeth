@@ -650,160 +650,6 @@ allow_hits:
   safety: Failures are returned in explicit result fields; programmer bugs and unrelated
     exceptions are not absorbed.
   expires: null
-- key: web/sessions/routes/_helpers.py:R2:_get_session_compose_lock_registry:fp=9a48c566decfe28d
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/_helpers.py:R2:_litellm_error_detail:fp=b4fd62e9a2cdbe87
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/_helpers.py:R1:_extract_runtime_model_snapshot:fp=6d1677fcffef1c09
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/_helpers.py:R1:_extract_runtime_model_snapshot:fp=ac9a77f94449d04a
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/_helpers.py:R6:_handle_convergence_error:fp=c6ee853787c77e21
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/_helpers.py:R6:_handle_plugin_crash:fp=f9a5129ab29f7db2
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/_helpers.py:R6:_handle_runtime_preflight_failure:fp=7d6384e50669f641
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=3f8d5ddf6536da5a
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/messages.py:R7:register_message_routes:send_message:fp=c97a9563975ee710
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/messages.py:R6:register_message_routes:send_message:fp=13cbecc303d03758
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/sessions.py:R6:register_session_routes:fork_from_message:fp=149356ae5d7560f0
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/sessions.py:R6:register_session_routes:fork_from_message:fp=16156db6d5b7f3eb
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/service.py:R1:_patch_llm_transform_prompt:fp=1ec37730adecfaaa
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=0e1944654eb249d2
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_session_write_lock:fp=8b9a7faf40d56535
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=2e3fa7c34e58ec3f
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=29f8ee83276b87db
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=0455bf167593a2c1
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=89cbdc0a5fca54c6
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=ef3701971b270390
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=209190a9043ace94
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=adbb67a26169ddee
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
 - key: web/sessions/_auto_title.py:R6:maybe_auto_title_session:fp=6eeb90e8c33babf8
   owner: web-sessions
   reason: Best-effort auto-title provider boundary; external/provider exceptions and
@@ -1484,166 +1330,6 @@ allow_hits:
   safety: Malformed data returns structured HTTP errors or preserves the primary exception;
     recovery catches are narrow and record class-name-only diagnostics.
   expires: '2026-08-20'
-- key: web/sessions/routes/composer.py:R1:_inline_blob_content_for_proposal:fp=c0f2bbfd5e6c57ed
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/composer.py:R5:_inline_blob_content_for_proposal:fp=7b7d6c8ca4388365
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/composer.py:R1:_inline_blob_content_for_proposal:fp=feb1bbf03070b119
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/composer.py:R5:_inline_blob_content_for_proposal:fp=09b43dc60ebd6036
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/composer.py:R1:_inline_blob_content_for_proposal:fp=5e022f0ca07cbf2e
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/composer.py:R5:_inline_blob_content_for_proposal:fp=f210c162f5a60357
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/composer.py:R1:register_composer_routes:accept_composition_proposal:fp=ec8182b9ca85932f
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R6:register_composer_routes:accept_composition_proposal:fp=97184ca5456a173f
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:recompose:fp=65afef4550e989c5
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:recompose:fp=b22f01dc72b4660b
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R4:register_composer_routes:get_guided:fp=f09febcda74c85ae
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:get_guided:fp=a89801c4ea858a56
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R4:register_composer_routes:get_guided:fp=3596e2d1f66b3f99
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:get_guided:fp=7357db09796362cd
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_respond:fp=65b078af067fd26a
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_respond:fp=90d1459942d2afe8
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_respond:fp=459203baa79b869f
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_respond:fp=647eaaa3142057a0
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_chat:fp=4aac0c4c0b044ec2
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_chat:fp=fda975b0625f46e8
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_chat:fp=6a812675536c1066
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
-- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_chat:fp=89713c5bac9cbaa5
-  owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
 - key: web/composer/tools/blobs.py:R1:_set_nested_option:fp=9606870cec567eb9
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
@@ -1677,22 +1363,6 @@ allow_hits:
     review instead of adding permanent debt
   expires: '2026-08-24'
 - key: web/composer/tools/blobs.py:R1:_execute_wire_blob_inline_ref:fp=79391f3b16bd3db6
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/blobs.py:R1:_state_source_blob_ref:fp=9f3a080fbddec2a0
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/blobs.py:R5:_state_source_blob_ref:fp=e8ea24c6f35c3e3c
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -2795,26 +2465,6 @@ allow_hits:
     accepted_value must equal the current template and no prompt hash is minted from
     non-string data.
   expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_resolve_invented_source:fp=8d1f39d4845aeaf1
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: invented-source resolution
-    validates persisted source_authoring.content_hash and optional draft text before
-    binding the user decision to the source artifact. Finding: isinstance() used:
-    if not isinstance(content_hash, str) or not content_hash:'
-  safety: Missing/non-string content_hash or mismatched draft raises before the row
-    is resolved; accepted_artifact_hash is copied only from validated persisted metadata.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_resolve_invented_source:fp=eb855e7731de8e46
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: invented-source resolution
-    validates persisted source_authoring.content_hash and optional draft text before
-    binding the user decision to the source artifact. Finding: isinstance() used:
-    if isinstance(draft, str) and draft != llm_draft:'
-  safety: Missing/non-string content_hash or mismatched draft raises before the row
-    is resolved; accepted_artifact_hash is copied only from validated persisted metadata.
-  expires: '2026-08-24'
 - key: web/sessions/service.py:R5:_resolve_pipeline_decision_review:fp=18fa846fc56b7d28
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
@@ -2881,76 +2531,6 @@ allow_hits:
     artefact is already gone.
   expires: '2026-08-23'
 - key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:fp=fddf6462f06f94f9
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=c94b66af33bb005a
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(source, Mapping):'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=8c17fac8ab8fa86f
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(source_options,
-    Mapping) or SOURCE_AUTHORING_KEY not in source_options:'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=3ee380ef96cdd82f
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(source_authoring,
-    Mapping):'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=fe4e1e22f49f444f
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(content_hash,
-    str) or not content_hash:'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=47690572cb1367a1
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if isinstance(draft, str) and
-    draft != llm_draft:'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=dd3c900b34959c33
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=e88ecf89b7b7efd0
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -3083,70 +2663,6 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=b19e372e1ba24e9a
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: prompt_template =
-    options.get("prompt_template")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_assert_affected_component:fp=9821fdd3b0a0e36a
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
-    str) or not prompt_template:'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_assert_affected_component:fp=cddef38c47eddcee
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=a3aa2e4be368b676
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=afcde30a5ec360ea
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=d92cc8f903f46fb1
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=fcc8acd21c8d9c6b
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/sessions.py:R5:_assert_affected_component:fp=b3cc1f6e14caea35
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
 - key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=42309d8e9c36b9ae
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
@@ -4164,12 +3680,12 @@ allow_hits:
   expires: null
 - key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=0e469aee138d8441
   owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``source.options``. ``blob_ref`` is schema-
-    optional — present only when set_source_from_blob (or inline_blob in set_pipeline)
-    wired a blob into the source; for path-based sources it is absent. The function
-    abstains from blob-backed proof checks when absent.
-  safety: Absent blob_ref returns the diagnostic list unchanged; no fabricated blob
-    lookups.
+  reason: Tier-3 read of the LLM-authored optional ``schema`` key from ``source.options``
+    during proof diagnostics; a source without an explicit schema legitimately omits
+    the key, so absence is meaningful (not a defect) and the helper proceeds with
+    non-schema diagnostics.
+  safety: Absent schema yields None; the proof check falls back to observed-mode behaviour
+    and fabricates nothing.
   expires: '2026-08-23'
 - key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=fd440d1fa2566c84
   owner: composer-tools-generation
@@ -4189,11 +3705,11 @@ allow_hits:
   expires: '2026-08-23'
 - key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=fbe84c1c1919289e
   owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping).
-    ``mode`` may be absent or non-string; ``schema.get('mode') == 'fixed'`` is the
-    discriminator for the blocking-diagnostic branch.
-  safety: Absent or wrong-typed mode causes the equality check to fail; no false-
-    positive diagnostic.
+  reason: Tier-3 read of the LLM-authored optional ``fields`` key from the already-Mapping-narrowed
+    ``schema``; a fixed schema may omit ``fields``, so ``.get`` with an empty-tuple
+    fallback is meaning-preserving (absent == no declared columns).
+  safety: Absent or falsy ``fields`` coerces to an empty tuple and the declared-column
+    loop is a no-op; no fabricated column list.
   expires: '2026-08-23'
 - key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=5a4439663b7d8eec
   owner: composer-tools-generation
@@ -4205,12 +3721,11 @@ allow_hits:
   expires: '2026-08-23'
 - key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=5b8528d3a11aa32a
   owner: composer-tools-generation
-  reason: 'Tier-3 walk of LLM-authored ``schema`` Mapping: ``fields`` is the declared
-    column list. ``schema.get(''fields'') or ()`` coerces an absent or falsy value
-    to an empty tuple so the downstream isinstance check at line 925 has a normalised
-    value to test.'
-  safety: Empty tuple cannot trigger the missing-columns diagnostic (no declared columns
-    ⇒ no omission); behavior is conservative.
+  reason: Tier-3 read of the LLM-authored optional ``columns`` key from ``source.options``
+    to detect a headerless-CSV declaration; ``columns`` is present only when the operator
+    declared explicit column names and is absent otherwise.
+  safety: Absent ``columns`` evaluates the headerless flag to False; no fabricated
+    column declaration.
   expires: '2026-08-23'
 - key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=a051184af324ed56
   owner: trust-tier-maintenance
@@ -4237,6 +3752,338 @@ allow_hits:
     review instead of adding permanent debt
   expires: '2026-08-24'
 - key: web/composer/tools/generation.py:R6:compute_proof_diagnostics:fp=c51ec158bfab3671
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=a49bde8c7b27be79
+  owner: trust-tier-maintenance
+  reason: Tier-3 validation of LLM-authored node options.prompt_template before persisting
+    an llm_prompt_template interpretation event; isinstance guards a non-string value
+    and raises ValueError (offensive validation at the composer-state boundary, not
+    error suppression).
+  safety: Non-string prompt_template raises ValueError before the draft-match check;
+    no coercion, no silent acceptance.
+  expires: '2026-08-24'
+- key: web/composer/tools/blobs.py:R5:_state_source_blob_refs:fp=327c03d6fa40d1c6
+  owner: trust-tier-maintenance
+  reason: Tier-3 walk of LLM-authored source.options collecting string blob refs;
+    isinstance(blob_ref, str) filters non-string values an LLM may have authored.
+    blob_ref is schema-optional, so a source without one is legitimate.
+  safety: Non-string or absent blob_ref is simply not collected into the ref set;
+    no fabrication, no crash on malformed options.
+  expires: '2026-08-24'
+- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=efb995237324fb54
+  owner: trust-tier-maintenance
+  reason: Tier-3 read of an LLM-authored interpretation-requirement mapping; .get('draft')
+    matches the sibling .get('kind')/.get('user_term')/.get('status') boundary reads
+    in the same already-Mapping-guarded loop. draft is optional in a pending requirement.
+  safety: Missing or non-string draft yields None and skips the draft-equality check;
+    ToolArgumentError is raised only on a genuine mismatch.
+  expires: '2026-08-24'
+- key: web/sessions/service.py:R5:_resolve_invented_source:fp=e7db573d8b2c1a3b
+  owner: web-sessions
+  pattern: tier3-boundary-validator
+  reason: '2026-05-24 tutorial-assumption surfacing addition: invented-source resolution
+    validates persisted source_authoring.content_hash and optional draft text before
+    binding the user decision to the source artifact. Finding: isinstance() used:
+    if not isinstance(content_hash, str) or not content_hash:'
+  safety: Missing/non-string content_hash or mismatched draft raises before the row
+    is resolved; accepted_artifact_hash is copied only from validated persisted metadata.
+  expires: '2026-08-24'
+- key: web/sessions/service.py:R5:_resolve_invented_source:fp=e0052866e37d3f20
+  owner: web-sessions
+  pattern: tier3-boundary-validator
+  reason: '2026-05-24 tutorial-assumption surfacing addition: invented-source resolution
+    validates persisted source_authoring.content_hash and optional draft text before
+    binding the user decision to the source artifact. Finding: isinstance() used:
+    if isinstance(draft, str) and draft != llm_draft:'
+  safety: Missing/non-string content_hash or mismatched draft raises before the row
+    is resolved; accepted_artifact_hash is copied only from validated persisted metadata.
+  expires: '2026-08-24'
+- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=43a9d0f310ce3563
+  owner: web-sessions
+  pattern: tier3-boundary-validator
+  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
+    validates persisted source/source_authoring JSON before writing an invented_source
+    interpretation row. Finding: isinstance() used: if not isinstance(source, Mapping):'
+  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
+    the pending interpretation event is inserted; no source component binding or content
+    hash is fabricated.
+  expires: '2026-08-24'
+- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=e92c8470b3bc09b6
+  owner: web-sessions
+  pattern: tier3-boundary-validator
+  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
+    validates persisted source/source_authoring JSON before writing an invented_source
+    interpretation row. Finding: isinstance() used: if not isinstance(source_options,
+    Mapping) or SOURCE_AUTHORING_KEY not in source_options:'
+  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
+    the pending interpretation event is inserted; no source component binding or content
+    hash is fabricated.
+  expires: '2026-08-24'
+- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=c70f5183d900a9a1
+  owner: web-sessions
+  pattern: tier3-boundary-validator
+  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
+    validates persisted source/source_authoring JSON before writing an invented_source
+    interpretation row. Finding: isinstance() used: if not isinstance(source_authoring,
+    Mapping):'
+  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
+    the pending interpretation event is inserted; no source component binding or content
+    hash is fabricated.
+  expires: '2026-08-24'
+- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=367d0faee08cf887
+  owner: web-sessions
+  pattern: tier3-boundary-validator
+  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
+    validates persisted source/source_authoring JSON before writing an invented_source
+    interpretation row. Finding: isinstance() used: if not isinstance(content_hash,
+    str) or not content_hash:'
+  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
+    the pending interpretation event is inserted; no source component binding or content
+    hash is fabricated.
+  expires: '2026-08-24'
+- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=dcce920bdb05f3fe
+  owner: web-sessions
+  pattern: tier3-boundary-validator
+  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
+    validates persisted source/source_authoring JSON before writing an invented_source
+    interpretation row. Finding: isinstance() used: if isinstance(draft, str) and
+    draft != llm_draft:'
+  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
+    the pending interpretation event is inserted; no source component binding or content
+    hash is fabricated.
+  expires: '2026-08-24'
+- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=5c47fa5535a0a891
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=788489b4b2d80d57
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/sessions/routes/composer.py:R1:_inline_blob_content_for_proposal:fp=f32ea8d43dbeb2a5
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/sessions/routes/composer.py:R5:_inline_blob_content_for_proposal:fp=fcc4970df152e64c
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/sessions/routes/composer.py:R1:_inline_blob_content_for_proposal:fp=ce2a9521bb731eb8
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/sessions/routes/composer.py:R5:_inline_blob_content_for_proposal:fp=4d8dc4e3a276b195
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/sessions/routes/composer.py:R1:_inline_blob_content_for_proposal:fp=2573d1ca3aab7f0d
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/sessions/routes/composer.py:R5:_inline_blob_content_for_proposal:fp=402fd23f1712450d
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/sessions/routes/composer.py:R6:register_composer_routes:accept_composition_proposal:fp=96dde33f7211fded
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:recompose:fp=219bf1cdc4f786e4
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:recompose:fp=86faef71b54f7a10
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R4:register_composer_routes:get_guided:fp=40c0cce7d790af77
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:get_guided:fp=74d7761965e5fa38
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R4:register_composer_routes:get_guided:fp=02a6013d60c1021f
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:get_guided:fp=b719fe97ee779be9
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_respond:fp=fc1c08ae2b841a21
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_respond:fp=f201b3029e71b744
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_respond:fp=0c79eb5709bbcdbb
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_respond:fp=97ac367d6a7d304c
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_chat:fp=c2784e88956f5fb7
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_chat:fp=1d3ff3ec74a6062a
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R4:register_composer_routes:post_guided_chat:fp=6e7484a7e0de1d49
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/sessions/routes/composer.py:R7:register_composer_routes:post_guided_chat:fp=f1874b40b5b2f76e
+  owner: web-sessions
+  reason: HTTP/session route boundary; persisted composer state, request payloads,
+    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
+    recovery catches are narrow and record class-name-only diagnostics.
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=8af41577cf88f410
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: Potential dict.get() usage: prompt_template =
+    options.get("prompt_template")'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=9192f586cd9c53d1
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/composer/tools/sessions.py:R5:_assert_affected_component:fp=fd19e5495e03d5f2
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
+    str) or not prompt_template:'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
+  expires: null
+- key: web/composer/tools/sessions.py:R5:_assert_affected_component:fp=153eaf75e62964e4
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=3fa0eb0d0e848eaa
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=bcbf183ffd6484f7
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=27835084b1fc8e30
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: web/composer/tools/sessions.py:R5:_assert_affected_component:fp=178bbfe436571106
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific

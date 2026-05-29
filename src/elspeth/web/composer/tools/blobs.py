@@ -585,7 +585,7 @@ def _state_source_blob_refs(state: CompositionState) -> frozenset[str]:
     """Blob refs bound to any pipeline source root."""
     refs: set[str] = set()
     for source in state.sources.values():
-        blob_ref = source.options.get("blob_ref")
+        blob_ref = source.options["blob_ref"] if "blob_ref" in source.options else None
         if isinstance(blob_ref, str):
             refs.add(blob_ref)
     return frozenset(refs)

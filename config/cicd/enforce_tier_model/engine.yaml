@@ -210,7 +210,41 @@ allow_hits:
     has already been caught and normalized to structured fields. It does not hide
     primary pipeline work, does not log raw exception text, and is covered by tests/unit/engine/test_best_effort.py::test_best_effort_suppresses_logger_failures.
   expires: null
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=30807d33e4b5599d
+- key: engine/orchestrator/core.py:R4:Orchestrator:_next_source_item_with_idle_timeout_flushes:poll_idle_flushes_guarded:fp=0903db43d0af57bc
+  owner: architecture
+  reason: Cross-thread exception capture in the idle-timeout-flush poller (daemon
+    thread). BaseException (not Exception) is caught so KeyboardInterrupt/SystemExit
+    are also propagated; the exception is stashed in the error sentinel and re-raised
+    on the orchestrator thread after poller.join().
+  safety: 'Nothing is swallowed: the captured exception is delivered through error_queue
+    and re-raised by _next_source_item_with_idle_timeout_flushes; the poller also
+    signals stop.'
+  expires: '2026-08-24'
+- key: engine/orchestrator/core.py:R7:Orchestrator:_next_source_item_with_idle_timeout_flushes:poll_idle_flushes_guarded:fp=d5163387bac2f224
+  owner: architecture
+  reason: The error sentinel queue has maxsize=1; suppress(queue.Full) guards a benign
+    double-put race when a second exception arrives after the first is already captured.
+    The first (real) exception is preserved for re-raise.
+  safety: Only queue.Full from the bounded sentinel is suppressed; the first captured
+    exception is re-raised on the orchestrator thread, so no error is lost.
+  expires: '2026-08-24'
+- key: engine/orchestrator/core.py:R4:Orchestrator:_next_source_item_with_idle_timeout_flushes:fp=c7ecf51eb9113b29
+  owner: architecture
+  reason: Caller-thread capture of source-iterator exceptions; BaseException is stored
+    in source_exc and re-raised after the poller is joined, preserving exception ordering
+    (idle-flush error first, then source error).
+  safety: source_exc is unconditionally re-raised below after stop_idle_polling.set()/poller.join();
+    StopIteration and the no-row invariant are also re-raised — no path swallows the
+    exception.
+  expires: '2026-08-24'
+- key: engine/orchestrator/core.py:R6:Orchestrator:_next_source_item_with_idle_timeout_flushes:fp=43a53b04c94c0ad1
+  owner: architecture
+  reason: queue.Empty is the normal 'no idle-poll error occurred' signal from error_queue.get_nowait();
+    it maps to idle_error=None (explicit queue-protocol handling, not exception swallowing).
+  safety: Empty queue means no poller error; a present error is captured into idle_error
+    and re-raised. Real source exceptions arrive via source_exc and are also re-raised.
+  expires: '2026-08-24'
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=92e93f1c4acb3c67
   owner: architecture
   reason: Plugin cleanup MUST attempt every hook even when individual hooks fail —
     the broad catch is required by contract (close()/on_complete() are best-effort
@@ -225,7 +259,7 @@ allow_hits:
     with cause chained to the pending exception so the audit trail preserves both.
     No silent drops. Burndown: filigree elspeth-550362f760 (closed).'
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=b07a148c9ee3fe81
+- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=d5e353e820b53aa2
   owner: bugfix
   pattern: audit-record-fallback
   reason: Tier-3 quarantine boundary — quarantined row data may contain NaN/Infinity
@@ -239,24 +273,7 @@ allow_hits:
     repr_hash is deterministic and recorded as the fallback path; the quarantine audit
     row carries which hash path produced the value.
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_next_source_item_with_idle_timeout_flushes:fetch_next:fp=edcb69d4b30ab3af
-  owner: architecture
-  reason: Worker-thread iterator exhaustion must be translated into an explicit stop
-    sentinel so the orchestrator thread can continue flushing idle aggregation windows
-    before raising StopIteration at the source-consumption boundary.
-  safety: The stop sentinel is consumed immediately by the orchestrator thread and
-    converted back to StopIteration; no source row or exception is dropped.
-  expires: null
-- key: engine/orchestrator/core.py:R4:Orchestrator:_next_source_item_with_idle_timeout_flushes:fetch_next:fp=b004b4080f31a730
-  owner: architecture
-  reason: Source iterator errors raised on the idle-poll worker thread must be relayed
-    through the bounded queue to the orchestrator thread; catching BaseException here
-    preserves KeyboardInterrupt/SystemExit style failures instead of losing them in
-    the daemon thread.
-  safety: Every caught exception is queued as an error result and re-raised unchanged
-    by the orchestrator thread before any row is returned.
-  expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_next_source_item_with_idle_timeout_flushes:fp=de379a7c1e6dd381
+- key: engine/orchestrator/core.py:R6:Orchestrator:_next_source_item_with_idle_timeout_flushes:fp=b4fb381e51bd0bfd
   owner: architecture
   reason: queue.Empty is the idle-poll signal for aggregation timeout flushing while
     a source iterator is blocked; the handler runs the explicit flush path and then
@@ -264,7 +281,7 @@ allow_hits:
   safety: Only queue.Empty is caught. Real source exceptions are delivered through
     the error sentinel and re-raised by the orchestrator thread.
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_run_main_processing_loop:fp=f53fc78d4e344df5
+- key: engine/orchestrator/core.py:R6:Orchestrator:_run_main_processing_loop:fp=299831581906adc3
   owner: architecture
   reason: StopIteration is the normal source exhaustion signal for both direct source
     iteration and the idle-poll helper; the main processing loop uses it to leave

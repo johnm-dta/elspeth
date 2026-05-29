@@ -667,7 +667,7 @@ class TestUpsertNode:
         assert len(result.updated_state.nodes) == 1
         assert "t1" in result.affected_nodes
 
-    def test_rejects_llm_consuming_web_scrape_without_prompt_shield_review(self) -> None:
+    def test_allows_llm_consuming_web_scrape_without_prompt_shield_as_advisory(self) -> None:
         state = CompositionState(
             source=None,
             nodes=(
@@ -724,9 +724,13 @@ class TestUpsertNode:
             catalog,
         )
 
-        assert result.success is False
-        assert result.updated_state is state
-        assert PROMPT_SHIELD_USER_TERM in result.data["error"]
+        # Advisory, not blocking (elspeth-abb2cb0931): the node is accepted because
+        # shield availability is not yet testable. The missing prompt-shield surfaces
+        # as a non-blocking validation warning rather than rejecting the upsert.
+        assert result.success is True
+        warning_text = " ".join(w.message for w in result.updated_state.validate().warnings)
+        assert PROMPT_SHIELD_USER_TERM in warning_text
+        assert "continuing without it is allowed" in warning_text
 
     def test_replaces_existing_node(self) -> None:
         state = _empty_state()

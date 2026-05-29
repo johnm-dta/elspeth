@@ -18,9 +18,8 @@ from typing import TYPE_CHECKING, Any, cast
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.web.composer._compose_loop_carriers import _PersistOutcome
 from elspeth.web.composer.protocol import ComposerPluginCrashError
-from elspeth.web.sessions._persist_payload import RedactedToolRow, _ToolOutcome
-
 from elspeth.web.composer.service import _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS
+from elspeth.web.sessions._persist_payload import RedactedToolRow, _ToolOutcome
 
 if TYPE_CHECKING:
     from elspeth.web.composer.service import ComposerServiceImpl

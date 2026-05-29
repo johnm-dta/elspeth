@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import time
 from collections.abc import Mapping
@@ -57,7 +56,6 @@ from elspeth.web.composer._compose_loop_carriers import (
     _TerminateOutcome,
 )
 from elspeth.web.composer.anti_anchor import AntiAnchorTracker
-from elspeth.web.composer.availability import ComposerAvailability as ComposerAvailability  # re-export; genuine home is availability.py
 from elspeth.web.composer.audit import (
     BufferingRecorder,
     DispatchAudit,
@@ -66,6 +64,7 @@ from elspeth.web.composer.audit import (
     finish_arg_error,
     finish_success,
 )
+from elspeth.web.composer.availability import ComposerAvailability as ComposerAvailability  # re-export; genuine home is availability.py
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.llm_response_parsing import (
     apply_anthropic_cache_markers,
@@ -93,10 +92,6 @@ from elspeth.web.composer.protocol import (
 from elspeth.web.composer.recipe_intent_routing import match_freeform_recipe_intent
 from elspeth.web.composer.skills import assert_skill_hash_unchanged_on_disk, load_skill_with_hash
 from elspeth.web.composer.state import CompositionState, ValidationSummary
-from elspeth.web.composer.state_claim_grounding import (
-    check_state_claim_grounding,
-    compose_grounded_message,
-)
 from elspeth.web.composer.tools import (
     _SESSION_AWARE_TOOL_HANDLERS,
     ADVISOR_TRIGGER_REACTIVE,

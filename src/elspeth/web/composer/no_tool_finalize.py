@@ -17,7 +17,6 @@ from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall
 from elspeth.web.composer.protocol import ComposerResult
 from elspeth.web.composer.service import (
-    _RuntimePreflightCache,
     _blocking_result_from_tool_invocations,
     _compose_empty_state_message,
     _compose_preflight_failure_message,
@@ -25,6 +24,7 @@ from elspeth.web.composer.service import (
     _is_pending_interpretation_handoff,
     _last_mutation_was_pending_proposal,
     _no_mutation_empty_state_validation,
+    _RuntimePreflightCache,
     _state_is_structurally_empty,
     _user_request_expects_pipeline_mutation,
 )

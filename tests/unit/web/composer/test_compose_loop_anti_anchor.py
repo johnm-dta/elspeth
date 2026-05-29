@@ -159,7 +159,7 @@ async def test_three_identical_arg_error_failures_inject_hint_before_fourth_turn
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch(
-            "elspeth.web.composer.service.execute_tool",
+            "elspeth.web.composer.tool_batch.execute_tool",
             side_effect=[arg_error, arg_error, arg_error],
         ),
     ):
@@ -261,7 +261,7 @@ async def test_discovery_success_between_mutation_failures_does_not_break_anchor
 
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
-        patch("elspeth.web.composer.service.execute_tool", side_effect=side_effects),
+        patch("elspeth.web.composer.tool_batch.execute_tool", side_effect=side_effects),
     ):
         mock_llm.side_effect = turns
         await service.compose("Build something", [], state)
@@ -321,7 +321,7 @@ async def test_mutation_success_breaks_anchor() -> None:
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch(
-            "elspeth.web.composer.service.execute_tool",
+            "elspeth.web.composer.tool_batch.execute_tool",
             side_effect=[arg_error, arg_error, mutation_success, arg_error, arg_error],
         ),
     ):
@@ -353,7 +353,7 @@ async def test_two_identical_failures_do_not_inject_hint() -> None:
     with (
         patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         patch(
-            "elspeth.web.composer.service.execute_tool",
+            "elspeth.web.composer.tool_batch.execute_tool",
             side_effect=[arg_error, arg_error],
         ),
     ):

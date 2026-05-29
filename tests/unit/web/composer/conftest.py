@@ -911,7 +911,7 @@ def fake_llm_tool_argument_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _
             raise ToolArgumentError(argument="phase3", expected="valid fixture input", actual_type="invalid")
         return original_execute_tool(tool_name, *args, **kwargs)
 
-    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _execute)
+    monkeypatch.setattr("elspeth.web.composer.tool_batch.execute_tool", _execute)
     return _FakeComposeLLM(
         (
             _fake_llm_response(
@@ -940,7 +940,7 @@ def fake_llm_assertion_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _Fake
             raise AssertionError("phase3 synthetic invariant")
         return original_execute_tool(tool_name, *args, **kwargs)
 
-    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _execute)
+    monkeypatch.setattr("elspeth.web.composer.tool_batch.execute_tool", _execute)
     return _FakeComposeLLM(
         (
             _fake_llm_response(
@@ -968,7 +968,7 @@ def fake_llm_runtime_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _FakeCo
             raise RuntimeError("phase3 synthetic runtime error")
         return original_execute_tool(tool_name, *args, **kwargs)
 
-    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _execute)
+    monkeypatch.setattr("elspeth.web.composer.tool_batch.execute_tool", _execute)
     return _FakeComposeLLM(
         (
             _fake_llm_response(

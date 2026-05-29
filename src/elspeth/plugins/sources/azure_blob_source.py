@@ -31,7 +31,12 @@ from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
-from elspeth.plugins.sources.field_normalization import FieldResolution, normalize_field_name, resolve_field_names
+from elspeth.plugins.sources.field_normalization import (
+    ExternalHeaderError,
+    FieldResolution,
+    normalize_field_name,
+    resolve_field_names,
+)
 from elspeth.plugins.sources.json_source import (
     _contains_surrogateescape_chars,
     _reject_nonfinite_constant,
@@ -615,11 +620,35 @@ class AzureBlobSource(BaseSource):
                     )
                 return
 
-            self._field_resolution = resolve_field_names(
-                raw_headers=raw_headers,
-                field_mapping=self._field_mapping,
-                columns=None,
-            )
+            # External-header faults (normalization collision, empty/duplicate headers)
+            # are Tier 3 (the blob's own header bytes are bad): record + quarantine/
+            # discard like the sibling csv.Error header path above. Config faults (a bad
+            # field_mapping) raise plain ValueError and crash — they are ours.
+            try:
+                self._field_resolution = resolve_field_names(
+                    raw_headers=raw_headers,
+                    field_mapping=self._field_mapping,
+                    columns=None,
+                )
+            except ExternalHeaderError as e:
+                raw_row = {
+                    "__raw_blob_preview__": text_data[:200],
+                    "__encoding__": encoding,
+                }
+                error_msg = f"CSV header could not be resolved: {e}"
+                ctx.record_validation_error(
+                    row=raw_row,
+                    error=error_msg,
+                    schema_mode="parse",
+                    destination=self._on_validation_failure,
+                )
+                if self._on_validation_failure != "discard":
+                    yield SourceRow.quarantined(
+                        row=raw_row,
+                        error=error_msg,
+                        destination=self._on_validation_failure,
+                    )
+                return
             headers = self._field_resolution.final_headers
         elif self._columns is not None:
             self._field_resolution = resolve_field_names(

@@ -1773,6 +1773,51 @@ class TestOpenRouterNanRejection:
         finally:
             transform.close()
 
+    def test_response_missing_model_routes_error_not_fabricated(
+        self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
+        """A response that omits 'model' must NOT be back-filled with the requested model.
+
+        Substituting the requested model fabricates a Tier-3 datum: the audit ``calls``
+        row, the ``{response_field}_model`` pipeline field, and the success metadata would
+        all assert a model the provider never reported, while the recorded raw_response
+        contains no model — two contradictory sources of truth. The provider must instead
+        record the malformed response and raise, routing the row to on_error (mirroring the
+        Azure provider's ``_validate_provider_response_model``).
+        """
+        no_model_body = (
+            '{"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], '
+            '"usage": {"prompt_tokens": 10, "completion_tokens": 25}}'
+        )
+        response = _create_mock_response(
+            chaosllm_server, raw_body=no_model_body, status_code=200, headers={"content-type": "application/json"}
+        )
+
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
+        init_ctx = make_context(landscape=mock_factory)
+        transform.on_start(init_ctx)
+        transform.connect_output(collector, max_pending=10)
+
+        token = make_token("row-1")
+        ctx = make_context(run_id="test", state_id="test-state", token=token, landscape=mock_factory)
+
+        try:
+            with mock_httpx_client(chaosllm_server, response=response):
+                transform.accept(make_pipeline_row({"text": "hello"}), ctx)
+                transform.flush_batch_processing(timeout=10.0)
+
+            assert len(collector.results) == 1
+            _, result, _ = collector.results[0]
+            assert isinstance(result, TransformResult)
+            assert result.status == "error"
+            assert result.reason is not None
+            assert result.reason["reason"] == "llm_call_failed"
+            assert "model" in result.reason["error"].lower()
+            # No fabricated model leaked into an output row.
+            assert result.row is None
+        finally:
+            transform.close()
+
 
 class TestOpenRouterMalformedUtf8:
     """Regression: Invalid UTF-8 in API response must fail, not silently mutate.

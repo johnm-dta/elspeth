@@ -186,14 +186,9 @@ class OpenRouterConfig(LLMConfig):
         if not catalog:
             hint = get_catalog_missing_dep_hint(MODEL_CATALOG_OPENROUTER)
             remediation = (
-                hint
-                if hint is not None
-                else "install the optional dependency that provides the catalog or pin a static catalog snapshot"
+                hint if hint is not None else "install the optional dependency that provides the catalog or pin a static catalog snapshot"
             )
-            raise ValueError(
-                f"catalog '{MODEL_CATALOG_OPENROUTER}' is empty or unavailable; cannot verify field value "
-                f"({remediation})"
-            )
+            raise ValueError(f"catalog '{MODEL_CATALOG_OPENROUTER}' is empty or unavailable; cannot verify field value ({remediation})")
 
         if self.model not in catalog:
             raise ValueError(
@@ -434,14 +429,24 @@ class OpenRouterLLMProvider:
             raw_finish_reason = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
             finish_reason = parse_finish_reason(str(raw_finish_reason)) if raw_finish_reason is not None else None
 
-            # Extract model (provider may return different model than requested).
-            # Missing 'model' field → fall back to the requested model.
-            # The full response is already recorded in the audit trail via
-            # AuditedHTTPClient.record_call(), so the absence is diagnosable there.
-            if isinstance(data, dict) and "model" in data:
-                response_model = data["model"]
-            else:
-                response_model = model
+            # Extract model. The provider MUST report which model served the request.
+            # Substituting the requested model would FABRICATE a Tier-3 datum: the
+            # audited `calls` row, the `{response_field}_model` pipeline field, and the
+            # success metadata would all assert a model the provider never reported,
+            # while the recorded raw_response carries no model — two contradictory
+            # sources of truth (CLAUDE.md Data Manifesto: inference from absence is
+            # fabrication, not coercion). Mirror the Azure provider
+            # (_validate_provider_response_model): record + raise so the row routes to
+            # on_error, rather than recording a confident wrong answer.
+            raw_model = data["model"] if isinstance(data, dict) and "model" in data else None
+            if not isinstance(raw_model, str) or not raw_model.strip():
+                missing_desc = "missing" if raw_model is None else f"{type(raw_model).__name__}/empty"
+                raise LLMClientError(
+                    f"LLM response 'model' is {missing_desc}, expected non-empty str. "
+                    f"Provider returned malformed data at the Tier 3 boundary.",
+                    retryable=False,
+                )
+            response_model = raw_model
 
             result = LLMQueryResult(
                 content=content,

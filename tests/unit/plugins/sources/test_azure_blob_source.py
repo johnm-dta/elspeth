@@ -234,6 +234,24 @@ class TestAzureBlobSourceCSV:
         assert rows[1].row["name"] == "bob"
         assert rows[2].row["value"] == "300"
 
+    def test_header_normalization_collision_quarantined_not_crash(self, ctx: PluginContext) -> None:
+        """External CSV header collision in a blob is Tier-3 bad data: quarantined, not crashed.
+
+        ``"User ID"`` and ``"user-id"`` both normalize to ``user_id``. Like the local CSV
+        source, the blob source records the parse-level failure and quarantines a single
+        header row rather than raising an uncaught ValueError that aborts the run.
+        """
+        csv_bytes = b"User ID,user-id,data\n1,2,3\n"
+        source = _make_source(_base_config())
+
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(csv_bytes)):
+            rows = list(source.load(ctx))
+
+        assert len(rows) == 1
+        assert rows[0].is_quarantined is True
+        assert rows[0].quarantine_error is not None
+        assert "collision" in rows[0].quarantine_error.lower()
+
     def test_custom_delimiter(self, ctx: PluginContext) -> None:
         """CSV with semicolon delimiter."""
         csv_bytes = b"id;name\n1;alice\n"

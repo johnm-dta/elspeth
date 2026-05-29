@@ -27,7 +27,7 @@ from elspeth.contracts.schema_contract_factory import create_contract_from_confi
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import TabularSourceDataConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
-from elspeth.plugins.sources.field_normalization import FieldResolution, resolve_field_names
+from elspeth.plugins.sources.field_normalization import ExternalHeaderError, FieldResolution, resolve_field_names
 
 
 class CSVSourceConfig(TabularSourceDataConfig):
@@ -386,13 +386,39 @@ class CSVSource(BaseSource):
                         destination=self._on_validation_failure,
                     )
                 return
-        # Resolve field names (normalization + mapping)
-        # This may raise ValueError on collision
-        self._field_resolution = resolve_field_names(
-            raw_headers=raw_headers,
-            field_mapping=self._field_mapping,
-            columns=self._columns,
-        )
+        # Resolve field names (normalization + mapping).
+        # External-header faults (normalization collision, empty/duplicate headers) are
+        # Tier 3 (the source's own header bytes are bad): record + quarantine/discard
+        # like a malformed data row — a collision means no rows are parseable. Config
+        # faults (a bad field_mapping) raise plain ValueError and crash; they are ours.
+        try:
+            self._field_resolution = resolve_field_names(
+                raw_headers=raw_headers,
+                field_mapping=self._field_mapping,
+                columns=self._columns,
+            )
+        except ExternalHeaderError as e:
+            # ExternalHeaderError is only raised on the normalization path, which
+            # resolve_field_names takes exclusively when raw_headers is not None.
+            assert raw_headers is not None, "ExternalHeaderError implies raw_headers was present"
+            raw_row = {
+                "file_path": str(self._path),
+                "__raw_line__": self._delimiter.join(raw_headers),
+            }
+            error_msg = f"CSV header could not be resolved: {e}"
+            ctx.record_validation_error(
+                row=raw_row,
+                error=error_msg,
+                schema_mode="parse",
+                destination=self._on_validation_failure,
+            )
+            if self._on_validation_failure != "discard":
+                yield SourceRow.quarantined(
+                    row=raw_row,
+                    error=error_msg,
+                    destination=self._on_validation_failure,
+                )
+            return
         headers = self._field_resolution.final_headers
         expected_count = len(headers)
 

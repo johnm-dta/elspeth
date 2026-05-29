@@ -275,7 +275,26 @@ class FieldMapper(BaseTransform):
         applied_mappings: dict[str, str] = {}
         for source, target in self._mapping.items():
             if "." in source:
-                value = get_nested_field(row_data, source)
+                # Dotted-path navigation is an operation on Tier-2 row values, not a
+                # type-contract check. Contracts are flat (no nested-shape guarantee),
+                # so a PRESENT non-dict intermediate (e.g. ``user`` is a str when the
+                # mapping expects ``user.name``) is operation-unsafe data, not an
+                # upstream type-contract violation. Route the offending row to on_error
+                # — recorded and attributable — rather than raising and crashing the
+                # whole run on a single malformed nested value. A genuinely absent
+                # intermediate still returns MISSING (handled below), preserving the
+                # strict/non-strict distinction for true absence.
+                try:
+                    value = get_nested_field(row_data, source)
+                except TypeError as exc:
+                    return TransformResult.error(
+                        {
+                            "reason": "type_mismatch",
+                            "field": source,
+                            "error": str(exc),
+                            "message": f"Dotted-path field '{source}' is not navigable on this row: {exc}",
+                        }
+                    )
             elif source in row:
                 value = row[source]
             else:

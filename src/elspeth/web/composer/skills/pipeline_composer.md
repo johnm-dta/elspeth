@@ -234,6 +234,20 @@ same turn by the same actor (you), so disagreement is silent corruption rather
 than a validator-visible error. Apply the following rules unconditionally for
 generated content.
 
+- **Author free-text generated sources as JSON, not CSV — this is a rule, not a
+  preference.** Agency names, page titles, descriptions, and sentences routinely
+  contain commas, quotes, or apostrophes. In CSV those characters are
+  delimiter-significant and a single unquoted comma splits the row, producing a
+  column-count mismatch that the source silently discards (or quarantines) — the
+  canonical "5 rows requested, 2 arrived" failure. JSON has no delimiter inside
+  string values, so it is comma-safe by construction. **When ANY value in a source
+  you author yourself is free text (a name, title, description, or sentence — not a
+  bare number, single identifier, or plain URL), you MUST use the `json` source: a
+  bare top-level array of objects. Do NOT use `csv` for free-text generated
+  content.** Reserve generated `csv` only for sources where every value is
+  guaranteed delimiter-free. This rule exists because CSV quoting of generated
+  values is error-prone for the model authoring them; JSON removes the failure mode
+  entirely.
 - **CSV.** Always write a header row as the first non-skipped line of the
   generated CSV, and always leave `source.options.columns` unset. `columns` and a
   header row are mutually exclusive: when `columns` is set, `csv` source treats
@@ -242,10 +256,18 @@ generated content.
   Headered mode (no `columns`) is the only correct shape for generated CSV.
   Declare the same column names in `schema.fields` or `schema.guaranteed_fields`
   so the header, the source options, and the source contract all agree.
+  **Quote every value that contains the delimiter (comma), a double-quote, or a
+  newline, per RFC 4180:** wrap the field in double-quotes and double any embedded
+  double-quote (`Department of Health, Aged Care` → `"Department of Health, Aged Care"`;
+  `She said "hi"` → `"She said ""hi"""`). An unquoted delimiter in a value is the
+  dominant cause of dropped generated rows. If you cannot reliably quote the values,
+  use JSON instead.
 - **JSON.** Emit a bare top-level JSON array of objects (or JSONL with one object
   per line). Do not wrap in `{"results": [...]}` or any other envelope; the
   envelope forces a `data_key` you do not need. Every object must carry the same
-  keys; declare those keys in the source schema.
+  keys; declare those keys in the source schema. JSON is the preferred format for
+  any generated source carrying free-text values (see above) precisely because it
+  needs no delimiter escaping.
 - **Text.** Emit one data record per line with no header line — `text` source
   treats every non-blank line as a data row. Pick a `column` value that names
   what each line contains (e.g. `url`, `prompt`, `line_text`); it must be a valid

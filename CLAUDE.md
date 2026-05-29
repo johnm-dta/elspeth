@@ -292,6 +292,31 @@ Resolution options in priority order:
 
 **When something is removed or changed, DELETE THE OLD CODE COMPLETELY.** No version checks, feature flags for old behaviour, adapter/wrapper/proxy shims, `@deprecated` retentions, commented-out "for reference" blocks, or "both old and new" branches. Don't rename unused variables to `_var` — delete them. Don't keep old code in comments — git history exists. Change all call sites in the same commit.
 
+## CICD Judge Gate: HMAC Key Custody
+
+The cicd-judge allowlist gate signs judge metadata with a **symmetric** HMAC key
+(`ELSPETH_JUDGE_METADATA_HMAC_KEY`). Symmetric means **every key holder can forge
+a valid signature** — so the gate's entire security reduces to one custody rule:
+
+**The signing key is operator-only. It MUST NOT be present in any autonomous
+agent's environment** (`.env` files an agent can read, agent CI contexts, dev
+shells an agent drives).
+
+An agent that holds the key can bypass the judge entirely: hand-write
+`judge_verdict: ACCEPTED` with a fabricated rationale and a correct
+(publicly-computable) `file_fingerprint`/`ast_path`, compute a valid signature,
+and pass **every** automated gate — putting a forged-but-validly-signed verdict
+into the audit trail, indistinguishable from a real one. The HMAC stops a
+*keyless* agent and makes tampering of signed entries detectable; it does nothing
+against a key-holding agent.
+
+Therefore: an agent may *propose* an `elspeth-lints justify` invocation; only an
+operator-held environment runs it and signs. CI verifies signatures with the key
+as a GitHub Actions secret (withheld from fork PRs by design — see the
+`shape-only-when-key-missing` verify mode and its load-time warning). A future
+asymmetric scheme (agents can verify, not sign) would remove this surface
+structurally.
+
 ## Git Safety
 
 **Never run destructive git commands without explicit user permission:**

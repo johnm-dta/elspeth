@@ -40,7 +40,7 @@ jobs:
           REDACTION_PATHS=(
             "src/elspeth/web/composer/redaction.py"
             "src/elspeth/web/composer/redaction_telemetry.py"
-            "src/elspeth/web/composer/tools.py"
+            "src/elspeth/web/composer/tools/"
             "tests/unit/web/composer/redaction_policy_snapshot.json"
             "tests/unit/web/composer/test_adequacy_guard.py"
             "tests/unit/web/composer/test_walk_model_schema.py"

@@ -20,6 +20,7 @@ from elspeth.web.composer.tutorial_service import (
     TutorialRunIntegrityError,
     _cache_seed_skip_reason,
     _coalesce_run_source_hashes,
+    _count_discarded_rows,
     _normalise_bare_required_field_templates,
     _normalise_current_tutorial_state_for_execution,
     _parse_rows_file,
@@ -33,6 +34,7 @@ from elspeth.web.composer.tutorial_service import (
 from elspeth.web.config import WebSettings
 from elspeth.web.preferences.tutorial_cache import TutorialCache
 from elspeth.web.sessions.protocol import CompositionStateRecord, RunRecord
+from tests.fixtures.landscape import make_factory, make_landscape_db
 
 
 def _make_tutorial_settings(data_dir: Path, **overrides: Any) -> WebSettings:
@@ -140,6 +142,54 @@ def test_normalise_bare_required_field_templates_thaws_frozen_state_nodes() -> N
     assert normalised is not None
     options = cast(dict[str, Any], normalised[0]["options"])
     assert options["prompt_template"] == "Content: {{ row.content }}"
+
+
+def test_count_discarded_rows_counts_only_discard_destination() -> None:
+    """_count_discarded_rows counts validation_errors whose destination is the
+    'discard' sentinel, NOT quarantine-to-a-sink rows (which have a visible
+    destination). This is what the tutorial UX surfaces so source-dropped rows
+    are not silently invisible."""
+    from elspeth.contracts.schema import SchemaConfig
+
+    db = make_landscape_db()
+    factory = make_factory(db)
+    run_id = "run-discard-count"
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+    factory.data_flow.register_node(
+        run_id=run_id,
+        plugin_name="csv",
+        node_type=NodeType.SOURCE,
+        plugin_version="1.0",
+        config={},
+        node_id="source-0",
+        schema_config=SchemaConfig.from_dict({"mode": "observed"}),
+    )
+    for i in range(2):
+        factory.data_flow.record_validation_error(
+            run_id=run_id,
+            node_id="source-0",
+            row_data={"i": i},
+            error="comma split the row",
+            schema_mode="parse",
+            destination="discard",
+        )
+    # A quarantined-to-a-sink row must NOT be counted as discarded.
+    factory.data_flow.record_validation_error(
+        run_id=run_id,
+        node_id="source-0",
+        row_data={"i": 99},
+        error="bad value",
+        schema_mode="parse",
+        destination="quarantine_sink",
+    )
+
+    with db.connection() as conn:
+        assert _count_discarded_rows(conn, run_id) == 2
+
+    other = "run-clean"
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=other)
+    with db.connection() as conn:
+        assert _count_discarded_rows(conn, other) == 0
 
 
 def test_coalesce_run_source_hashes_aggregates_row_hashes() -> None:

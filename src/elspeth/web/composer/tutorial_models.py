@@ -28,6 +28,13 @@ class TutorialRunOutput(BaseModel):
 
     rows: tuple[dict[str, Any], ...]
     source_data_hash: str
+    # Count of rows the source DISCARDED at the boundary (on_validation_failure=
+    # "discard"): recorded in the Landscape validation_errors trail but absent from
+    # ``rows``. Surfaced so the UX can show "N rows dropped at source" rather than
+    # silently presenting only the survivors (the "5 requested, 2 arrived" gap).
+    # Quarantined-to-a-sink rows are NOT counted here — those have a visible
+    # destination. Defaults to 0 (e.g. cache-replayed clean runs).
+    discarded_row_count: int = Field(default=0, ge=0)
 
 
 class TutorialRunResponse(BaseModel):

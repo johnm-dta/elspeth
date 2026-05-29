@@ -30,6 +30,7 @@ from elspeth.core.landscape.schema import (
     operations_table,
     rows_table,
     runs_table,
+    validation_errors_table,
 )
 from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
 from elspeth.plugins.infrastructure.discovery import discover_all_plugins
@@ -405,6 +406,7 @@ def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landsca
         db.connection() as conn,
     ):
         llm_call_count = _count_calls_for_run(conn, landscape_run_id)
+        discarded_row_count = _count_discarded_rows(conn, landscape_run_id)
         conn.execute(
             update(runs_table)
             .where(runs_table.c.run_id == landscape_run_id)
@@ -439,7 +441,11 @@ def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landsca
         run_id=run_id,
     )
     return _LiveTutorialProjection(
-        output=TutorialRunOutput(rows=tuple(rows), source_data_hash=source_data_hash),
+        output=TutorialRunOutput(
+            rows=tuple(rows),
+            source_data_hash=source_data_hash,
+            discarded_row_count=discarded_row_count,
+        ),
         llm_call_count=llm_call_count,
     )
 
@@ -464,6 +470,26 @@ def _count_calls_for_run(conn: Any, landscape_run_id: str) -> int:
         .where(operations_table.c.run_id == landscape_run_id)
     ).scalar_one()
     return int(state_call_count) + int(operation_call_count)
+
+
+def _count_discarded_rows(conn: Any, landscape_run_id: str) -> int:
+    """Count rows the source DISCARDED for this run.
+
+    A discarded row is a Landscape validation_errors entry whose ``destination`` is
+    the sentinel ``"discard"`` (as opposed to a sink name, which is a quarantine with
+    a visible destination). These rows are recorded for audit but never reach the
+    output, so the tutorial UX must surface their count to avoid silently presenting
+    only the survivors.
+    """
+    discarded = conn.execute(
+        select(func.count())
+        .select_from(validation_errors_table)
+        .where(
+            validation_errors_table.c.run_id == landscape_run_id,
+            validation_errors_table.c.destination == "discard",
+        )
+    ).scalar_one()
+    return int(discarded)
 
 
 _ROW_FORMAT_SUFFIXES = frozenset({".csv", ".tsv", ".jsonl", ".ndjson", ".json"})

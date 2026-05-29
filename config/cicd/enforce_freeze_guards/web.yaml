@@ -8,3 +8,17 @@ per_file_rules:
     and creates a new object that is no longer the original frozen reference
   expires: null
   max_hits: 1
+- pattern: web/composer/tool_batch.py
+  rules:
+  - FG3
+  reason: ToolBatchContext.discovery_cache and runtime_preflight_cache are intentionally
+    NOT deep-frozen. They are driver-owned, long-lived mutable caches created once in
+    _compose_loop and threaded through the frozen context by reference; run_tool_batch
+    writes into them (discovery_cache[cache_key] = ... and the runtime-preflight cache
+    population) so that results computed in one batch are visible to later batches of
+    the same compose call. The frozen=True on ToolBatchContext is the correct lifecycle
+    statement — the field *references* are batch-invariant — but deep-freezing the cache
+    *contents* would break the cache-write behaviour that is the whole reason the caches
+    are passed through the context. Documented at the field in tool_batch.py.
+  expires: null
+  max_hits: 1

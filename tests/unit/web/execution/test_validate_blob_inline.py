@@ -15,6 +15,7 @@ from pydantic import SecretBytes
 
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.hashing import stable_hash
+from elspeth.core.dag.graph import ExecutionGraph
 from elspeth.web.blobs.protocol import BlobNotFoundError, BlobRecord
 from elspeth.web.composer import yaml_generator as composer_yaml_generator
 from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
@@ -174,22 +175,28 @@ def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
 ) -> None:
     session_id = uuid4()
 
-    def load_settings(yaml_text: str) -> MagicMock:
+    def load_settings(yaml_text: str) -> SimpleNamespace:
         doc = yaml.safe_load(yaml_text)
         prompt_template = doc["transforms"][0]["options"]["prompt_template"]
         assert type(prompt_template) is str
         assert "blob_ref" not in yaml_text
         assert "inline_content" not in yaml_text
-        return MagicMock()
+        return SimpleNamespace()
 
     mock_load_settings.side_effect = load_settings
-    mock_bundle = MagicMock()
-    mock_bundle.source = MagicMock()
-    mock_bundle.transforms = ()
-    mock_bundle.sinks = {"results": MagicMock()}
-    mock_bundle.aggregations = {}
+    # Structural fakes (not mocks): instantiate/build_graph/assemble are all
+    # patched, so the bundle and graph are threaded through opaquely — a plain
+    # SimpleNamespace is honest and keeps the unspecced-mock debt from growing.
+    mock_bundle = SimpleNamespace(
+        source=SimpleNamespace(),
+        transforms=(),
+        sinks={"results": SimpleNamespace()},
+        aggregations={},
+    )
     mock_instantiate.return_value = mock_bundle
-    mock_graph = MagicMock()
+    # spec=ExecutionGraph keeps auto-method behaviour (validate, edge checks…)
+    # while satisfying the unspecced-mock discipline gate.
+    mock_graph = MagicMock(spec=ExecutionGraph)
     mock_build_graph.return_value = mock_graph
 
     result = validate_pipeline(

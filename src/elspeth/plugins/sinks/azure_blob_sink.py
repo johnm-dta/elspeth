@@ -603,6 +603,21 @@ class AzureBlobSink(BaseSink):
         output_rows = rows
         if self._format in {"json", "jsonl"}:
             output_rows = apply_display_headers(self, rows)
+            # A value that can't be encoded as standard JSON (NaN/Infinity, or a
+            # non-serializable object) is a per-row Tier-2/3 data fault, NOT a code
+            # bug: divert that row (recorded + routed per on_write_failure) so one bad
+            # value doesn't abort the whole blob upload. The blob upload stays
+            # all-or-nothing — but over the GOOD rows. CSV is unaffected (csv writes
+            # non-finite floats as text, so no serialization crash occurs there).
+            serializable_rows: list[dict[str, Any]] = []
+            for i, output_row in enumerate(output_rows):
+                try:
+                    json.dumps(output_row, allow_nan=False)
+                except (ValueError, TypeError) as exc:
+                    self._divert_row(rows[i], row_index=i, reason=f"JSON serialization failed: {exc}")
+                    continue
+                serializable_rows.append(output_row)
+            output_rows = serializable_rows
 
         # Render the blob path once per instance and reuse it across writes.
         rendered_path = self._get_or_init_blob_path(ctx)
@@ -710,7 +725,8 @@ class AzureBlobSink(BaseSink):
                 path_or_uri=f"azure://{self._container}/{rendered_path}",
                 content_hash=content_hash,
                 size_bytes=size_bytes,
-            )
+            ),
+            diversions=self._get_diversions(),
         )
 
     def flush(self) -> None:

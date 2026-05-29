@@ -24,7 +24,7 @@ only to be rejected pre-token at /execute.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID
 

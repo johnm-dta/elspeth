@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import nullcontext
-from datetime import UTC, datetime
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest

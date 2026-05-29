@@ -1735,6 +1735,38 @@ def test_justify_rejects_non_substantive_owner(tmp_path: Path, capsys: pytest.Ca
     assert "non-empty" in captured.err or "audit identity" in captured.err or "single-line" in captured.err
 
 
+def test_justify_rejects_overlong_owner(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """An unbounded --owner is rejected: it is a short identity, not free text.
+
+    An owner is recorded verbatim, folded into the grandfathering discriminator,
+    and replayed into future judge prompts via similar_entries; an unbounded value
+    bloats all three. The cap (200 chars) keeps it a name, not a payload.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "tier-3 boundary",
+        "--owner",
+        "a" * 201,
+    ]
+    with pytest.raises(SystemExit) as exc_info:
+        main(argv)
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "--owner" in captured.err
+    assert "at most 200 characters" in captured.err
+
+
 def test_justify_rejects_overlong_rationale(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Operator rationale is bounded before it can reach the judge prompt."""
     root, _target = _build_source_tree(tmp_path)

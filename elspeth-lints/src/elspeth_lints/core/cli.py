@@ -39,6 +39,9 @@ OPERATOR_OVERRIDE_TOKEN_SHA256_ENV = "ELSPETH_JUDGE_OVERRIDE_TOKEN_SHA256"
 OPERATOR_OVERRIDE_MIN_TOKEN_BYTES = 20
 
 
+_MAX_AUDIT_IDENTITY_LENGTH = 200
+
+
 def _non_empty_string(value: str) -> str:
     """Argparse ``type=`` callable that rejects empty / whitespace-only input.
 
@@ -66,6 +69,13 @@ def _non_empty_string(value: str) -> str:
             "must be a substantive audit identity with at least two "
             "alphanumeric characters; values like 'x', '.', '~', or '-' "
             "cannot safely distinguish rotation-grandfathered entries."
+        )
+    if len(value) > _MAX_AUDIT_IDENTITY_LENGTH:
+        raise argparse.ArgumentTypeError(
+            f"must be at most {_MAX_AUDIT_IDENTITY_LENGTH} characters; an audit "
+            "identity is a short owner/reviewer name, not free text. An unbounded "
+            "value bloats the entry, the grandfathering discriminator, and the "
+            "text replayed verbatim into future judge prompts."
         )
     return value
 

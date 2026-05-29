@@ -1,14 +1,21 @@
-"""Characterization tests pinning every terminal arm of _dispatch_tool_batch.
+"""Characterization tests for the ARG_ERROR pre-dispatch arms of _dispatch_tool_batch.
 
-These tests assert the audit-envelope status (ComposerToolStatus), the
-anti-anchor side-effect, and the LLM tool-message shape for each arm. They
-exist to make the Phase-2 verbatim extraction of the dispatch loop provably
-behaviour-preserving for the audit trail — a dropped or reordered
-recorder.record(finish_*) on any arm must turn one of these RED.
+This file pins arms #1, #2, and #5 of the dispatch loop (the inventory of
+terminal arms is completed cumulatively across the Phase-1 characterization
+tasks; this file is one task in that set). For each arm covered here the test
+asserts the audit-envelope status (``ComposerToolStatus``), the recorded
+``error_class`` on the ``_ToolOutcome``, and that exactly one invocation was
+buffered. They exist to make the Phase-2 verbatim extraction of the dispatch
+loop provably behaviour-preserving for the audit trail — a dropped or reordered
+``recorder.record(finish_*)`` on any covered arm, or a rerouted exception
+handler that changes the recorded ``error_class``, must turn one of these RED.
 
-Driver: ComposerServiceImpl._run_one_turn_for_test(llm=...). The returned
-ComposeLoopTestResult exposes .tool_invocations (the recorder buffer) and
-.tool_outcomes.
+Observable surface: the ``_run_one_turn_for_test`` driver returns a
+``ComposeLoopTestResult`` exposing only ``.tool_invocations`` (the recorder
+buffer of ``ComposerToolInvocation`` records) and ``.tool_outcomes`` (the
+``_ToolOutcome`` records). Anti-anchor state and the per-call LLM tool-message
+content are NOT observable through this driver, so these tests do not assert on
+them.
 
 Arms characterised here:
   #1 — JSON-decode failure (service.py ARG_ERROR pre-dispatch site 1/3)
@@ -18,22 +25,27 @@ Arms characterised here:
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import pytest
 
 from elspeth.contracts.composer_audit import ComposerToolStatus
 from elspeth.web.composer.service import ComposerServiceImpl
 
-from .conftest import _FakeComposeLLM, _fake_llm_response
+from .conftest import (
+    _FakeChoice,
+    _FakeComposeLLM,
+    _FakeFunction,
+    _FakeLLMResponse,
+    _FakeMessage,
+    _FakeToolCall,
+    _fake_llm_response,
+)
 
 
 def _raw_tool_call_llm(*, name: str, raw_arguments: str) -> _FakeComposeLLM:
     """LLM whose first turn emits ONE tool call with a raw (already-encoded)
     arguments string, bypassing _fake_llm_response's json.dumps. Used to inject
     malformed JSON / non-object payloads the decode arms must reject."""
-    from .conftest import _FakeChoice, _FakeFunction, _FakeLLMResponse, _FakeMessage, _FakeToolCall
-
     first = _FakeLLMResponse(
         choices=[
             _FakeChoice(
@@ -52,16 +64,21 @@ async def test_arm_json_decode_failure_records_arg_error(
     fake_composer_service: ComposerServiceImpl,
     result_session_id: str,
 ) -> None:
-    """Arm #1: JSON-decode failure → ARG_ERROR recorded in audit envelope.
+    """Arm #1: JSON-decode failure → ARG_ERROR with error_class 'JSONDecodeError'.
 
     Service.py ARG_ERROR pre-dispatch site 1/3 (lines ~2401-2444).
     The dispatch loop catches ``json.JSONDecodeError`` / ``TypeError``,
     opens the audit envelope via ``begin_dispatch``, and records
     ``finish_arg_error`` with ``error_class=type(exc).__name__``.
 
-    Pinning: exactly 1 invocation (the one malformed call), all with
-    ARG_ERROR status, and at least one outcome carrying a non-None
-    error_class proving the error was recorded truthfully.
+    Empirically observed: a malformed ``"{not valid json"`` payload raises
+    ``json.JSONDecodeError``, so ``error_class == "JSONDecodeError"`` is the
+    value recorded on the ``_ToolOutcome``. A loose ``is not None`` assertion
+    would not catch a rerouted handler (e.g. one that recorded TypeError or a
+    generic ARG_ERROR), so this pins the exact class string.
+
+    Pinning: exactly 1 invocation (the one malformed call), ARG_ERROR status,
+    and the outcome carries error_class == "JSONDecodeError".
     """
     llm = _raw_tool_call_llm(name="get_pipeline_state", raw_arguments="{not valid json")
     result = await fake_composer_service._run_one_turn_for_test(llm=llm, session_id=result_session_id)
@@ -73,8 +90,10 @@ async def test_arm_json_decode_failure_records_arg_error(
     assert ComposerToolStatus.ARG_ERROR in statuses, (
         f"ARG_ERROR not in recorded statuses {statuses!r}; audit trail did not record the decode failure"
     )
-    assert any(o.error_class is not None for o in result.tool_outcomes), (
-        "No outcome has a non-None error_class; the ARG_ERROR arm did not populate error_class in _ToolOutcome"
+    error_classes = [o.error_class for o in result.tool_outcomes]
+    assert any(ec == "JSONDecodeError" for ec in error_classes), (
+        f"No outcome has error_class='JSONDecodeError'; got {error_classes!r}. "
+        "The JSON-decode ARG_ERROR arm may have been rerouted — inspect service.py:2424."
     )
 
 
@@ -83,7 +102,7 @@ async def test_arm_non_dict_arguments_records_arg_error(
     fake_composer_service: ComposerServiceImpl,
     result_session_id: str,
 ) -> None:
-    """Arm #2: valid JSON but non-dict (list) arguments → ARG_ERROR recorded.
+    """Arm #2: valid JSON but non-dict (list) arguments → ARG_ERROR with error_class 'TypeError'.
 
     Service.py ARG_ERROR pre-dispatch site 2/3 (lines ~2446-2495).
     The LLM produced syntactically valid JSON, but it decoded to a list
@@ -92,11 +111,13 @@ async def test_arm_non_dict_arguments_records_arg_error(
     the canonicalization exception class (when it fails — not the case for
     a plain list).
 
-    Observed behaviour: a JSON list ``[1, 2, 3]`` canonicalizes cleanly via
-    ``begin_dispatch_or_arg_error`` (wraps under ``_decoded_non_object``),
-    so ``error_class="TypeError"`` is recorded (service.py:2465).
+    Empirically observed: a JSON list ``[1, 2, 3]`` canonicalizes cleanly via
+    ``begin_dispatch_or_arg_error`` (wraps under ``_decoded_non_object``), so
+    ``error_class == "TypeError"`` is recorded (service.py:2465). A loose
+    ``is not None`` assertion would not catch a rerouted handler, so this pins
+    the exact class string.
 
-    Pinning: exactly 1 invocation, ARG_ERROR status, non-None error_class.
+    Pinning: exactly 1 invocation, ARG_ERROR status, error_class == "TypeError".
     """
     llm = _raw_tool_call_llm(name="get_pipeline_state", raw_arguments=json.dumps([1, 2, 3]))
     result = await fake_composer_service._run_one_turn_for_test(llm=llm, session_id=result_session_id)
@@ -108,8 +129,10 @@ async def test_arm_non_dict_arguments_records_arg_error(
     assert ComposerToolStatus.ARG_ERROR in statuses, (
         f"ARG_ERROR not in recorded statuses {statuses!r}; audit trail did not record the non-dict-args failure"
     )
-    assert any(o.error_class is not None for o in result.tool_outcomes), (
-        "No outcome has a non-None error_class; the non-dict-args ARG_ERROR arm did not populate error_class"
+    error_classes = [o.error_class for o in result.tool_outcomes]
+    assert any(ec == "TypeError" for ec in error_classes), (
+        f"No outcome has error_class='TypeError'; got {error_classes!r}. "
+        "The non-dict-args ARG_ERROR arm may have been rerouted — inspect service.py:2465."
     )
 
 

@@ -256,7 +256,7 @@ def _build_runtime_graph(
     instances = instantiate_plugins_from_config(config)
     return ExecutionGraph.from_plugin_instances(
         sources=instances.sources,
-        source_settings_map={"primary": instances.source_settings},
+        source_settings_map=instances.source_settings_map,
         transforms=instances.transforms,
         sinks=instances.sinks,
         aggregations=instances.aggregations,

@@ -200,7 +200,7 @@ allow_hits:
     not hide primary pipeline work, does not log raw exception text, and is covered
     by tests/unit/engine/test_best_effort.py::test_best_effort_suppresses_logger_failures."
   expires: null
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=4554eb8c5690f3b0
+- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=5a8d608f6bc5b301
   owner: architecture
   reason: "Plugin cleanup MUST attempt every hook even when individual hooks fail \u2014
     the broad catch is required by contract (close()/on_complete() are best-effort
@@ -216,7 +216,7 @@ allow_hits:
     trail preserves both. No silent drops. Burndown: filigree elspeth-550362f760
     (closed)."
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=beff030913968c36
+- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=797c085e662d1790
   owner: bugfix
   pattern: audit-record-fallback
   reason: "Tier-3 quarantine boundary \u2014 quarantined row data may contain NaN/Infinity

@@ -1,14 +1,13 @@
-"""Characterization tests for the ARG_ERROR pre-dispatch arms of _dispatch_tool_batch.
+"""Characterization tests for the terminal arms of _dispatch_tool_batch.
 
-This file pins arms #1, #2, and #5 of the dispatch loop (the inventory of
-terminal arms is completed cumulatively across the Phase-1 characterization
-tasks; this file is one task in that set). For each arm covered here the test
-asserts the audit-envelope status (``ComposerToolStatus``), the recorded
-``error_class`` on the ``_ToolOutcome``, and that exactly one invocation was
-buffered. They exist to make the Phase-2 verbatim extraction of the dispatch
-loop provably behaviour-preserving for the audit trail — a dropped or reordered
-``recorder.record(finish_*)`` on any covered arm, or a rerouted exception
-handler that changes the recorded ``error_class``, must turn one of these RED.
+This file pins arms #1, #2, #4, #5, #7, #8, #9, #10, and #17 of the dispatch
+loop. For each arm covered here the test asserts the audit-envelope status
+(``ComposerToolStatus``), the recorded ``error_class`` on the ``_ToolOutcome``
+(where applicable), and that invocations were buffered. They exist to make the
+Phase-2 verbatim extraction of the dispatch loop provably behaviour-preserving
+for the audit trail — a dropped or reordered ``recorder.record(finish_*)`` on
+any covered arm, or a rerouted exception handler that changes the recorded
+``error_class``, must turn one of these RED.
 
 Observable surface: the ``_run_one_turn_for_test`` driver returns a
 ``ComposeLoopTestResult`` exposing only ``.tool_invocations`` (the recorder
@@ -17,19 +16,64 @@ buffer of ``ComposerToolInvocation`` records) and ``.tool_outcomes`` (the
 content are NOT observable through this driver, so these tests do not assert on
 them.
 
+Arm #10 (advisor COMPOSE_TIMEOUT pre-call deadline check, service.py ~line
+2900) is NOT covered here. The check raises ``ComposerConvergenceError``, which
+is an unhandled exception from ``_run_one_turn_for_test`` — it does not return
+a ``ComposeLoopTestResult``. The only reachable path is the live timeout path,
+which is not deterministically triggerable through this driver without risking
+a race against other deadline checks earlier in the loop (~line 5039). This gap
+is documented explicitly rather than omitted silently; see service.py ~line 2900
+for the two COMPOSE_TIMEOUT arms (pre-call deadline and post-advisor-timeout
+with deadline_limited=True).
+
+Pre-covered arms verified in ``test_compose_loop_audit_wiring.py`` and
+``test_compose_loop_interpretation_review_dispatch.py``:
+  #11 — session-aware (request_interpretation_review) — asserted at
+        ``invocation.status.value == "success"/"arg_error"`` by
+        ``test_compose_loop_dispatches_request_interpretation_review`` (SUCCESS)
+        and ``test_request_interpretation_review_without_persisted_state_returns_arg_error``
+        (ARG_ERROR).
+  #12 — ToolArgumentError ARG_ERROR — asserted at
+        ``arg_error_inv.status == ComposerToolStatus.ARG_ERROR`` with
+        ``error_class == "ToolArgumentError"`` by
+        ``test_compose_loop_records_success_arg_error_plugin_crash_sequence``.
+  #13 — narrow re-raise PLUGIN_CRASH — asserted at
+        ``inv.status == ComposerToolStatus.PLUGIN_CRASH`` with
+        ``error_class == "AssertionError"`` by
+        ``test_compose_loop_records_assertion_error_before_reraise``.
+  #14 — plugin-crash break PLUGIN_CRASH — asserted at
+        ``plugin_crash_inv.status == ComposerToolStatus.PLUGIN_CRASH`` with
+        ``error_class == "RuntimeError"`` by
+        ``test_compose_loop_records_success_arg_error_plugin_crash_sequence``.
+  #15 — success mutation — asserted at
+        ``success_inv.status == ComposerToolStatus.SUCCESS`` by
+        ``test_compose_loop_records_success_arg_error_plugin_crash_sequence``.
+  #16 — success discovery — asserted at
+        ``inv.status == ComposerToolStatus.SUCCESS`` by
+        ``TestDiscoveryToolAuditPayload.test_cache_miss_audit_preserves_pydantic_payload``.
+
 Arms characterised here:
-  #1 — JSON-decode failure (service.py ARG_ERROR pre-dispatch site 1/3)
-  #2 — non-dict arguments, valid JSON (service.py ARG_ERROR pre-dispatch site 2/3)
-  #5 — required-paths missing (service.py ARG_ERROR pre-dispatch site 3/3)
+  #1  — JSON-decode failure (service.py ARG_ERROR pre-dispatch site 1/3)
+  #2  — non-dict arguments, valid JSON (service.py ARG_ERROR pre-dispatch site 2/3)
+  #4  — discovery cache-hit (service.py ~line 2548; second identical cacheable call)
+  #5  — required-paths missing (service.py ARG_ERROR pre-dispatch site 3/3)
+  #7  — advisor disabled (service.py ~line 2790; defense-in-depth arm)
+  #8  — advisor budget exhausted (service.py ~line 2822)
+  #9  — advisor arg-error (service.py ~line 2872; _validate_advisor_arguments rejects)
+  #17 — get_plugin_schema success marks (type, name) loaded (service.py ~line 3518)
 """
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from elspeth.contracts.composer_audit import ComposerToolStatus
 from elspeth.web.composer.service import ComposerServiceImpl
+from elspeth.web.sessions.models import sessions_table
 
 from .conftest import (
     _FakeChoice,
@@ -39,6 +83,9 @@ from .conftest import (
     _FakeMessage,
     _FakeToolCall,
     _fake_llm_response,
+    _make_settings,
+    _mock_catalog,
+    build_test_sessions_service,
 )
 
 
@@ -175,4 +222,400 @@ async def test_arm_required_paths_missing_records_arg_error(
         f"No outcome has error_class='MissingRequiredPaths'; got {error_classes!r}. "
         "Either the required-paths arm was not reached (set_source not in _TOOL_REQUIRED_PATHS) "
         "or the error_class string changed — inspect service.py:2626."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — Arm #4: discovery cache-hit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_arm_discovery_cache_hit_records_success_with_cache_hit_flag(
+    fake_composer_service: ComposerServiceImpl,
+    result_session_id: str,
+) -> None:
+    """Arm #4: second identical cacheable discovery call is served from cache.
+
+    Service.py cache-hit arm ~line 2548. When the LLM emits two tool calls
+    for the same cacheable discovery tool with identical arguments in one
+    assistant turn, the first call executes normally and populates
+    ``discovery_cache`` (~line 3518).  The second call finds the key in
+    cache and records ``finish_success`` with ``cache_hit=True`` (~line 2571).
+
+    Tool chosen: ``list_sources`` — it is in ``_CACHEABLE_DISCOVERY_TOOL_NAMES``
+    and has no required paths (``_TOOL_REQUIRED_PATHS["list_sources"]`` is empty),
+    so ``{}`` clears the required-paths gate at ~line 2610 without triggering
+    MissingRequiredPaths.  The first sorted cacheable name,
+    ``explain_validation_error``, requires ``error_text`` — using ``{}`` for it
+    would trip the required-paths arm BEFORE populating the cache, leaving the
+    second call with nothing to hit.  ``list_sources`` does not have this
+    ordering hazard because the required-paths gate precedes the cache-populate
+    step (~line 3518 > ~line 2610).
+
+    Pinning:
+    - exactly 2 invocations (one per tool call in the batch)
+    - both carry SUCCESS status (cache-hit arm records finish_success)
+    - at least one invocation has cache_hit=True (the second call, served from
+      cache; the first is a cache miss with cache_hit=False)
+    """
+    # Two identical list_sources calls with empty args — both are valid because
+    # list_sources requires no arguments.
+    first_response = _FakeLLMResponse(
+        choices=[
+            _FakeChoice(
+                message=_FakeMessage(
+                    content=None,
+                    tool_calls=[
+                        _FakeToolCall(id="call_ls1", function=_FakeFunction(name="list_sources", arguments="{}")),
+                        _FakeToolCall(id="call_ls2", function=_FakeFunction(name="list_sources", arguments="{}")),
+                    ],
+                )
+            )
+        ]
+    )
+    llm = _FakeComposeLLM((first_response, _fake_llm_response(content="Done.")))
+    result = await fake_composer_service._run_one_turn_for_test(llm=llm, session_id=result_session_id)
+
+    assert len(result.tool_invocations) >= 2, (
+        f"Expected at least 2 invocations (two list_sources calls), got {len(result.tool_invocations)}"
+    )
+    statuses = [inv.status for inv in result.tool_invocations]
+    assert all(s == ComposerToolStatus.SUCCESS for s in statuses), (
+        f"All invocations must be SUCCESS (cache-hit arm records finish_success); got {statuses!r}"
+    )
+    assert any(getattr(inv, "cache_hit", False) for inv in result.tool_invocations), (
+        "No invocation has cache_hit=True; the second list_sources call should have been served "
+        "from discovery_cache (service.py ~line 2548).  If the cache-hit arm was bypassed "
+        "(e.g. both calls hit the execute path), the cache-populate step at ~line 3518 "
+        "or the cache-check ordering changed."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — Advisor arms #7–#9
+# ---------------------------------------------------------------------------
+
+# Minimal set of advisor arguments that satisfies _TOOL_REQUIRED_PATHS
+# (trigger, problem_summary, recent_errors, attempted_actions all present) so
+# the required-paths gate at ~line 2610 is cleared before reaching the
+# advisor interception at ~line 2784.  The required-paths gate precedes both
+# the disabled-advisor arm (~line 2790) and the budget-exhaustion arm
+# (~line 2822), so omitting any required key would produce MissingRequiredPaths
+# instead of the intended advisor arm.
+_VALID_ADVISOR_ARGS: dict[str, object] = {
+    "trigger": "proactive_security_safety",
+    "problem_summary": "characterization test — pinning advisor arm",
+    "recent_errors": [],
+    "attempted_actions": [],
+}
+
+
+@pytest.mark.asyncio
+async def test_arm_advisor_disabled_records_success_with_error_payload(
+    fake_composer_service: ComposerServiceImpl,
+    result_session_id: str,
+) -> None:
+    """Arm #7: advisor disabled (defense-in-depth) → SUCCESS with error dict.
+
+    Service.py ~line 2790.  When ``composer_advisor_enabled`` is False (the
+    default) and the LLM calls ``request_advisor_hint`` anyway (e.g. via
+    replayed transcript, stale state, or prompt injection), the loop bypasses
+    any outbound call and records ``finish_success`` with an error-keyed
+    payload rather than ARG_ERROR.  The audit trail gets a SUCCESS row because
+    the decision to refuse is a policy outcome, not a malformed argument.
+
+    ``fake_composer_service`` uses ``_make_settings`` defaults, which have
+    ``composer_advisor_enabled=False``.  This test explicitly asserts that
+    is true so a settings-default change would surface here first.
+
+    Empirically observed: ``.response`` is a ``mappingproxy`` (the frozen form
+    of the payload dict) carrying ``"error"``.  The Mapping protocol supports
+    ``in`` and ``[]`` so the assertion uses ``"error" in outcome.response``.
+
+    Pinning:
+    - exactly 1 invocation
+    - status == SUCCESS (not ARG_ERROR — policy refusal is recorded as success)
+    - outcome response contains key ``"error"``
+    """
+    assert not fake_composer_service._settings.composer_advisor_enabled, (
+        "This test requires the default settings to have composer_advisor_enabled=False.  "
+        "If the default changed, update this assertion and verify arm #7 is still reachable."
+    )
+    first_response = _FakeLLMResponse(
+        choices=[
+            _FakeChoice(
+                message=_FakeMessage(
+                    content=None,
+                    tool_calls=[
+                        _FakeToolCall(
+                            id="call_adv_disabled",
+                            function=_FakeFunction(
+                                name="request_advisor_hint",
+                                arguments=json.dumps(_VALID_ADVISOR_ARGS),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    llm = _FakeComposeLLM((first_response, _fake_llm_response(content="Done.")))
+    result = await fake_composer_service._run_one_turn_for_test(llm=llm, session_id=result_session_id)
+
+    assert len(result.tool_invocations) == 1, (
+        f"Expected exactly 1 invocation (one advisor-disabled call), got {len(result.tool_invocations)}"
+    )
+    statuses = [inv.status for inv in result.tool_invocations]
+    assert ComposerToolStatus.SUCCESS in statuses, (
+        f"SUCCESS not in recorded statuses {statuses!r}; the advisor-disabled arm records "
+        "finish_success (not finish_arg_error) — inspect service.py ~line 2798."
+    )
+    assert len(result.tool_outcomes) == 1
+    outcome = result.tool_outcomes[0]
+    assert outcome.response is not None, "Outcome response must not be None for advisor-disabled arm"
+    assert "error" in outcome.response, (
+        f"Outcome response does not contain key 'error'; got {dict(outcome.response)!r}. "
+        "The advisor-disabled payload must carry an 'error' key so the LLM receives "
+        "a diagnostic message — inspect service.py ~line 2795."
+    )
+
+
+@pytest.mark.asyncio
+async def test_arm_advisor_budget_exhausted_records_success_with_budget_exhausted_status(
+    tmp_path: Path,
+) -> None:
+    """Arm #8: advisor budget=0 → SUCCESS with status == 'BUDGET_EXHAUSTED'.
+
+    Service.py ~line 2822.  When ``composer_advisor_max_calls_per_compose`` is 0
+    (``ge=0`` — validated in config.py line 76), ``advisor_calls_used >= budget``
+    is immediately True and the loop records ``finish_success`` with a
+    ``status: BUDGET_EXHAUSTED`` payload rather than making any outbound call.
+
+    Budget exhaustion is a policy outcome, not a malformed argument, so
+    ``finish_success`` is the correct record (not ``finish_arg_error``).
+
+    This test constructs its own service rather than using the shared
+    ``fake_composer_service`` fixture because ``composer_advisor_max_calls_per_compose=0``
+    is a non-default setting that must not bleed into other tests.
+
+    Empirically observed: ``.response`` is a ``mappingproxy``; ``status`` key
+    contains the string ``"BUDGET_EXHAUSTED"``.
+
+    Pinning:
+    - exactly 1 invocation
+    - status == SUCCESS
+    - outcome response ``status == "BUDGET_EXHAUSTED"``
+    """
+    settings = _make_settings(tmp_path, composer_advisor_enabled=True, composer_advisor_max_calls_per_compose=0)
+    sessions_svc = build_test_sessions_service(data_dir=tmp_path)
+    svc = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
+
+    # Insert a session so _run_one_turn_for_test has a valid session_id to work
+    # with (mirrors the result_session_id fixture body in conftest.py).
+    session_id = str(uuid4())
+    now = datetime.now(UTC)
+    with sessions_svc._engine.begin() as conn:
+        conn.execute(
+            sessions_table.insert().values(
+                id=session_id,
+                user_id="arm8-test-user",
+                auth_provider_type="local",
+                title="Arm #8 budget-exhausted test session",
+                trust_mode="auto_commit",
+                density_default="high",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    first_response = _FakeLLMResponse(
+        choices=[
+            _FakeChoice(
+                message=_FakeMessage(
+                    content=None,
+                    tool_calls=[
+                        _FakeToolCall(
+                            id="call_adv_budget",
+                            function=_FakeFunction(
+                                name="request_advisor_hint",
+                                arguments=json.dumps(_VALID_ADVISOR_ARGS),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    llm = _FakeComposeLLM((first_response, _fake_llm_response(content="Done.")))
+    result = await svc._run_one_turn_for_test(llm=llm, session_id=session_id)
+
+    assert len(result.tool_invocations) == 1, (
+        f"Expected exactly 1 invocation (budget-exhausted advisor call), got {len(result.tool_invocations)}"
+    )
+    statuses = [inv.status for inv in result.tool_invocations]
+    assert ComposerToolStatus.SUCCESS in statuses, (
+        f"SUCCESS not in recorded statuses {statuses!r}; budget-exhaustion records finish_success "
+        "(not finish_arg_error) — inspect service.py ~line 2835."
+    )
+    assert len(result.tool_outcomes) == 1
+    outcome = result.tool_outcomes[0]
+    assert outcome.response is not None, "Outcome response must not be None for budget-exhausted arm"
+    assert outcome.response["status"] == "BUDGET_EXHAUSTED", (
+        f"Expected outcome.response['status'] == 'BUDGET_EXHAUSTED'; got {dict(outcome.response)!r}. "
+        "The budget-exhaustion payload shape changed — inspect service.py ~line 2824."
+    )
+
+
+@pytest.mark.asyncio
+async def test_arm_advisor_arg_error_records_arg_error_with_type_error_class(
+    tmp_path: Path,
+) -> None:
+    """Arm #9: advisor arg validation failure → ARG_ERROR with error_class 'TypeError'.
+
+    Service.py ~line 2872 (_validate_advisor_arguments).  When the advisor is
+    enabled, the budget is not exhausted, and the arguments pass the
+    required-paths gate (~line 2610), but the Tier-3 type validator rejects
+    the argument shape, the loop records ``finish_arg_error`` with the
+    ``error_class`` from the validator's error dict.
+
+    To land here the test must supply ALL four required keys
+    (trigger, problem_summary, recent_errors, attempted_actions) so the
+    required-paths gate clears, then introduce a type fault in one field.
+    ``attempted_actions="oops"`` is a string, not a list — ``not isinstance``
+    check at _validate_advisor_arguments line ~4416 catches it and returns
+    ``error_class: "TypeError"``.
+
+    This test constructs its own service (advisor enabled, default budget=4)
+    to avoid mutating the shared fixture's settings.
+
+    Pinning:
+    - exactly 1 invocation
+    - status == ARG_ERROR
+    - error_class == "TypeError"
+    """
+    settings = _make_settings(tmp_path, composer_advisor_enabled=True)
+    sessions_svc = build_test_sessions_service(data_dir=tmp_path)
+    svc = ComposerServiceImpl(catalog=_mock_catalog(), settings=settings, sessions_service=sessions_svc)
+
+    session_id = str(uuid4())
+    now = datetime.now(UTC)
+    with sessions_svc._engine.begin() as conn:
+        conn.execute(
+            sessions_table.insert().values(
+                id=session_id,
+                user_id="arm9-test-user",
+                auth_provider_type="local",
+                title="Arm #9 advisor arg-error test session",
+                trust_mode="auto_commit",
+                density_default="high",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    # attempted_actions must be a list; passing a string causes _validate_advisor_arguments
+    # to return error_class="TypeError" at ~line 4416.
+    bad_args = {**_VALID_ADVISOR_ARGS, "attempted_actions": "oops"}
+    first_response = _FakeLLMResponse(
+        choices=[
+            _FakeChoice(
+                message=_FakeMessage(
+                    content=None,
+                    tool_calls=[
+                        _FakeToolCall(
+                            id="call_adv_argbad",
+                            function=_FakeFunction(
+                                name="request_advisor_hint",
+                                arguments=json.dumps(bad_args),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    llm = _FakeComposeLLM((first_response, _fake_llm_response(content="Done.")))
+    result = await svc._run_one_turn_for_test(llm=llm, session_id=session_id)
+
+    assert len(result.tool_invocations) == 1, (
+        f"Expected exactly 1 invocation (advisor arg-error call), got {len(result.tool_invocations)}"
+    )
+    statuses = [inv.status for inv in result.tool_invocations]
+    assert ComposerToolStatus.ARG_ERROR in statuses, (
+        f"ARG_ERROR not in recorded statuses {statuses!r}; "
+        "_validate_advisor_arguments should reject attempted_actions='oops' (not a list) "
+        "with finish_arg_error — inspect service.py ~line 2874."
+    )
+    error_classes = [o.error_class for o in result.tool_outcomes]
+    assert any(ec == "TypeError" for ec in error_classes), (
+        f"No outcome has error_class='TypeError'; got {error_classes!r}. "
+        "_validate_advisor_arguments returns error_class='TypeError' for non-list "
+        "attempted_actions — inspect service.py (tools/sessions.py ~line 4416)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — Arm #17: get_plugin_schema success marks (type, name) loaded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_arm_get_plugin_schema_success_marks_type_name_loaded(
+    fake_composer_service: ComposerServiceImpl,
+    result_session_id: str,
+) -> None:
+    """Arm #17: successful get_plugin_schema records (type, name) in _schemas_loaded.
+
+    Service.py ~line 3518.  After a successful ``get_plugin_schema`` dispatch,
+    the loop calls ``_mark_plugin_schema_loaded(session_id, plugin_type, plugin_name)``
+    so the LLM tool-list builder can surface schema-loaded state to the model.
+
+    ``fake_composer_service`` uses a mock catalog whose ``get_schema`` returns a
+    ``PluginSchemaInfo`` for any (plugin_type, name) pair — sufficient to make the
+    dispatch succeed.
+
+    This test pins the side-effect rather than the full audit row: if the
+    ``_mark_plugin_schema_loaded`` call is accidentally dropped or its arguments
+    transposed during the Phase-2 extraction, ``_schemas_loaded_for_session``
+    will return an empty frozenset and the assertion will fail.
+
+    Pinning:
+    - exactly 1 SUCCESS invocation
+    - ``("source", "csv") in fake_composer_service._schemas_loaded_for_session(result_session_id)``
+    """
+    first_response = _FakeLLMResponse(
+        choices=[
+            _FakeChoice(
+                message=_FakeMessage(
+                    content=None,
+                    tool_calls=[
+                        _FakeToolCall(
+                            id="call_gps",
+                            function=_FakeFunction(
+                                name="get_plugin_schema",
+                                arguments=json.dumps({"plugin_type": "source", "name": "csv"}),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    llm = _FakeComposeLLM((first_response, _fake_llm_response(content="Done.")))
+    result = await fake_composer_service._run_one_turn_for_test(llm=llm, session_id=result_session_id)
+
+    assert len(result.tool_invocations) == 1, (
+        f"Expected exactly 1 invocation (get_plugin_schema call), got {len(result.tool_invocations)}"
+    )
+    statuses = [inv.status for inv in result.tool_invocations]
+    assert ComposerToolStatus.SUCCESS in statuses, (
+        f"SUCCESS not in recorded statuses {statuses!r}; get_plugin_schema with valid args "
+        "and a mock catalog that always returns a schema should record finish_success."
+    )
+    schemas_loaded = fake_composer_service._schemas_loaded_for_session(result_session_id)
+    assert ("source", "csv") in schemas_loaded, (
+        f"('source', 'csv') not in _schemas_loaded_for_session({result_session_id!r}); "
+        f"got {schemas_loaded!r}.  _mark_plugin_schema_loaded must be called after a "
+        "successful get_plugin_schema dispatch — inspect service.py ~line 3518."
     )

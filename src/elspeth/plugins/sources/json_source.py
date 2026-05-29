@@ -147,7 +147,7 @@ class JSONSource(BaseSource):
     name = "json"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:af07fcdc3bef7b61"
+    source_file_hash: str | None = "sha256:ca6909ead9a71ad6"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str

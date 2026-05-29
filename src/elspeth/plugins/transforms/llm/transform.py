@@ -1040,7 +1040,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a83ca2b2c40832f4"
+    source_file_hash: str | None = "sha256:3024fee57fccc324"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True

@@ -48,7 +48,7 @@ class NullSource(BaseSource):
 
     name = "null"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:63b0863fea267d55"
+    source_file_hash: str | None = "sha256:fee3a9be38552d0c"
     config_model = None  # NullSource requires no config (resume-only)
     determinism = Determinism.DETERMINISTIC
     output_schema: type[PluginSchema] = NullSourceSchema

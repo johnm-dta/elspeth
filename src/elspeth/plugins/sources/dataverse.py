@@ -206,7 +206,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:bc31a2918a365798"
+    source_file_hash: str | None = "sha256:bb9bda9aef65ee41"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 

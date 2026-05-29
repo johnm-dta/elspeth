@@ -329,7 +329,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6bcd495be2457a12"
+    source_file_hash: str | None = "sha256:252221e581ad1a84"
     config_model = AzureBlobSourceConfig
 
     @classmethod

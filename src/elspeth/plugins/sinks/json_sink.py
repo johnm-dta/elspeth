@@ -104,7 +104,7 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4471f2684a139a34"
+    source_file_hash: str | None = "sha256:392d93200c10b2e1"
     config_model = JSONSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

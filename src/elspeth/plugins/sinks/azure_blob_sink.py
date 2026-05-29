@@ -305,7 +305,7 @@ class AzureBlobSink(BaseSink):
     name = "azure_blob"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:280fc88bf9f55a24"
+    source_file_hash: str | None = "sha256:e8998299fb06cce9"
     config_model = AzureBlobSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

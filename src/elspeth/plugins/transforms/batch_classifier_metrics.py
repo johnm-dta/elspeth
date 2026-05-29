@@ -151,7 +151,7 @@ class BatchClassifierMetrics(BaseTransform):
     name = "batch_classifier_metrics"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:74709a8c8a9717dd"
+    source_file_hash: str | None = "sha256:128c9eca5770883f"
     config_model = BatchClassifierMetricsConfig
     is_batch_aware = True
     capability_tags: tuple[str, ...] = ("narrative-summary",)

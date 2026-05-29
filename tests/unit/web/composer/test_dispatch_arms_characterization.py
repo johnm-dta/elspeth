@@ -1,6 +1,12 @@
-"""Characterization tests for the terminal arms of _dispatch_tool_batch.
+"""Characterization tests for the terminal arms of the dispatch loop.
 
-This file pins arms #1, #2, #4, #5, #7, #8, #9, #10, and #17 of the dispatch
+The dispatch loop is ``elspeth.web.composer.tool_batch.run_tool_batch``
+(extracted verbatim from the former ``ComposerServiceImpl._dispatch_tool_batch``).
+Production-code citations below name ``tool_batch.py`` and a verbatim anchor
+comment (e.g. ``ARG_ERROR pre-dispatch site (N/3)``) rather than a line number,
+so they survive the deferred Phase-3 reshuffle without re-rotting.
+
+This file pins arms #1, #2, #4, #5, #7, #8, #9, and #17 of the dispatch
 loop. For each arm covered here the test asserts the audit-envelope status
 (``ComposerToolStatus``), the recorded ``error_class`` on the ``_ToolOutcome``
 (where applicable), and that invocations were buffered. They exist to make the
@@ -16,15 +22,16 @@ buffer of ``ComposerToolInvocation`` records) and ``.tool_outcomes`` (the
 content are NOT observable through this driver, so these tests do not assert on
 them.
 
-Arm #10 (advisor COMPOSE_TIMEOUT pre-call deadline check, service.py ~line
-2900) is NOT covered here. The check raises ``ComposerConvergenceError``, which
-is an unhandled exception from ``_run_one_turn_for_test`` — it does not return
-a ``ComposeLoopTestResult``. The only reachable path is the live timeout path,
-which is not deterministically triggerable through this driver without risking
-a race against other deadline checks earlier in the loop (~line 5039). This gap
-is documented explicitly rather than omitted silently; see service.py ~line 2900
-for the two COMPOSE_TIMEOUT arms (pre-call deadline and post-advisor-timeout
-with deadline_limited=True).
+Arm #10 (advisor COMPOSE_TIMEOUT pre-call deadline check, ``tool_batch.py``
+``"status": "COMPOSE_TIMEOUT"`` arms) is NOT covered here. The check raises
+``ComposerConvergenceError``, which is an unhandled exception from
+``_run_one_turn_for_test`` — it does not return a ``ComposeLoopTestResult``.
+The only reachable path is the live timeout path, which is not
+deterministically triggerable through this driver without risking a race
+against other deadline checks earlier in the loop. This gap is documented
+explicitly rather than omitted silently; see the two ``COMPOSE_TIMEOUT`` arms
+in ``tool_batch.py`` (pre-call deadline and post-advisor-timeout with
+deadline_limited=True).
 
 Pre-covered arms verified in ``test_compose_loop_audit_wiring.py`` and
 ``test_compose_loop_interpretation_review_dispatch.py``:
@@ -32,13 +39,13 @@ Pre-covered arms verified in ``test_compose_loop_audit_wiring.py`` and
         ``error_class == "ValueError"`` — asserted at
         ``inv.status == ComposerToolStatus.ARG_ERROR`` with ``error_class == "ValueError"``
         by ``test_compose_loop_records_arg_error_for_non_finite_non_object_arguments``.
-        This is the ``canonicalization_failed is not None`` branch inside the non-dict
-        block at service.py ~line 2467 (``float("inf")`` as top-level non-object).
+        This is the ``canonicalization_failed is not None`` branch reached from the
+        non-dict block in ``tool_batch.py`` (``float("inf")`` as top-level non-object).
   #6  — dict arguments, canonicalization fails (non-finite inside object) → ARG_ERROR /
         ``error_class == "ValueError"`` — asserted at
         ``inv.status == ComposerToolStatus.ARG_ERROR`` with ``error_class == "ValueError"``
         by ``test_compose_loop_records_arg_error_for_non_finite_object_arguments``.
-        This is the ``canonicalization_failed is not None`` branch at service.py ~line 2512,
+        This is the ``canonicalization_failed is not None`` branch in ``tool_batch.py``,
         which fires after the required-paths gate and before the cache-check.
   #11 — session-aware (request_interpretation_review) — asserted at
         ``invocation.status.value == "success"/"arg_error"`` by
@@ -64,16 +71,17 @@ Pre-covered arms verified in ``test_compose_loop_audit_wiring.py`` and
         ``inv.status == ComposerToolStatus.SUCCESS`` by
         ``TestDiscoveryToolAuditPayload.test_cache_miss_audit_preserves_pydantic_payload``.
 
-Arms characterised here:
-  #1  — JSON-decode failure (service.py ARG_ERROR pre-dispatch site 1/3, ~line 2407)
+Arms characterised here (all in ``tool_batch.py``):
+  #1  — JSON-decode failure (``ARG_ERROR pre-dispatch site (1/3)``)
   #2  — non-dict arguments, valid JSON, canonicalization succeeds → TypeError
-        (service.py ARG_ERROR pre-dispatch site 2/3, ~line 2451)
-  #4  — discovery cache-hit (service.py ~line 2548; second identical cacheable call)
-  #5  — required-paths missing (service.py ARG_ERROR pre-dispatch site 3/3, ~line 2617)
-  #7  — advisor disabled (service.py ~line 2790; defense-in-depth arm)
-  #8  — advisor budget exhausted (service.py ~line 2822)
-  #9  — advisor arg-error (service.py ~line 2872; _validate_advisor_arguments rejects)
-  #17 — get_plugin_schema success marks (type, name) loaded (service.py ~line 3518)
+        (``ARG_ERROR pre-dispatch site (2/3)``)
+  #4  — discovery cache-hit (``cache_hit=True`` branch; second identical cacheable call)
+  #5  — required-paths missing (``ARG_ERROR pre-dispatch site (3/3)``)
+  #7  — advisor disabled (defense-in-depth arm)
+  #8  — advisor budget exhausted (``Advisor budget exhausted`` arm)
+  #9  — advisor arg-error (``_validate_advisor_arguments`` rejects)
+  #17 — get_plugin_schema success marks (type, name) loaded
+        (``tool_name == "get_plugin_schema" and result.success`` branch)
 """
 from __future__ import annotations
 
@@ -89,13 +97,13 @@ from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.sessions.models import sessions_table
 
 from .conftest import (
+    _fake_llm_response,
     _FakeChoice,
     _FakeComposeLLM,
     _FakeFunction,
     _FakeLLMResponse,
     _FakeMessage,
     _FakeToolCall,
-    _fake_llm_response,
     _make_settings,
     _mock_catalog,
     build_test_sessions_service,
@@ -126,7 +134,7 @@ async def test_arm_json_decode_failure_records_arg_error(
 ) -> None:
     """Arm #1: JSON-decode failure → ARG_ERROR with error_class 'JSONDecodeError'.
 
-    Service.py ARG_ERROR pre-dispatch site 1/3 (lines ~2401-2444).
+    tool_batch.py — ARG_ERROR pre-dispatch site (1/3).
     The dispatch loop catches ``json.JSONDecodeError`` / ``TypeError``,
     opens the audit envelope via ``begin_dispatch``, and records
     ``finish_arg_error`` with ``error_class=type(exc).__name__``.
@@ -153,7 +161,8 @@ async def test_arm_json_decode_failure_records_arg_error(
     error_classes = [o.error_class for o in result.tool_outcomes]
     assert any(ec == "JSONDecodeError" for ec in error_classes), (
         f"No outcome has error_class='JSONDecodeError'; got {error_classes!r}. "
-        "The JSON-decode ARG_ERROR arm may have been rerouted — inspect service.py:2424."
+        "The JSON-decode ARG_ERROR arm may have been rerouted — inspect "
+        "tool_batch.py (ARG_ERROR pre-dispatch site 1/3)."
     )
 
 
@@ -164,7 +173,7 @@ async def test_arm_non_dict_arguments_records_arg_error(
 ) -> None:
     """Arm #2: valid JSON but non-dict (list) arguments → ARG_ERROR with error_class 'TypeError'.
 
-    Service.py ARG_ERROR pre-dispatch site 2/3 (lines ~2446-2495).
+    tool_batch.py — ARG_ERROR pre-dispatch site (2/3).
     The LLM produced syntactically valid JSON, but it decoded to a list
     rather than a dict (JSON object). The loop records ``finish_arg_error``
     with ``error_class="TypeError"`` (when canonicalization succeeds) or
@@ -173,7 +182,8 @@ async def test_arm_non_dict_arguments_records_arg_error(
 
     Empirically observed: a JSON list ``[1, 2, 3]`` canonicalizes cleanly via
     ``begin_dispatch_or_arg_error`` (wraps under ``_decoded_non_object``), so
-    ``error_class == "TypeError"`` is recorded (service.py:2465). A loose
+    ``error_class == "TypeError"`` is recorded (tool_batch.py, ARG_ERROR
+    pre-dispatch site 2/3). A loose
     ``is not None`` assertion would not catch a rerouted handler, so this pins
     the exact class string.
 
@@ -192,7 +202,8 @@ async def test_arm_non_dict_arguments_records_arg_error(
     error_classes = [o.error_class for o in result.tool_outcomes]
     assert any(ec == "TypeError" for ec in error_classes), (
         f"No outcome has error_class='TypeError'; got {error_classes!r}. "
-        "The non-dict-args ARG_ERROR arm may have been rerouted — inspect service.py:2465."
+        "The non-dict-args ARG_ERROR arm may have been rerouted — inspect "
+        "tool_batch.py (ARG_ERROR pre-dispatch site 2/3)."
     )
 
 
@@ -203,7 +214,7 @@ async def test_arm_required_paths_missing_records_arg_error(
 ) -> None:
     """Arm #5: required paths missing → ARG_ERROR with error_class 'MissingRequiredPaths'.
 
-    Service.py ARG_ERROR pre-dispatch site 3/3 (lines ~2610-2645).
+    tool_batch.py — ARG_ERROR pre-dispatch site (3/3).
     ``set_source`` declares required: ["plugin", "on_success", "options",
     "on_validation_failure"] in its JSON schema.  Passing ``{}`` means all
     four are missing.  The loop records ``finish_arg_error`` with
@@ -234,7 +245,8 @@ async def test_arm_required_paths_missing_records_arg_error(
     assert any(ec == "MissingRequiredPaths" for ec in error_classes), (
         f"No outcome has error_class='MissingRequiredPaths'; got {error_classes!r}. "
         "Either the required-paths arm was not reached (set_source not in _TOOL_REQUIRED_PATHS) "
-        "or the error_class string changed — inspect service.py:2626."
+        "or the error_class string changed — inspect tool_batch.py "
+        "(ARG_ERROR pre-dispatch site 3/3)."
     )
 
 
@@ -250,27 +262,30 @@ async def test_arm_discovery_cache_hit_records_success_with_cache_hit_flag(
 ) -> None:
     """Arm #4: second identical cacheable discovery call is served from cache.
 
-    Service.py cache-hit arm ~line 2548. When the LLM emits two tool calls
+    tool_batch.py cache-hit arm. When the LLM emits two tool calls
     for the same cacheable discovery tool with identical arguments in one
     assistant turn, the first call executes normally and populates
-    ``discovery_cache`` (~line 3518).  The second call finds the key in
-    cache and records ``finish_success`` with ``cache_hit=True`` (~line 2571).
+    ``discovery_cache``.  The second call finds the key in
+    cache and records ``finish_success`` with ``cache_hit=True``.
 
     Tool chosen: ``list_sources`` — it is in ``_CACHEABLE_DISCOVERY_TOOL_NAMES``
     and has no required paths (``_TOOL_REQUIRED_PATHS["list_sources"]`` is empty),
-    so ``{}`` clears the required-paths gate at ~line 2610 without triggering
+    so ``{}`` clears the required-paths gate without triggering
     MissingRequiredPaths.  The first sorted cacheable name,
     ``explain_validation_error``, requires ``error_text`` — using ``{}`` for it
     would trip the required-paths arm BEFORE populating the cache, leaving the
     second call with nothing to hit.  ``list_sources`` does not have this
     ordering hazard because the required-paths gate precedes the cache-populate
-    step (~line 3518 > ~line 2610).
+    step.
 
     Pinning:
     - exactly 2 invocations (one per tool call in the batch)
     - both carry SUCCESS status (cache-hit arm records finish_success)
-    - at least one invocation has cache_hit=True (the second call, served from
-      cache; the first is a cache miss with cache_hit=False)
+    - the cache_hit flags are the ordered pair [False, True]: the first call is
+      a cache miss (cache_hit=False), the second is served from discovery_cache
+      (cache_hit=True). An ``any(...)`` check would pass even if both calls were
+      (wrongly) served from cache or the first were cached — so the order is
+      pinned exactly.
     """
     # Two identical list_sources calls with empty args — both are valid because
     # list_sources requires no arguments.
@@ -297,25 +312,26 @@ async def test_arm_discovery_cache_hit_records_success_with_cache_hit_flag(
     assert all(s == ComposerToolStatus.SUCCESS for s in statuses), (
         f"All invocations must be SUCCESS (cache-hit arm records finish_success); got {statuses!r}"
     )
-    assert any(inv.cache_hit for inv in result.tool_invocations), (
-        "No invocation has cache_hit=True; the second list_sources call should have been served "
-        "from discovery_cache (service.py ~line 2548).  If the cache-hit arm was bypassed "
-        "(e.g. both calls hit the execute path), the cache-populate step at ~line 3518 "
-        "or the cache-check ordering changed."
+    cache_hits = [inv.cache_hit for inv in result.tool_invocations[:2]]
+    assert cache_hits == [False, True], (
+        f"Expected the two list_sources calls to be [miss, hit] = [False, True], got {cache_hits!r}. "
+        "The second call should be served from discovery_cache (tool_batch.py cache_hit=True branch). "
+        "If both are True the first was wrongly cached; if both are False the cache-hit arm was bypassed "
+        "(e.g. both calls hit the execute path) — inspect the cache-populate / cache-check ordering in "
+        "tool_batch.py."
     )
 
 
 # ---------------------------------------------------------------------------
-# Task 3 — Advisor arms #7–#9
+# Task 3 — Advisor arms #7-#9
 # ---------------------------------------------------------------------------
 
 # Minimal set of advisor arguments that satisfies _TOOL_REQUIRED_PATHS
 # (trigger, problem_summary, recent_errors, attempted_actions all present) so
-# the required-paths gate at ~line 2610 is cleared before reaching the
-# advisor interception at ~line 2784.  The required-paths gate precedes both
-# the disabled-advisor arm (~line 2790) and the budget-exhaustion arm
-# (~line 2822), so omitting any required key would produce MissingRequiredPaths
-# instead of the intended advisor arm.
+# the required-paths gate is cleared before reaching the advisor interception
+# in tool_batch.py.  The required-paths gate precedes both the disabled-advisor
+# arm and the budget-exhaustion arm, so omitting any required key would produce
+# MissingRequiredPaths instead of the intended advisor arm.
 _VALID_ADVISOR_ARGS: dict[str, object] = {
     "trigger": "proactive_security_safety",
     "problem_summary": "characterization test — pinning advisor arm",
@@ -331,8 +347,8 @@ async def test_arm_advisor_disabled_records_success_with_error_payload(
 ) -> None:
     """Arm #7: advisor disabled (defense-in-depth) → SUCCESS with error dict.
 
-    Service.py ~line 2790.  When ``composer_advisor_enabled`` is False (the
-    default) and the LLM calls ``request_advisor_hint`` anyway (e.g. via
+    tool_batch.py advisor-disabled arm.  When ``composer_advisor_enabled`` is
+    False (the default) and the LLM calls ``request_advisor_hint`` anyway (e.g. via
     replayed transcript, stale state, or prompt injection), the loop bypasses
     any outbound call and records ``finish_success`` with an error-keyed
     payload rather than ARG_ERROR.  The audit trail gets a SUCCESS row because
@@ -382,7 +398,7 @@ async def test_arm_advisor_disabled_records_success_with_error_payload(
     statuses = [inv.status for inv in result.tool_invocations]
     assert ComposerToolStatus.SUCCESS in statuses, (
         f"SUCCESS not in recorded statuses {statuses!r}; the advisor-disabled arm records "
-        "finish_success (not finish_arg_error) — inspect service.py ~line 2798."
+        "finish_success (not finish_arg_error) — inspect tool_batch.py (advisor disabled arm)."
     )
     assert len(result.tool_outcomes) == 1
     outcome = result.tool_outcomes[0]
@@ -390,7 +406,7 @@ async def test_arm_advisor_disabled_records_success_with_error_payload(
     assert "error" in outcome.response, (
         f"Outcome response does not contain key 'error'; got {dict(outcome.response)!r}. "
         "The advisor-disabled payload must carry an 'error' key so the LLM receives "
-        "a diagnostic message — inspect service.py ~line 2795."
+        "a diagnostic message — inspect tool_batch.py (advisor disabled arm)."
     )
 
 
@@ -400,8 +416,9 @@ async def test_arm_advisor_budget_exhausted_records_success_with_budget_exhauste
 ) -> None:
     """Arm #8: advisor budget=0 → SUCCESS with status == 'BUDGET_EXHAUSTED'.
 
-    Service.py ~line 2822.  When ``composer_advisor_max_calls_per_compose`` is 0
-    (``ge=0`` — validated in config.py line 76), ``advisor_calls_used >= budget``
+    tool_batch.py advisor budget-exhausted arm.  When
+    ``composer_advisor_max_calls_per_compose`` is 0
+    (``ge=0`` — validated in config.py), ``advisor_calls_used >= budget``
     is immediately True and the loop records ``finish_success`` with a
     ``status: BUDGET_EXHAUSTED`` payload rather than making any outbound call.
 
@@ -469,14 +486,14 @@ async def test_arm_advisor_budget_exhausted_records_success_with_budget_exhauste
     statuses = [inv.status for inv in result.tool_invocations]
     assert ComposerToolStatus.SUCCESS in statuses, (
         f"SUCCESS not in recorded statuses {statuses!r}; budget-exhaustion records finish_success "
-        "(not finish_arg_error) — inspect service.py ~line 2835."
+        "(not finish_arg_error) — inspect tool_batch.py (advisor budget-exhausted arm)."
     )
     assert len(result.tool_outcomes) == 1
     outcome = result.tool_outcomes[0]
     assert outcome.response is not None, "Outcome response must not be None for budget-exhausted arm"
     assert outcome.response["status"] == "BUDGET_EXHAUSTED", (
         f"Expected outcome.response['status'] == 'BUDGET_EXHAUSTED'; got {dict(outcome.response)!r}. "
-        "The budget-exhaustion payload shape changed — inspect service.py ~line 2824."
+        "The budget-exhaustion payload shape changed — inspect tool_batch.py (advisor budget-exhausted arm)."
     )
 
 
@@ -486,18 +503,18 @@ async def test_arm_advisor_arg_error_records_arg_error_with_type_error_class(
 ) -> None:
     """Arm #9: advisor arg validation failure → ARG_ERROR with error_class 'TypeError'.
 
-    Service.py ~line 2872 (_validate_advisor_arguments).  When the advisor is
-    enabled, the budget is not exhausted, and the arguments pass the
-    required-paths gate (~line 2610), but the Tier-3 type validator rejects
+    tool_batch.py advisor arg-error arm (``_validate_advisor_arguments``).  When
+    the advisor is enabled, the budget is not exhausted, and the arguments pass
+    the required-paths gate, but the Tier-3 type validator rejects
     the argument shape, the loop records ``finish_arg_error`` with the
     ``error_class`` from the validator's error dict.
 
     To land here the test must supply ALL four required keys
     (trigger, problem_summary, recent_errors, attempted_actions) so the
     required-paths gate clears, then introduce a type fault in one field.
-    ``attempted_actions="oops"`` is a string, not a list — ``not isinstance``
-    check at _validate_advisor_arguments line ~4416 catches it and returns
-    ``error_class: "TypeError"``.
+    ``attempted_actions="oops"`` is a string, not a list — the ``not isinstance``
+    check in ``ComposerServiceImpl._validate_advisor_arguments`` catches it and
+    returns ``error_class: "TypeError"``.
 
     This test constructs its own service (advisor enabled, default budget=4)
     to avoid mutating the shared fixture's settings.
@@ -527,8 +544,8 @@ async def test_arm_advisor_arg_error_records_arg_error_with_type_error_class(
             )
         )
 
-    # attempted_actions must be a list; passing a string causes _validate_advisor_arguments
-    # to return error_class="TypeError" at ~line 4416.
+    # attempted_actions must be a list; passing a string causes
+    # _validate_advisor_arguments to return error_class="TypeError".
     bad_args = {**_VALID_ADVISOR_ARGS, "attempted_actions": "oops"}
     first_response = _FakeLLMResponse(
         choices=[
@@ -558,13 +575,13 @@ async def test_arm_advisor_arg_error_records_arg_error_with_type_error_class(
     assert ComposerToolStatus.ARG_ERROR in statuses, (
         f"ARG_ERROR not in recorded statuses {statuses!r}; "
         "_validate_advisor_arguments should reject attempted_actions='oops' (not a list) "
-        "with finish_arg_error — inspect service.py ~line 2874."
+        "with finish_arg_error — inspect tool_batch.py (_validate_advisor_arguments arm)."
     )
     error_classes = [o.error_class for o in result.tool_outcomes]
     assert any(ec == "TypeError" for ec in error_classes), (
         f"No outcome has error_class='TypeError'; got {error_classes!r}. "
         "_validate_advisor_arguments returns error_class='TypeError' for non-list "
-        "attempted_actions — inspect service.py:~4416."
+        "attempted_actions — inspect tool_batch.py / ComposerServiceImpl._validate_advisor_arguments."
     )
 
 
@@ -580,7 +597,7 @@ async def test_arm_get_plugin_schema_success_marks_type_name_loaded(
 ) -> None:
     """Arm #17: successful get_plugin_schema records (type, name) in _schemas_loaded.
 
-    Service.py ~line 3518.  After a successful ``get_plugin_schema`` dispatch,
+    tool_batch.py get_plugin_schema success branch.  After a successful ``get_plugin_schema`` dispatch,
     the loop calls ``_mark_plugin_schema_loaded(session_id, plugin_type, plugin_name)``
     so the LLM tool-list builder can surface schema-loaded state to the model.
 
@@ -630,5 +647,5 @@ async def test_arm_get_plugin_schema_success_marks_type_name_loaded(
     assert ("source", "csv") in schemas_loaded, (
         f"('source', 'csv') not in _schemas_loaded_for_session({result_session_id!r}); "
         f"got {schemas_loaded!r}.  _mark_plugin_schema_loaded must be called after a "
-        "successful get_plugin_schema dispatch — inspect service.py ~line 3518."
+        "successful get_plugin_schema dispatch — inspect tool_batch.py (get_plugin_schema success branch)."
     )

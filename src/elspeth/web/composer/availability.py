@@ -21,13 +21,29 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class ComposerAvailability:
-    """Boot-time availability snapshot for the composer service."""
+    """Boot-time availability snapshot for the composer service.
+
+    Correlation invariant (this is our own data — Tier 1): ``available`` is
+    true *only* when there is no failure reason and nothing is missing, and
+    ``missing_keys`` is non-empty *only* when unavailable. ``compute_availability``
+    upholds this by construction; ``__post_init__`` makes any contradictory
+    instance from a future construction site crash rather than record a
+    self-inconsistent readiness snapshot.
+    """
 
     available: bool
     model: str
     provider: str | None
     reason: str | None = None
     missing_keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.available and (self.reason is not None or self.missing_keys):
+            raise ValueError(
+                "ComposerAvailability(available=True) is incompatible with a "
+                f"failure reason or missing_keys (reason={self.reason!r}, "
+                f"missing_keys={self.missing_keys!r})."
+            )
 
 
 def compute_availability(service: ComposerServiceImpl) -> ComposerAvailability:

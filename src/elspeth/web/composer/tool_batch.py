@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
@@ -123,21 +123,22 @@ class ToolBatchContext:
 
 @dataclass(slots=True)
 class BatchAccumulator:
-    """Loop-carried state that rebinds per iteration."""
+    """Driver-owned state threaded across compose-loop turns.
+
+    These four are the only live loop-carried inputs: ``run_tool_batch``
+    reads each exactly once (alias preamble) and the driver carries the
+    updated values forward via ``_DispatchOutcome``. The batch body keeps
+    every other accumulator (``tool_outcomes``, ``turn_has_mutation``, ...)
+    as inline locals, so they are NOT fields here — adding them back would
+    create a second, unread source of truth shadowing those locals. The
+    deferred Phase 3 (locals->carriers) migration is what would move that
+    state onto this carrier; until then this is exactly the live surface.
+    """
 
     state: CompositionState
     last_validation: ValidationSummary | None
     last_runtime_preflight: ValidationResult | None
     advisor_calls_used: int
-    turn_has_mutation: bool = False
-    turn_has_discovery: bool = False
-    all_cache_hits: bool = True
-    proposals_this_turn: int = 0
-    mutation_success_observed: bool = False
-    plugin_crash: ComposerPluginCrashError | None = None
-    plugin_crash_cause: BaseException | None = None
-    tool_outcomes: list[_ToolOutcome] = field(default_factory=list)
-    decoded_args_by_call_id: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 async def run_tool_batch(

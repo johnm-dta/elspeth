@@ -233,7 +233,19 @@ defaults:
     # top of the web-rotation bump above (RC5.2 took it 92 → 94; this merge
     # takes it 94 → 95). Honest accounting of the file split, not new
     # defensive surface.
-    max_per_file_rules: 98
+    #
+    # Bumped from 98 → 99 on 2026-05-30 on merge of composer-service-decomp
+    # into RC5.2. The decomposition extracted ComposerServiceImpl._dispatch_tool_batch
+    # into the module-level run_tool_batch in web/composer/tool_batch.py. The three
+    # R6 Tier-3 LLM-tool-argument sites (json.JSONDecodeError parse, redaction-time
+    # PydanticValidationError fallback, ToolArgumentError after audit-write) were
+    # previously covered by the existing web/composer/service.py R6 per_file_rule;
+    # the file split relocated them to a new web/composer/tool_batch.py R6
+    # per_file_rule (max_hits=3). Same boundary semantics, one extra per-file rule
+    # for the one extra file — honest accounting of the split, not new defensive
+    # surface. The 10 in-place fingerprint rotations and 2 R4 + 1 R5 fingerprinted
+    # entries this merge also rotated/added stay within the allow_hits ceilings.
+    max_per_file_rules: 99
     # Bumped from 95 → 98 on 2026-05-30: collapsed 17 fragile per-fingerprint
     # allow_hits entries for web/composer/tools/_common.py into 3 durable
     # per_file_rules (R1/R5/R9) after an import addition rotated every one of
@@ -374,7 +386,12 @@ defaults:
     # refactor/engine-orchestrator-processor: the permanent cleanup.py R5
     # file-split entry (expires: null) lands on top of the web-rotation bump
     # above. Same +1 accounting as the ``max_per_file_rules`` merge bump.
-    max_permanent_per_file_rules: 98
+    #
+    # Bumped from 98 → 99 on 2026-05-30 on merge of composer-service-decomp:
+    # the new web/composer/tool_batch.py R6 per_file_rule (expires: null) is
+    # permanent, so it lands on this ceiling too. Same +1 file-split accounting
+    # as the ``max_per_file_rules`` merge bump above.
+    max_permanent_per_file_rules: 99
     # Bumped from 95 → 98 on 2026-05-30: the 3 new web/composer/tools/_common.py
     # per_file_rules are permanent (expires: null, matching the Tier-3-boundary
     # convention used by core/secrets.py et al.), so they also land on the

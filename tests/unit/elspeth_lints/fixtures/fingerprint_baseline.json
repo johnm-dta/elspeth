@@ -3861,67 +3861,47 @@
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "320af615e54a618e"
+      "fingerprint": "1b4aa0ca1e1d2f83"
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "3d948d7005e5461a"
+      "fingerprint": "2a6ac3e449ff4daa"
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "65b5ba6849562f44"
+      "fingerprint": "4ba60774ae10f0f5"
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "66be6fd1f16ecb31"
+      "fingerprint": "5e18582300fe4db8"
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "6cb3c7eee7b0c42d"
+      "fingerprint": "9475aed316c9be0b"
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "6fc692049651af1d"
+      "fingerprint": "9c37dc8cf6aa2386"
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "7825c5fa9bdc30c1"
+      "fingerprint": "b8c97a159c375db2"
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "8802936bfb40358a"
+      "fingerprint": "c28f5f9ec51d0f9a"
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "8f1e5dd0dd26ffa7"
+      "fingerprint": "cd655256ca15f7bb"
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "a57348fd56c55418"
+      "fingerprint": "d6a5623c6b049c50"
     },
     {
       "file_path": "web/composer/service.py",
-      "fingerprint": "aac2dcc1899d82ce"
-    },
-    {
-      "file_path": "web/composer/service.py",
-      "fingerprint": "b2eba752dd7e3657"
-    },
-    {
-      "file_path": "web/composer/service.py",
-      "fingerprint": "c66c62e303150d89"
-    },
-    {
-      "file_path": "web/composer/service.py",
-      "fingerprint": "c97533f0e70b8765"
-    },
-    {
-      "file_path": "web/composer/service.py",
-      "fingerprint": "e24d8e59d85bfe69"
-    },
-    {
-      "file_path": "web/composer/service.py",
-      "fingerprint": "fa6d8025daedb3fc"
+      "fingerprint": "ee9dfe639c1746a6"
     },
     {
       "file_path": "web/composer/skills/__init__.py",
@@ -4074,6 +4054,30 @@
     {
       "file_path": "web/composer/telemetry_phase8.py",
       "fingerprint": "ec883bb6324c83c0"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "0d486255de228823"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "1498557d416fbe12"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "1ed37d0b88a0151f"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "54356b4332bf5c63"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "9a7b25e2fc96514d"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "e7084dd7e4c42da5"
     },
     {
       "file_path": "web/composer/tools/_common.py",

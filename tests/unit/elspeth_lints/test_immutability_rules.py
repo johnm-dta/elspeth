@@ -463,7 +463,11 @@ def test_existing_yaml_loads_with_core_loader() -> None:
 
     path = Path("config/cicd/enforce_frozen_annotations/existing.yaml")
     result = load_allowlist(path, valid_rule_ids={"immutability.frozen_annotations"})
-    assert len(result.entries) == 16, f"expected 16 entries, got {len(result.entries)}"
+    # 17 since the composer/service.py decomposition added the ToolBatchContext
+    # .discovery_cache frozen-annotation exemption (the intentionally-mutable
+    # dispatch cache extracted into tool_batch.py, paired with its FG3 freeze-guard
+    # rule in enforce_freeze_guards/web.yaml).
+    assert len(result.entries) == 17, f"expected 17 entries, got {len(result.entries)}"
 
 
 def _analyze_freeze_guards(source: str) -> list[Finding]:

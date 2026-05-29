@@ -690,6 +690,11 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_model_turn:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_model_turn:tools (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._dispatch_tool_batch:llm_messages (list)"
+  # Extracted body of _dispatch_tool_batch: the verbatim move to the module-level
+  # run_tool_batch (composer/service.py decomposition) carries the same OpenAI
+  # chat-completion message list. The service.py:_dispatch_tool_batch entry above
+  # remains valid for the thin delegator that still builds and forwards the list.
+  - "src/elspeth/web/composer/tool_batch.py:run_tool_batch:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._classify_and_budget_turn:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._classify_and_budget_turn:tools (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._try_terminate_no_tools:llm_messages (list)"
@@ -873,7 +878,10 @@ allowed_dict_patterns:
   # parsed dict (LLM-supplied tool call arguments — no schema available
   # at this site, validation already happened above) and the closure
   # default-argument pattern shadows it as `_arguments` to silence B023.
-  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._do_dispatch:_arguments"
+  # Moved service.py -> tool_batch.py: the _do_dispatch closure was extracted
+  # verbatim into the module-level run_tool_batch (composer/service.py
+  # decomposition); same Tier-3 parsed-dict semantics, no enclosing class now.
+  - "src/elspeth/web/composer/tool_batch.py:_do_dispatch:_arguments"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_messages:return (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._get_litellm_tools:return (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_llm:messages (list)"

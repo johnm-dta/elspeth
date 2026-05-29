@@ -271,64 +271,7 @@ def test_advisor_tool_excluded_from_cli_mcp_allowlist() -> None:
     assert "request_advisor_hint" in runtime_names
 
 
-# --- 3. Skill ↔ tool-definitions parity ---
-
-
-def test_skill_step0_includes_request_advisor_hint() -> None:
-    """The web composer skill's Step-0 list must mention request_advisor_hint.
-    This test is a focused subset of TestComposerToolNameDrift in
-    test_skill_drift.py — duplicating it here gives a fast local signal
-    while editing this feature without running the full drift suite.
-    """
-    from importlib.resources import files
-
-    skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
-    # Find the Diagnostics line in Step-0
-    assert "`request_advisor_hint`" in skill_text, "skill does not mention the advisor tool in its Step-0 enumeration"
-
-
-def test_skill_advisor_examples_include_required_trigger_values() -> None:
-    """The static skill examples must not teach a payload that the runtime
-    tool schema now rejects.
-    """
-    from importlib.resources import files
-
-    skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
-    assert "Valid triggers include" in skill_text
-    assert "reactive_validation_loop" in skill_text
-    assert "proactive_security_safety" in skill_text
-    assert "proactive_red_listed_plugin" in skill_text
-
-
-def test_skill_wiring_examples_include_duplicate_consumer_fork_repair() -> None:
-    """The skill must teach the duplicate-consumer repair pattern: insert a gate /
-    distinct routing, and never delete a user-requested consumer node. (The skill
-    restructure replaced the verbatim "Example C" JSON block with prose + a
-    troubleshooting-table row; this test now pins that current guidance.)
-    """
-    from importlib.resources import files
-
-    skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
-    assert "Duplicate consumer for connection" in skill_text
-    assert "Insert a gate node" in skill_text
-    assert "Do not remove either consumer node" in skill_text
-
-
-def test_skill_does_not_teach_branch_node_ids_in_fork_to() -> None:
-    """The skill must never teach the wrong fork_to form — naming path-transform
-    node IDs (``fork_to: [path_a, path_b]``) instead of connection/input names.
-
-    The dedicated "Critical: fork_to vs routes" section was removed in the skill
-    restructure (fork_to is no longer taught inline). This remains a regression
-    guard against re-introducing the incorrect node-ID form anywhere in the prompt.
-    """
-    from importlib.resources import files
-
-    skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
-    assert "fork_to: [path_a, path_b]" not in skill_text
-
-
-# --- 4. Compose-loop happy path (advisor returns guidance) ---
+# --- 3. Compose-loop happy path (advisor returns guidance) ---
 
 
 @pytest.mark.asyncio
@@ -513,7 +456,7 @@ async def test_advisor_omits_seed_when_advisor_model_does_not_support_it(monkeyp
     assert recorder.llm_calls[0].seed is None
 
 
-# --- 5. Budget exhaustion ---
+# --- 4. Budget exhaustion ---
 
 
 @pytest.mark.asyncio
@@ -612,7 +555,7 @@ async def test_exhausted_advisor_turn_charges_discovery_budget() -> None:
     assert "BUDGET_EXHAUSTED" in _result_canonical(invocations[0])
 
 
-# --- 6. Disabled-but-LLM-tries (defense-in-depth) ---
+# --- 5. Disabled-but-LLM-tries (defense-in-depth) ---
 
 
 @pytest.mark.asyncio

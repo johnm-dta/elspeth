@@ -1691,7 +1691,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/service.py:R5:_request_interpretation_review_kind_from_arguments:fp=320af615e54a618e
+- key: web/composer/service.py:R5:_request_interpretation_review_kind_from_arguments:fp=ee9dfe639c1746a6
   owner: web-composer
   pattern: tier3-boundary-validator
   reason: '2026-05-24 tutorial-assumption surfacing addition: request_interpretation_review
@@ -2844,7 +2844,7 @@ allow_hits:
     excluded (too broad); programmer bugs propagate; partial failures logged from
     structured result
   expires: null
-- key: web/composer/service.py:R8:_apply_openrouter_app_identity:fp=fa6d8025daedb3fc
+- key: web/composer/service.py:R8:_apply_openrouter_app_identity:fp=9c37dc8cf6aa2386
   owner: composer-openrouter-attribution
   reason: 'Outbound-request construction boundary: setdefault fills ELSPETH''s three
     OpenRouter app-attribution identity headers (HTTP-Referer, X-OpenRouter-Title,
@@ -2855,7 +2855,7 @@ allow_hits:
   expires: null
   safety: setdefault never overwrites a caller value; identity-only keys; no inbound
     data read.
-- key: web/composer/service.py:R8:_apply_openrouter_app_identity:fp=c97533f0e70b8765
+- key: web/composer/service.py:R8:_apply_openrouter_app_identity:fp=c28f5f9ec51d0f9a
   owner: composer-openrouter-attribution
   reason: 'Outbound-request construction boundary: setdefault fills ELSPETH''s three
     OpenRouter app-attribution identity headers (HTTP-Referer, X-OpenRouter-Title,
@@ -2866,7 +2866,7 @@ allow_hits:
   expires: null
   safety: setdefault never overwrites a caller value; identity-only keys; no inbound
     data read.
-- key: web/composer/service.py:R8:_apply_openrouter_app_identity:fp=66be6fd1f16ecb31
+- key: web/composer/service.py:R8:_apply_openrouter_app_identity:fp=5e18582300fe4db8
   owner: composer-openrouter-attribution
   reason: 'Outbound-request construction boundary: setdefault fills ELSPETH''s three
     OpenRouter app-attribution identity headers (HTTP-Referer, X-OpenRouter-Title,
@@ -2877,14 +2877,14 @@ allow_hits:
   expires: null
   safety: setdefault never overwrites a caller value; identity-only keys; no inbound
     data read.
-- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=8802936bfb40358a
+- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=b8c97a159c375db2
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: data = payload.get("data")'
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=aac2dcc1899d82ce
+- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=2a6ac3e449ff4daa
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
     composition). Pattern preserved: Potential dict.get() usage: return type(data)
@@ -2892,7 +2892,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_serialize_response_via_walker:fp=b2eba752dd7e3657
+- key: web/composer/service.py:R5:ComposerServiceImpl:_serialize_response_via_walker:fp=cd655256ca15f7bb
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -2900,7 +2900,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=3d948d7005e5461a
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=4ba60774ae10f0f5
   owner: composer-tools-rearchitect
   reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
     (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
@@ -2908,25 +2908,48 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
     infrastructure; semantics unchanged from RC5.2
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_dispatch_tool_batch:fp=c66c62e303150d89
-  owner: composer-tools-rearchitect
-  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
-    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
-    + Steps 6-7). Pattern preserved: Broad exception caught without re-raise: except
-    Exception as advisor_exc:'
-  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
-    infrastructure; semantics unchanged from RC5.2
+- key: web/composer/tool_batch.py:R4:run_tool_batch:fp=54356b4332bf5c63
+  owner: web-composer
+  reason: 'Extracted verbatim from ComposerServiceImpl._dispatch_tool_batch into the
+    module-level run_tool_batch during the composer/service.py decomposition (key
+    moved service.py -> tool_batch.py, broad-except semantics unchanged). Tier-3
+    outbound boundary: the advisor (request_advisor_hint) LLM call may fail for any
+    provider/network reason; the broad except converts the failure into a structured
+    tool-result error returned to the composer LLM so it gets feedback rather than a
+    silent stall. Pattern: Broad exception caught without re-raise: except Exception
+    as advisor_exc:'
+  safety: The ComposerLLMCall record is fired before the catch, so the failure is
+    already in the audit trail; the exception is surfaced to the LLM as a structured
+    error payload and the compose loop continues deterministically. No silent
+    pass-through.
   expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_dispatch_tool_batch:fp=6fc692049651af1d
-  owner: composer-tools-rearchitect
-  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
-    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
-    + Steps 6-7). Pattern preserved: Broad exception caught without re-raise: except
-    Exception as tool_exc:'
-  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
-    infrastructure; semantics unchanged from RC5.2
+- key: web/composer/tool_batch.py:R4:run_tool_batch:fp=1498557d416fbe12
+  owner: web-composer
+  reason: 'Extracted verbatim from ComposerServiceImpl._dispatch_tool_batch into the
+    module-level run_tool_batch during the composer/service.py decomposition (key
+    moved service.py -> tool_batch.py, broad-except semantics unchanged). Plugin-bug
+    isolation path (CLAUDE.md tier 1/2): AuditIntegrityError (Tier-1) and
+    ToolArgumentError are re-raised by explicit handlers ABOVE this catch; any other
+    exception escaping execute_tool() is a plugin bug, captured and converted to a
+    ComposerPluginCrashError rather than aborting the run uncontrolled. Pattern:
+    Broad exception caught without re-raise: except Exception as tool_exc:'
+  safety: Tier-1 AuditIntegrityError is re-raised before this catch-all and is never
+    laundered; the captured plugin-bug exception is recorded and re-surfaced as a
+    typed ComposerPluginCrashError. No silent pass-through of audit-integrity faults.
   expires: null
-- key: web/composer/service.py:R2:ComposerServiceImpl:_call_llm:fp=6cb3c7eee7b0c42d
+- key: web/composer/tool_batch.py:R5:run_tool_batch:fp=9a7b25e2fc96514d
+  owner: web-composer
+  reason: 'Tier-3 boundary in the extracted run_tool_batch (composer/service.py
+    decomposition): LLM tool-call arguments are JSON-decoded from an untrusted model
+    response, so the decoded value must be confirmed to be a dict before it is treated
+    as a keyword-argument mapping. isinstance() rejects non-object JSON (list / str /
+    number / null) at the boundary. Pattern: isinstance() used: if not isinstance(decoded_arguments,
+    dict):'
+  safety: A non-dict decoded payload takes the error branch (structured tool-result
+    error returned to the LLM, budget class still tracked); it is never spread as kwargs
+    into a tool handler. No coercion, no silent acceptance.
+  expires: null
+- key: web/composer/service.py:R2:ComposerServiceImpl:_call_llm:fp=d6a5623c6b049c50
   owner: composer-tools-rearchitect
   reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
     (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
@@ -2935,7 +2958,7 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
     infrastructure; semantics unchanged from RC5.2
   expires: null
-- key: web/composer/service.py:R2:ComposerServiceImpl:_call_text_llm:fp=a57348fd56c55418
+- key: web/composer/service.py:R2:ComposerServiceImpl:_call_text_llm:fp=9475aed316c9be0b
   owner: composer-tools-rearchitect
   reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
     (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
@@ -3086,6 +3109,23 @@ per_file_rules:
     or missing required keys (KeyError/TypeError). Errors returned to LLM for self-correction,
     not swallowed.
   expires: null
+- pattern: web/composer/tool_batch.py
+  rules:
+  - R6
+  owner: web-composer
+  reason: 'Tier 3 boundary, moved verbatim from the service.py R6 rule above when the
+    composer/service.py decomposition extracted _dispatch_tool_batch into the
+    module-level run_tool_batch. The three sites parse/redact untrusted LLM tool-call
+    arguments: malformed JSON (json.JSONDecodeError, TypeError), a redaction-time
+    PydanticValidationError (falls back to None so a redaction failure cannot block
+    the audited dispatch), and a ToolArgumentError whose audit record is already
+    written by the helper before the LLM-facing error message is built. Every site
+    returns a structured error to the LLM for self-correction, not silent swallow.
+    Per-file rule (not per-fingerprint) because run_tool_batch is a high-churn
+    boundary whose AST fingerprints rotate on any edit (feedback_rotate_tier_model_dup_key_dataloss);
+    max_hits caps the exemption so a NEW R6 still trips review.'
+  expires: null
+  max_hits: 3
 - pattern: web/composer/telemetry_phase8.py
   rules:
   - R4

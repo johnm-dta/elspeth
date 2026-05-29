@@ -87,6 +87,18 @@ class TokenWorkItem:
 
 
 @dataclass(frozen=True, slots=True)
+class BlockedPendingSinkHandoff:
+    """Sink handoff metadata for a BLOCKED scheduler row released by a barrier."""
+
+    row_payload_json: str
+    sink_name: str
+    outcome: str
+    path: str
+    error_hash: str | None
+    error_message: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class SchedulerEvent:
     """Immutable audit event for a scheduler work-item transition."""
 

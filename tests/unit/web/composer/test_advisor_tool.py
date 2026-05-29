@@ -294,36 +294,38 @@ def test_skill_advisor_examples_include_required_trigger_values() -> None:
     from importlib.resources import files
 
     skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
-    assert "trigger:" in skill_text
+    assert "Valid triggers include" in skill_text
     assert "reactive_validation_loop" in skill_text
     assert "proactive_security_safety" in skill_text
     assert "proactive_red_listed_plugin" in skill_text
 
 
 def test_skill_wiring_examples_include_duplicate_consumer_fork_repair() -> None:
-    """The skill must teach the duplicate-consumer repair pattern from P1 stress."""
+    """The skill must teach the duplicate-consumer repair pattern: insert a gate /
+    distinct routing, and never delete a user-requested consumer node. (The skill
+    restructure replaced the verbatim "Example C" JSON block with prose + a
+    troubleshooting-table row; this test now pins that current guidance.)
+    """
     from importlib.resources import files
 
     skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
-    assert "Example C" in skill_text
-    assert "Duplicate consumer for connection 'classified_rows'" in skill_text
-    assert '"id": "fork_classified_rows"' in skill_text
-    assert '"fork_to": ["classified_rows_to_fraud_filter", "classified_rows_to_regular_filter"]' in skill_text
+    assert "Duplicate consumer for connection" in skill_text
+    assert "Insert a gate node" in skill_text
+    assert "Do not remove either consumer node" in skill_text
 
 
-def test_skill_fork_coalesce_critical_guidance_does_not_teach_branch_node_ids() -> None:
-    """Recipe #10's critical guidance must teach connection names, not node IDs."""
+def test_skill_does_not_teach_branch_node_ids_in_fork_to() -> None:
+    """The skill must never teach the wrong fork_to form — naming path-transform
+    node IDs (``fork_to: [path_a, path_b]``) instead of connection/input names.
+
+    The dedicated "Critical: fork_to vs routes" section was removed in the skill
+    restructure (fork_to is no longer taught inline). This remains a regression
+    guard against re-introducing the incorrect node-ID form anywhere in the prompt.
+    """
     from importlib.resources import files
 
     skill_text = (files("elspeth.web.composer.skills") / "pipeline_composer.md").read_text(encoding="utf-8")
-    critical_section = skill_text.split("#### Critical: `fork_to` vs `routes` on a gate", 1)[1].split(
-        "#### Connection naming",
-        1,
-    )[0]
-
-    assert "fork_to: [path_a, path_b]" not in critical_section
-    assert "fork_to: [path_a_in, path_b_in]" in critical_section
-    assert "The `gate.fork_to` list names the **inputs** to the path-transforms" in critical_section
+    assert "fork_to: [path_a, path_b]" not in skill_text
 
 
 # --- 4. Compose-loop happy path (advisor returns guidance) ---

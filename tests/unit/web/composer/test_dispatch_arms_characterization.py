@@ -297,7 +297,7 @@ async def test_arm_discovery_cache_hit_records_success_with_cache_hit_flag(
     assert all(s == ComposerToolStatus.SUCCESS for s in statuses), (
         f"All invocations must be SUCCESS (cache-hit arm records finish_success); got {statuses!r}"
     )
-    assert any(getattr(inv, "cache_hit", False) for inv in result.tool_invocations), (
+    assert any(inv.cache_hit for inv in result.tool_invocations), (
         "No invocation has cache_hit=True; the second list_sources call should have been served "
         "from discovery_cache (service.py ~line 2548).  If the cache-hit arm was bypassed "
         "(e.g. both calls hit the execute path), the cache-populate step at ~line 3518 "

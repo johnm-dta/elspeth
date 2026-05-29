@@ -7697,7 +7697,7 @@ class TestGetPluginAssistance:
         assert "url_field" in hints
         assert "Unknown source plugin: web_scrape" in hints
         assert "surface prompt-injection shielding as an important recommendation" in hints
-        assert "recommendation is not permission to add a node" in hints
+        assert "Recommendation is not permission to add a node" in hints
         assert "do not add passthrough, placeholder, no-op, or renamed utility nodes" in hints
         assert "do not substitute azure_content_safety" in hints
         assert "do not insert it automatically" in hints

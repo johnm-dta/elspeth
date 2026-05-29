@@ -25,6 +25,24 @@ def _make_orchestrator() -> Orchestrator:
     return Orchestrator(make_landscape_db())
 
 
+def _make_active_source() -> MagicMock:
+    """Active-source stand-in that satisfies _record_run_source_lifecycle.
+
+    The exhausted, non-interrupted finalization path records source lifecycle,
+    which probes ``get_field_resolution()`` (unpacked as a 2-tuple), serialises
+    ``output_schema.model_json_schema()`` via ``json.dumps``, and hashes
+    ``config`` via ``stable_hash``. A bare MagicMock yields un-unpackable /
+    un-serialisable Mocks, so configure the minimum real-shaped returns. These
+    tests assert on context restoration and flush gating — not on the recorded
+    lifecycle — so empty/None evidence is sufficient and honest.
+    """
+    source = MagicMock()
+    source.get_field_resolution.return_value = None
+    source.output_schema.model_json_schema.return_value = {}
+    source.config = {}
+    return source
+
+
 def _make_loop_ctx(ctx: PluginContext, *, coalesce_executor: MagicMock | None = None) -> LoopContext:
     """Build minimal LoopContext for finalization tests.
 
@@ -78,12 +96,14 @@ class TestFinalizeSourceIterationContext:
             factory=MagicMock(),
             run_id="test-run",
             source_id=source_id,
+            active_source_name="source-node-001",
             source_operation_id=source_operation_id,
             field_resolution_recorded=True,
             schema_contract_recorded=True,
+            source_exhausted=False,
             interrupted_by_shutdown=True,
             flush_end_of_input=False,
-            active_source=MagicMock(),
+            active_source=_make_active_source(),
         )
 
         assert ctx.node_id == source_id, (
@@ -111,12 +131,14 @@ class TestFinalizeSourceIterationContext:
             factory=MagicMock(),
             run_id="test-run",
             source_id=source_id,
+            active_source_name="source-node-002",
             source_operation_id=source_operation_id,
             field_resolution_recorded=True,
             schema_contract_recorded=True,
+            source_exhausted=True,
             interrupted_by_shutdown=False,
             flush_end_of_input=True,
-            active_source=MagicMock(),
+            active_source=_make_active_source(),
         )
 
         assert ctx.node_id == source_id
@@ -140,12 +162,14 @@ class TestFinalizeSourceIterationContext:
                 factory=MagicMock(),
                 run_id="test-run",
                 source_id=NodeID("source-orders"),
+                active_source_name="orders",
                 source_operation_id="op-source-load-orders",
                 field_resolution_recorded=True,
                 schema_contract_recorded=True,
+                source_exhausted=True,
                 interrupted_by_shutdown=False,
                 flush_end_of_input=False,
-                active_source=MagicMock(),
+                active_source=_make_active_source(),
             )
 
         flush_coalesce.assert_not_called()
@@ -168,12 +192,14 @@ class TestFinalizeSourceIterationContext:
                 factory=MagicMock(),
                 run_id="test-run",
                 source_id=NodeID("source-refunds"),
+                active_source_name="refunds",
                 source_operation_id="op-source-load-refunds",
                 field_resolution_recorded=True,
                 schema_contract_recorded=True,
+                source_exhausted=True,
                 interrupted_by_shutdown=False,
                 flush_end_of_input=True,
-                active_source=MagicMock(),
+                active_source=_make_active_source(),
             )
 
         flush_coalesce.assert_called_once()
@@ -196,12 +222,14 @@ class TestFinalizeSourceIterationContext:
                 factory=MagicMock(),
                 run_id="test-run",
                 source_id=NodeID("source-orders"),
+                active_source_name="orders",
                 source_operation_id="op-source-load-orders",
                 field_resolution_recorded=True,
                 schema_contract_recorded=True,
+                source_exhausted=True,
                 interrupted_by_shutdown=False,
                 flush_end_of_input=False,
-                active_source=MagicMock(),
+                active_source=_make_active_source(),
             )
 
         flush_aggregation.assert_not_called()
@@ -224,12 +252,14 @@ class TestFinalizeSourceIterationContext:
                 factory=MagicMock(),
                 run_id="test-run",
                 source_id=NodeID("source-refunds"),
+                active_source_name="refunds",
                 source_operation_id="op-source-load-refunds",
                 field_resolution_recorded=True,
                 schema_contract_recorded=True,
+                source_exhausted=True,
                 interrupted_by_shutdown=False,
                 flush_end_of_input=True,
-                active_source=MagicMock(),
+                active_source=_make_active_source(),
             )
 
         flush_aggregation.assert_called_once()

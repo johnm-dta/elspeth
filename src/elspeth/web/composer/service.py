@@ -57,6 +57,7 @@ from elspeth.web.composer._compose_loop_carriers import (
     _TerminateOutcome,
 )
 from elspeth.web.composer.anti_anchor import AntiAnchorTracker
+from elspeth.web.composer.availability import ComposerAvailability as ComposerAvailability  # re-export; genuine home is availability.py
 from elspeth.web.composer.audit import (
     BufferingRecorder,
     DispatchAudit,
@@ -771,17 +772,6 @@ def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
             ],
         ),
     )
-
-
-@dataclass(frozen=True, slots=True)
-class ComposerAvailability:
-    """Boot-time availability snapshot for the composer service."""
-
-    available: bool
-    model: str
-    provider: str | None
-    reason: str | None = None
-    missing_keys: tuple[str, ...] = ()
 
 
 _PROVIDER_REQUIRED_ENV_KEYS: dict[str, tuple[str, ...]] = {
@@ -3727,50 +3717,15 @@ class ComposerServiceImpl:
     def _compute_availability(self) -> ComposerAvailability:
         """Infer whether the configured model has the required env at boot.
 
-        This is a configuration/readiness signal, not a network health check.
-        Keep it side-effect-free: LiteLLM provider probing has observable
-        startup side effects in web lifespans, while the actual composer call
-        path still validates provider requests through LiteLLM.
+        Delegates to :func:`availability.compute_availability`.
+        The monkeypatch target ``ComposerServiceImpl._compute_availability``
+        is preserved here so test fixtures using
+        ``monkeypatch.setattr(ComposerServiceImpl, "_compute_availability", ...)``
+        continue to work without modification.
         """
-        provider = _infer_provider_from_model_name(self._model) or _infer_provider_from_unprefixed_model_name(self._model)
-        if provider is None:
-            return ComposerAvailability(
-                available=False,
-                model=self._model,
-                provider=provider,
-                reason=(
-                    f"Composer model {self._model} is unavailable: provider could not be inferred. "
-                    "Use a provider-prefixed model name or a recognized OpenAI/Anthropic model name."
-                ),
-            )
+        from elspeth.web.composer.availability import compute_availability
 
-        if provider not in _PROVIDER_REQUIRED_ENV_KEYS:
-            return ComposerAvailability(
-                available=False,
-                model=self._model,
-                provider=provider,
-                reason=f"Composer model {self._model} is unavailable: provider {provider!r} has no configured environment contract.",
-            )
-        required_keys = _PROVIDER_REQUIRED_ENV_KEYS[provider]
-
-        missing_keys = tuple(key for key in required_keys if key not in os.environ or not os.environ[key])
-        if not missing_keys:
-            return ComposerAvailability(
-                available=True,
-                model=self._model,
-                provider=provider,
-            )
-
-        missing = ", ".join(missing_keys)
-        reason = f"Composer model {self._model} is unavailable: missing {missing}."
-
-        return ComposerAvailability(
-            available=False,
-            model=self._model,
-            provider=provider,
-            reason=reason,
-            missing_keys=missing_keys,
-        )
+        return compute_availability(self)
 
 
 def _infer_provider_from_model_name(model: str) -> str | None:

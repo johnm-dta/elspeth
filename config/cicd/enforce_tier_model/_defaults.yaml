@@ -221,7 +221,19 @@ defaults:
     # rule so a NEW R1/R5 in either file still trips review. R6/R7 in
     # sessions/service.py remain individually fingerprinted for per-site
     # scrutiny and are NOT covered by the rule.
-    max_per_file_rules: 94
+    #
+    # Bumped from 94 → 95 on 2026-05-29 (net +1) on merge of
+    # refactor/engine-orchestrator-processor into RC5.2: the orchestrator
+    # god-class decomposition extracted ``_cleanup_plugins`` into
+    # ``engine/orchestrator/cleanup.py``, relocating the Tier-1 re-raise R5
+    # guard out of the ``core.py`` R5 pattern into a new per-file pattern
+    # entry for ``cleanup.py`` (the ``core.py`` R5 ``max_hits`` was
+    # decremented 3 → 2 to compensate on the hit axis). Splitting one file
+    # into two costs exactly one new per_file_rules entry; this +1 lands on
+    # top of the web-rotation bump above (RC5.2 took it 92 → 94; this merge
+    # takes it 94 → 95). Honest accounting of the file split, not new
+    # defensive surface.
+    max_per_file_rules: 95
     # Bumped from 485 → 486 on 2026-05-19 for the same Phase 8 PR-review
     # S4 entry as ``max_allow_hits`` above.
     #
@@ -280,7 +292,15 @@ defaults:
     # Bumped to 744 on 2026-05-25 (net +7) for the same llm_model_choice
     # algorithmic-surfacing addition accounted for in ``max_allow_hits``
     # above.
-    max_total_entries: 744
+    #
+    # Bumped to 745 on 2026-05-29 (net +1) for the same orchestrator
+    # decomposition cleanup.py R5 file-split entry as ``max_per_file_rules``
+    # above. ``max_allow_hits`` is NOT paired: the R4 ``run_hook`` allow_hit
+    # key was relocated core.py → cleanup.py (net-zero on hits), so only the
+    # new R5 pattern entry adds to the total-entry count. The pre-existing
+    # total_entries overage (RC5.2's DECAYING cicd-allowlist-audit track) is
+    # left visible, NOT absorbed by this bump.
+    max_total_entries: 745
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.
@@ -310,6 +330,13 @@ defaults:
     # Ratcheted 2026-05-23: max_permanent_per_file_rules 93 → 92 matching
     # the ``max_per_file_rules`` ratchet above.
     #
+    # Bumped 2026-05-29: max_permanent_total_entries 412 → 413 for the
+    # orchestrator decomposition cleanup.py R5 file-split entry (expires:
+    # null, so it counts in the permanent subset). Same +1 accounting as the
+    # ``max_total_entries`` bump above. The matching
+    # max_permanent_per_file_rules +1 is recorded at that ceiling below,
+    # where it stacks onto RC5.2's web-rotation bump (92 → 94 → 95).
+    #
     # Bumped on merge of refactor/composer-tools-rearchitect into RC5.2
     # (commits 7114e78cc + 1e7e42d7a, plus this merge commit):
     # max_permanent_allow_hits 275 → 330 (+55) and
@@ -334,11 +361,20 @@ defaults:
     # the ``max_per_file_rules`` bump above. The 112 removed allow_hits were
     # likewise permanent, so the permanent exact-hit and total subsets both
     # fall well below their ceilings; only the per-file-rule subset rises.
-    max_permanent_per_file_rules: 94
+    #
+    # Bumped from 94 → 95 on 2026-05-29 (net +1) on merge of
+    # refactor/engine-orchestrator-processor: the permanent cleanup.py R5
+    # file-split entry (expires: null) lands on top of the web-rotation bump
+    # above. Same +1 accounting as the ``max_per_file_rules`` merge bump.
+    max_permanent_per_file_rules: 95
     # Ratcheted to 410 on 2026-05-25 after stale-fingerprint pruning in the
     # tutorial-assumption-surfacing rebase reduced the permanent total corpus
     # below the prior ceiling.
     #
     # Bumped to 412 on 2026-05-25 (net +2) for the same model-catalog-snapshot
     # permanent entries as ``max_permanent_allow_hits`` above.
-    max_permanent_total_entries: 412
+    #
+    # Bumped to 413 on 2026-05-29 (net +1) for the same orchestrator
+    # decomposition cleanup.py R5 file-split entry as
+    # ``max_permanent_per_file_rules`` above.
+    max_permanent_total_entries: 413

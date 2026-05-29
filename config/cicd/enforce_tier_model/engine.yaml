@@ -44,12 +44,21 @@ per_file_rules:
   reason: TransformProtocol dispatch on config.transforms
   expires: null
   max_hits: 1
+- pattern: engine/orchestrator/cleanup.py
+  rules:
+  - R5
+  reason: Tier-1 re-raise guard — record_cleanup_error() uses isinstance(error,
+    TIER_1_ERRORS) to bypass the cleanup-warning downgrade and propagate
+    FrameworkBugError/AuditIntegrityError immediately. Relocated from the core.py
+    R5 pattern when _cleanup_plugins was extracted to its own module.
+  expires: null
+  max_hits: 1
 - pattern: engine/orchestrator/core.py
   rules:
   - R5
   reason: Protocol dispatch for batch-aware transforms and re-raise guards
   expires: null
-  max_hits: 3
+  max_hits: 2
 - pattern: engine/processor.py
   rules:
   - R5
@@ -200,7 +209,7 @@ allow_hits:
     not hide primary pipeline work, does not log raw exception text, and is covered
     by tests/unit/engine/test_best_effort.py::test_best_effort_suppresses_logger_failures."
   expires: null
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=64aa6bffa9e759d1
+- key: engine/orchestrator/cleanup.py:R4:cleanup_plugins:run_hook:fp=3f14e10c45af58b3
   owner: architecture
   reason: "Plugin cleanup MUST attempt every hook even when individual hooks fail \u2014
     the broad catch is required by contract (close()/on_complete() are best-effort
@@ -216,7 +225,7 @@ allow_hits:
     trail preserves both. No silent drops. Burndown: filigree elspeth-550362f760
     (closed)."
   expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=28abc6a4bd80595e
+- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=49d051713c4a7398
   owner: bugfix
   pattern: audit-record-fallback
   reason: "Tier-3 quarantine boundary \u2014 quarantined row data may contain NaN/Infinity

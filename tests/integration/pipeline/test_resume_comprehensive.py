@@ -1650,7 +1650,7 @@ class TestResumeComprehensive:
         rows_routed split.
 
         Why this test exists (and why the unit-level coverage is not
-        sufficient): ``_derive_resume_terminal_status_from_audit`` has two
+        sufficient): ``derive_resume_terminal_status_from_audit`` has two
         symmetric match arms — ``(SUCCESS, GATE_ROUTED)`` (gate MOVE; counts
         toward ``rows_routed_success``) and ``(FAILURE, ON_ERROR_ROUTED)``
         (transform on_error DIVERT; counts toward ``rows_routed_failure``).
@@ -1690,7 +1690,7 @@ class TestResumeComprehensive:
            provenance.
 
         Regression catcher: an inversion of the two ``rows_routed_*``
-        increments in ``_derive_resume_terminal_status_from_audit``'s
+        increments in ``derive_resume_terminal_status_from_audit``'s
         ``ROUTED_ON_ERROR`` arm would (a) miscount as
         ``rows_routed_success=5`` and (b) flip the predicate to
         ``RunStatus.COMPLETED``.  Both assertions fail under the swap.

@@ -1691,6 +1691,14 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
+- key: web/composer/tools/generation.py:R5:_csv_source_field_mapping:fp=176985867214e183
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
 - key: web/composer/service.py:R5:_request_interpretation_review_kind_from_arguments:fp=ee9dfe639c1746a6
   owner: web-composer
   pattern: tier3-boundary-validator

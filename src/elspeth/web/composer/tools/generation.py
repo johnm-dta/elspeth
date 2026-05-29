@@ -108,7 +108,11 @@ def _csv_source_field_mapping(options: Mapping[str, Any]) -> dict[str, str] | No
     raw = options["field_mapping"] if "field_mapping" in options else None
     if raw is None:
         return None
-    if type(raw) is not dict:
+    # Accept any Mapping, not just dict: CompositionState options are deep-frozen,
+    # so field_mapping arrives as a MappingProxyType. A `type(raw) is dict` check
+    # wrongly rejects the frozen mapping (Tier-3 structural validation of external/
+    # LLM-authored config — isinstance is the correct, subtype-aware guard here).
+    if not isinstance(raw, Mapping):
         raise ValueError(f"csv source field_mapping must be a mapping when present; got {type(raw).__name__}")
     mapping: dict[str, str] = {}
     for key, value in raw.items():

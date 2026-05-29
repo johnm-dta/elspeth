@@ -131,6 +131,10 @@ from elspeth.engine.orchestrator.outcomes import (
     handle_coalesce_timeouts,
     reconcile_sink_write_diversions,
 )
+from elspeth.engine.orchestrator.run_status import (
+    cli_completion_for,
+    derive_resume_terminal_status_from_audit,
+)
 from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
     ExecutionCounters,
@@ -421,128 +425,6 @@ class Orchestrator:
             )
             if pending_exc is None:
                 raise
-
-    def _derive_resume_terminal_status_from_audit(self, factory: RecorderFactory, run_id: str) -> tuple[RunStatus, ExecutionCounters]:
-        """Phase 2.2 (elspeth-0de989c56d) — recover the truthful terminal
-        status of a run from the Landscape audit DB when the resume found
-        no unprocessed rows.
-
-        The "all-rows-already-processed" resume branch fires when a prior
-        run was interrupted *after* all source rows had reached terminal
-        states.  At that point the resume's local counters are 0 (nothing
-        was reprocessed), but the audit DB carries the truth in
-        ``token_outcomes``.  Pre-Phase-2.2 the engine wrote
-        ``RunStatus.COMPLETED`` here unconditionally, masking runs that
-        actually failed.  This helper aggregates ``token_outcomes`` and
-        applies the presence-indicator predicate so the persisted status
-        reflects what really happened.
-
-        Returns:
-            ``(terminal_status, counters)``.  ``counters`` feeds the local
-            RunResult so its row counts match the chosen status (otherwise
-            the biconditional in :class:`elspeth.contracts.run_result.RunResult`
-            would crash) and so structural counters are not fabricated as 0.
-        """
-        outcomes = factory.query.get_all_token_outcomes_for_run(run_id)
-        counters = ExecutionCounters()
-        for outcome_record in outcomes:
-            if not outcome_record.completed:
-                if (outcome_record.outcome, outcome_record.path) == (None, TerminalPath.BUFFERED):
-                    counters.rows_buffered += 1
-                continue
-            pair = (outcome_record.outcome, outcome_record.path)
-            match pair:
-                case (
-                    (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
-                    | (TerminalOutcome.SUCCESS, TerminalPath.FILTER_DROPPED)
-                    | (TerminalOutcome.SUCCESS, TerminalPath.GATE_DISCARDED)
-                ):
-                    counters.rows_succeeded += 1
-                    counters.rows_processed += 1
-                case (TerminalOutcome.SUCCESS, TerminalPath.COALESCED):
-                    counters.rows_coalesced += 1
-                    counters.rows_succeeded += 1
-                    counters.rows_processed += 1
-                case (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED):
-                    counters.rows_routed_success += 1
-                    counters.rows_succeeded += 1
-                    counters.rows_processed += 1
-                    if outcome_record.sink_name is not None:
-                        counters.routed_destinations[outcome_record.sink_name] += 1
-                case (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
-                    counters.rows_failed += 1
-                    counters.rows_routed_failure += 1
-                    counters.rows_processed += 1
-                    if outcome_record.sink_name is not None:
-                        counters.routed_destinations[outcome_record.sink_name] += 1
-                case (TerminalOutcome.FAILURE, TerminalPath.UNROUTED):
-                    counters.rows_failed += 1
-                    counters.rows_processed += 1
-                case (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE):
-                    counters.rows_quarantined += 1
-                    counters.rows_failed += 1
-                    counters.rows_processed += 1
-                case (TerminalOutcome.FAILURE, TerminalPath.SINK_DISCARDED):
-                    counters.rows_diverted += 1
-                    counters.rows_failed += 1
-                    counters.rows_processed += 1
-                case (TerminalOutcome.TRANSIENT, TerminalPath.SINK_FALLBACK_TO_FAILSINK):
-                    counters.rows_diverted += 1
-                    counters.rows_processed += 1
-                case (TerminalOutcome.TRANSIENT, TerminalPath.FORK_PARENT):
-                    # Parent tokens delegate predicate counters to their
-                    # children, but the structural fork count belongs here.
-                    counters.rows_forked += 1
-                case (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT):
-                    # Deaggregation parents behave like fork parents for the
-                    # success/failure tally, with their own structural count.
-                    counters.rows_expanded += 1
-                case (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED):
-                    # Batch-consumed tokens do not have a dedicated RunResult
-                    # counter; the BUFFERED record captures the structural row.
-                    pass
-                case _:
-                    raise AssertionError(
-                        f"Unhandled (outcome, path) pair in resume aggregation: {pair!r}. "
-                        "Add a case here; see ADR-019 mapping table and the live accumulator."
-                    )
-        terminal_status = derive_terminal_run_status(
-            rows_processed=counters.rows_processed,
-            rows_succeeded=counters.rows_succeeded,
-            rows_failed=counters.rows_failed,
-            rows_routed_success=counters.rows_routed_success,
-            rows_routed_failure=counters.rows_routed_failure,
-            rows_quarantined=counters.rows_quarantined,
-            rows_coalesce_failed=counters.rows_coalesce_failed,
-        )
-        return terminal_status, counters
-
-    def _cli_completion_for(self, status: RunStatus) -> tuple[RunCompletionStatus, int]:
-        """Phase 2.2 (elspeth-0de989c56d) — map terminal RunStatus to the
-        CLI ``RunCompletionStatus`` + exit code.
-
-        ``COMPLETED`` and ``EMPTY`` both map to ``COMPLETED`` / exit 0:
-        a run that ingested zero rows is operationally a clean exit at the
-        CLI surface (the Web layer carries the structural distinction).
-        ``COMPLETED_WITH_FAILURES`` reuses the existing ``PARTIAL``
-        ceremony — same exit-code-1 semantics as the post-run export-failure
-        path that already emits ``PARTIAL``.
-        """
-        match status:
-            case RunStatus.COMPLETED | RunStatus.EMPTY:
-                return RunCompletionStatus.COMPLETED, 0
-            case RunStatus.COMPLETED_WITH_FAILURES:
-                return RunCompletionStatus.PARTIAL, 1
-            case RunStatus.FAILED:
-                return RunCompletionStatus.FAILED, 2
-            case RunStatus.INTERRUPTED:
-                return RunCompletionStatus.INTERRUPTED, 3
-            case _:
-                raise OrchestrationInvariantError(
-                    f"Cannot map RunStatus {status!r} to RunCompletionStatus — "
-                    f"this is a terminal-status-only mapping; RUNNING and other "
-                    f"non-terminal values must not reach this site."
-                )
 
     def _emit_interrupted_ceremony(
         self,
@@ -1622,9 +1504,9 @@ class Orchestrator:
 
             # Emit RunSummary event with final metrics.  Map the new
             # terminal status onto the CLI exit-code taxonomy via
-            # ``_cli_completion_for`` so the operator-facing CLI summary
+            # ``cli_completion_for`` so the operator-facing CLI summary
             # remains coherent with /api/runs/{rid}.
-            cli_status, exit_code = self._cli_completion_for(terminal_status)
+            cli_status, exit_code = cli_completion_for(terminal_status)
             total_duration = time.perf_counter() - run_start_time
             self._events.emit(
                 RunSummary(
@@ -3310,7 +3192,7 @@ class Orchestrator:
                 # carries the truth.  Aggregate token_outcomes to derive the
                 # correct four-value terminal status and feed it to both the
                 # Landscape finalize and the local RunResult.
-                terminal_status, audit_counters = self._derive_resume_terminal_status_from_audit(factory, run_id)
+                terminal_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
                 factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
 
                 # Emit RunFinished telemetry (matching the normal completion path)
@@ -3325,7 +3207,7 @@ class Orchestrator:
                 )
 
                 # Emit RunSummary event
-                cli_status, exit_code = self._cli_completion_for(terminal_status)
+                cli_status, exit_code = cli_completion_for(terminal_status)
                 self._events.emit(
                     RunSummary(
                         run_id=run_id,
@@ -3396,7 +3278,7 @@ class Orchestrator:
             )
 
             # 8. Emit RunSummary event
-            cli_status, exit_code = self._cli_completion_for(terminal_status)
+            cli_status, exit_code = cli_completion_for(terminal_status)
             total_duration = time.perf_counter() - resume_start_time
             self._events.emit(
                 RunSummary(

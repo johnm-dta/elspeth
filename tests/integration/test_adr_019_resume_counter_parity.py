@@ -10,7 +10,7 @@ import pytest
 from elspeth.contracts.run_result import RunResult
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.engine.orchestrator import Orchestrator
+from elspeth.engine.orchestrator.run_status import derive_resume_terminal_status_from_audit
 from tests.integration._helpers import (
     build_test_pipeline_with_discard_sink,
     build_test_pipeline_with_failsink_diversion,
@@ -52,11 +52,7 @@ def _resume_counter_snapshot_from_audit(
     run_id: str,
 ) -> dict[str, object]:
     factory = RecorderFactory(db)
-    status, counters = Orchestrator._derive_resume_terminal_status_from_audit(  # pyright: ignore[reportPrivateUsage]
-        Orchestrator(db),
-        factory,
-        run_id,
-    )
+    status, counters = derive_resume_terminal_status_from_audit(factory, run_id)
     return {
         "status": status,
         "rows_processed": counters.rows_processed,
@@ -152,10 +148,6 @@ def test_resume_counter_derivation_replays_diversion_structural_count(
     live = run_live_scenario(tmp_path / scenario, monkeypatch, scenario)
     factory = RecorderFactory(live.db)
 
-    _status, counters = Orchestrator._derive_resume_terminal_status_from_audit(  # pyright: ignore[reportPrivateUsage]
-        Orchestrator(live.db),
-        factory,
-        live.run_id,
-    )
+    _status, counters = derive_resume_terminal_status_from_audit(factory, live.run_id)
 
     assert counters.rows_diverted == live.result.rows_diverted

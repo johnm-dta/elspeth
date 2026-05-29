@@ -182,9 +182,8 @@ class TestResumeFinalizesAsFailed:
         with (
             patch.object(orch, "_reconstruct_resume_state", return_value=resume_state),
             patch.object(orch, "_process_resumed_rows", side_effect=AssertionError("empty coalesce state should early-exit")),
-            patch.object(
-                orch,
-                "_derive_resume_terminal_status_from_audit",
+            patch(
+                "elspeth.engine.orchestrator.core.derive_resume_terminal_status_from_audit",
                 return_value=(RunStatus.COMPLETED, ExecutionCounters(rows_processed=3, rows_succeeded=3)),
             ),
             patch.object(orch, "_emit_telemetry"),

@@ -19,6 +19,12 @@ let unsubscribe: (() => void) | null = null;
 // Module-level state for the executionStore subscriber.
 // Must be reset in _resetSubscriptionsForTesting().
 let previousValidationFingerprint: string | null = null;
+// Tracks whether the last surfaced validation outcome was a pending
+// interpretation review. When the next outcome is clean-valid we use this to
+// replace the "needs your okay" message with a "ready to run" nudge (and so
+// clear the otherwise-stale pending message), without firing that nudge on
+// ordinary mid-compose valid results.
+let previousWasPendingReview = false;
 let unsubscribeExecution: (() => void) | null = null;
 
 const lastValidatedVersionBySession = new Map<string, number>();
@@ -109,6 +115,7 @@ function authIdentityFingerprint(state: { token: string | null; user: { user_id:
 function resetPerUserState(): void {
   previousVersion = null;
   previousValidationFingerprint = null;
+  previousWasPendingReview = false;
   previousSessionIds = new Set();
   lastValidatedVersionBySession.clear();
   pendingValidateTarget = null;
@@ -201,18 +208,29 @@ export function initStoreSubscriptions(): void {
     const sessionStore = useSessionStore.getState();
 
     if (isPendingInterpretationReviewResult(result)) {
-      const lines = ["**Interpretation review pending** — execution is blocked until review is resolved:"];
-      for (const blocker of result.readiness.blockers) {
-        if (blocker.code !== "interpretation_review_pending") continue;
-        lines.push(
-          `- **[${blocker.component_type ?? "unknown"}] ${blocker.component_id ?? "unknown"}:** ${blocker.detail}`,
-        );
-      }
-      sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
+      previousWasPendingReview = true;
+      // Human-centric, not a dump of the raw validation blockers: the review
+      // cards above already describe each item in plain language, so this
+      // message just orients the user toward them. The per-blocker detail
+      // strings (validation.py) are machine-facing and would read as error
+      // extracts here.
+      const count = result.readiness.blockers.filter(
+        (blocker) => blocker.code === "interpretation_review_pending",
+      ).length;
+      const message =
+        count === 1
+          ? "I made one choice while building this that I'd like you to okay. " +
+            "Check the card above and pick **Use** or **Change it** — then your " +
+            "pipeline's ready to run."
+          : `I made ${count} choices while building this that I'd like you to okay. ` +
+            "Check the cards above and pick **Use** or **Change it** for each — " +
+            "once they're all approved, your pipeline's ready to run.";
+      sessionStore.injectSystemMessage(message, VALIDATION_MSG_ID);
       return;
     }
 
     if (!result.is_valid && result.errors.length > 0) {
+      previousWasPendingReview = false;
       const lines = ["**Validation failed** — the following errors were sent to the agent:"];
       for (const err of result.errors) {
         lines.push(
@@ -227,6 +245,7 @@ export function initStoreSubscriptions(): void {
       // the right owner if a frontend operational signal proves useful.
       void sessionStore.sendValidationFeedback(result);
     } else if (result.is_valid && result.warnings && result.warnings.length > 0) {
+      previousWasPendingReview = false;
       const lines = ["**Validation passed with warnings:**"];
       for (const warn of result.warnings) {
         lines.push(
@@ -234,6 +253,19 @@ export function initStoreSubscriptions(): void {
         );
       }
       sessionStore.injectSystemMessage(lines.join("\n"), VALIDATION_MSG_ID);
+    } else if (result.is_valid && previousWasPendingReview) {
+      // The user just resolved the last pending interpretation review and the
+      // pipeline is otherwise clean. Replace the now-stale "needs your okay"
+      // message (same VALIDATION_MSG_ID) with a clear next step — the Run
+      // button lives in the side rail, away from the chat where the user's
+      // attention is, so name it explicitly. Gated on previousWasPendingReview
+      // so ordinary mid-compose valid results stay quiet.
+      previousWasPendingReview = false;
+      sessionStore.injectSystemMessage(
+        "All approved — your pipeline's ready. Select **Run pipeline** in the " +
+          "side panel to start it.",
+        VALIDATION_MSG_ID,
+      );
     }
   });
 
@@ -348,6 +380,7 @@ export function _resetSubscriptionsForTesting(): void {
   unsubscribeAuth = null;
   previousVersion = null;
   previousValidationFingerprint = null;
+  previousWasPendingReview = false;
   previousSessionIds = new Set();
   lastValidatedVersionBySession.clear();
   pendingValidateTarget = null;

@@ -263,6 +263,7 @@ interface SessionState {
   loadStateVersions: () => Promise<void>;
   isLoadingVersions: boolean;
   revertToVersion: (stateId: string) => Promise<void>;
+  applyResolvedInterpretation: (newState: CompositionState | null) => void;
 
   // Guided-mode protocol state — all three are null when not in a guided session
   guidedSession: GuidedSession | null;
@@ -1393,6 +1394,35 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     } catch {
       set({ error: "Failed to revert to version. Please try again." });
     }
+  },
+
+  applyResolvedInterpretation(newState: CompositionState | null) {
+    const { activeSessionId } = get();
+    if (!activeSessionId) return;
+
+    // Display sync: resolving an interpretation patches the pipeline server-side
+    // (bakes the chosen prompt template / model / decision) and returns the new
+    // composition. Reflect it so the rendered pipeline matches what will run.
+    if (newState !== null) {
+      set((s) => ({
+        compositionState: newState,
+        selectedNodeId:
+          !s.selectedNodeId ||
+          newState.nodes.some((n) => n.id === s.selectedNodeId)
+            ? s.selectedNodeId
+            : null,
+      }));
+    }
+
+    // Gate clearing: re-validate explicitly. The run-gate (ExecuteButton) and
+    // the validation system message are driven by validationResult, which goes
+    // stale after a resolve — the auto-validate subscription only fires on a
+    // composition-version bump, which a resolve does not guarantee (and
+    // newState may be null). Without this the user resolves every review and
+    // the Run button stays disabled with no signal of what changed. validate()
+    // re-checks server-side pending interpretations, so once the last review is
+    // resolved the gate opens.
+    void getExecutionStore().validate(activeSessionId);
   },
 
   clearError() {

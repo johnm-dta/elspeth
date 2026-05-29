@@ -12,6 +12,7 @@ import type {
 import type { InterpretationEvent } from "@/types/interpretation";
 
 const clearValidationMock = vi.hoisted(() => vi.fn());
+const validateMock = vi.hoisted(() => vi.fn());
 
 // Mock the API client — store tests verify state logic, not HTTP calls
 vi.mock("@/api/client", () => ({
@@ -55,7 +56,10 @@ vi.mock("@/api/client", () => ({
 // Mock the execution store dependency
 vi.mock("./executionStore", () => ({
   useExecutionStore: {
-    getState: () => ({ clearValidation: clearValidationMock }),
+    getState: () => ({
+      clearValidation: clearValidationMock,
+      validate: validateMock,
+    }),
   },
 }));
 
@@ -823,6 +827,48 @@ describe("sessionStore", () => {
       expect(useSessionStore.getState().staleProposalIds).toContain(
         "proposal-1",
       );
+    });
+  });
+
+  describe("applyResolvedInterpretation", () => {
+    it("applies the patched composition state and re-validates so the run-gate can reopen", () => {
+      const newState = makeCompositionState(3, ["analyze_colors"]);
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        compositionState: makeCompositionState(2, ["analyze_colors"]),
+      });
+
+      useSessionStore.getState().applyResolvedInterpretation(newState);
+
+      // Display sync: the resolved interpretation's patched pipeline is shown.
+      expect(useSessionStore.getState().compositionState).toBe(newState);
+      // Gate clearing: an explicit re-validate runs (the auto-validate
+      // subscription only fires on a version bump, which a resolve can't
+      // guarantee).
+      expect(validateMock).toHaveBeenCalledWith("session-1");
+    });
+
+    it("re-validates even when the resolve returns no new state (null)", () => {
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        compositionState: makeCompositionState(2),
+      });
+
+      useSessionStore.getState().applyResolvedInterpretation(null);
+
+      // No state to apply, but the gate must still be re-checked.
+      expect(useSessionStore.getState().compositionState?.version).toBe(2);
+      expect(validateMock).toHaveBeenCalledWith("session-1");
+    });
+
+    it("is a no-op without an active session", () => {
+      useSessionStore.setState({ activeSessionId: null });
+
+      useSessionStore
+        .getState()
+        .applyResolvedInterpretation(makeCompositionState(3));
+
+      expect(validateMock).not.toHaveBeenCalled();
     });
   });
 

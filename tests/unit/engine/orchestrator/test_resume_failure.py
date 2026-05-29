@@ -23,6 +23,7 @@ from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import prepare_for_run
+from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.core import Orchestrator
 from elspeth.engine.orchestrator.types import ExecutionCounters, ResumeState
 from tests.fixtures.landscape import make_landscape_db
@@ -330,8 +331,6 @@ class TestBuildProcessorCallsCleanupOnFailure:
         """
         from elspeth.contracts.plugin_context import PluginContext
 
-        db = make_landscape_db()
-        orch = _make_orchestrator(db)
         ctx = PluginContext(run_id="test", config={}, landscape=None)
 
         config = MagicMock()
@@ -341,7 +340,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
         config.sinks = {}
         config.source = MagicMock()
 
-        orch._cleanup_plugins(config, ctx)
+        cleanup_plugins(config, ctx)
 
         tracked_transform.on_complete.assert_called_once()
         tracked_transform.close.assert_called_once()
@@ -392,7 +391,9 @@ class TestBuildProcessorCallsCleanupOnFailure:
         # _build_processor fails after on_start has been called on all plugins
         with (
             patch.object(orch, "_build_processor", side_effect=RuntimeError("processor build failed")),
-            patch.object(orch, "_cleanup_plugins", wraps=orch._cleanup_plugins) as spy_cleanup,
+            # cleanup_plugins is now a module function; patch it where core.py looks
+            # it up (the imported name in core's namespace), not on the instance.
+            patch("elspeth.engine.orchestrator.core.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
             pytest.raises(RuntimeError, match="processor build failed"),
         ):
             orch._initialize_run_context(
@@ -412,7 +413,7 @@ class TestBuildProcessorCallsCleanupOnFailure:
         spy_cleanup.assert_called_once()
         call_kwargs = spy_cleanup.call_args
         assert call_kwargs.kwargs.get("include_source") is True, (
-            f"_cleanup_plugins must be called with include_source=True when source was started. Got: {call_kwargs}"
+            f"cleanup_plugins must be called with include_source=True when source was started. Got: {call_kwargs}"
         )
         # The config passed must be the same config object
         assert call_kwargs.args[0] is config
@@ -440,13 +441,13 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         import inspect
         import textwrap
 
-        source = inspect.getsource(Orchestrator._cleanup_plugins)
-        # Dedent because getsource preserves indentation from the class
+        source = inspect.getsource(cleanup_plugins)
+        # Dedent for consistency (module-level function is already unindented).
         source = textwrap.dedent(source)
         tree = ast.parse(source)
 
         # Look for TIER_1_ERRORS usage in the function
-        assert "TIER_1_ERRORS" in source, "_cleanup_plugins must use TIER_1_ERRORS guard in record_cleanup_error"
+        assert "TIER_1_ERRORS" in source, "cleanup_plugins must use TIER_1_ERRORS guard in record_cleanup_error"
 
         # Find a Raise inside an If that checks isinstance with TIER_1_ERRORS
         found_reraise = False
@@ -467,8 +468,6 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         from elspeth.contracts import FrameworkBugError
         from elspeth.contracts.plugin_context import PluginContext
 
-        db = make_landscape_db()
-        orch = _make_orchestrator(db)
         ctx = PluginContext(run_id="test", config={}, landscape=None)
 
         # Create a mock config with a transform that raises FrameworkBugError
@@ -481,15 +480,13 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         config.source = MagicMock()
 
         with pytest.raises(FrameworkBugError, match="internal corruption"):
-            orch._cleanup_plugins(config, ctx)
+            cleanup_plugins(config, ctx)
 
     def test_audit_integrity_error_propagates_through_cleanup(self) -> None:
         """AuditIntegrityError from sink.close() must propagate, not be swallowed."""
         from elspeth.contracts.errors import AuditIntegrityError
         from elspeth.contracts.plugin_context import PluginContext
 
-        db = make_landscape_db()
-        orch = _make_orchestrator(db)
         ctx = PluginContext(run_id="test", config={}, landscape=None)
 
         # Create a mock config with a sink that raises AuditIntegrityError on close
@@ -502,14 +499,12 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         config.source = MagicMock()
 
         with pytest.raises(AuditIntegrityError, match="audit DB corrupted"):
-            orch._cleanup_plugins(config, ctx)
+            cleanup_plugins(config, ctx)
 
     def test_regular_exceptions_still_collected_as_cleanup_errors(self) -> None:
         """Non-system exceptions are still collected and reported as RuntimeError."""
         from elspeth.contracts.plugin_context import PluginContext
 
-        db = make_landscape_db()
-        orch = _make_orchestrator(db)
         ctx = PluginContext(run_id="test", config={}, landscape=None)
 
         # Create a mock config with a transform that raises a regular error
@@ -522,4 +517,4 @@ class TestCleanupPluginsReRaisesSystemExceptions:
         config.source = MagicMock()
 
         with pytest.raises(RuntimeError, match="Plugin cleanup failed"):
-            orch._cleanup_plugins(config, ctx)
+            cleanup_plugins(config, ctx)

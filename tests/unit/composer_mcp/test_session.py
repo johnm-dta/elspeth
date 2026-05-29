@@ -28,7 +28,7 @@ class TestSessionManager:
     def test_new_session_returns_empty_state(self, manager: SessionManager) -> None:
         session_id, state = manager.new_session()
         assert session_id
-        assert state.source is None
+        assert state.sources == {}
         assert state.nodes == ()
         assert state.edges == ()
         assert state.outputs == ()

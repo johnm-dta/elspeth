@@ -1266,7 +1266,7 @@ def compute_proof_diagnostics(
     """
     diagnostics: list[Mapping[str, Any]] = []
 
-    source = state.sources.get("source")
+    source = state.sources["source"] if "source" in state.sources else None
     blob_id: Any | None = None
     if source is not None and "blob_ref" in source.options:
         blob_id = source.options["blob_ref"]

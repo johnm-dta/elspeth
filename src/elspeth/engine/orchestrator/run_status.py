@@ -28,7 +28,32 @@ from elspeth.contracts.run_result import derive_terminal_run_status
 from elspeth.engine.orchestrator.types import ExecutionCounters
 
 if TYPE_CHECKING:
+    from elspeth.contracts.audit import TokenOutcome
     from elspeth.core.landscape.factory import RecorderFactory
+
+
+def _require_routed_sink_name(outcome_record: TokenOutcome, pair: tuple[TerminalOutcome | None, TerminalPath]) -> str:
+    """Require a non-NULL ``sink_name`` on a routed ``token_outcomes`` row.
+
+    ``GATE_ROUTED`` / ``ON_ERROR_ROUTED`` outcomes are bound by the write-side
+    Tier-1 contract (``_TERMINAL_PAIR_FIELD_CONSTRAINTS`` in
+    :mod:`elspeth.contracts.audit`) to carry a non-NULL ``sink_name``, and the
+    read path enforces it (``model_loaders.py`` raises ``AuditIntegrityError``
+    on a NULL). A NULL reaching this resume aggregator is therefore a Tier-1
+    audit-integrity violation — our own data is corrupt — so we crash loudly
+    rather than silently under-count ``routed_destinations`` in the legal
+    record. This mirrors the live accumulator's ``_require_sink_name``
+    (:mod:`elspeth.engine.orchestrator.outcomes`); the two paths must agree on
+    the audit truth.
+    """
+    name = outcome_record.sink_name
+    if name is None:
+        raise OrchestrationInvariantError(
+            f"Routed token_outcomes row for token {outcome_record.token_id!r} has terminal pair "
+            f"{pair} but missing sink_name — a Tier-1 audit-integrity violation (sink_name is "
+            f"contract-required for routed outcomes and enforced on read by the TokenOutcome loader)."
+        )
+    return name
 
 
 def derive_resume_terminal_status_from_audit(factory: RecorderFactory, run_id: str) -> tuple[RunStatus, ExecutionCounters]:
@@ -76,14 +101,12 @@ def derive_resume_terminal_status_from_audit(factory: RecorderFactory, run_id: s
                 counters.rows_routed_success += 1
                 counters.rows_succeeded += 1
                 counters.rows_processed += 1
-                if outcome_record.sink_name is not None:
-                    counters.routed_destinations[outcome_record.sink_name] += 1
+                counters.routed_destinations[_require_routed_sink_name(outcome_record, pair)] += 1
             case (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
                 counters.rows_failed += 1
                 counters.rows_routed_failure += 1
                 counters.rows_processed += 1
-                if outcome_record.sink_name is not None:
-                    counters.routed_destinations[outcome_record.sink_name] += 1
+                counters.routed_destinations[_require_routed_sink_name(outcome_record, pair)] += 1
             case (TerminalOutcome.FAILURE, TerminalPath.UNROUTED):
                 counters.rows_failed += 1
                 counters.rows_processed += 1

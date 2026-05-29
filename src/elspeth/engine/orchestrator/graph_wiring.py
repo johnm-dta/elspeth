@@ -54,7 +54,7 @@ def assign_plugin_node_ids(
         sink_id_map: Maps sink_name -> node_id
 
     Raises:
-        ValueError: If transform/sink not in ID map
+        OrchestrationInvariantError: If transform/sink not in ID map
     """
     # Set node_id on source
     source.node_id = source_id

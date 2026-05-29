@@ -2,7 +2,7 @@
 
 This module contains pure functions that write run-setup records to the
 Landscape audit trail:
-- register_node s with the data-flow repository for every node in the execution
+- register_nodes with the data-flow repository for every node in the execution
   graph (resolving plugin metadata, schema config, output contract per node)
 - record_schema_contract: persist the source schema contract at run and
   source-node level and expose it to transforms via the plugin context

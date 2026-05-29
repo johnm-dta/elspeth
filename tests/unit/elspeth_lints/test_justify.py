@@ -1858,13 +1858,16 @@ def test_call_judge_system_block_is_cached_and_user_block_is_not(tmp_path: Path)
         assert "cache_control" not in user_block
 
 
-def test_call_judge_static_policy_contains_loadbearing_phrases(tmp_path: Path) -> None:
-    """The cached block must contain the policy vocabulary the judge needs.
+def test_call_judge_static_policy_sections_not_accidentally_dropped(tmp_path: Path) -> None:
+    """Refactor canary: assert key policy SECTIONS survived a prompt edit.
 
-    These phrases are excerpted verbatim from CLAUDE.md and bind back to
-    the Decision Heuristic at the end of the prompt. If a refactor
-    accidentally drops one of these sections, the heuristic loses its
-    referent and the verdict quality degrades.
+    NOT a verdict-quality test. This greps for substrings in the system prompt,
+    which per the project's own doctrine ("no tests for skill-prompt content;
+    grepping prompt text is theatre") proves only that a refactor did not
+    accidentally delete a section heading — never that the judge applies the
+    policy correctly. Real verdict quality is validated by the VAL judge-quality
+    corpus run against the live model, not here. Kept deliberately as a cheap
+    drop-detection canary; do NOT expand the substring list.
     """
     request = JudgeRequest(
         file_path="plugins/widget.py",

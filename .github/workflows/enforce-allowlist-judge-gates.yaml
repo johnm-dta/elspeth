@@ -20,8 +20,12 @@
 #
 #   VAL (check-judge-quality): in trusted contexts only, run the labelled
 #     judge-quality corpus through the live OpenRouter-backed judge and
-#     require exact verdict/decorator accuracy >= 0.90. This catches prompt
-#     or model drift that parser/schema tests cannot see.
+#     require exact verdict/decorator accuracy >= 0.90. This is a prompt/model
+#     REGRESSION TRIPWIRE, not a quality guarantee: the corpus is small (10-30
+#     cases) and tolerates ~1 miss, so it catches a gross prompt edit or model
+#     swap that parser/schema tests cannot see — it does NOT prove the judge is
+#     well-calibrated or injection-resistant. Grow the corpus (esp. adversarial
+#     cases) to widen what the tripwire detects.
 #
 # All gates are implemented as elspeth-lints subcommands; the workflow
 # orchestrates checkout (full history, needed for C1's git-show baseline

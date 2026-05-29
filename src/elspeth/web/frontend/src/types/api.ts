@@ -106,6 +106,9 @@ export interface TutorialRunRequest {
 export interface TutorialRunOutput {
   rows: Array<Record<string, unknown>>;
   source_data_hash: string;
+  // Rows the source discarded at the boundary (on_validation_failure="discard"):
+  // recorded for audit but absent from `rows`. Surfaced so dropped rows are visible.
+  discarded_row_count: number;
 }
 
 export interface TutorialRunResponse {

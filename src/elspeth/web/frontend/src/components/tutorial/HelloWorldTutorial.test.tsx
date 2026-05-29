@@ -165,6 +165,7 @@ describe("HelloWorldTutorial", () => {
           { url: "dta.gov.au", score: 9, rationale: "bold" },
           { url: "data.gov.au", score: 8, rationale: "useful" },
         ],
+        discarded_row_count: 0,
       },
       seeded_from_cache: false,
       cache_key: null,

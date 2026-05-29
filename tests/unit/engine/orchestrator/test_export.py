@@ -119,7 +119,13 @@ class TestExportLandscapeJSON:
         def bad_factory(name: str) -> Any:
             raise ValueError(f"Export sink '{name}' not found in sink configuration")
 
-        with pytest.raises(ValueError, match=r"nonexistent.*not found"):
+        # LandscapeExporter constructs its own (module-level imported, so
+        # autouse-unpatched) RecorderFactory, which now eagerly probes the
+        # engine. Patch it so the bad-factory ValueError is what surfaces.
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter"),
+            pytest.raises(ValueError, match=r"nonexistent.*not found"),
+        ):
             export_landscape(db, "run-1", settings, bad_factory)
 
     def test_signing_reads_env_key(self) -> None:
@@ -215,7 +221,10 @@ class TestExportLandscapeCSV:
         settings = self._make_settings()
         _sink, factory = _make_sink_and_factory()
 
-        with pytest.raises(ValueError, match="CSV export requires file-based sink"):
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter"),
+            pytest.raises(ValueError, match="CSV export requires file-based sink"),
+        ):
             export_landscape(db, "run-1", settings, factory)
 
     def test_csv_export_calls_multifile(self, tmp_path: Path) -> None:
@@ -224,7 +233,10 @@ class TestExportLandscapeCSV:
         settings = self._make_settings()
         _sink, factory = _make_sink_and_factory(config={"path": str(tmp_path / "export.csv")})
 
-        with patch("elspeth.engine.orchestrator.export._export_csv_multifile") as mock_csv:
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter"),
+            patch("elspeth.engine.orchestrator.export._export_csv_multifile") as mock_csv,
+        ):
             export_landscape(db, "run-1", settings, factory)
 
         mock_csv.assert_called_once()

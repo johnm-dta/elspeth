@@ -49,9 +49,11 @@ class TestSessionManager:
         state = state.with_source(source)
         manager.save(session_id, state)
         loaded = manager.load(session_id)
-        assert loaded.source is not None
-        assert loaded.source.plugin == "csv"
-        assert loaded.source.on_success == "source_out"
+        # with_source() stores under the default named root "source" in the
+        # multi-source `sources` map (the singular `source` attribute is deleted).
+        assert loaded.sources["source"] is not None
+        assert loaded.sources["source"].plugin == "csv"
+        assert loaded.sources["source"].on_success == "source_out"
         assert loaded.version == state.version
 
     def test_load_nonexistent_raises(self, manager: SessionManager) -> None:

@@ -83,6 +83,11 @@ def _make_result(
     if path == TerminalPath.COALESCED and result.token.join_group_id is None:
         result.token = replace(result.token, join_group_id="join-1")
     result.sink_name = sink_name
+    # RowProcessingResult.scheduler_pending_sink (contracts/results.py) defaults
+    # False; accumulate_row_outcomes reads it and passes it to PendingOutcome,
+    # whose offensive guard rejects a non-bool. A bare Mock would auto-vivify a
+    # Mock here, so set the real default explicitly.
+    result.scheduler_pending_sink = False
     return result
 
 
@@ -445,7 +450,9 @@ class TestCheckAggregationTimeouts:
         (not hardcoded as TIMEOUT).
         """
         token = make_token_info()
-        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
+        completed = Mock(
+            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
+        )
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -497,7 +504,9 @@ class TestCheckAggregationTimeouts:
     def test_timeout_flush_completed_results(self) -> None:
         """Timeout flush produces completed tokens routed to sink."""
         token = make_token_info()
-        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
+        completed = Mock(
+            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
+        )
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -525,7 +534,7 @@ class TestCheckAggregationTimeouts:
 
     def test_timeout_flush_failed_results(self) -> None:
         """Failed results from flush increment failed counter."""
-        failed = Mock(outcome=TerminalOutcome.FAILURE, path=TerminalPath.UNROUTED)
+        failed = Mock(outcome=TerminalOutcome.FAILURE, path=TerminalPath.UNROUTED, scheduler_pending_sink=False)
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -807,7 +816,9 @@ class TestCheckAggregationTimeouts:
     def test_completed_result_branch_fallback_in_timeout(self) -> None:
         """Completed result with branch not in pending routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="missing_sink")
-        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
+        completed = Mock(
+            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
+        )
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -887,7 +898,9 @@ class TestFlushRemainingAggregationBuffers:
     def test_flush_completed_results(self) -> None:
         """Completed results from flush go to sink."""
         token = make_token_info()
-        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
+        completed = Mock(
+            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
+        )
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -1018,7 +1031,9 @@ class TestFlushRemainingAggregationBuffers:
     def test_branch_routing_for_completed_tokens(self) -> None:
         """Completed tokens route via result.sink_name, not branch_name."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="path_a")
-        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
+        completed = Mock(
+            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
+        )
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -1187,7 +1202,9 @@ class TestFlushRemainingAggregationBuffers:
     def test_completed_result_branch_fallback_to_sink_name(self) -> None:
         """Completed result with branch not in pending routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="missing")
-        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
+        completed = Mock(
+            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
+        )
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(
@@ -1213,7 +1230,9 @@ class TestFlushRemainingAggregationBuffers:
     def test_branch_routing_falls_back_to_sink_name(self) -> None:
         """Branch name not in pending_tokens routes to sink_name from result."""
         token = TokenInfo(row_id="row-1", token_id="tok-1", row_data=make_row({}), branch_name="nonexistent")
-        completed = Mock(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output")
+        completed = Mock(
+            outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW, token=token, sink_name="output", scheduler_pending_sink=False
+        )
 
         agg_transform = _make_batch_transform(node_id="agg-1")
         config = _make_config(

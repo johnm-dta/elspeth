@@ -127,7 +127,11 @@ sinks:
 
 """)
         # Environment variable should override YAML
-        monkeypatch.setenv("ELSPETH_SOURCE__PLUGIN", "json")
+        # Multi-source config nests sources under named roots, so the env-override
+        # segment must name the source: ELSPETH_SOURCES__<NAME>__PLUGIN. The bare
+        # ELSPETH_SOURCE__ form is a single-source relic that no longer maps to any
+        # config key (proven: the plural+named form overrides; the singular does not).
+        monkeypatch.setenv("ELSPETH_SOURCES__PRIMARY__PLUGIN", "json")
 
         settings = load_settings(config_file)
         assert settings.sources["primary"].plugin == "json"

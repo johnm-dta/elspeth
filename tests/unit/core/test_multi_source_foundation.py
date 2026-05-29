@@ -111,7 +111,9 @@ sinks:
 """
     )
     assert list(settings.sources) == ["primary"]
-    assert not hasattr(type(settings), "source") or "source" not in type(settings).model_fields
+    # ADR-025 §1: the singular 'source' field is deleted. Pydantic models always
+    # expose model_fields, so its absence is the correct hasattr-free invariant.
+    assert "source" not in type(settings).model_fields
 
 
 def test_elspeth_settings_has_no_singular_source_field() -> None:

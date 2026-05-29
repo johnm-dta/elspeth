@@ -3112,14 +3112,14 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=74a76098d9285f6e
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=2d2e6b24c7aafd25
   owner: web-composer
   reason: Function receives multiple dict shapes — to_dict() output always has "source",
     but component dicts from _execute_get_pipeline_state do not. .get() handles the
     absent-key case (no-op early return).
   safety: Returns input unchanged when "source" key absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=5b178cb72815136e
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=f98ce159ca5d32fa
   owner: web-composer
   reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
     — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.

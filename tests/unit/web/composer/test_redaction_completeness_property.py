@@ -309,12 +309,16 @@ def test_redaction_replaces_every_sensitive_response_value(tool_name: str) -> No
                 # Hypothesis's summary output — a parametrize entry whose
                 # strategy produces ONLY empty containers across all 50
                 # examples surfaces as a high event count rather than passing
-                # as a silent zero-assertion run. Today no MANIFEST response
-                # model uses sub-element Sensitive markers (the only
-                # response-sensitive entry, get_blob_content.content, is a
-                # scalar Sensitive[str]), so this branch is unreachable for
-                # the current parametrize set; the instrumentation is
-                # forward-safety against future entries.
+                # as a silent zero-assertion run. This branch IS reachable for
+                # get_blob_content: its response_model carries a Sensitive
+                # marker on the repair-tool-call ``arguments`` field nested
+                # under ``validation.graph_repair_suggestions[*].tool_sequence
+                # [*].arguments`` — a path with ``[*]`` segments, so
+                # _is_container_descent_path returns True. (get_blob_content's
+                # other Sensitive leaf, ``data.content``, is a scalar
+                # Sensitive[str] and takes the else-branch below.) The
+                # instrumentation also remains forward-safety for future
+                # entries with sub-element Sensitive markers.
                 if not raw_pairs:
                     event(f"empty_container_response:{tool_name}:{node.path}")
                 for key, raw_value in raw_pairs.items():

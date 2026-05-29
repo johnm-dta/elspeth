@@ -329,7 +329,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:252221e581ad1a84"
+    source_file_hash: str | None = "sha256:c4940c65bdab1236"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -343,7 +343,8 @@ class AzureBlobSource(BaseSource):
                     "Configure exactly one auth path: connection_string, sas_token+account_url, managed identity+account_url, or service principal+account_url.",
                     "Choose format explicitly; csv uses csv_options, while json/jsonl use json_options and optional data_key.",
                     "For headerless CSV set csv_options.has_header=false and provide columns; columns is invalid for headered CSV or non-CSV blobs.",
-                    "If you have been asked to generate source rows yourself, do not pick `azure_blob` — this source reads pre-existing storage blobs, not LLM-authored content. Switch to a local-blob source (`csv`, `json`, or `text`) via `create_blob` plus `set_source_from_blob`. Never synthesise an Azure container name, blob path, account URL, or credential for content you authored — the audit trail must reference a real, addressable blob.",
+                    "If you have been asked to generate source rows yourself, do not pick `azure_blob` — this source reads pre-existing storage blobs, not LLM-authored content. Switch to a local-blob source (`csv`, `json`, or `text`) via `create_blob` plus `set_source_from_blob`.",
+                    "Never synthesise an Azure container name, blob path, account URL, or credential for content you authored — the audit trail must reference a real, addressable blob.",
                     "Use field_mapping only to override normalized field names at the source boundary.",
                     "Set on_validation_failure to a quarantine sink unless deliberate discard is acceptable.",
                 ),

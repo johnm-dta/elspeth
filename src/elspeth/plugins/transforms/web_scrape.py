@@ -418,7 +418,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:52c3fed075da8cd1"
+    source_file_hash: str | None = "sha256:c5faf7a4a9af9a81"
     config_model = WebScrapeConfig
     passes_through_input = True
 
@@ -544,7 +544,8 @@ class WebScrapeTransform(BaseTransform):
                     "http.abuse_contact and http.scraping_reason are mandatory and recorded in the audit trail — operator must declare them, not the model.",
                     "If the user-facing output should exclude raw scraped content, route the final path through field_mapper with select_only: true before the sink; a sink name or output name is not cleanup.",
                     "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete when raw scraped-content cleanup is required; insert or restore the final field_mapper before the sink.",
-                    "If scraped public internet content flows into an LLM, surface prompt-injection shielding as an important recommendation. Use azure_prompt_shield or the deployment's equivalent; continuing without it is allowed; recommendation is not permission to add a node; do not substitute azure_content_safety; do not insert it automatically unless requested or policy-required.",
+                    "If scraped public internet content flows into an LLM, surface prompt-injection shielding as an important recommendation. Use azure_prompt_shield or the deployment's equivalent; continuing without it is allowed.",
+                    "For prompt-injection shielding when scraped content flows into an LLM, recommendation is not permission to add a node; do not substitute azure_content_safety; do not insert it automatically unless requested or policy-required.",
                     "If no prompt shield is authorized, surface a pipeline_decision warning on the LLM node using user_term prompt_injection_shield_recommendation.",
                     "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
                 ),

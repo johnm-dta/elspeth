@@ -2265,45 +2265,6 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_requirement_matches_field_value:fp=fe48281fe07a5e76
-  owner: composer-tools
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _requirement_matches_field_value
-    is the polymorphic-by-status comparison helper used by _options_with_pending_requirement.
-    Reads the existing requirement''s ''draft'' field for pending status; the field
-    is present by construction in our auto-stager but absent in third-party-stored
-    requirements during the auto-stager migration window. Carried forward from the
-    pre-rename function _requirement_matches_prompt_template. Finding: Potential dict.get()
-    usage: return requirement.get("draft") == field_value'
-  safety: Absent draft compares unequal to field_value (returns False), causing the
-    caller to replace rather than retain the existing requirement; no requirement
-    state is fabricated. Behavior unchanged from the pre-rename function.
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_requirement_matches_field_value:fp=b3c1edb91718dbfb
-  owner: composer-tools
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _requirement_matches_field_value
-    compares the existing requirement''s ''resolved_prompt_template_hash'' (the universal
-    resolved-value hash field — name retained for backward compatibility) against
-    the stable_hash of the current field value, for requirements in ''resolved'' status.
-    Carried forward from the pre-rename function _requirement_matches_prompt_template.
-    Finding: Potential dict.get() usage: return requirement.get("resolved_prompt_template_hash")
-    == stable_hash(field_value)'
-  safety: Absent hash compares unequal to stable_hash(field_value), causing the caller
-    to treat the resolved requirement as stale; no hash is fabricated. Behavior unchanged
-    from the pre-rename function.
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R5:_options_with_default_model_choice_review:fp=cb05cf6498ea8182
-  owner: composer-tools
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _options_with_default_model_choice_review
-    is the mutation-time auto-stager that creates a pending llm_model_choice interpretation
-    requirement whenever an LLM node''s options.model is set. Reads composer-authored
-    options[''model''] and type-narrows before staging. Parallel to _options_with_default_prompt_template_review.
-    Finding: isinstance() used: if not isinstance(model, str) or not model:'
-  safety: Absent or non-string model returns options unchanged (no requirement staged);
-    no model id is fabricated. Only a non-empty string triggers the auto-stager.
-  expires: '2026-08-24'
 - key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=400e7fa8db4f1ead
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
@@ -2358,119 +2319,6 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_common.py:R5:_options_with_pending_requirement:fp=34dcd378b55518ac
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R5:_options_with_pending_requirement:fp=90c5d3916dfe96b8
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_options_with_pending_requirement:fp=f0071edca977648d
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R5:_options_with_default_prompt_template_review:fp=825c8398f7ee041a
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R9:_apply_merge_patch:fp=50e1ff09114fc72d
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: dict.pop() with default hides missing keys: result.pop(key,
-    None)'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=9e33e86e9f195351
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(value, Mapping)
-    and len(value) == 1 and "secret_ref" in value and isinstance(value["secret_ref"],
-    str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=9ef95b04e5e6168a
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(value, Mapping)
-    and len(value) == 1 and "secret_ref" in value and isinstance(value["secret_ref"],
-    str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=5d98c7eb01bf4e18
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(cause, PydanticValidationError):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R1:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=6e311910f9e4cf07
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: prompt_template =
-    options.get("prompt_template")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R5:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=0d4f94fb3de2caf6
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
-    str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R9:_source_options_for_prevalidation:fp=c3b76a130d2152ad
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_source_options_for_prevalidation:fp=30f756eeef74be42
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_source_options_for_prevalidation:fp=813af9da48723e97
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R9:_source_options_for_prevalidation:fp=f4962f25ecacf3b3
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
 - key: web/composer/tools/generation.py:R1:_csv_source_field_mapping:fp=3dd0d533b3510ff0
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
@@ -3195,6 +3043,33 @@ allow_hits:
     below.
   expires: '2026-08-24'
 per_file_rules:
+- pattern: web/composer/tools/_common.py
+  rules:
+  - R1
+  reason: Composer per-node option prevalidation inspects external / LLM-authored
+    config dicts (Tier 3) before binding to CompositionState; optional-field reads
+    via .get() and merge-patch pop-with-default are boundary-appropriate accesses.
+    Collapsed from per-fingerprint entries because this high-churn file's fingerprints
+    rotate on any import or body shift, so a per_file_rule ceiling is the durable form
+    (per feedback_rotate_tier_model_dup_key_dataloss).
+  expires: null
+  max_hits: 6
+- pattern: web/composer/tools/_common.py
+  rules:
+  - R5
+  reason: isinstance() for structural dispatch over external / LLM-authored config
+    dicts (Mapping and str discrimination, Pydantic validation-cause typing) at the
+    composer prevalidation boundary. See the R1 entry for the per_file_rule rationale.
+  expires: null
+  max_hits: 8
+- pattern: web/composer/tools/_common.py
+  rules:
+  - R9
+  reason: dict.pop(key, None) when stripping authoring, secret-ref, and blob-inline
+    markers from a COPIED options dict before validation; the keys are known-optional
+    markers, not silent missing-key suppression. See the R1 entry for rationale.
+  expires: null
+  max_hits: 3
 - pattern: web/composer/guided/chat_solver.py
   rules:
   - R5

@@ -177,39 +177,28 @@ class TestOpenRouterConfig:
         assert config.model == _OPENROUTER_MODEL
         assert config.prompt_template == "Analyze: {{ row.text }}"
 
-    def test_config_rejects_unknown_model_on_canonical_openrouter(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Canonical OpenRouter configs must choose a model from the catalog."""
-        monkeypatch.setattr(
-            "elspeth.plugins.transforms.llm.providers.openrouter.get_catalog_values",
-            lambda catalog_id: frozenset({"openai/gpt-4o"}),
+    def test_config_construction_does_not_enforce_catalog_membership(self) -> None:
+        """Catalog membership is a value-source concern, not a construction-time
+        invariant. Construction must NOT consult the catalog (it is optional and
+        runtime-primed); an unknown model constructs cleanly and is rejected later
+        by the walker / composer prevalidation (check_config_value_sources).
+        """
+        config = OpenRouterConfig.from_dict(
+            {
+                "api_key": "sk-test-key",
+                "model": _OPENROUTER_INVALID_MODEL,
+                "prompt_template": "Analyze: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "required_input_fields": [],
+            }
         )
+        assert config.model == _OPENROUTER_INVALID_MODEL
 
-        with pytest.raises(PluginConfigError) as exc_info:
-            OpenRouterConfig.from_dict(
-                {
-                    "api_key": "sk-test-key",
-                    "model": _OPENROUTER_INVALID_MODEL,
-                    "prompt_template": "Analyze: {{ row.text }}",
-                    "schema": DYNAMIC_SCHEMA,
-                    "required_input_fields": [],
-                }
-            )
-
-        assert exc_info.value.cause is not None
-        assert "list_models" in exc_info.value.cause
-        assert _OPENROUTER_INVALID_MODEL in exc_info.value.cause
-
-    def test_config_allows_custom_base_url_without_catalog_membership(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Non-canonical endpoints own model semantics, so the OpenRouter catalog is skipped."""
-        called = False
-
-        def fake_catalog_values(catalog_id: str) -> frozenset[str]:
-            nonlocal called
-            called = True
-            return frozenset({"openai/gpt-4o"})
-
-        monkeypatch.setattr("elspeth.plugins.transforms.llm.providers.openrouter.get_catalog_values", fake_catalog_values)
-
+    def test_config_allows_custom_base_url_without_catalog_membership(self) -> None:
+        """A custom base_url config with an arbitrary model constructs cleanly;
+        the walker's applies_when predicate skips the catalog for non-canonical
+        endpoints (catalog enforcement is no longer a construction concern).
+        """
         config = OpenRouterConfig.from_dict(
             {
                 "api_key": "sk-test-key",
@@ -222,7 +211,6 @@ class TestOpenRouterConfig:
         )
 
         assert config.model == "totally/custom-model"
-        assert called is False
 
     def test_config_default_values(self) -> None:
         """Config has sensible defaults."""

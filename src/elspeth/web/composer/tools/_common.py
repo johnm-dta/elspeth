@@ -41,6 +41,7 @@ from elspeth.core.secrets import (
     collect_credential_field_violations,
     collect_disallowed_secret_ref_markers,
 )
+from elspeth.engine.orchestrator.preflight import check_config_value_sources
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.validation import (
     UnknownPluginTypeError,
@@ -1267,8 +1268,7 @@ def _prevalidate_plugin_options(
             del merged[key]
 
     try:
-        config_cls.from_dict(merged, plugin_name=plugin_name)
-        return None
+        config = config_cls.from_dict(merged, plugin_name=plugin_name)
     except PluginConfigError as exc:
         if not secret_ref_keys and not blob_inline_ref_keys:
             # No secret refs were stripped — report the error as-is.
@@ -1290,6 +1290,18 @@ def _prevalidate_plugin_options(
         # Re-format only the non-secret errors.
         lines = "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in remaining)
         return f"Invalid options for {plugin_type} '{plugin_name}': {lines}"
+
+    # Construction passed type/required validation. Now enforce the config's
+    # VALUE_SOURCES declarations (e.g. OpenRouter ``model`` catalog membership)
+    # at authoring time — the same structured check the bundle walker runs at
+    # instantiation (engine/orchestrator/preflight.py). This catches a
+    # hallucinated catalog value here, with an actionable ``list_models`` hint,
+    # instead of letting it slip through prevalidation. Catalog membership is a
+    # value-source concern, deliberately NOT enforced in config construction.
+    value_source_findings = check_config_value_sources(config, component_id=plugin_name)
+    if value_source_findings:
+        return f"Invalid options for {plugin_type} '{plugin_name}': " + "; ".join(f.reason for f in value_source_findings)
+    return None
 
 
 def _mask_pending_interpretation_placeholders_for_authoring_validation(

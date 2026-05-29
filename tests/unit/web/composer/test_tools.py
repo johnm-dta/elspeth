@@ -8166,9 +8166,14 @@ class TestPrevalidatePluginOptions:
         assert "template" in result
 
     def test_llm_openrouter_invalid_model_surfaces_list_models_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Composer prevalidation must reject unknown OpenRouter models with a repair hint."""
+        """Composer prevalidation must reject unknown OpenRouter models with a repair hint.
+
+        Catalog membership is now enforced via the value-source walker
+        (check_config_value_sources), so patch the catalog at the walker's lookup
+        site rather than the (removed) construction-time validator's.
+        """
         monkeypatch.setattr(
-            "elspeth.plugins.transforms.llm.providers.openrouter.get_catalog_values",
+            "elspeth.engine.orchestrator.preflight.get_catalog_values",
             lambda catalog_id: frozenset({"openai/gpt-4o"}),
         )
 

@@ -27,6 +27,15 @@
 # orchestrates checkout (full history, needed for C1's git-show baseline
 # diff) and invocation.
 #
+# BRANCH PROTECTION: the aggregate ``judge-gates-success`` job at the bottom
+# is the single required status check for these gates (mirroring ci.yaml's
+# ``ci-success``). Branch protection MUST require ``judge-gates-success`` —
+# requiring the individual gate jobs is fragile (a renamed job silently drops
+# the requirement) and GitHub keys protection on one named check. The
+# aggregate fails if C1 or C3 is not ``success``; VAL may be ``skipped`` (it is
+# intentionally skipped on untrusted fork PRs, which cannot read the
+# OpenRouter secret).
+#
 # Spec: notes/cicd-judge-cli-prototype-plan.md + the convergent-findings
 # remediation diff that introduced this workflow.
 
@@ -273,3 +282,41 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
+
+  # ===========================================================================
+  # Aggregate success job - Required for branch protection
+  # ===========================================================================
+  # Branch protection requires THIS job, not the individual gates. Without an
+  # aggregate, a red gate only blocks merge if that specific job name is listed
+  # as required — fragile against renames, and it leaves "are the gates even
+  # gating?" depending on unverifiable repo settings. This job makes the answer
+  # mechanical: it fails unless C1 and C3 succeeded and VAL succeeded-or-skipped.
+  judge-gates-success:
+    name: Judge gates success
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}
+    needs:
+      - check-judge-coverage
+      - check-judge-quality
+      - check-override-rate
+    if: always()
+    steps:
+      - name: Check all judge gates passed
+        run: |
+          if [[ "${{ needs.check-judge-coverage.result }}" != "success" ]]; then
+            echo "C1 new-entry judge-coverage gate did not pass (result: ${{ needs.check-judge-coverage.result }})"
+            exit 1
+          fi
+          if [[ "${{ needs.check-override-rate.result }}" != "success" ]]; then
+            echo "C3 override-rate drift gate did not pass (result: ${{ needs.check-override-rate.result }})"
+            exit 1
+          fi
+          # VAL (judge-quality) is intentionally skipped on untrusted fork PRs:
+          # it needs the OpenRouter secret, which GitHub withholds from forks.
+          # 'skipped' is therefore acceptable here; any other non-success result
+          # (failure / cancelled / timed_out) blocks the merge.
+          val_result="${{ needs.check-judge-quality.result }}"
+          if [[ "$val_result" != "success" && "$val_result" != "skipped" ]]; then
+            echo "VAL judge-quality gate did not pass (result: $val_result)"
+            exit 1
+          fi
+          echo "All judge gates passed (VAL result: $val_result)."

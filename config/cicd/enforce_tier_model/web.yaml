@@ -1208,104 +1208,6 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=8734443e640fa0a1
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: data = payload.get("data")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=ecbdf9165f6cc4e4
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: return type(data)
-    is dict and data.get("status") == "APPROVAL_REQUIRED"'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=5a0f2d39d13b7298
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: requirements = node.options.get(INTERPRETATION_REQUIREMENTS_KEY)'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=b607a467b052e1d2
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: if isinstance(requirement,
-    Mapping) and requirement.get("status") == "pending" and requirement.get("user_term") '
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=3060845a3ba39016
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: if isinstance(requirement,
-    Mapping) and requirement.get("status") == "pending" and requirement.get("user_term") '
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=1b4199d92fed559b
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: prompt_template =
-    node.options.get("prompt_template")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/service.py:R5:ComposerServiceImpl:_serialize_response_via_walker:fp=0b8c1851d2f5adfe
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=85e5713146801ed9
-  owner: composer-tools-rearchitect
-  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
-    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
-    + Steps 6-7). Pattern preserved: Potential dict.get() usage: cached = cache.get(key)'
-  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
-    infrastructure; semantics unchanged from RC5.2
-  expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_dispatch_tool_batch:fp=4279e2293b55bfdf
-  owner: composer-tools-rearchitect
-  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
-    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
-    + Steps 6-7). Pattern preserved: Broad exception caught without re-raise: except
-    Exception as advisor_exc:'
-  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
-    infrastructure; semantics unchanged from RC5.2
-  expires: null
-- key: web/composer/service.py:R4:ComposerServiceImpl:_dispatch_tool_batch:fp=45966396128a64fc
-  owner: composer-tools-rearchitect
-  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
-    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
-    + Steps 6-7). Pattern preserved: Broad exception caught without re-raise: except
-    Exception as tool_exc:'
-  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
-    infrastructure; semantics unchanged from RC5.2
-  expires: null
-- key: web/composer/service.py:R2:ComposerServiceImpl:_call_llm:fp=9b264b3c7f80d77d
-  owner: composer-tools-rearchitect
-  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
-    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
-    + Steps 6-7). Pattern preserved: getattr() with default hides AttributeError:
-    provider_status_code=getattr(exc, "status_code", None)'
-  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
-    infrastructure; semantics unchanged from RC5.2
-  expires: null
-- key: web/composer/service.py:R2:ComposerServiceImpl:_call_text_llm:fp=3b1a24fbfd0dc4a6
-  owner: composer-tools-rearchitect
-  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
-    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
-    + Steps 6-7). Pattern preserved: getattr() with default hides AttributeError:
-    provider_status_code=getattr(exc, "status_code", None)'
-  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
-    infrastructure; semantics unchanged from RC5.2
-  expires: null
 - key: web/sessions/routes/_helpers.py:R1:_patched_routes_attr:fp=468f024091698e3f
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads,
@@ -1789,7 +1691,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/service.py:R5:_request_interpretation_review_kind_from_arguments:fp=320af615e54a618e
+- key: web/composer/service.py:R5:_request_interpretation_review_kind_from_arguments:fp=ee9dfe639c1746a6
   owner: web-composer
   pattern: tier3-boundary-validator
   reason: '2026-05-24 tutorial-assumption surfacing addition: request_interpretation_review
@@ -1799,14 +1701,6 @@ allow_hits:
   safety: Non-string or unknown kind raises AuditIntegrityError; the rate-cap path
     does not coerce a value or write an audit row under the wrong interpretation kind.
   expires: '2026-08-24'
-- key: web/composer/service.py:R1:_matching_interpretation_placeholder_count:fp=4b30b654f20e14c2
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: prompt_template =
-    node.options.get("prompt_template")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
 - key: web/composer/redaction.py:R1:_build_substitute_provider:provider:fp=849a3ad887180a44
   owner: web-composer
   reason: Companion to the R5 entry above — the ``.get(name)`` call inside the Optional-container
@@ -1823,584 +1717,6 @@ allow_hits:
     the substitution set, matching the audit semantics (no leaf exists, no substitution
     needed).
   expires: null
-- key: web/interpretation_state.py:R1:validate_pipeline_decision_semantics:fp=843869917076dec7
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:validate_pipeline_decision_semantics:fp=991454d636f07654
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:validate_pipeline_decision_semantics:fp=c95f789431ca6b9c
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:raw_html_cleanup_review_contract_error:fp=008ecdc3cdcd527f
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:raw_html_cleanup_review_contract_error:fp=bdb3e4f758fde647
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:raw_html_cleanup_review_contract_error:fp=ec1c0b154981a007
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_producer_by_output_stream:fp=38502f2a342c0ffa
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_llm_consumes_untrusted_remote_content:fp=6387153998d41d19
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_llm_consumes_untrusted_remote_content:fp=25e047fb9b1dee0a
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_is_raw_html_cleanup_decision:fp=5d85e146b7208eed
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_validated_mapping_pair:fp=fcb67831cdeaa465
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_validated_mapping_pair:fp=59193f2536bccaf8
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_preserved_mapping_fields:fp=a289c3f8e8a05608
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_preserved_mapping_fields:fp=38636046983a4412
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_materialize_node_for_authoring:fp=02f3bc8a7424ee74
-  owner: web-interpretation
-  reason: Tier-3 read of composer-authored NodeSpec.options. After the structured
-    prompt_template_parts path (L129-132) did not apply and the node has no resolved_prompt_template_hash
-    (L134), we look up the legacy prompt_template string. Absent key means an llm
-    node with no template at all — legitimate during early authoring and must not
-    crash the materialization pass.
-  safety: Returned value is type-checked at L138 isinstance(str); non-string and absent
-    both early-return node unchanged. No default fabricated.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_materialize_node_for_authoring:fp=ecb8990d1d214d6b
-  owner: web-interpretation
-  reason: Tier-3 type discrimination on composer-authored options['prompt_template'].
-    The masking pass (substituting {{interpretation:<term>}} with a placeholder string)
-    only makes sense for string templates; non-string forms are handled by the structured-parts
-    branch above. The not-isinstance arm returns the node unchanged.
-  safety: Negative arm returns node unchanged; no fabrication. Subsequent code operates
-    on a confirmed str.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R1:_materialize_node_for_execution:fp=6abdb3462aedd6c4
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _materialize_node_for_execution
-    reads composer-authored NodeSpec.options[''prompt_template''] in the legacy prompt-template
-    arm after the structured prompt-parts path has been considered. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: Potential dict.get() usage:
-    prompt_template = node.options.get("prompt_template")'
-  safety: Absent or non-string prompt_template returns the node/site set unchanged
-    or empty; no prompt text, hash, or review site is fabricated. Valid string prompts
-    still pass through hash/review validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_materialize_node_for_execution:fp=a05e69b99e5bf9d7
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _materialize_node_for_execution
-    reads composer-authored NodeSpec.options[''model''] before invoking _validate_model_choice_review.
-    Parallel to the existing prompt_template branch in this function. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: Potential dict.get() usage:
-    model = node.options.get("model")'
-  safety: Absent or non-string model skips the model-choice hash guard for that
-    node — preserving the existing prompt-template path's behavior; no model id,
-    hash, or review site is fabricated. Valid string models pass through hash
-    validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_materialize_node_for_execution:fp=9548e9320a95f4c0
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _materialize_node_for_execution
-    reads composer-authored NodeSpec.options[''prompt_template''] in the legacy prompt-template
-    arm after the structured prompt-parts path has been considered. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: isinstance() used: if isinstance(prompt_template,
-    str) and prompt_template:'
-  safety: Absent or non-string prompt_template returns the node/site set unchanged
-    or empty; no prompt text, hash, or review site is fabricated. Valid string prompts
-    still pass through hash/review validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_materialize_node_for_execution:fp=a3057797dcca4a30
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _materialize_node_for_execution
-    reads composer-authored NodeSpec.options[''model''] before invoking _validate_model_choice_review.
-    Parallel to the existing prompt_template branch in this function. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: isinstance() used: if isinstance(model,
-    str) and model:'
-  safety: Absent or non-string model skips the model-choice hash guard for that
-    node — preserving the existing prompt-template path's behavior; no model id,
-    hash, or review site is fabricated. Valid string models pass through hash
-    validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_missing_model_choice_review_sites:fp=e00c3c59a5c8d523
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _missing_model_choice_review_sites
-    is the state-load gate that enumerates a pending review site when an LLM
-    node has a non-empty options[''model''] but no llm_model_choice requirement
-    yet (covers pre-auto-stager sessions). Parallel to _missing_prompt_template_review_sites.
-    The field may be absent or non-string while the LLM is still authoring a
-    pipeline; the helper only proceeds for a real non-empty string. Finding:
-    Potential dict.get() usage: model = node.options.get("model")'
-  safety: Absent or non-string model returns empty site tuple; no model id, hash,
-    or review site is fabricated. Only a non-empty string triggers the enumerator,
-    which emits a single InterpretationReviewSite for user review.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_missing_model_choice_review_sites:fp=59eea9a547d957fa
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _missing_model_choice_review_sites
-    is the state-load gate that enumerates a pending review site when an LLM
-    node has a non-empty options[''model''] but no llm_model_choice requirement
-    yet (covers pre-auto-stager sessions). Parallel to _missing_prompt_template_review_sites.
-    The field may be absent or non-string while the LLM is still authoring a
-    pipeline; the helper only proceeds for a real non-empty string. Finding:
-    isinstance() used: if not isinstance(model, str) or not model:'
-  safety: Absent or non-string model returns empty site tuple; no model id, hash,
-    or review site is fabricated. Only a non-empty string triggers the enumerator,
-    which emits a single InterpretationReviewSite for user review.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_replace_prompt_if_changed:fp=233994c2f99dec9a
-  owner: web-interpretation
-  reason: Tier-3 read of composer-authored options for change detection. _replace_prompt_if_changed
-    compares the existing options['prompt_template'] (may be absent, None, or a string
-    from a prior materialization) against the freshly-rendered prompt. Absent key
-    returns None; the comparison with the rendered string then naturally returns False
-    and the function writes the new template — exactly the desired behaviour for first-time
-    render.
-  safety: Return value participates only in equality comparison at L158; None == str
-    is always False, so absent key drives the correct 'write new template' branch.
-    No default fabricated.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R1:_replace_prompt_if_changed:fp=cd03b057b2096c2d
-  owner: web-interpretation
-  reason: Tier-3 read of composer-authored options['resolved_prompt_template_hash'].
-    Same change-detection pattern as the prior line — absent key on first render must
-    compare unequal to the new stable_hash and drive the rewrite branch.
-  safety: Result used only as an equality operand at L158. None != new hash drives
-    rewrite; identical hash drives early-return-unchanged. No fabrication.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R1:_ensure_prompt_template_hash:fp=0d7b0f4acc097323
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _ensure_prompt_template_hash
-    reads composer-authored NodeSpec.options[''prompt_template''] in the legacy prompt-template
-    arm after the structured prompt-parts path has been considered. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: Potential dict.get() usage:
-    prompt_template = node.options.get("prompt_template")'
-  safety: Absent or non-string prompt_template returns the node/site set unchanged
-    or empty; no prompt text, hash, or review site is fabricated. Valid string prompts
-    still pass through hash/review validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_ensure_prompt_template_hash:fp=53898f12c9ff8362
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _ensure_prompt_template_hash
-    reads composer-authored NodeSpec.options[''prompt_template''] in the legacy prompt-template
-    arm after the structured prompt-parts path has been considered. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: isinstance() used: if not
-    isinstance(prompt_template, str) or not prompt_template:'
-  safety: Absent or non-string prompt_template returns the node/site set unchanged
-    or empty; no prompt text, hash, or review site is fabricated. Valid string prompts
-    still pass through hash/review validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_web_scrape_raw_fields:fp=785781928ab8166c
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_web_scrape_raw_fields:fp=8654cf96e3b3607b
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_web_scrape_raw_fields:fp=83fb3f390eb64092
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_web_scrape_raw_fields:fp=db55f389887f9554
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_missing_raw_html_cleanup_review_sites:fp=c9c72398921f6052
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_missing_raw_html_cleanup_review_sites:fp=5a09a722d3114b23
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_missing_raw_html_cleanup_review_sites:fp=360d06cf34655c5d
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_missing_raw_html_cleanup_review_sites:fp=aae8b124e12475a8
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_missing_raw_html_cleanup_review_sites:fp=b7057f27957c97ef
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_legacy_placeholder_sites:fp=451d355c0e31cf77
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _legacy_placeholder_sites
-    reads composer-authored NodeSpec.options[''prompt_template''] in the legacy prompt-template
-    arm after the structured prompt-parts path has been considered. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: Potential dict.get() usage:
-    prompt_template = node.options.get("prompt_template")'
-  safety: Absent or non-string prompt_template returns the node/site set unchanged
-    or empty; no prompt text, hash, or review site is fabricated. Valid string prompts
-    still pass through hash/review validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_legacy_placeholder_sites:fp=e09d39da79adde0f
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _legacy_placeholder_sites
-    reads composer-authored NodeSpec.options[''prompt_template''] in the legacy prompt-template
-    arm after the structured prompt-parts path has been considered. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: isinstance() used: if not
-    isinstance(prompt_template, str):'
-  safety: Absent or non-string prompt_template returns the node/site set unchanged
-    or empty; no prompt text, hash, or review site is fabricated. Valid string prompts
-    still pass through hash/review validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_missing_prompt_template_review_sites:fp=48910a0a0c473ee0
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _missing_prompt_template_review_sites
-    reads composer-authored NodeSpec.options[''prompt_template''] in the legacy prompt-template
-    arm after the structured prompt-parts path has been considered. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: Potential dict.get() usage:
-    prompt_template = node.options.get("prompt_template")'
-  safety: Absent or non-string prompt_template returns the node/site set unchanged
-    or empty; no prompt text, hash, or review site is fabricated. Valid string prompts
-    still pass through hash/review validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_missing_prompt_template_review_sites:fp=68554c307eb9343e
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _missing_prompt_template_review_sites
-    reads composer-authored NodeSpec.options[''prompt_template''] in the legacy prompt-template
-    arm after the structured prompt-parts path has been considered. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: isinstance() used: if not
-    isinstance(prompt_template, str) or not prompt_template:'
-  safety: Absent or non-string prompt_template returns the node/site set unchanged
-    or empty; no prompt text, hash, or review site is fabricated. Valid string prompts
-    still pass through hash/review validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_requirements:fp=db0d4cc3531f68f7
-  owner: web-interpretation
-  reason: Tier-3 shape validation of composer-authored options['interpretation_requirements'].
-    The mapping comes from composer client requests where the requirements field must
-    be a list/tuple. Not-isinstance arm raises TypeError with a precise message, halting
-    the boundary read with a typed exception the caller can interpret — explicit validation,
-    not silent coercion.
-  safety: 'Raises TypeError on shape mismatch; the function never returns a wrong-type
-    structure to downstream code. Pattern is allowed by Tier-3 boundary validation:
-    validate-and-raise, not validate-and-default.'
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_requirements:fp=a06c65f32fd563d5
-  owner: web-interpretation
-  reason: Tier-3 shape validation of an element of composer-authored interpretation_requirements.
-    Each entry must be a Mapping; if a client sends a scalar or list there instead,
-    the function raises TypeError rather than silently dropping the entry or fabricating
-    a default.
-  safety: Raises TypeError with a precise message; no silent coercion. The outer loop
-    never appends a non-Mapping entry to the requirements tuple.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=3ded9964ae6c9454
-  owner: web-interpretation
-  reason: Tier-3 type/shape validation of requirement['id'] from composer-authored
-    interpretation_requirements. The id must be a non-empty string; this check ensures
-    the TypedDict contract is observed at the boundary. Raises TypeError on violation.
-  safety: Raises TypeError on non-str or empty/whitespace id. No default id fabricated;
-    the malformed requirement never enters the validated tuple.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=8811a2882dc712ff
-  owner: web-interpretation
-  reason: Tier-3 type/shape validation of requirement['user_term']. Same boundary
-    shape-validation pattern as the id check above; user_term must be a non-empty
-    string for downstream prompt-rendering to work.
-  safety: Raises TypeError on violation. No silent default; the malformed requirement
-    is rejected at the boundary.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=2ecaa57aab31c5cf
-  owner: web-interpretation
-  reason: 'Tier-3 cross-field validation of composer-authored requirement: when status
-    is ''resolved'', accepted_value must be a string. This is the TypedDict contract
-    enforced at the boundary so downstream rendering code can rely on resolved requirements
-    carrying an accepted value.'
-  safety: Raises TypeError if a resolved requirement is missing the accepted_value
-    string; no default substituted. Pending requirements skip this check.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=e2e4adcfcc7a79c2
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _coerce_requirement
-    validates optional resolved interpretation metadata from composer-authored requirements.
-    accepted_value, accepted_artifact_hash, and resolved_prompt_template_hash are
-    external JSON fields that must be str-or-None before becoming the TypedDict contract.
-    Finding: isinstance() used: if status == "resolved" and not isinstance(accepted_value,
-    str):'
-  safety: Malformed resolved requirement fields raise TypeError at the boundary; pending
-    requirements preserve honest None/absence and no accepted value or hash is synthesized.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=be2c8dfe49c9d256
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _coerce_requirement
-    validates optional resolved interpretation metadata from composer-authored requirements.
-    accepted_value, accepted_artifact_hash, and resolved_prompt_template_hash are
-    external JSON fields that must be str-or-None before becoming the TypedDict contract.
-    Finding: isinstance() used: if accepted_artifact_hash is not None and not isinstance(accepted_artifact_hash,
-    str):'
-  safety: Malformed resolved requirement fields raise TypeError at the boundary; pending
-    requirements preserve honest None/absence and no accepted value or hash is synthesized.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=cecd2c1d57be7458
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _coerce_requirement
-    validates optional resolved interpretation metadata from composer-authored requirements.
-    accepted_value, accepted_artifact_hash, and resolved_prompt_template_hash are
-    external JSON fields that must be str-or-None before becoming the TypedDict contract.
-    Finding: isinstance() used: if resolved_prompt_template_hash is not None and not
-    isinstance(resolved_prompt_template_hash, str):'
-  safety: Malformed resolved requirement fields raise TypeError at the boundary; pending
-    requirements preserve honest None/absence and no accepted value or hash is synthesized.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_source_authoring_metadata:fp=f04a0dde493b780d
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _source_authoring_metadata
-    validates composer-authored source_authoring metadata for invented-source review
-    handoff. The metadata is schemaless options data until this boundary narrows modality/content_hash/review_event_id/resolved_kind.
-    Finding: isinstance() used: if not isinstance(value, Mapping):'
-  safety: Malformed source_authoring data raises TypeError before execution materialization;
-    absence remains None and no source hash, modality, or review binding is invented.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_source_authoring_metadata:fp=28ab28e16d7a8803
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _source_authoring_metadata
-    validates composer-authored source_authoring metadata for invented-source review
-    handoff. The metadata is schemaless options data until this boundary narrows modality/content_hash/review_event_id/resolved_kind.
-    Finding: isinstance() used: if not isinstance(modality, str) or not modality:'
-  safety: Malformed source_authoring data raises TypeError before execution materialization;
-    absence remains None and no source hash, modality, or review binding is invented.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_source_authoring_metadata:fp=39e4239622c26dcf
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _source_authoring_metadata
-    validates composer-authored source_authoring metadata for invented-source review
-    handoff. The metadata is schemaless options data until this boundary narrows modality/content_hash/review_event_id/resolved_kind.
-    Finding: isinstance() used: if not isinstance(content_hash, str) or not content_hash:'
-  safety: Malformed source_authoring data raises TypeError before execution materialization;
-    absence remains None and no source hash, modality, or review binding is invented.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_source_authoring_metadata:fp=ac0ded8fac4452f4
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _source_authoring_metadata
-    validates composer-authored source_authoring metadata for invented-source review
-    handoff. The metadata is schemaless options data until this boundary narrows modality/content_hash/review_event_id/resolved_kind.
-    Finding: isinstance() used: if review_event_id is not None and not isinstance(review_event_id,
-    str):'
-  safety: Malformed source_authoring data raises TypeError before execution materialization;
-    absence remains None and no source hash, modality, or review binding is invented.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_source_authoring_metadata:fp=134a5420544b8335
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _source_authoring_metadata
-    validates composer-authored source_authoring metadata for invented-source review
-    handoff. The metadata is schemaless options data until this boundary narrows modality/content_hash/review_event_id/resolved_kind.
-    Finding: isinstance() used: if not isinstance(resolved_kind, str):'
-  safety: Malformed source_authoring data raises TypeError before execution materialization;
-    absence remains None and no source hash, modality, or review binding is invented.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=67af438a63c3cfbf
-  owner: web-interpretation
-  reason: Tier-3 shape validation of composer-authored options['prompt_template_parts'].
-    Same list/tuple shape requirement as interpretation_requirements above; raises
-    TypeError on a malformed shape rather than silently coercing.
-  safety: TypeError raised at the boundary; no fabricated default; downstream code
-    operates on a validated tuple of PromptPart entries.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=8dd7eeac83a65653
-  owner: web-interpretation
-  reason: Tier-3 element-shape validation in prompt_template_parts. Each entry must
-    be a Mapping (it then carries kind/text/requirement_id depending on type). Raises
-    TypeError on a non-Mapping entry.
-  safety: Raises TypeError with a precise message; no entry is silently skipped or
-    coerced. The downstream parts tuple contains only validated mappings.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=d51743144f1fac54
-  owner: web-interpretation
-  reason: 'Tier-3 type validation of the text payload on a ''text'' prompt-part. The
-    TypedDict PromptTextPart declares text: str; this check enforces that at the boundary,
-    since the source is composer-authored options data.'
-  safety: Raises TypeError on non-string text. No default text fabricated; the PromptPart
-    tuple only contains string-typed text parts.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=ddf9ce0a605bfca8
-  owner: web-interpretation
-  reason: Tier-3 validation of an interpretation_ref prompt-part's requirement_id
-    field. Must be a non-empty string to be resolvable against the interpretation_requirements
-    lookup. Raises TypeError at the boundary.
-  safety: TypeError raised on non-str or empty requirement_id; never silently rewritten.
-    Downstream _render_prompt_parts can rely on every interpretation_ref carrying
-    a usable requirement_id.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_render_prompt_parts:fp=50690f7a042729ed
-  owner: web-interpretation
-  reason: 'Late safety net during rendering: the resolved interpretation requirement''s
-    accepted_value must be a string by TypedDict contract, but the requirement came
-    from composer-authored options data validated earlier in this module — this isinstance
-    guards against a future caller bypassing _coerce_requirement (e.g. constructing
-    requirements_by_id from a different boundary). Raises TypeError to halt rendering.'
-  safety: TypeError raised; rendered prompt never contains a non-string accepted value
-    cast through str(). No fabrication.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_prompt_shield_artifact_hash:fp=0df1208e3e8a08ce
-  owner: web-interpretation
-  reason: Type-narrowing on NodeSpec.input (typed str | None) while walking the upstream
-    producer chain for the prompt-shield review's material hash. Mirrors the canonical
-    pattern at _llm_consumes_untrusted_remote_content. Exits the loop cleanly when
-    input is None (chain root) — no fabrication, no silent coercion.
-  safety: Loop terminates when stream is not a string; no synthetic upstream chain
-    entries are produced. Pure topology projection feeding stable_hash.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_raw_html_cleanup_artifact_hash:fp=da5ff49586fc1843
-  owner: web-interpretation
-  reason: Type-narrowing on node.options.get("mapping") to validate it's a Mapping
-    before coercing to a plain dict for the raw-html cleanup review's material hash.
-    options is typed Mapping[str, Any] so the inner value is Any at the type system
-    level; this isinstance guards a non-Mapping intruder (e.g. None or a stale list)
-    from being included in the canonical hash domain.
-  safety: Non-Mapping mapping value falls through to empty dict, which is what the
-    review semantics already require — there's no fabrication path. Pure projection
-    feeding stable_hash.
-  expires: '2026-08-23'
 - key: web/app.py:R6:_periodic_orphan_cleanup:fp=2de630b45978d685
   owner: web-execution
   reason: Audit/IO-cleanup narrow catch — except (SQLAlchemyError, OSError) absorbs
@@ -2517,20 +1833,6 @@ allow_hits:
     collector cannot escalate to a traceback-leaking 500. Allowlist expiry deliberately
     bounded (90d) per project policy on new suggested entries.
   expires: '2026-08-19'
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=b238a979c662822d
-  owner: web-composer
-  reason: Function receives multiple dict shapes — to_dict() output always has "source",
-    but component dicts from _execute_get_pipeline_state do not. .get() handles the
-    absent-key case (no-op early return).
-  safety: Returns input unchanged when "source" key absent — no data loss or fabrication
-  expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=07a8be5fa3d363e3
-  owner: web-composer
-  reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
-    — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.
-    Not all source shapes include "options".
-  safety: Returns input unchanged when "options" absent — no data loss or fabrication
-  expires: null
 - key: web/composer/source_inspection.py:R6:_inspect_jsonl:fp=327fe9a5a3e59ac5
   owner: web-composer
   reason: Tier-3 trust boundary — JSONL line-by-line parsing of operator-supplied
@@ -2612,426 +1914,6 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_interpretation_hash_domain_v2:fp=df35b14aa455126c
-  owner: web-sessions
-  pattern: union-dispatch
-  reason: '2026-05-24 tutorial-assumption surfacing addition: interpretation-event
-    hash-domain construction accepts the closed kind union (InterpretationKind | str)
-    used by callers during migration and serializes the enum arm to its stable value.
-    Finding: isinstance() used: "kind": kind.value if isinstance(kind, InterpretationKind)
-    else kind,'
-  safety: The completed domain dict is checked against INTERPRETATION_HASH_DOMAIN_V2
-    immediately; unexpected keys or missing keys crash before hashing, and no kind
-    default is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_require_mapping:fp=1691df83cddee859
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: persisted composition-state
-    JSON is schemaless at the DB boundary, and _require_mapping is the narrow guard
-    before interpretation resolution reads nested options/source payloads. Finding:
-    isinstance() used: if not isinstance(value, Mapping):'
-  safety: Wrong-shaped values raise InterpretationPlaceholderConsumedError; callers
-    do not continue with an empty mapping or coerced object.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R1:_find_llm_transform_node:fp=ba318c72bc72a109
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _find_llm_transform_node
-    validates persisted composition-state nodes before binding an interpretation event
-    to an LLM transform prompt. Finding: Potential dict.get() usage: if node.get("node_type")
-    != "transform" or "plugin" not in node:'
-  safety: Malformed or non-LLM nodes raise a domain error naming the affected node;
-    no prompt template or node binding is guessed.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_find_llm_transform_node:fp=a2799a9219660862
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _find_llm_transform_node
-    validates persisted composition-state nodes before binding an interpretation event
-    to an LLM transform prompt. Finding: isinstance() used: if not isinstance(prompt_template,
-    str) or not prompt_template:'
-  safety: Malformed or non-LLM nodes raise a domain error naming the affected node;
-    no prompt template or node binding is guessed.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_matching_pending_requirement_index:fp=3c2ad659cde04b5d
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _matching_pending_requirement_index
-    validates persisted interpretation_requirements while locating the single pending
-    requirement for a user resolution. Finding: isinstance() used: if not isinstance(requirements_value,
-    (list, tuple)):'
-  safety: Malformed entries raise InterpretationPlaceholderConsumedError and zero/multiple
-    matches are rejected; no requirement index or status is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_matching_pending_requirement_index:fp=1ddae53e70acacec
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _matching_pending_requirement_index
-    validates persisted interpretation_requirements while locating the single pending
-    requirement for a user resolution. Finding: isinstance() used: if not isinstance(requirement_value,
-    Mapping):'
-  safety: Malformed entries raise InterpretationPlaceholderConsumedError and zero/multiple
-    matches are rejected; no requirement index or status is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_matching_pending_requirement_index:fp=d64d0f1d9aebc0a4
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _matching_pending_requirement_index
-    validates persisted interpretation_requirements while locating the single pending
-    requirement for a user resolution. Finding: isinstance() used: if not isinstance(requirement_term,
-    str):'
-  safety: Malformed entries raise InterpretationPlaceholderConsumedError and zero/multiple
-    matches are rejected; no requirement index or status is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R1:_matching_pending_requirement_index:fp=5e2fcb5fc9ceac6b
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _matching_pending_requirement_index
-    validates persisted interpretation_requirements while locating the single pending
-    requirement for a user resolution. Finding: Potential dict.get() usage: if requirement_term.strip()
-    == normalized_user_term and requirement.get("status") == "pending" and requirement_kind
-    == kind.value:'
-  safety: Malformed entries raise InterpretationPlaceholderConsumedError and zero/multiple
-    matches are rejected; no requirement index or status is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=c4f7406126d5de85
-  owner: web-sessions
-  reason: Tier-3 shape validation of composer-authored options[INTERPRETATION_REQUIREMENTS_KEY]
-    before _patch_structured_interpretation_prompt writes a resolved version back.
-    The value must be list/tuple shaped; raises InterpretationPlaceholderConsumedError
-    naming affected_node_id on violation so the caller can attribute the failure to
-    a specific node.
-  safety: Domain exception raised on shape mismatch; the patch function never produces
-    a corrupt option payload from a malformed input.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=a4a66343affba69c
-  owner: web-sessions
-  reason: Tier-3 shape validation of composer-authored options[PROMPT_TEMPLATE_PARTS_KEY].
-    Structured interpretation resolution requires the parts list to be present and
-    list/tuple-shaped; raises InterpretationPlaceholderConsumedError otherwise.
-  safety: Domain exception raised on shape mismatch; control returns to the session-update
-    handler which translates it into a user-visible error.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=50fa456e87481a59
-  owner: web-sessions
-  reason: Tier-3 element-shape validation for an interpretation requirement entry
-    in the patch input. Mirrors interpretation_state._requirements but raises the
-    patch-specific domain exception instead of TypeError, so the session-update handler
-    can distinguish patch-time vs read-time validation failures.
-  safety: Domain exception raised at the boundary; the patch never partially writes
-    a malformed requirement entry back to the options blob.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=c3b1c1a17ece73e0
-  owner: web-sessions
-  reason: Tier-3 validation of requirement['id'] (str, non-empty). Necessary before
-    using it as a key in the requirements_by_id dedup map below.
-  safety: Raises InterpretationPlaceholderConsumedError naming the node; no default
-    id fabricated.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=85a31ca4bce53302
-  owner: web-sessions
-  reason: Tier-3 validation of requirement['user_term'] (str). Required for the user-term
-    normalization match below at L527.
-  safety: Domain exception raised; the patch refuses to consume a requirement whose
-    user_term cannot be normalized.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=56d07b5e1d1f2c02
-  owner: web-sessions
-  reason: Tier-3 read of requirement.get('status'). The requirement dict was just
-    shallow-copied from composer-authored options (L511 dict(requirement_value));
-    the status key may be missing in malformed inputs. Comparing the .get result to
-    the literal 'pending' yields False for absent or non-'pending' status — exactly
-    the desired behaviour for the match-counter below.
-  safety: Result used only in an equality test. Absent status excludes the requirement
-    from matching_indexes; the function then raises if zero matches were found, so
-    absence is never silently accepted as 'this matched'.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=a55cc4aa59727346
-  owner: web-sessions
-  reason: Tier-3 read of stored_requirement.get('status') for a non-target interpretation_ref.
-    stored_requirement was looked up from requirements_by_id (built from validated
-    boundary data); the status key may still be absent in malformed inputs. Comparing
-    to 'resolved' yields False on absence — falls through to the PENDING_INTERPRETATION_AUTHORING_TEXT
-    branch, which is correct for any non-resolved requirement.
-  safety: Result is an equality operand only; absent or non-resolved both route to
-    the pending-text branch with the same outcome.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=9f1a9d65303d81dd
-  owner: web-sessions
-  reason: Tier-3 element-shape validation of a prompt_template_parts entry. Each must
-    be a Mapping for downstream kind/text/requirement_id reads.
-  safety: Domain exception raised; rendered prompt never contains a string rendered
-    from a malformed part.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=a3caae3b48ded548
-  owner: web-sessions
-  reason: Tier-3 type validation of part_value['text'] when kind=='text'. Same PromptTextPart
-    contract enforced here as in interpretation_state._prompt_parts, raising the patch-specific
-    exception type.
-  safety: Domain exception raised; rendered prompt is built only from validated string
-    text fragments.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=e25f53129622b4f6
-  owner: web-sessions
-  reason: 'Tier-3 validation of part_value[''requirement_id''] for interpretation_ref
-    parts. Must be a str AND must already be present in requirements_by_id (structural
-    integrity: the parts list cannot reference a requirement that does not exist in
-    the requirements list).'
-  safety: Domain exception raised on either failure; no fallback to None or synthesized
-    requirement object.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=dcdd0881eb943228
-  owner: web-sessions
-  reason: Tier-3 read of stored_requirement.get('accepted_value') after we have established
-    status=='resolved' on the previous line. If a resolved requirement is missing
-    accepted_value (a contract violation by the writer), the next line's isinstance(accepted,
-    str) catches it and raises InterpretationPlaceholderConsumedError.
-  safety: Result is type-checked at L578 isinstance(str); absent value (None) fails
-    the check and raises the domain exception. No default substituted.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=c4a6858571bf95a6
-  owner: web-sessions
-  reason: Tier-3 read of requirement.get('status'). The requirement dict was just
-    shallow-copied from composer-authored options (L511 dict(requirement_value));
-    the status key may be missing in malformed inputs. Comparing the .get result to
-    the literal 'pending' yields False for absent or non-'pending' status — exactly
-    the desired behaviour for the match-counter below.
-  safety: Result used only in an equality test. Absent status excludes the requirement
-    from matching_indexes; the function then raises if zero matches were found, so
-    absence is never silently accepted as 'this matched'.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=1d187096f6a3194a
-  owner: web-sessions
-  reason: Tier-3 validation of stored_requirement['accepted_value'] for a resolved
-    non-target interpretation_ref. By TypedDict contract resolved requirements must
-    carry str accepted_value; this isinstance guard raises the domain exception when
-    the contract is violated upstream.
-  safety: InterpretationPlaceholderConsumedError raised with a precise message naming
-    requirement_id and the contract violation. Rendered prompt never contains None
-    coerced to 'None'.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:_patch_llm_transform_prompt:fp=ce086372dd45b64b
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R5:_resolve_prompt_template_review:fp=c3e62769459a9fee
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: resolving a prompt-template
-    review re-reads persisted node options and must prove options.prompt_template
-    is still a string before comparing the user acceptance and hashing it. Finding:
-    isinstance() used: if not isinstance(prompt_template, str):'
-  safety: Wrong-shaped prompt_template raises InterpretationPlaceholderConsumedError;
-    accepted_value must equal the current template and no prompt hash is minted from
-    non-string data.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_resolve_invented_source:fp=8d1f39d4845aeaf1
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: invented-source resolution
-    validates persisted source_authoring.content_hash and optional draft text before
-    binding the user decision to the source artifact. Finding: isinstance() used:
-    if not isinstance(content_hash, str) or not content_hash:'
-  safety: Missing/non-string content_hash or mismatched draft raises before the row
-    is resolved; accepted_artifact_hash is copied only from validated persisted metadata.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_resolve_invented_source:fp=eb855e7731de8e46
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: invented-source resolution
-    validates persisted source_authoring.content_hash and optional draft text before
-    binding the user decision to the source artifact. Finding: isinstance() used:
-    if isinstance(draft, str) and draft != llm_draft:'
-  safety: Missing/non-string content_hash or mismatched draft raises before the row
-    is resolved; accepted_artifact_hash is copied only from validated persisted metadata.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_resolve_pipeline_decision_review:fp=18fa846fc56b7d28
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R1:SessionServiceImpl:_assert_session_write_lock_held:fp=2851c93a131c9e47
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R1:SessionServiceImpl:_session_write_lock:fp=2c223ca3eecf3576
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=e27430ff4d85a6f7
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=be42dba4d947b479
-  owner: web-sessions
-  reason: Tier-3 filesystem boundary in archive_session rollback. The primary DB transaction
-    has already failed (primary_exc captured at L1677). We attempt to rename the staged
-    quarantine directory back to its original blob_dir location so the session blob
-    remains readable. If that restore rename itself fails with OSError (disk full,
-    permission, FS race, intermediate dir vanished), we add an exception note to primary_exc
-    and re-raise primary_exc — the operator sees both failures, the primary is never
-    swallowed.
-  safety: Narrowed to OSError only. primary_exc.add_note carries type(restore_exc),
-    the source and destination paths, and 'Manual cleanup required'. The raise on
-    L1689 propagates the original DB-layer failure.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=63c9e8a7006387b6
-  owner: web-sessions
-  reason: Post-commit quarantine purge in archive_session::_sync. The session-row
-    delete has already committed and from the caller's perspective the archive succeeded;
-    this is best-effort filesystem cleanup of the staged blob dir. If shutil.rmtree
-    raises OSError (file lock, permission, partial filesystem state), we intentionally
-    early-return so the directory remains in quarantine for manual cleanup rather
-    than raising a misleading 'archive failed' error after the DB rows are gone.
-  safety: Narrowed to OSError only. Inline comment L1691-1694 documents the quarantine-on-cleanup-failure
-    invariant. Subsequent quarantine_root rmdir is gated by this early return so we
-    never attempt parent removal when the child cleanup failed.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=6ae7c31a28b59d28
-  owner: web-sessions
-  reason: Best-effort rmdir of the parent quarantine_root once the session-scoped
-    staged dir was successfully removed by the rmtree above. The parent may be non-empty
-    (other sessions still quarantined under the same root) or raise transient OSError
-    under concurrent purge — none of these conditions change the archive outcome and
-    must not propagate.
-  safety: Reached only after the session-scoped rmtree succeeded. contextlib.suppress
-    is narrowed to OSError only; non-FS exceptions propagate. The session's own quarantine
-    artefact is already gone.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:fp=fddf6462f06f94f9
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=c94b66af33bb005a
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(source, Mapping):'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=8c17fac8ab8fa86f
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(source_options,
-    Mapping) or SOURCE_AUTHORING_KEY not in source_options:'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=3ee380ef96cdd82f
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(source_authoring,
-    Mapping):'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=fe4e1e22f49f444f
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(content_hash,
-    str) or not content_hash:'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=47690572cb1367a1
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if isinstance(draft, str) and
-    draft != llm_draft:'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=dd3c900b34959c33
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=e88ecf89b7b7efd0
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:record_auto_interpreted_no_surfaces_event:fp=a03d3e8006245522
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=ecfa1eb58e52ae14
-  owner: web-sessions
-  reason: Cross-table reference walk in prune_state_versions. derived_from_map is
-    built from composition_states_table for the current session; seeds is the union
-    of keep_ids (caller param), run_referenced (from runs table), and message_referenced
-    (from chat_messages_table). A seed id can legitimately not appear in derived_from_map
-    when a run or chat message references a composition state that has already been
-    pruned or that lives in a different session. .get() returning None is the correct
-    termination signal for the while-loop on L3707.
-  safety: Loop terminates on parent is None. lineage_protected only grows with IDs
-    that DO appear in derived_from_map. No silent default is fabricated into audit
-    data — None is interpreted as 'walk terminates here', and the prune candidate
-    set is conservative (protects strictly more than the true closure, never less).
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:SessionServiceImpl:prune_state_versions:_sync:fp=d3febd70c6d39c8e
-  owner: web-sessions
-  reason: Inner step of the same lineage walk in prune_state_versions. After protecting
-    a parent at L3708, advance to its parent via derived_from_map.get(). Returns None
-    when the lineage reaches a root state (derived_from_state_id IS NULL in the DB)
-    or leaves the session's state table (cross-session fork ancestor). Both are correct
-    termination conditions; the while-loop reads parent is None and exits.
-  safety: Termination signal, not silent default. lineage_protected only grows with
-    present IDs so prune candidates on L3713 are computed against the true protected
-    set.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:SessionServiceImpl:fork_session:fp=573b0020b6c3c992
-  owner: web-sessions
-  reason: Session persistence boundary; optional envelope, fork, archive, and lock
-    state is inspected while preserving audit/session invariants.
-  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
-    as recovery notes, and programmer bugs propagate.
-  expires: null
 - key: web/execution/validation.py:R1:_find_identity_node_advisories:fp=3aba7cf3d76c43d9
   owner: web-execution
   reason: Runtime validation inspects user-authored pipeline dictionaries and composer-only
@@ -3078,54 +1960,6 @@ allow_hits:
   safety: Absent path/file means no sink-side path-allowlist check needed for that
     key; the other key is still checked in the same iteration. No data loss or fabrication.
   expires: null
-- key: web/sessions/routes/sessions.py:R5:_copied_blob_for_inline_marker:fp=361f453445f65a4f
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/sessions.py:R5:_copied_blob_for_inline_marker:fp=850ecbae2b04f4e3
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/sessions.py:R5:_rewrite_inline_content_blob_refs:fp=295179d16e76d11a
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/sessions.py:R1:_rewrite_inline_content_blob_refs:fp=78848f02eaeb5cc3
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/sessions.py:R5:_rewrite_inline_content_blob_refs:fp=fd0fdc763984785e
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/sessions.py:R5:_rewrite_inline_content_blob_refs:fp=413166a7e7723531
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
 - key: web/sessions/routes/sessions.py:R6:register_session_routes:fork_from_message:fp=7db495b3c8fcc96a
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads,
@@ -3383,72 +2217,6 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=d55d8a8acef2abd1
-  owner: composer-tools
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _assert_affected_component
-    validates a request_interpretation_review call against the current node.options.
-    The model-choice branch reads options[''model''] to compare against the supplied
-    llm_draft (Tier-3 LLM tool argument). The field may be absent or non-string while
-    the LLM is still authoring the node. Finding: Potential dict.get() usage:
-    current_model = options.get("model")'
-  safety: Absent or non-string current_model raises ToolArgumentError with an
-    actionable message; no model id or hash is fabricated. The strict draft-equality
-    check below only runs when current_model is a non-empty string.
-  expires: '2026-08-24'
-- key: web/composer/tools/sessions.py:R5:_assert_affected_component:fp=078d581fa15ba3a8
-  owner: composer-tools
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _assert_affected_component
-    validates a request_interpretation_review call against the current node.options.
-    The model-choice branch reads options[''model''] and type-narrows before comparing
-    against the supplied llm_draft (Tier-3 LLM tool argument). Finding: isinstance()
-    used: if not isinstance(current_model, str) or not current_model:'
-  safety: Absent or non-string current_model raises ToolArgumentError with an
-    actionable message; no model id or hash is fabricated. Type check guards the
-    strict equality below.
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_requirement_matches_field_value:fp=fe48281fe07a5e76
-  owner: composer-tools
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _requirement_matches_field_value
-    is the polymorphic-by-status comparison helper used by _options_with_pending_requirement.
-    Reads the existing requirement''s ''draft'' field for pending status; the field
-    is present by construction in our auto-stager but absent in third-party-stored
-    requirements during the auto-stager migration window. Carried forward from the
-    pre-rename function _requirement_matches_prompt_template. Finding: Potential
-    dict.get() usage: return requirement.get("draft") == field_value'
-  safety: Absent draft compares unequal to field_value (returns False), causing
-    the caller to replace rather than retain the existing requirement; no requirement
-    state is fabricated. Behavior unchanged from the pre-rename function.
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_requirement_matches_field_value:fp=b3c1edb91718dbfb
-  owner: composer-tools
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _requirement_matches_field_value
-    compares the existing requirement''s ''resolved_prompt_template_hash'' (the
-    universal resolved-value hash field — name retained for backward
-    compatibility) against the stable_hash of the current field value, for
-    requirements in ''resolved'' status. Carried forward from the pre-rename
-    function _requirement_matches_prompt_template. Finding: Potential dict.get()
-    usage: return requirement.get("resolved_prompt_template_hash") == stable_hash(field_value)'
-  safety: Absent hash compares unequal to stable_hash(field_value), causing the
-    caller to treat the resolved requirement as stale; no hash is fabricated.
-    Behavior unchanged from the pre-rename function.
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R5:_options_with_default_model_choice_review:fp=cb05cf6498ea8182
-  owner: composer-tools
-  pattern: tier3-boundary-validator
-  reason: '2026-05-25 llm_model_choice surfacing addition: _options_with_default_model_choice_review
-    is the mutation-time auto-stager that creates a pending llm_model_choice
-    interpretation requirement whenever an LLM node''s options.model is set.
-    Reads composer-authored options[''model''] and type-narrows before staging.
-    Parallel to _options_with_default_prompt_template_review. Finding: isinstance()
-    used: if not isinstance(model, str) or not model:'
-  safety: Absent or non-string model returns options unchanged (no requirement
-    staged); no model id is fabricated. Only a non-empty string triggers the
-    auto-stager.
-  expires: '2026-08-24'
 - key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=400e7fa8db4f1ead
   owner: composer-tools-rearchitect
   reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
@@ -3503,135 +2271,6 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/_common.py:R5:_options_with_pending_requirement:fp=34dcd378b55518ac
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R5:_options_with_pending_requirement:fp=90c5d3916dfe96b8
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_options_with_pending_requirement:fp=f0071edca977648d
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R5:_options_with_default_prompt_template_review:fp=825c8398f7ee041a
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R9:_apply_merge_patch:fp=50e1ff09114fc72d
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: dict.pop() with default hides missing keys: result.pop(key,
-    None)'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=9e33e86e9f195351
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(value, Mapping)
-    and len(value) == 1 and "secret_ref" in value and isinstance(value["secret_ref"],
-    str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=9ef95b04e5e6168a
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(value, Mapping)
-    and len(value) == 1 and "secret_ref" in value and isinstance(value["secret_ref"],
-    str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=5d98c7eb01bf4e18
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(cause, PydanticValidationError):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R1:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=6e311910f9e4cf07
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: prompt_template =
-    options.get("prompt_template")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R5:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=0d4f94fb3de2caf6
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
-    str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/_common.py:R9:_source_options_for_prevalidation:fp=c3b76a130d2152ad
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_source_options_for_prevalidation:fp=30f756eeef74be42
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_source_options_for_prevalidation:fp=813af9da48723e97
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R9:_source_options_for_prevalidation:fp=f4962f25ecacf3b3
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:_csv_source_field_mapping:fp=3dd0d533b3510ff0
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R5:_csv_source_field_mapping:fp=176985867214e183
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
 - key: web/composer/tools/generation.py:R1:_schema_required_fields:fp=170da3b1e8b91a7c
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
@@ -4022,18 +2661,6 @@ allow_hits:
     gate ImportFroms.
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=e52d7f64d67fd540
-  owner: web-execution
-  reason: Idempotent cleanup of self._shutdown_events on the BaseException path of
-    _execute_locked when run setup fails before thread-pool submission. The key may
-    or may not have been inserted depending on which preceding step raised (audit-record
-    creation, run-row insert, executor.submit). pop(..., None) is the canonical 'remove
-    if present, no-op if absent' construct; raising KeyError here would mask the actual
-    setup failure being re-raised by the surrounding handler.
-  safety: Absent key means setup raised before insertion; nothing to clean up. Mutation
-    runs under self._shutdown_events_lock. The outer raise propagates the original
-    exception unchanged.
-  expires: '2026-08-23'
 - key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=b4fdef35d6621b71
   owner: web-execution
   reason: Best-effort run status cleanup on setup failure — must not mask original
@@ -4141,162 +2768,55 @@ allow_hits:
     excluded (too broad); programmer bugs propagate; partial failures logged from
     structured result
   expires: null
-- key: web/app.py:R6:_settings_from_env:fp=117db781e6c0b121
-  owner: web-app
-  reason: Tier 3 boundary — env var value that isn't valid JSON is treated as plain
-    string (the common case)
-  safety: JSONDecodeError caught only to fall back to raw string; no silent data loss
+- key: web/composer/service.py:R8:_apply_openrouter_app_identity:fp=9c37dc8cf6aa2386
+  owner: composer-openrouter-attribution
+  reason: 'Outbound-request construction boundary: setdefault fills ELSPETH''s three
+    OpenRouter app-attribution identity headers (HTTP-Referer, X-OpenRouter-Title,
+    X-Title) only when the caller has not already set them, so caller-supplied headers
+    always win. The absent header is the normal case (LiteLLM callers rarely pass
+    extra_headers), not a missing-key bug; this is meaning-adding default-fill at
+    a Tier-3 external-API boundary, not silent coercion of inbound data.'
   expires: null
-- key: web/app.py:R1:create_app:fp=ee3d5988120521d6
-  owner: web-app
-  reason: Tier 3 — os.environ.get() for optional WEB_CONCURRENCY env var
-  safety: Defaults to "1" when absent
+  safety: setdefault never overwrites a caller value; identity-only keys; no inbound
+    data read.
+- key: web/composer/service.py:R8:_apply_openrouter_app_identity:fp=c28f5f9ec51d0f9a
+  owner: composer-openrouter-attribution
+  reason: 'Outbound-request construction boundary: setdefault fills ELSPETH''s three
+    OpenRouter app-attribution identity headers (HTTP-Referer, X-OpenRouter-Title,
+    X-Title) only when the caller has not already set them, so caller-supplied headers
+    always win. The absent header is the normal case (LiteLLM callers rarely pass
+    extra_headers), not a missing-key bug; this is meaning-adding default-fill at
+    a Tier-3 external-API boundary, not silent coercion of inbound data.'
   expires: null
-- key: web/app.py:R1:_BodySizeLimitMiddleware:dispatch:fp=1334109675365467
-  owner: web-app
-  reason: Tier 3 — request.headers.get('content-length') reads an optional HTTP header
-    from untrusted client input; absent header means no declared size and the request
-    proceeds to per-field Pydantic caps which are the actual guarantee.
-  safety: Absent header is the expected control-flow branch (Content-Length is optional
-    in HTTP); when present and over the 10 MB ceiling, the request short-circuits
-    with a 413 before any handler or downstream middleware touches the body. The Pydantic
-    per-field caps (SendMessageRequest.content 64 KiB, _InlineBlobModel.content 256
-    KiB) remain the binding contract.
+  safety: setdefault never overwrites a caller value; identity-only keys; no inbound
+    data read.
+- key: web/composer/service.py:R8:_apply_openrouter_app_identity:fp=5e18582300fe4db8
+  owner: composer-openrouter-attribution
+  reason: 'Outbound-request construction boundary: setdefault fills ELSPETH''s three
+    OpenRouter app-attribution identity headers (HTTP-Referer, X-OpenRouter-Title,
+    X-Title) only when the caller has not already set them, so caller-supplied headers
+    always win. The absent header is the normal case (LiteLLM callers rarely pass
+    extra_headers), not a missing-key bug; this is meaning-adding default-fill at
+    a Tier-3 external-API boundary, not silent coercion of inbound data.'
   expires: null
-- key: web/app.py:R1:create_app:fp=827bd843b6a90233
-  owner: web-app
-  reason: Tier 3 — os.environ.get() for optional ELSPETH_ENV
-  safety: Returns None when absent; only used for test guard
+  safety: setdefault never overwrites a caller value; identity-only keys; no inbound
+    data read.
+- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=b8c97a159c375db2
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: Potential dict.get() usage: data = payload.get("data")'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
   expires: null
-- key: web/app.py:R4:create_app:_prometheus_metrics:fp=78163b1e6057d667
-  owner: web-app
-  reason: Tier 3 — public ``/metrics`` scrape endpoint. ``generate_latest()`` walks
-    the global Prometheus REGISTRY and runs collector code we do not own; a collector
-    raising on a corrupted state would, under Starlette's default 500 handler, leak
-    the traceback into the response body. The bare ``except Exception`` traps the
-    collector failure and returns a safe 503 with a one-line ``# scrape failed`` body
-    and no internal detail. Closes the Phase 8 PR-review S4 finding.
-  safety: Audit-primacy not implicated — ``/metrics`` reads in-memory counter state
-    only, emits nothing to audit. Scrapers retry on 5xx; service degrades gracefully.
-    The actual exception is unreachable in tests (would require a deliberately-corrupted
-    collector) but the handler exists so a production regression in any third-party
-    collector cannot escalate to a traceback-leaking 500. Allowlist expiry deliberately
-    bounded (90d) per project policy on new suggested entries.
-  expires: '2026-08-19'
-- key: web/app.py:R7:lifespan:fp=a42d820384ebe0eb
-  owner: web-execution
-  reason: contextlib.suppress(CancelledError) is the expected shutdown path for the
-    periodic orphan cleanup task
-  safety: Clean cancellation during app shutdown; no error suppression
+- key: web/composer/service.py:R1:_last_mutation_was_pending_proposal:fp=2a6ac3e449ff4daa
+  owner: composer-tools-rearchitect
+  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
+    composition). Pattern preserved: Potential dict.get() usage: return type(data)
+    is dict and data.get("status") == "APPROVAL_REQUIRED"'
+  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
+    unchanged post-refactor
   expires: null
-- key: web/app.py:R6:_periodic_orphan_cleanup:fp=5d78fe4d3fee0279
-  owner: web-execution
-  reason: Audit/IO-cleanup narrow catch — except (SQLAlchemyError, OSError) absorbs
-    recoverable failures of cancel_all_orphaned_runs (transient DB loss, lock contention,
-    SQLite file I/O) so the periodic loop retries on the next interval. Catch is intentionally
-    narrow; programmer-bug exceptions (AttributeError from a drifted attribute on
-    ExecutionServiceImpl, TypeError from a signature change, AssertionError from an
-    invariant guard) are NOT caught and terminate the background task so they surface
-    at lifespan shutdown (the outer contextlib.suppress absorbs only CancelledError).
-    Same pattern as the CRIT-2 audit-cleanup narrow catch at web/composer/service.py
-    ComposerServiceImpl.compose and the rollback-cleanup sites at web/sessions/routes.py
-    fork_from_message (lines 968 and 987).
-  safety: Recoverable failures are logged via slog.error periodic_orphan_cleanup_failed
-    with exc_class only — exc_info is deliberately omitted so SQLAlchemy __cause__
-    chains (DB URLs, schema names, sqlite file path) cannot reach structured server
-    logs. Same exc_info-redaction pattern commit 59bdf514 established across the HTTP-path
-    slog.error sites. Programmer-bug propagation invariant is guarded by tests/unit/web/test_app.py
-    test_programmer_bug_terminates_task_and_does_not_log (AttributeError terminates
-    the task) and the recoverable-failure path by test_continues_after_exception (OperationalError
-    logged, loop continues, no traceback text leaked).
-  expires: null
-- key: web/app.py:R2:create_app:_request_id:fp=d547812f4371ad79
-  owner: web-app
-  reason: 'Trust-boundary fallback. The exception handlers registered in
-
-    create_app() use this helper to read request.state.request_id, set
-
-    by RequestIdMiddleware on every request. If a pre-middleware path
-
-    ever fires an exception (e.g., Starlette itself rejecting the
-
-    request before the middleware chain completes), the attribute will
-
-    not exist. getattr(..., "unset") provides a JSON-serialisable
-
-    sentinel so the handler still produces a well-formed response body
-
-    rather than compounding the failure with AttributeError.
-
-    '
-  safety: 'The "unset" sentinel cannot be confused with a real UUID4 or any
-
-    value accepted by RequestIdMiddleware''s validator, so operators
-
-    reading slog events and response bodies can distinguish
-
-    middleware-bypassed failures from normal ones.
-
-    '
-  expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:cleanup_session_lock:fp=90d8dd62a6b480c6
-  owner: web-execution
-  reason: Session may never have called execute(), so no lock exists in _session_locks.
-    Cleanup is called on every session delete regardless. Matches ProgressBroadcaster.cleanup_run()
-    pattern. Fingerprint shifted from 981e2ceefd468842 by the F-17/F-21 pre-execute
-    placeholder gate ImportFroms.
-  safety: Missing key means session was never executed against; no cleanup needed
-  expires: null
-- key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=e3b231f949038d26
-  owner: web-execution
-  reason: Session lock map creates per-session lock lazily on first execution. Fingerprint
-    shifted from ea064c190d972e82 by the F-17/F-21 pre-execute placeholder gate ImportFroms.
-  safety: Mutation is thread-safe; setdefault is atomic for dict
-  expires: null
-- key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=7d54918ec09e9cb9
-  owner: web-execution
-  reason: 'Discriminated sum-type return from materialize_state_for_execution(): the
-    function returns CompositionState | InterpretationReviewPending. isinstance is
-    the canonical Python pattern for distinguishing arms of an explicitly-typed return
-    union. The pending-arm path emits the interpretation_placeholder_unresolved_at_runtime_total
-    counter (per node_id, term) and raises UnresolvedInterpretationPlaceholderError;
-    the happy-arm path continues with the resolved CompositionState.'
-  safety: Sum type is closed (defined at web/interpretation_state.py L107). Both arms
-    are exhaustive; pending arm raises and never returns; happy arm rebinds composition_state.
-    No fabrication.
-  expires: '2026-08-23'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=8489e25f357a798e
-  owner: web-execution
-  reason: Optional keys in user-authored config — source options key may be absent.
-    Fingerprint shifted from 1814e5926bbae2eb by the F-17/F-21 pre-execute placeholder
-    gate ImportFroms.
-  safety: Returns None; validation handles absence
-  expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=d9cba1746d5346a0
-  owner: web-execution
-  reason: Optional keys in user-authored config — source options key may be absent.
-    Fingerprint shifted from 0fae5de7cc15744d by the F-17/F-21 pre-execute placeholder
-    gate ImportFroms.
-  safety: Returns None; validation handles absence
-  expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_execute_locked:fp=239a65f9f3daaff2
-  owner: web-execution
-  reason: Optional keys in user-authored config — source options key may be absent.
-    Fingerprint shifted from 05fc7c19c92be15e by the F-17/F-21 pre-execute placeholder
-    gate ImportFroms.
-  safety: Returns None; validation handles absence
-  expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=59dfaefe6c5b1775
-  owner: web-execution
-  reason: Best-effort run status cleanup on setup failure — must not mask original
-    exception. Narrowed from `except Exception` to `(SQLAlchemyError, OSError)` per
-    canonical pattern b8ba2214/127417cb so programmer bugs in update_run_status propagate.
-    Logs exc_class only (no str(exc)) to avoid SQLAlchemy `__cause__` chains exposing
-    DB URLs/credentials. Fingerprint shifted from b031613c4c5e30c1 by the F-17/F-21
-    pre-execute placeholder gate ImportFroms.
-  safety: Logged with slog.error; original exception always re-raised
-  expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:validate_state:_blob_get_metadata:fp=ab7e7a130095da5a
+- key: web/composer/service.py:R5:ComposerServiceImpl:_serialize_response_via_walker:fp=cd655256ca15f7bb
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -4304,121 +2824,74 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/execution/service.py:R1:ExecutionServiceImpl:cancel:fp=ad335c76a6a6321d
-  owner: web-execution
-  reason: Check for live shutdown event before fallback handling. Fingerprint shifted
-    from 4b30168a2d2ed662 by the F-17/F-21 pre-execute placeholder gate ImportFroms.
-  safety: Returns None if absent; no silent default
-  expires: null
-- key: web/execution/service.py:R1:ExecutionServiceImpl:_run_pipeline:fp=82e30c5317c02491
-  owner: web-execution
-  reason: Scope-to-audit-source mapping — .get() on explicit mapping dict with crash-on-unknown
-    guard. Fingerprint shifted from 7866f83f247b03ca by the F-17/F-21 pre-execute
-    placeholder gate ImportFroms.
-  safety: Unknown scope raises ValueError immediately; no silent default
-  expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:_safe_broadcast:fp=3b91fd0e327ce989
-  owner: web-execution
-  reason: Progress broadcasting via call_soon_threadsafe raises RuntimeError when
-    event loop is closed during shutdown. Fingerprint shifted from 09eebfd4cd7b2bbd
-    by the F-17/F-21 pre-execute placeholder gate ImportFroms.
-  safety: Only RuntimeError caught (narrowed from bare Exception); logged with canonical
-    exc_class; pipeline continues
-  expires: null
-- key: web/execution/service.py:R4:ExecutionServiceImpl:_run_pipeline:fp=ffbc87a5c06020c5
-  owner: web-execution
-  reason: Best-effort failure-sample enrichment — Tier-1 audit DB read via load_top_failure_samples
-    may raise on malformed audit JSON or transient DB error. Degrading to bare error
-    message is preferable to losing the run-status persistence (which is the more
-    important failure-mode invariant). Audit-DB anomalies remain observable via the
-    slog warning per the audit-system-failure exemption in CLAUDE.md logging-telemetry-policy.
-    Fingerprint shifted from cbe49e832b2214aa by the F-17/F-21 pre-execute placeholder
-    gate ImportFroms.
-  safety: samples_text falls back to empty string; the failed-requires-error invariant
-    is still satisfied via the structural failure message; slog.warning emits exc_info
-    for forensic visibility.
-  expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=ec8fd9c741fa8afd
-  owner: web-execution
-  reason: GracefulShutdownError is an expected control-flow signal from orchestrator
-    cancellation. Fingerprint shifted from 266193e08add405b by the F-17/F-21 pre-execute
-    placeholder gate ImportFroms.
-  safety: Classified as cancelled; separated from BaseException failure path
-  expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=38199f640fed5d76
-  owner: web-execution
-  reason: 'elspeth-879f6de6bd post-completion run-state probe — catches (SQLAlchemyError,
-    OSError) only, so transient audit-system degradation (DB hiccup, filesystem race)
-    on the get_run() read does not mask the original post-completion exception. ValueError
-    is deliberately NOT caught: per the inline source rationale (web/execution/service.py:1094-1114),
-    the ValueErrors get_run() can raise ("Run not found", malformed UUID, non-UTC
-    datetimes via _ensure_utc) are all Tier-1 audit-data corruption and MUST crash
-    immediately per CLAUDE.md tier model rather than be silently absorbed. Fingerprint
-    shifted from c6a02ba63e915cd4 when the catch tuple was narrowed from (SQLAlchemyError,
-    OSError, ValueError) to (SQLAlchemyError, OSError); previous fingerprint shift
-    was af4245407c3c4a91 → c6a02ba63e915cd4 by the I-4 audit-primacy fix that removed
-    the post-terminal-exception slog block above this handler; current rotation 73f0527874b3b0ef
-    → 8f81977d810d0f31 by the F-17/F-21 pre-execute placeholder gate ImportFroms.'
-  safety: Falls through to best-effort failed-status update on absorbed exceptions;
-    ValueError surfaces Tier-1 audit corruption as required; programmer bugs (TypeError/AttributeError/RuntimeError)
-    propagate
-  expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_run_pipeline:fp=a3c060697ab9a2cc
-  owner: web-execution
-  reason: Canonical narrow-catch pattern (commits b8ba2214 / 127417cb) for the status
-    update inside the BaseException recovery handler. Fingerprint shifted from 7edaa7aa890d4d12
-    by the I-4 audit-primacy fix that removed the post-terminal-exception slog block
-    above this handler; rotation 4ca07d4fcd4cc2a6 \u2192 e61d4ed5e592b346 by the F-17/F-21
-    pre-execute placeholder gate ImportFroms; current rotation e61d4ed5e592b346 \u2192
-    80110f33271577a7 by the elspeth-879f6de6bd branch-3 IRTE catch inserted above
-    this clause to close the probe-failure-with-legal-transitions gap (post_exception_recovery_aborted_run_terminal
-    slog site).
-  safety: Catches (SQLAlchemyError, OSError) from update_run_status so transient DB
-    or filesystem failures do not mask the original pipeline exception; programmer
-    bugs (TypeError, AttributeError, RuntimeError) propagate
-  expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_run_pipeline:fp=b7972595c021334e
-  owner: web-execution
-  reason: Final shutdown-event cleanup is intentionally idempotent. Fingerprint shifted
-    from 51e796e5d8999941 by the F-17/F-21 pre-execute placeholder gate ImportFroms.
-  safety: Pop is idempotent
-  expires: null
-- key: web/execution/service.py:R6:ExecutionServiceImpl:_finalize_output_blobs:fp=968bb54f748ca346
-  owner: web-execution
-  reason: Blob finalization before terminal broadcast — failure must not mask run
-    outcome. Fingerprint shifted from 4023de852eb0f269 by the F-17/F-21 pre-execute
-    placeholder gate ImportFroms.
-  safety: _FINALIZE_SUPPRESSED covers blob-domain exceptions (OSError, SQLAlchemyError,
-    BlobNotFoundError, BlobQuotaExceededError, BlobStateError); RuntimeError deliberately
-    excluded (too broad); programmer bugs propagate; partial failures logged from
-    structured result
-  expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=04240ffc872d6f3b
+- key: web/composer/service.py:R1:ComposerServiceImpl:_cached_runtime_preflight:fp=4ba60774ae10f0f5
   owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(value, Mapping)
-    and len(value) == 1 and "secret_ref" in value and isinstance(value["secret_ref"],
-    str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
+  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
+    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
+    + Steps 6-7). Pattern preserved: Potential dict.get() usage: cached = cache.get(key)'
+  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
+    infrastructure; semantics unchanged from RC5.2
   expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=ec6f9c5650fbb481
+- key: web/composer/tool_batch.py:R4:run_tool_batch:fp=54356b4332bf5c63
+  owner: web-composer
+  reason: 'Extracted verbatim from ComposerServiceImpl._dispatch_tool_batch into the
+    module-level run_tool_batch during the composer/service.py decomposition (key
+    moved service.py -> tool_batch.py, broad-except semantics unchanged). Tier-3
+    outbound boundary: the advisor (request_advisor_hint) LLM call may fail for any
+    provider/network reason; the broad except converts the failure into a structured
+    tool-result error returned to the composer LLM so it gets feedback rather than a
+    silent stall. Pattern: Broad exception caught without re-raise: except Exception
+    as advisor_exc:'
+  safety: The ComposerLLMCall record is fired before the catch, so the failure is
+    already in the audit trail; the exception is surfaced to the LLM as a structured
+    error payload and the compose loop continues deterministically. No silent
+    pass-through.
+  expires: null
+- key: web/composer/tool_batch.py:R4:run_tool_batch:fp=1498557d416fbe12
+  owner: web-composer
+  reason: 'Extracted verbatim from ComposerServiceImpl._dispatch_tool_batch into the
+    module-level run_tool_batch during the composer/service.py decomposition (key
+    moved service.py -> tool_batch.py, broad-except semantics unchanged). Plugin-bug
+    isolation path (CLAUDE.md tier 1/2): AuditIntegrityError (Tier-1) and
+    ToolArgumentError are re-raised by explicit handlers ABOVE this catch; any other
+    exception escaping execute_tool() is a plugin bug, captured and converted to a
+    ComposerPluginCrashError rather than aborting the run uncontrolled. Pattern:
+    Broad exception caught without re-raise: except Exception as tool_exc:'
+  safety: Tier-1 AuditIntegrityError is re-raised before this catch-all and is never
+    laundered; the captured plugin-bug exception is recorded and re-surfaced as a
+    typed ComposerPluginCrashError. No silent pass-through of audit-integrity faults.
+  expires: null
+- key: web/composer/tool_batch.py:R5:run_tool_batch:fp=9a7b25e2fc96514d
+  owner: web-composer
+  reason: 'Tier-3 boundary in the extracted run_tool_batch (composer/service.py
+    decomposition): LLM tool-call arguments are JSON-decoded from an untrusted model
+    response, so the decoded value must be confirmed to be a dict before it is treated
+    as a keyword-argument mapping. isinstance() rejects non-object JSON (list / str /
+    number / null) at the boundary. Pattern: isinstance() used: if not isinstance(decoded_arguments,
+    dict):'
+  safety: A non-dict decoded payload takes the error branch (structured tool-result
+    error returned to the LLM, budget class still tracked); it is never spread as kwargs
+    into a tool handler. No coercion, no silent acceptance.
+  expires: null
+- key: web/composer/service.py:R2:ComposerServiceImpl:_call_llm:fp=d6a5623c6b049c50
   owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(value, Mapping)
-    and len(value) == 1 and "secret_ref" in value and isinstance(value["secret_ref"],
-    str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
+  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
+    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
+    + Steps 6-7). Pattern preserved: getattr() with default hides AttributeError:
+    provider_status_code=getattr(exc, "status_code", None)'
+  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
+    infrastructure; semantics unchanged from RC5.2
   expires: null
-- key: web/composer/tools/_common.py:R5:_prevalidate_plugin_options:fp=7d8e07b35849fc6d
+- key: web/composer/service.py:R2:ComposerServiceImpl:_call_text_llm:fp=9475aed316c9be0b
   owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(cause, PydanticValidationError):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
+  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
+    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
+    + Steps 6-7). Pattern preserved: getattr() with default hides AttributeError:
+    provider_status_code=getattr(exc, "status_code", None)'
+  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
+    infrastructure; semantics unchanged from RC5.2
   expires: null
-- key: web/composer/tools/generation.py:R1:_csv_source_delimiter:fp=c111361882a8c951
+- key: web/composer/redaction.py:R5:_coerce_stringified_json_object:fp=4f5bfe819cd1532d
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -4426,7 +2899,7 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:_csv_source_skip_rows:fp=812efea439e8433c
+- key: web/composer/redaction.py:R5:_coerce_stringified_json_object:fp=22c2fc298648b291
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
     rotation; review whether this is new debt that needs a source fix or a more specific
@@ -4434,908 +2907,172 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:_csv_source_columns:fp=081a70999323deac
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R5:_csv_source_columns:fp=08ac3ab8e2f99558
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:_schema_required_fields:fp=4f34a16550dd3969
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R5:_schema_required_fields:fp=beaf5af9704fe85a
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:_execute_get_plugin_assistance:fp=fde98094a6a67049
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: issue_code = args.get("issue_code")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=1414f1b8cb353dfa
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: provider = args.get("provider")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/generation.py:R1:_execute_list_models:fp=2bdbe4b694b9d8f6
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: limit = args.get("limit",
-    50)'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=9e3e1510a2145244
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(limit, int)
-    or limit < 1:'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/generation.py:R5:_execute_list_models:fp=1efd801324e87943
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if provider is not None and
-    isinstance(provider, str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=d9dc836fc8fd0893
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``source.options`` (a ``Mapping[str, Any]``
-    from :class:`SourceSpec` — the type is Tier-1 but the *values* under each key
-    are LLM-supplied). ``schema`` is optional; absence means 'no declared schema,
-    infer from sample data'.
-  safety: Returns None at line 568, which the caller treats as 'observed' (the default
-    inference path); no diagnostics are silently dropped.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=a51b47044266e5f4
-  owner: composer-tools-generation
-  reason: Tier-3 type narrow on the LLM-authored ``schema`` value (any JSON type is
-    possible at this boundary). When ``schema`` is not a Mapping, the diagnostic helper
-    returns None (no schema-mode information available).
-  safety: Wrong-shape schema fails the narrow and returns None at line 568; the caller's
-    downstream diagnostics treat that as 'mode unknown' (no false negatives).
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=d13118e4c56a45a2
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping
-    at line 567). The ``mode`` key is optional; absence means the operator declared
-    a schema without a mode (likely a partial composer state) and the helper returns
-    None to signal 'mode-unknown' to the caller.
-  safety: Absent or non-string mode returns None at line 568; callers treat mode-
-    unknown as observed-CSV default.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=14b6fab1dca27950
-  owner: composer-tools-generation
-  reason: Tier-3 type narrow on the LLM-authored ``mode`` value within ``schema.mode``.
-    Non-string modes (e.g. a number, dict, or None) return None at line 568 — same
-    'mode-unknown' fallthrough as absent mode.
-  safety: Non-string returns None; no exception; downstream diagnostics handle the
-    mode-unknown case identically to absent-schema.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=2a237887fb1d77d2
-  owner: composer-tools-generation
-  reason: 'Standard ``ast.walk`` node-type discrimination: ``isinstance(node, ast.Subscript)``
-    is the canonical way to filter Subscript nodes from the walk. This is sum-type
-    dispatch over ``ast.AST``, not a defensive type check on untrusted data.'
-  safety: Non-Subscript nodes are skipped (continue to next node); no exception, no
-    false negatives.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=801f38a52a89003f
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination within the Subscript branch: ``isinstance(node.value,
-    ast.Name)`` filters subscripts of the form ``<Name>[<slice>]`` (e.g. ``row[''field'']``).'
-  safety: Non-Name values fall to the next ``if`` branch; no false negatives.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=be8502bd24804f4d
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.slice, ast.Constant)``
-    filters Subscript slices that are literal constants (vs. computed expressions
-    like ``row[some_var]``).'
-  safety: Computed slices are skipped; field extraction is limited to literal indices,
-    which is correct for the row-field detector.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=19fb4ef1b3a56382
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.slice.value, str)``
-    further narrows the Constant slice to strings (we only collect string-keyed row
-    references).'
-  safety: Non-string constants (e.g. numeric indices) are skipped.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=c7c9d102543d1855
-  owner: composer-tools-generation
-  reason: 'Standard ``ast.walk`` node-type discrimination: ``isinstance(node, ast.Call)``
-    selects the ``row.get(''field'')`` sibling pattern that the Subscript branch above
-    doesn''t cover.'
-  safety: Non-Call nodes are skipped — fully complementary to the Subscript branch.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=8a2f00273acd2a3c
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination within the Call branch: ``isinstance(node.func,
-    ast.Attribute)`` filters calls of the form ``<obj>.<method>(...)`` — required
-    to match ``row.get(...)``.'
-  safety: Non-Attribute callables fail the narrow; no row-field extraction for non-
-    attribute calls.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=76a359727421c7b4
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.func.value, ast.Name)``
-    requires the method-receiver to be a bare Name (so we match ``row.get(...)`` but
-    not ``obj.row.get(...)``).'
-  safety: Non-Name receivers (e.g. attribute chains) are skipped.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=e5d57b452dc40a5c
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.args[0], ast.Constant)``
-    filters ``row.get(<literal>)`` calls (vs ``row.get(var)``).'
-  safety: Computed-arg calls are skipped — field extraction is literal-only.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_row_fields_referenced_by_condition:fp=80b9e50cb375f8fa
-  owner: composer-tools-generation
-  reason: 'Standard ``ast`` field discrimination: ``isinstance(node.args[0].value,
-    str)`` narrows the Constant arg to strings (only string-keyed row.get calls are
-    collected).'
-  safety: Non-string literal args (e.g. numeric) are skipped.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=8259e63c4ff58022
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``node.options`` (NodeSpec.options is ``Mapping[str,
-    Any]``; the values at each key are LLM-supplied). ``operations`` is the value-transform
-    pipeline; absence or non-list means 'this is not a field-preserving transform
-    we can prove past'.
-  safety: Returns False at line 698; the proof helper's caller treats False as 'abstain'
-    (no transformation inferred) so the proof step doesn't fabricate a result.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=5e2a4a76f65e3123
-  owner: composer-tools-generation
-  reason: 'Tier-3 narrow on the LLM-authored ``operations`` value: must be a list
-    or tuple to be iterable as a transform sequence. Anything else (mapping, scalar,
-    None) returns False to signal ''cannot prove preservation''.'
-  safety: Wrong-shape operations returns False; proof helper abstains.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:_value_transform_preserves_field:fp=dd103ad6ca3766dd
-  owner: composer-tools-generation
-  reason: 'Tier-3 narrow on each operation entry within the LLM-authored ``operations``
-    list: a non-Mapping entry means we cannot reason about the operation''s target
-    field. Return False to abstain.'
-  safety: Non-Mapping entries return False (abstain); proof helper does not synthesise
-    a result from malformed input.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_value_transform_preserves_field:fp=4407f369d3939004
-  owner: composer-tools-generation
-  reason: Tier-3 read of LLM-authored ``operation.target`` (the field this operation
-    writes to). Absence is permitted by the schema; matching the current field_name
-    to ``target`` is the field-preservation check.
-  safety: A missing target is treated as 'this op does not write to field_name' (preservation
-    possibly intact); the loop continues to the next op.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=a1f3e512f68cc562
-  owner: composer-tools-generation
-  reason: Tier-3 read of LLM-authored aggregation contract options. ``value_field``
-    is required for numeric aggregations but the helper handles absence gracefully
-    — a missing value_field means we abstain from the diagnostic (line 776 ``type(value_field)
-    is not str``).
-  safety: Missing or non-string value_field returns the helper to the next node without
-    emitting a diagnostic; no false positives.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=dfbf47e00da1bb44
-  owner: composer-tools-generation
-  reason: Read of our own type-inference output. ``inferred_types`` is a ``Mapping[str,
-    str] | None`` we computed from sampled CSV data; a missing ``value_field`` key
-    means inference produced no signal for that column (e.g. all-empty values). ``.get(...)``
-    returns None which is included verbatim in the diagnostic's evidence_locator as
-    ``inferred_sample_type``.
-  safety: None is the correct representation of 'no inference available'; the diagnostic
-    message text already shows ``inferred_type or 'unknown'`` so the audit trail distinguishes
-    'unknown' from 'str' (the runtime type).
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=317692c927f55941
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``source.options``. ``blob_ref`` is schema-
-    optional — present only when set_source_from_blob (or inline_blob in set_pipeline)
-    wired a blob into the source; for path-based sources it is absent. The function
-    abstains from blob-backed proof checks when absent.
-  safety: Absent blob_ref returns the diagnostic list unchanged; no fabricated blob
-    lookups.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=6f3d142acbb01034
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``source.options.schema`` during proof diagnostics.
-    Re-read here (separate from ``_source_schema_mode``) to pull the schema for the
-    fixed-mode-omits-columns blocking check.
-  safety: Absent or non-Mapping schema fails the isinstance gate at line 923; no diagnostic
-    emitted.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=bcc472adbaa41717
-  owner: composer-tools-generation
-  reason: 'Tier-3 narrow on the LLM-authored ``schema`` value within ``compute_proof_diagnostics``:
-    the helper only emits the ``csv_fixed_schema_omits_observed_columns`` blocking
-    diagnostic when schema is a Mapping with mode=''fixed''.'
-  safety: Non-Mapping or non-fixed-mode schema bypasses the diagnostic branch; not
-    a Tier-1 'our data crash' because the schema is LLM-authored composer state.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=fe3319833c67a13d
-  owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping).
-    ``mode`` may be absent or non-string; ``schema.get('mode') == 'fixed'`` is the
-    discriminator for the blocking-diagnostic branch.
-  safety: Absent or wrong-typed mode causes the equality check to fail; no false-
-    positive diagnostic.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=2db7eb77a2234ba3
-  owner: composer-tools-generation
-  reason: 'Tier-3 walk of LLM-authored ``schema`` Mapping: ``fields`` is the declared
-    column list. ``schema.get(''fields'') or ()`` coerces an absent or falsy value
-    to an empty tuple so the downstream isinstance check at line 925 has a normalised
-    value to test.'
-  safety: Empty tuple cannot trigger the missing-columns diagnostic (no declared columns
-    ⇒ no omission); behavior is conservative.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=734f81ba4efbe455
-  owner: composer-tools-generation
-  reason: Tier-3 narrow on the LLM-authored ``schema.fields`` value before iterating
-    it as a declared-column sequence. Non-(list|tuple) shapes (mapping, scalar) bypass
-    the diagnostic branch.
-  safety: Wrong-shape fields silently bypasses the diagnostic — no synthesized diagnostic
-    against malformed schema input.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=209a0633f2d3a999
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=14ced8fcb206732a
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R1:_replace_prompt_if_changed:fp=fbe321dc816b7cd4
-  owner: web-interpretation
-  reason: Tier-3 read of composer-authored options for change detection. _replace_prompt_if_changed
-    compares the existing options['prompt_template'] (may be absent, None, or a string
-    from a prior materialization) against the freshly-rendered prompt. Absent key
-    returns None; the comparison with the rendered string then naturally returns False
-    and the function writes the new template — exactly the desired behaviour for first-time
-    render.
-  safety: Return value participates only in equality comparison at L158; None == str
-    is always False, so absent key drives the correct 'write new template' branch.
-    No default fabricated.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R1:_replace_prompt_if_changed:fp=82ef0caf6e9e0b19
-  owner: web-interpretation
-  reason: Tier-3 read of composer-authored options['resolved_prompt_template_hash'].
-    Same change-detection pattern as the prior line — absent key on first render must
-    compare unequal to the new stable_hash and drive the rewrite branch.
-  safety: Result used only as an equality operand at L158. None != new hash drives
-    rewrite; identical hash drives early-return-unchanged. No fabrication.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_requirements:fp=bc7180ff59201436
-  owner: web-interpretation
-  reason: Tier-3 shape validation of composer-authored options['interpretation_requirements'].
-    The mapping comes from composer client requests where the requirements field must
-    be a list/tuple. Not-isinstance arm raises TypeError with a precise message, halting
-    the boundary read with a typed exception the caller can interpret — explicit validation,
-    not silent coercion.
-  safety: 'Raises TypeError on shape mismatch; the function never returns a wrong-type
-    structure to downstream code. Pattern is allowed by Tier-3 boundary validation:
-    validate-and-raise, not validate-and-default.'
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_requirements:fp=bd73d9e9fe738e22
-  owner: web-interpretation
-  reason: Tier-3 shape validation of an element of composer-authored interpretation_requirements.
-    Each entry must be a Mapping; if a client sends a scalar or list there instead,
-    the function raises TypeError rather than silently dropping the entry or fabricating
-    a default.
-  safety: Raises TypeError with a precise message; no silent coercion. The outer loop
-    never appends a non-Mapping entry to the requirements tuple.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=e38339acb715439e
-  owner: web-interpretation
-  reason: Tier-3 type/shape validation of requirement['id'] from composer-authored
-    interpretation_requirements. The id must be a non-empty string; this check ensures
-    the TypedDict contract is observed at the boundary. Raises TypeError on violation.
-  safety: Raises TypeError on non-str or empty/whitespace id. No default id fabricated;
-    the malformed requirement never enters the validated tuple.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=ec18160fcc1ce47e
-  owner: web-interpretation
-  reason: Tier-3 type/shape validation of requirement['user_term']. Same boundary
-    shape-validation pattern as the id check above; user_term must be a non-empty
-    string for downstream prompt-rendering to work.
-  safety: Raises TypeError on violation. No silent default; the malformed requirement
-    is rejected at the boundary.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=dd48d4eae40f4ad7
-  owner: web-interpretation
-  reason: 'Tier-3 cross-field validation of composer-authored requirement: when status
-    is ''resolved'', accepted_value must be a string. This is the TypedDict contract
-    enforced at the boundary so downstream rendering code can rely on resolved requirements
-    carrying an accepted value.'
-  safety: Raises TypeError if a resolved requirement is missing the accepted_value
-    string; no default substituted. Pending requirements skip this check.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=b35f23f08fd399a2
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _coerce_requirement
-    validates optional resolved interpretation metadata from composer-authored requirements.
-    accepted_value, accepted_artifact_hash, and resolved_prompt_template_hash are
-    external JSON fields that must be str-or-None before becoming the TypedDict contract.
-    Finding: isinstance() used: if status == "resolved" and not isinstance(accepted_value,
-    str):'
-  safety: Malformed resolved requirement fields raise TypeError at the boundary; pending
-    requirements preserve honest None/absence and no accepted value or hash is synthesized.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=e7bc45a4ecc18600
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _coerce_requirement
-    validates optional resolved interpretation metadata from composer-authored requirements.
-    accepted_value, accepted_artifact_hash, and resolved_prompt_template_hash are
-    external JSON fields that must be str-or-None before becoming the TypedDict contract.
-    Finding: isinstance() used: if accepted_artifact_hash is not None and not isinstance(accepted_artifact_hash,
-    str):'
-  safety: Malformed resolved requirement fields raise TypeError at the boundary; pending
-    requirements preserve honest None/absence and no accepted value or hash is synthesized.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_coerce_requirement:fp=2239af5b0c12f9fa
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _coerce_requirement
-    validates optional resolved interpretation metadata from composer-authored requirements.
-    accepted_value, accepted_artifact_hash, and resolved_prompt_template_hash are
-    external JSON fields that must be str-or-None before becoming the TypedDict contract.
-    Finding: isinstance() used: if resolved_prompt_template_hash is not None and not
-    isinstance(resolved_prompt_template_hash, str):'
-  safety: Malformed resolved requirement fields raise TypeError at the boundary; pending
-    requirements preserve honest None/absence and no accepted value or hash is synthesized.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_source_authoring_metadata:fp=60f83e267c1b8764
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _source_authoring_metadata
-    validates composer-authored source_authoring metadata for invented-source review
-    handoff. The metadata is schemaless options data until this boundary narrows modality/content_hash/review_event_id/resolved_kind.
-    Finding: isinstance() used: if not isinstance(value, Mapping):'
-  safety: Malformed source_authoring data raises TypeError before execution materialization;
-    absence remains None and no source hash, modality, or review binding is invented.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_source_authoring_metadata:fp=c73f08cf0741791e
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _source_authoring_metadata
-    validates composer-authored source_authoring metadata for invented-source review
-    handoff. The metadata is schemaless options data until this boundary narrows modality/content_hash/review_event_id/resolved_kind.
-    Finding: isinstance() used: if not isinstance(modality, str) or not modality:'
-  safety: Malformed source_authoring data raises TypeError before execution materialization;
-    absence remains None and no source hash, modality, or review binding is invented.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_source_authoring_metadata:fp=7bae7bd410ff29b6
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _source_authoring_metadata
-    validates composer-authored source_authoring metadata for invented-source review
-    handoff. The metadata is schemaless options data until this boundary narrows modality/content_hash/review_event_id/resolved_kind.
-    Finding: isinstance() used: if not isinstance(content_hash, str) or not content_hash:'
-  safety: Malformed source_authoring data raises TypeError before execution materialization;
-    absence remains None and no source hash, modality, or review binding is invented.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_source_authoring_metadata:fp=ac6cc24fcc150e8a
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _source_authoring_metadata
-    validates composer-authored source_authoring metadata for invented-source review
-    handoff. The metadata is schemaless options data until this boundary narrows modality/content_hash/review_event_id/resolved_kind.
-    Finding: isinstance() used: if review_event_id is not None and not isinstance(review_event_id,
-    str):'
-  safety: Malformed source_authoring data raises TypeError before execution materialization;
-    absence remains None and no source hash, modality, or review binding is invented.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_source_authoring_metadata:fp=0913161059bd354b
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _source_authoring_metadata
-    validates composer-authored source_authoring metadata for invented-source review
-    handoff. The metadata is schemaless options data until this boundary narrows modality/content_hash/review_event_id/resolved_kind.
-    Finding: isinstance() used: if not isinstance(resolved_kind, str):'
-  safety: Malformed source_authoring data raises TypeError before execution materialization;
-    absence remains None and no source hash, modality, or review binding is invented.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=9e48fb250f23dbf8
-  owner: web-interpretation
-  reason: Tier-3 shape validation of composer-authored options['prompt_template_parts'].
-    Same list/tuple shape requirement as interpretation_requirements above; raises
-    TypeError on a malformed shape rather than silently coercing.
-  safety: TypeError raised at the boundary; no fabricated default; downstream code
-    operates on a validated tuple of PromptPart entries.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=21b369494888cdb9
-  owner: web-interpretation
-  reason: Tier-3 element-shape validation in prompt_template_parts. Each entry must
-    be a Mapping (it then carries kind/text/requirement_id depending on type). Raises
-    TypeError on a non-Mapping entry.
-  safety: Raises TypeError with a precise message; no entry is silently skipped or
-    coerced. The downstream parts tuple contains only validated mappings.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=f93dad45210b36fe
-  owner: web-interpretation
-  reason: 'Tier-3 type validation of the text payload on a ''text'' prompt-part. The
-    TypedDict PromptTextPart declares text: str; this check enforces that at the boundary,
-    since the source is composer-authored options data.'
-  safety: Raises TypeError on non-string text. No default text fabricated; the PromptPart
-    tuple only contains string-typed text parts.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R5:_prompt_parts:fp=89e00a7fe49b3bc4
-  owner: web-interpretation
-  reason: Tier-3 validation of an interpretation_ref prompt-part's requirement_id
-    field. Must be a non-empty string to be resolvable against the interpretation_requirements
-    lookup. Raises TypeError at the boundary.
-  safety: TypeError raised on non-str or empty requirement_id; never silently rewritten.
-    Downstream _render_prompt_parts can rely on every interpretation_ref carrying
-    a usable requirement_id.
-  expires: '2026-08-23'
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=a952d7a27b61687e
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(resolved, ToolResult):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=36c60810203418b6
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: mime_entry = _MIME_TO_SOURCE.get(prepared_inline_blob.mime_type)'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_execute_set_pipeline:fp=2725eeb89655b97c
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: raw_outputs = args.get("outputs")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=55c15cdb3df8dcc9
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(raw_outputs,
-    list) and 0 <= index < len(raw_outputs):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=bf57707352ca9ea5
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if isinstance(raw_entry, Mapping):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_execute_set_pipeline:fp=d527c95dc0659eac
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: branches = dict(n.branches)
-    if isinstance(n.branches, Mapping) else tuple(n.branches) if n.branches is not
-    None else None'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=952075a791e1478e
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: prompt_template =
-    options.get("prompt_template")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_assert_affected_component:fp=752878cbbf52a7c0
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
-    str) or not prompt_template:'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=895de94a67158056
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(node, Mapping):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=0750a9f6600b1cfb
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: if node.get("kind")
-    != "llm":'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=0991b72474c4324e
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: options = node.get("options")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=528fb2e6ab9e71a3
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: prompt_template = options.get("prompt_template")
-    if isinstance(options, Mapping) else None'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R1:_detect_unresolved_interpretation_placeholders:fp=4b73302b6e6c1b0c
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: prompt_template =
-    options.get("prompt_template") if isinstance(options, Mapping) else None'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/tools/sessions.py:R5:_detect_unresolved_interpretation_placeholders:fp=c2824a0c99372827
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
-    str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
-  expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=07d0c384540df990
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=2d2e6b24c7aafd25
   owner: web-composer
   reason: Function receives multiple dict shapes — to_dict() output always has "source",
     but component dicts from _execute_get_pipeline_state do not. .get() handles the
     absent-key case (no-op early return).
   safety: Returns input unchanged when "source" key absent — no data loss or fabrication
   expires: null
-- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=0bf97f4dee8fce01
+- key: web/composer/redaction.py:R1:redact_source_storage_path:fp=f98ce159ca5d32fa
   owner: web-composer
   reason: Source dict from DB records (CompositionStateRecord.source) may lack "options"
     — _state_response wraps deep_thaw(state.source) which is raw JSON from the DB.
     Not all source shapes include "options".
   safety: Returns input unchanged when "options" absent — no data loss or fabrication
   expires: null
-- key: web/sessions/service.py:R5:_matching_pending_requirement_index:fp=a460e159575e9c4a
+- key: web/sessions/service.py:R6:SessionServiceImpl:persist_compose_turn:fp=1708f112cf7702e2
   owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _matching_pending_requirement_index
-    validates persisted interpretation_requirements while locating the single pending
-    requirement for a user resolution. Finding: isinstance() used: if not isinstance(requirements_value,
-    (list, tuple)):'
-  safety: Malformed entries raise InterpretationPlaceholderConsumedError and zero/multiple
-    matches are rejected; no requirement index or status is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_matching_pending_requirement_index:fp=fa699ebbac2e2146
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _matching_pending_requirement_index
-    validates persisted interpretation_requirements while locating the single pending
-    requirement for a user resolution. Finding: isinstance() used: if not isinstance(requirement_value,
-    Mapping):'
-  safety: Malformed entries raise InterpretationPlaceholderConsumedError and zero/multiple
-    matches are rejected; no requirement index or status is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_matching_pending_requirement_index:fp=f58b2d8c4135c36c
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _matching_pending_requirement_index
-    validates persisted interpretation_requirements while locating the single pending
-    requirement for a user resolution. Finding: isinstance() used: if not isinstance(requirement_term,
-    str):'
-  safety: Malformed entries raise InterpretationPlaceholderConsumedError and zero/multiple
-    matches are rejected; no requirement index or status is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=06f663a5cf70eb0f
-  owner: web-sessions
-  reason: Tier-3 shape validation of composer-authored options[INTERPRETATION_REQUIREMENTS_KEY]
-    before _patch_structured_interpretation_prompt writes a resolved version back.
-    The value must be list/tuple shaped; raises InterpretationPlaceholderConsumedError
-    naming affected_node_id on violation so the caller can attribute the failure to
-    a specific node.
-  safety: Domain exception raised on shape mismatch; the patch function never produces
-    a corrupt option payload from a malformed input.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=eb2d561383e55a8e
-  owner: web-sessions
-  reason: Tier-3 shape validation of composer-authored options[PROMPT_TEMPLATE_PARTS_KEY].
-    Structured interpretation resolution requires the parts list to be present and
-    list/tuple-shaped; raises InterpretationPlaceholderConsumedError otherwise.
-  safety: Domain exception raised on shape mismatch; control returns to the session-update
-    handler which translates it into a user-visible error.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=dd59617ef807c09e
-  owner: web-sessions
-  reason: Tier-3 element-shape validation for an interpretation requirement entry
-    in the patch input. Mirrors interpretation_state._requirements but raises the
-    patch-specific domain exception instead of TypeError, so the session-update handler
-    can distinguish patch-time vs read-time validation failures.
-  safety: Domain exception raised at the boundary; the patch never partially writes
-    a malformed requirement entry back to the options blob.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=e9686758786aa409
-  owner: web-sessions
-  reason: Tier-3 validation of requirement['id'] (str, non-empty). Necessary before
-    using it as a key in the requirements_by_id dedup map below.
-  safety: Raises InterpretationPlaceholderConsumedError naming the node; no default
-    id fabricated.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=76df5b781a589ef3
-  owner: web-sessions
-  reason: Tier-3 validation of requirement['user_term'] (str). Required for the user-term
-    normalization match below at L527.
-  safety: Domain exception raised; the patch refuses to consume a requirement whose
-    user_term cannot be normalized.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=d9adb66eb4eabd35
-  owner: web-sessions
-  reason: Tier-3 read of requirement.get('status'). The requirement dict was just
-    shallow-copied from composer-authored options (L511 dict(requirement_value));
-    the status key may be missing in malformed inputs. Comparing the .get result to
-    the literal 'pending' yields False for absent or non-'pending' status — exactly
-    the desired behaviour for the match-counter below.
-  safety: Result used only in an equality test. Absent status excludes the requirement
-    from matching_indexes; the function then raises if zero matches were found, so
-    absence is never silently accepted as 'this matched'.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=e4304db760da4c4b
-  owner: web-sessions
-  reason: Tier-3 read of stored_requirement.get('status') for a non-target interpretation_ref.
-    stored_requirement was looked up from requirements_by_id (built from validated
-    boundary data); the status key may still be absent in malformed inputs. Comparing
-    to 'resolved' yields False on absence — falls through to the PENDING_INTERPRETATION_AUTHORING_TEXT
-    branch, which is correct for any non-resolved requirement.
-  safety: Result is an equality operand only; absent or non-resolved both route to
-    the pending-text branch with the same outcome.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=39d571ad0cee7b64
-  owner: web-sessions
-  reason: Tier-3 element-shape validation of a prompt_template_parts entry. Each must
-    be a Mapping for downstream kind/text/requirement_id reads.
-  safety: Domain exception raised; rendered prompt never contains a string rendered
-    from a malformed part.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=4767c6c1d82243fb
-  owner: web-sessions
-  reason: Tier-3 type validation of part_value['text'] when kind=='text'. Same PromptTextPart
-    contract enforced here as in interpretation_state._prompt_parts, raising the patch-specific
-    exception type.
-  safety: Domain exception raised; rendered prompt is built only from validated string
-    text fragments.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=10c51a54cd8ac48a
-  owner: web-sessions
-  reason: 'Tier-3 validation of part_value[''requirement_id''] for interpretation_ref
-    parts. Must be a str AND must already be present in requirements_by_id (structural
-    integrity: the parts list cannot reference a requirement that does not exist in
-    the requirements list).'
-  safety: Domain exception raised on either failure; no fallback to None or synthesized
-    requirement object.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=46ae2265c292acb0
-  owner: web-sessions
-  reason: Tier-3 read of stored_requirement.get('accepted_value') after we have established
-    status=='resolved' on the previous line. If a resolved requirement is missing
-    accepted_value (a contract violation by the writer), the next line's isinstance(accepted,
-    str) catches it and raises InterpretationPlaceholderConsumedError.
-  safety: Result is type-checked at L578 isinstance(str); absent value (None) fails
-    the check and raises the domain exception. No default substituted.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R1:_patch_structured_interpretation_prompt:fp=7aa477a615e2e78b
-  owner: web-sessions
-  reason: Tier-3 read of requirement.get('status'). The requirement dict was just
-    shallow-copied from composer-authored options (L511 dict(requirement_value));
-    the status key may be missing in malformed inputs. Comparing the .get result to
-    the literal 'pending' yields False for absent or non-'pending' status — exactly
-    the desired behaviour for the match-counter below.
-  safety: Result used only in an equality test. Absent status excludes the requirement
-    from matching_indexes; the function then raises if zero matches were found, so
-    absence is never silently accepted as 'this matched'.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_patch_structured_interpretation_prompt:fp=9e18e4f783280da4
-  owner: web-sessions
-  reason: Tier-3 validation of stored_requirement['accepted_value'] for a resolved
-    non-target interpretation_ref. By TypedDict contract resolved requirements must
-    carry str accepted_value; this isinstance guard raises the domain exception when
-    the contract is violated upstream.
-  safety: InterpretationPlaceholderConsumedError raised with a precise message naming
-    requirement_id and the contract violation. Rendered prompt never contains None
-    coerced to 'None'.
-  expires: '2026-08-23'
-- key: web/sessions/service.py:R5:_resolve_invented_source:fp=07d354a9419e5f35
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: invented-source resolution
-    validates persisted source_authoring.content_hash and optional draft text before
-    binding the user decision to the source artifact. Finding: isinstance() used:
-    if not isinstance(content_hash, str) or not content_hash:'
-  safety: Missing/non-string content_hash or mismatched draft raises before the row
-    is resolved; accepted_artifact_hash is copied only from validated persisted metadata.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:_resolve_invented_source:fp=e80da3dbac4712bb
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: invented-source resolution
-    validates persisted source_authoring.content_hash and optional draft text before
-    binding the user decision to the source artifact. Finding: isinstance() used:
-    if isinstance(draft, str) and draft != llm_draft:'
-  safety: Missing/non-string content_hash or mismatched draft raises before the row
-    is resolved; accepted_artifact_hash is copied only from validated persisted metadata.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=fc79ee17fb73f231
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(source, Mapping):'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=c8c4afbf9f0200e8
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(source_options,
-    Mapping) or SOURCE_AUTHORING_KEY not in source_options:'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=f7e7530786d6944c
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(source_authoring,
-    Mapping):'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=b9f78b988476fccf
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if not isinstance(content_hash,
-    str) or not content_hash:'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/sessions/service.py:R5:SessionServiceImpl:create_pending_interpretation_event:_sync:fp=4fbe68eedb5ff9a4
-  owner: web-sessions
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: create_pending_interpretation_event._sync
-    validates persisted source/source_authoring JSON before writing an invented_source
-    interpretation row. Finding: isinstance() used: if isinstance(draft, str) and
-    draft != llm_draft:'
-  safety: Wrong-shaped source metadata raises ValueError inside the transaction before
-    the pending interpretation event is inserted; no source component binding or content
-    hash is fabricated.
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=b6ad84dc264945c5
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: Potential dict.get() usage: prompt_template =
-    options.get("prompt_template")'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
+  reason: Session persistence boundary; optional envelope, fork, archive, and lock
+    state is inspected while preserving audit/session invariants.
+  safety: Missing optional links remain absent, narrow cleanup failures are surfaced
+    as recovery notes, and programmer bugs propagate.
   expires: null
-- key: web/composer/tools/_common.py:R5:_mask_pending_interpretation_placeholders_for_authoring_validation:fp=2ce7763a8ef4e39a
-  owner: composer-tools-rearchitect
-  reason: 'AST shift after ToolContext refactor merge into RC5.2 (7114e78cc + ecc43953b
-    composition). Pattern preserved: isinstance() used: if not isinstance(prompt_template,
-    str):'
-  safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
-    unchanged post-refactor
+- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=69d4c22527c9a7f2
+  owner: web-sessions
+  reason: Tier-3 filesystem boundary in archive_session rollback. The primary DB transaction
+    has already failed (primary_exc captured at L1677). We attempt to rename the staged
+    quarantine directory back to its original blob_dir location so the session blob
+    remains readable. If that restore rename itself fails with OSError (disk full,
+    permission, FS race, intermediate dir vanished), we add an exception note to primary_exc
+    and re-raise primary_exc — the operator sees both failures, the primary is never
+    swallowed.
+  safety: Narrowed to OSError only. primary_exc.add_note carries type(restore_exc),
+    the source and destination paths, and 'Manual cleanup required'. The raise on
+    L1689 propagates the original DB-layer failure.
+  expires: '2026-08-23'
+- key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=8aadfa2550cfc8c9
+  owner: web-sessions
+  reason: Best-effort rmdir of the parent quarantine_root once the session-scoped
+    staged dir was successfully removed by the rmtree above. The parent may be non-empty
+    (other sessions still quarantined under the same root) or raise transient OSError
+    under concurrent purge — none of these conditions change the archive outcome and
+    must not propagate.
+  safety: Reached only after the session-scoped rmtree succeeded. contextlib.suppress
+    is narrowed to OSError only; non-FS exceptions propagate. The session's own quarantine
+    artefact is already gone.
+  expires: '2026-08-23'
+- key: web/composer/tools/sessions.py:R1:_assert_affected_component:fp=bd8888c405f0f2b5
+  owner: composer-tools
+  pattern: tier3-boundary-validator
+  reason: '2026-05-25 llm_model_choice surfacing addition: _assert_affected_component
+    validates a request_interpretation_review call against the current node.options.
+    The model-choice branch reads options[''model''] to compare against the supplied
+    llm_draft (Tier-3 LLM tool argument). The field may be absent or non-string while
+    the LLM is still authoring the node. Finding: Potential dict.get() usage: current_model
+    = options.get("model")'
+  safety: Absent or non-string current_model raises ToolArgumentError with an actionable
+    message; no model id or hash is fabricated. The strict draft-equality check below
+    only runs when current_model is a non-empty string.
+  expires: '2026-08-24'
+- key: web/composer/tools/sessions.py:R5:_assert_affected_component:fp=d096c7dfd60bc4c9
+  owner: composer-tools
+  pattern: tier3-boundary-validator
+  reason: '2026-05-25 llm_model_choice surfacing addition: _assert_affected_component
+    validates a request_interpretation_review call against the current node.options.
+    The model-choice branch reads options[''model''] and type-narrows before comparing
+    against the supplied llm_draft (Tier-3 LLM tool argument). Finding: isinstance()
+    used: if not isinstance(current_model, str) or not current_model:'
+  safety: Absent or non-string current_model raises ToolArgumentError with an actionable
+    message; no model id or hash is fabricated. Type check guards the strict equality
+    below.
+  expires: '2026-08-24'
+per_file_rules:
+- pattern: web/composer/tools/_common.py
+  rules:
+  - R1
+  reason: Composer per-node option prevalidation inspects external / LLM-authored
+    config dicts (Tier 3) before binding to CompositionState; optional-field reads
+    via .get() and merge-patch pop-with-default are boundary-appropriate accesses.
+    Collapsed from per-fingerprint entries because this high-churn file's fingerprints
+    rotate on any import or body shift, so a per_file_rule ceiling is the durable form
+    (per feedback_rotate_tier_model_dup_key_dataloss).
   expires: null
-- key: web/composer/tools/_common.py:R1:_source_options_for_prevalidation:fp=b2f19696ff8fe248
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/_common.py:R1:_source_options_for_prevalidation:fp=7ddb05a043541a81
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R5:_sample_csv_rows:fp=fef71eb694616020
-  owner: composer-tools-generation
-  reason: 'Tier-3 CSV-row boundary: ``csv.DictReader`` can yield rows where ``key``
-    is None (ragged rows where extra fields land in the implicit ``None`` key). The
-    ``isinstance(key, str)`` filter drops those entries so the downstream sampler
-    only emits string-keyed cells.'
-  safety: Non-string keys (None or any other type from a misconfigured DictReader)
-    are silently dropped from the sample, which is correct — they have no header to
-    attribute to.
-  expires: '2026-08-23'
-- key: web/composer/tools/generation.py:R6:_gate_expression_type_diagnostics_for_observed_csv:fp=0d53e077db98d102
-  owner: composer-tools-generation
-  reason: Tier-3 conversion of LLM-authored gate-expression evaluation failure into
-    a structured diagnostic. ``parser.evaluate(row)`` is running the LLM-authored
-    gate condition (an ``ExpressionParser`` of a user expression) against a sampled
-    CSV row; a failure means the expression is type-mismatched for the data shape
-    (e.g. comparing a string CSV value to an int). The except clause captures the
-    exception, emits a ``_blocking_diagnostic`` with the original error text in ``message``,
-    and breaks out of the row loop — the diagnostic is the audit record, not a silent
-    swallow.
-  safety: Narrowed to ``ExpressionEvaluationError`` (not bare ``Exception``); other
-    exceptions (programmer bugs in the parser, AttributeError on row) propagate. The
-    exception text is included verbatim in the diagnostic so the audit trail names
-    the type mismatch.
-  expires: '2026-08-23'
-- key: web/interpretation_state.py:R1:_materialize_node_for_execution:fp=3807c4d9cd5807fb
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _materialize_node_for_execution
-    reads composer-authored NodeSpec.options[''prompt_template''] in the legacy prompt-template
-    arm after the structured prompt-parts path has been considered. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: Potential dict.get() usage:
-    prompt_template = node.options.get("prompt_template")'
-  safety: Absent or non-string prompt_template returns the node/site set unchanged
-    or empty; no prompt text, hash, or review site is fabricated. Valid string prompts
-    still pass through hash/review validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_materialize_node_for_execution:fp=f83a86e081ac9818
-  owner: web-interpretation
-  pattern: tier3-boundary-validator
-  reason: '2026-05-24 tutorial-assumption surfacing addition: _materialize_node_for_execution
-    reads composer-authored NodeSpec.options[''prompt_template''] in the legacy prompt-template
-    arm after the structured prompt-parts path has been considered. The field may
-    be absent or non-string while the LLM is still authoring a pipeline; the helper
-    only proceeds for a real non-empty string. Finding: isinstance() used: if isinstance(prompt_template,
-    str) and prompt_template:'
-  safety: Absent or non-string prompt_template returns the node/site set unchanged
-    or empty; no prompt text, hash, or review site is fabricated. Valid string prompts
-    still pass through hash/review validation before execution.
-  expires: '2026-08-24'
-- key: web/interpretation_state.py:R5:_render_prompt_parts:fp=04c47a53eaa681ed
-  owner: web-interpretation
-  reason: 'Late safety net during rendering: the resolved interpretation requirement''s
-    accepted_value must be a string by TypedDict contract, but the requirement came
-    from composer-authored options data validated earlier in this module — this isinstance
-    guards against a future caller bypassing _coerce_requirement (e.g. constructing
-    requirements_by_id from a different boundary). Raises TypeError to halt rendering.'
-  safety: TypeError raised; rendered prompt never contains a non-string accepted value
-    cast through str(). No fabrication.
-  expires: '2026-08-23'
+  max_hits: 6
+- pattern: web/composer/tools/_common.py
+  rules:
+  - R5
+  reason: isinstance() for structural dispatch over external / LLM-authored config
+    dicts (Mapping and str discrimination, Pydantic validation-cause typing) at the
+    composer prevalidation boundary. See the R1 entry for the per_file_rule rationale.
+  expires: null
+  max_hits: 8
+- pattern: web/composer/guided/chat_solver.py
+  rules:
+  - R5
+  reason: Tier 3 boundary — Step-1 source chat solver parses LLM tool-call JSON. isinstance
+    checks reject malformed plugin, filename, mime_type, content, options, observed_columns,
+    sample_rows, assistant_message, and function.arguments fields before the route
+    writes blobs or mutates guided state.
+  expires: null
+  max_hits: 12
+- pattern: web/composer/service.py
+  rules:
+  - R6
+  reason: Tier 3 boundary — LLM tool call arguments may contain malformed JSON (JSONDecodeError)
+    or missing required keys (KeyError/TypeError). Errors returned to LLM for self-correction,
+    not swallowed.
+  expires: null
+- pattern: web/composer/tool_batch.py
+  rules:
+  - R6
+  owner: web-composer
+  reason: 'Tier 3 boundary, moved verbatim from the service.py R6 rule above when the
+    composer/service.py decomposition extracted _dispatch_tool_batch into the
+    module-level run_tool_batch. The three sites parse/redact untrusted LLM tool-call
+    arguments: malformed JSON (json.JSONDecodeError, TypeError), a redaction-time
+    PydanticValidationError (falls back to None so a redaction failure cannot block
+    the audited dispatch), and a ToolArgumentError whose audit record is already
+    written by the helper before the LLM-facing error message is built. Every site
+    returns a structured error to the LLM for self-correction, not silent swallow.
+    Per-file rule (not per-fingerprint) because run_tool_batch is a high-churn
+    boundary whose AST fingerprints rotate on any edit (feedback_rotate_tier_model_dup_key_dataloss);
+    max_hits caps the exemption so a NEW R6 still trips review.'
+  expires: null
+  max_hits: 3
+- pattern: web/composer/telemetry_phase8.py
+  rules:
+  - R4
+  owner: web-composer
+  reason: 'Telemetry-only exemption per CLAUDE.md §"Telemetry and Logging" / logging-telemetry-policy.
+    Every record_* helper wraps its underlying counter .add(...) call in try / except
+    Exception that swallows and returns None. Rationale (W5 — load-bearing per docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md):
+    telemetry is best-effort; a broken OTel exporter must not 500 a PATCH whose audit
+    row already wrote. Audit primacy: audit fires sync + crash-on-failure BEFORE the
+    emit; if the emit then raises, the audit record stands but the user request would
+    otherwise fail after the fact, inverting primacy. The _assert_session_trust_mode
+    / _assert_account_mode / _assert_completion_verb ValueErrors fire BEFORE the try/except
+    wrap so input-validation programmer-error guards still propagate.'
+  safety: Exception is silently consumed and the helper returns None; the audit row
+    (where present) is the legal record per CLAUDE.md primacy. The assert-before-try
+    ordering is verified by tests/unit/web/composer/test_telemetry_phase8.py::test_record_session_switched_assert_runs_before_swallow;
+    W5 swallow behaviour is verified by test_helper_swallows_exporter_failure parametrised
+    across every record_* helper. Future emit-site additions should reuse the same
+    wrap shape — extending this allowlist max_hits requires re-reading the W5 rationale
+    section in the Phase 8 plan.
+  expires: null
+  max_hits: 11
+- pattern: web/interpretation_state.py
+  rules:
+  - R1
+  - R5
+  reason: 'Composer interpretation-review state reads operator/LLM-authored option
+    dicts (Tier-3 authoring metadata: interpretation_requirements, prompt_template_parts,
+    source_authoring, web_scrape field config). isinstance()/dict.get() are the documented
+    lenient Tier-3 staging idiom for these externally-shaped dicts (see module docstring).
+    Collapsed from per-fingerprint entries to one bounded per-file rule because the
+    file''s high edit cadence rotated AST fingerprints on every change; max_hits caps
+    the exemption so a NEW R1/R5 still trips CI review. R6/R7 are not exempted here.'
+  expires: null
+  max_hits: 71
+- pattern: web/sessions/service.py
+  rules:
+  - R1
+  - R5
+  reason: Session service reads composer-authored option dicts and Pydantic/SQLAlchemy
+    boundary results (Tier-3). R1/R5 collapsed to one bounded per-file rule for the
+    same AST-fingerprint-churn reason as interpretation_state.py; max_hits caps the
+    exemption so a NEW R1/R5 still trips review. R6 (silent-except) and R7 (contextlib.suppress)
+    remain individually fingerprinted for per-site scrutiny.
+  expires: null
+  max_hits: 41

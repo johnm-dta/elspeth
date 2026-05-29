@@ -38,6 +38,7 @@ export interface TutorialRunResult {
   rows: RunResultRow[];
   seededFromCache: boolean;
   cacheKey: string | null;
+  discardedRowCount: number;
 }
 
 export interface TutorialState {

@@ -1546,3 +1546,153 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ── Freeform interpretation-review cards ────────────────────────────────
+   Inline (freeform-mode) counterpart to the guided InterpretationReviewTurn.
+   Execution is gated until these are resolved, so they read as distinct
+   action cards — an elevated surface with an amber left-accent — rather than
+   ordinary assistant prose bubbles. The chat-message / chat-message--assistant
+   classes the component carries have no CSS of their own (the chat bubbles use
+   .bubble*), so before this every element rendered as unstyled, full-width,
+   default-browser content with no card or separation between stacked reviews.
+   The flex column + gap gives uniform internal rhythm; align-self: stretch lets
+   the card use the full message column (these are tasks, not chat prose). */
+.interpretation-review-inline-message {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: var(--space-sm) 0;
+  padding: var(--space-lg);
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-left: 3px solid var(--color-warning);
+  border-radius: var(--radius-lg);
+}
+
+.interpretation-review-inline-message-heading {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+  line-height: var(--line-height-tight);
+  color: var(--color-text);
+}
+
+.interpretation-review-inline-message-body {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--color-text-secondary);
+}
+
+/* Inline emphasis (user term, model name, node id) reads as a value, not
+   italic prose. */
+.interpretation-review-inline-message-body em,
+.interpretation-review-inline-message-user-term,
+.interpretation-review-inline-message-llm-draft {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.interpretation-review-inline-message-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-top: var(--space-2xs);
+}
+
+.interpretation-review-inline-message-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  padding: var(--space-sm);
+  background-color: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.interpretation-review-inline-message-error-heading {
+  color: var(--color-error);
+}
+
+/* "Change it: I meant…" amend form */
+.interpretation-review-inline-message-amend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.interpretation-review-inline-message-amend-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.interpretation-review-inline-message-amend-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-sm);
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  resize: vertical;
+}
+
+.interpretation-review-inline-message-amend-actions {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.interpretation-review-inline-message-amend-cap-warning {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+}
+
+/* Session opt-out: de-emphasised and divided from the card body so it no
+   longer butts straight against the next card's heading. */
+.interpretation-review-inline-message-opt-out {
+  margin-top: var(--space-2xs);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.interpretation-review-inline-message-opt-out-link {
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.interpretation-review-inline-message-opt-out-link:hover:not(:disabled) {
+  color: var(--color-text-secondary);
+}
+
+.interpretation-review-inline-message-spinner {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-right: var(--space-2xs);
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: var(--radius-pill);
+  vertical-align: -0.1em;
+  animation: spin 0.6s linear infinite;
+}
+
+/* Mirror the per-selector reduced-motion guards in animations.css — the
+   global guard there is not a universal `*` reset. */
+@media (prefers-reduced-motion: reduce) {
+  .interpretation-review-inline-message-spinner {
+    animation: none;
+    opacity: 0.6;
+  }
+}

@@ -51,6 +51,7 @@ describe("tutorialMachine", () => {
         rows: [{ url: "australia.gov.au", score: 6 }],
         seededFromCache: false,
         cacheKey: null,
+        discardedRowCount: 0,
       },
     });
     expect(audit.step).toBe("audit");

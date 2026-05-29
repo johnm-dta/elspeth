@@ -356,6 +356,9 @@ export function ChatPanel({
   );
   const acceptProposal = useSessionStore((s) => s.acceptProposal);
   const rejectProposal = useSessionStore((s) => s.rejectProposal);
+  const applyResolvedInterpretation = useSessionStore(
+    (s) => s.applyResolvedInterpretation,
+  );
   const composerProgress = useSessionStore((s) => s.composerProgress);
   const clearError = useSessionStore((s) => s.clearError);
   const forkFromMessage = useSessionStore((s) => s.forkFromMessage);
@@ -1397,7 +1400,16 @@ export function ChatPanel({
             // NOT fire it for opt-out (event.user_term is null for
             // opt-out rows — see InterpretationEvent contract) and the
             // handler skips null/empty user_terms.
-            onResolved={() => handleInterpretationResolved(event)}
+            //
+            // applyResolvedInterpretation re-syncs the displayed pipeline with
+            // the patched state AND re-validates, so the run-gate opens once the
+            // last review is resolved (resolving alone leaves validationResult
+            // stale, which previously left the Run button disabled with no
+            // signal of what to do next).
+            onResolved={(newState) => {
+              applyResolvedInterpretation(newState);
+              handleInterpretationResolved(event);
+            }}
           />
         ))}
         {/*

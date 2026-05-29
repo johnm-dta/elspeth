@@ -117,7 +117,7 @@ class FieldMapper(BaseTransform):
     name = "field_mapper"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:946dd005c41af030"
+    source_file_hash: str | None = "sha256:e3ae346ffc76d394"
     config_model = FieldMapperConfig
 
     @classmethod
@@ -275,7 +275,26 @@ class FieldMapper(BaseTransform):
         applied_mappings: dict[str, str] = {}
         for source, target in self._mapping.items():
             if "." in source:
-                value = get_nested_field(row_data, source)
+                # Dotted-path navigation is an operation on Tier-2 row values, not a
+                # type-contract check. Contracts are flat (no nested-shape guarantee),
+                # so a PRESENT non-dict intermediate (e.g. ``user`` is a str when the
+                # mapping expects ``user.name``) is operation-unsafe data, not an
+                # upstream type-contract violation. Route the offending row to on_error
+                # — recorded and attributable — rather than raising and crashing the
+                # whole run on a single malformed nested value. A genuinely absent
+                # intermediate still returns MISSING (handled below), preserving the
+                # strict/non-strict distinction for true absence.
+                try:
+                    value = get_nested_field(row_data, source)
+                except TypeError as exc:
+                    return TransformResult.error(
+                        {
+                            "reason": "type_mismatch",
+                            "field": source,
+                            "error": str(exc),
+                            "message": f"Dotted-path field '{source}' is not navigable on this row: {exc}",
+                        }
+                    )
             elif source in row:
                 value = row[source]
             else:
@@ -346,7 +365,8 @@ class FieldMapper(BaseTransform):
                     "A cleanup stream name is not a cleanup node; if an upstream producer points to a cleanup stream, create a field_mapper that consumes it before stopping, and do not offer to repair it later.",
                     "For final cleanup routing, set the upstream LLM or scraper on_success to the cleanup mapper, and set the cleanup mapper on_success to the sink.",
                     "If an LLM routes directly to a JSON sink whose name sounds like cleanup, cleanup is still missing; the LLM passes through raw scrape fields until this field_mapper whitelists them.",
-                    "If a final cleanup field_mapper points to an intermediate stream with no downstream node, route the mapper directly to the existing sink by setting on_success to the sink name or by using an on_success edge. Do not remove the cleanup mapper or output to clear the validation error.",
+                    "If a final cleanup field_mapper points to an intermediate stream with no downstream node, route the mapper directly to the existing sink by setting on_success to the sink name or by using an on_success edge.",
+                    "When a final cleanup field_mapper points to an intermediate stream with no downstream node, do not remove the cleanup mapper or output to clear the validation error.",
                     "A field_mapper before web_scrape or before raw scraped fields exist cannot satisfy scraped-content cleanup; source-shaping mappers are separate from final cleanup.",
                     "Final cleanup should preserve requested enrichment, extraction, scoring, or LLM response fields unless the user explicitly asked to drop them.",
                     "If the user already asked to remove, drop, exclude, or avoid saving raw scrape fields, that request is the authorization and requirement to add the cleanup field_mapper; do not ask whether to add cleanup later.",

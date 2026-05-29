@@ -221,9 +221,108 @@ describe("subscriptions — validation result side effects", () => {
     expect(injectSystemMessage).toHaveBeenCalled();
     expect(sendValidationFeedback).not.toHaveBeenCalled();
     const [message, stableId] = injectSystemMessage.mock.calls[0] as [string, string];
-    expect(message).toContain("Interpretation review pending");
-    expect(message).toContain("rate_node");
+    // Human-centric copy that points at the review cards, NOT a dump of the
+    // raw validation blockers. The machine-facing component id / detail
+    // ("rate_node", "rate_node:cool") must NOT leak into the chat message.
+    expect(message).toContain("okay");
+    expect(message).toContain("ready to run");
+    expect(message).not.toContain("rate_node");
     expect(stableId).toBe("system-validation-current");
+  });
+
+  it("replaces the pending message with a ready-to-run nudge once reviews resolve", () => {
+    const injectSystemMessage = vi.fn();
+    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendValidationFeedback,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    // 1) Pending review surfaces the human "needs your okay" message.
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        checks: [],
+        errors: [
+          {
+            component_type: "transform",
+            component_id: "rate_node",
+            message: "pending",
+            error_code: "interpretation_review_pending",
+          },
+        ],
+        warnings: [],
+        readiness: {
+          authoring_valid: true,
+          execution_ready: false,
+          completion_ready: true,
+          blockers: [
+            {
+              code: "interpretation_review_pending",
+              component_id: "rate_node",
+              component_type: "transform",
+              detail: "rate_node:cool",
+            },
+          ],
+        },
+      } as never,
+    } as never);
+
+    // 2) All reviews resolved → clean valid result → the stale pending message
+    //    is replaced (same stable id) by a ready-to-run nudge that names Run.
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [],
+        readiness: {
+          authoring_valid: true,
+          execution_ready: true,
+          completion_ready: true,
+          blockers: [],
+        },
+      } as never,
+    } as never);
+
+    const lastCall = injectSystemMessage.mock.calls.at(-1) as [string, string];
+    expect(lastCall[0]).toContain("ready");
+    expect(lastCall[0]).toContain("Run pipeline");
+    expect(lastCall[1]).toBe("system-validation-current");
+  });
+
+  it("does NOT fire the ready-to-run nudge for an ordinary valid result", () => {
+    const injectSystemMessage = vi.fn();
+    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendValidationFeedback,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    // A clean valid result with no preceding pending review must stay quiet —
+    // the nudge is only for the just-resolved transition, not every compose.
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [],
+        readiness: {
+          authoring_valid: true,
+          execution_ready: true,
+          completion_ready: true,
+          blockers: [],
+        },
+      } as never,
+    } as never);
+
+    expect(injectSystemMessage).not.toHaveBeenCalled();
   });
 
   it("calls injectSystemMessage but NOT sendValidationFeedback when validation passes with warnings", () => {

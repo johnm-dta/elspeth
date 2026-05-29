@@ -577,17 +577,6 @@ allow_hits:
     skipped and the original Pydantic msg passes through unchanged. No silent coercion
     of error data.
   expires: null
-- key: plugins/infrastructure/validation.py:R1:_extract_errors:fp=9240c6f6517a323b
-  owner: plugin-validation
-  reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
-    field is documented but Pydantic does not guarantee its presence in every error
-    dict shape across versions. error.get(''type'') == ''missing'' is the schema-required-on-DataPluginConfig
-    discriminator for the LLM-composer mode-guidance enrichment (cf. elspeth-861b0c58f5).
-    Bare error[''type''] would crash on any Pydantic version that omitted the key.'
-  safety: Default None compares unequal to 'missing', so the enrichment branch is
-    skipped and the original Pydantic msg passes through unchanged. No silent coercion
-    of error data.
-  expires: null
 - key: plugins/infrastructure/config_base.py:R1:DataPluginConfig:__init_subclass__:fp=e9064dddb97b1895
   owner: plugin-infrastructure
   reason: cls.__dict__ is a Tier-1 Python-internal mapping with guaranteed shape;
@@ -596,12 +585,6 @@ allow_hits:
   safety: Default False; absent marker behaves as non-exempt, which is the stricter
     side. The fall-through path enforces _plugin_component_type or raises TypeError.
   expires: '2026-08-20'
-- key: plugins/sinks/database_sink.py:R1:DatabaseSink:__init__:fp=f42e3ff1c27193b5
-  owner: architecture
-  reason: os.environ.get() for optional env var at trust boundary — ELSPETH_ALLOW_RAW_SECRETS
-    is genuinely optional with empty-string default
-  safety: Empty string default is meaning-preserving (feature disabled); no data fabrication
-  expires: '2026-07-02'
 - key: plugins/transforms/rag/transform.py:R2:RAGRetrievalTransform:_configured_collection_name:fp=757eb1e99aea1a3e
   owner: architecture
   reason: Provider config comes from a validated provider-specific model union; getattr
@@ -797,17 +780,76 @@ allow_hits:
     surfaces no coaching, which is the right failure mode for malformed config (the
     validator catches the real config error separately).
   expires: null
-- key: plugins/infrastructure/config_base.py:R1:_format_validation_error_cause:fp=d62fb21952dcf3f2
-  owner: plugin-validation
-  reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
-    field is documented but Pydantic does not guarantee its presence in every error
-    dict shape across versions. error.get(''type'') == ''missing'' is the schema-required-on-DataPluginConfig
-    discriminator for the LLM-composer mode-guidance enrichment (cf. elspeth-861b0c58f5).
-    Bare error[''type''] would crash on any Pydantic version that omitted the key.'
-  safety: Default None compares unequal to 'missing', so the enrichment branch is
-    skipped and the original Pydantic msg passes through unchanged. No silent coercion
-    of error data.
-  expires: null
+- key: plugins/sinks/azure_blob_sink.py:R6:AzureBlobSink:write:fp=304f148f13df7df3
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: plugins/sinks/database_sink.py:R1:DatabaseSink:__init__:fp=4aa464556c62f83d
+  owner: architecture
+  reason: os.environ.get() for optional env var at trust boundary — ELSPETH_ALLOW_RAW_SECRETS
+    is genuinely optional with empty-string default
+  safety: Empty string default is meaning-preserving (feature disabled); no data fabrication
+  expires: '2026-07-02'
+- key: plugins/sinks/database_sink.py:R6:DatabaseSink:_insert_with_per_row_diversion:fp=9e9d1f67fecbd6f2
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: plugins/sinks/database_sink.py:R6:DatabaseSink:_insert_with_per_row_diversion:fp=d64a7ca89b0cfe0e
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: plugins/sinks/csv_sink.py:R6:CSVSink:_stage_rows_per_row:fp=73ebd4f4b271eb4f
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: plugins/sinks/json_sink.py:R6:JSONSink:write:fp=70e172c6d4480200
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: plugins/sinks/json_sink.py:R6:JSONSink:_write_jsonl_content:fp=7f2a8740a6f881fa
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=e59ce88529f38df2
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=7b8583638b096231
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
 - key: plugins/infrastructure/validation.py:R1:_extract_errors:fp=9240c6f6517a323b
   owner: plugin-validation
   reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''

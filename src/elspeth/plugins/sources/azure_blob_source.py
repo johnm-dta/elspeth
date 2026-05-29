@@ -31,7 +31,12 @@ from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
-from elspeth.plugins.sources.field_normalization import FieldResolution, normalize_field_name, resolve_field_names
+from elspeth.plugins.sources.field_normalization import (
+    ExternalHeaderError,
+    FieldResolution,
+    normalize_field_name,
+    resolve_field_names,
+)
 from elspeth.plugins.sources.json_source import (
     _contains_surrogateescape_chars,
     _reject_nonfinite_constant,
@@ -324,7 +329,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6bcd495be2457a12"
+    source_file_hash: str | None = "sha256:c4940c65bdab1236"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -338,7 +343,8 @@ class AzureBlobSource(BaseSource):
                     "Configure exactly one auth path: connection_string, sas_token+account_url, managed identity+account_url, or service principal+account_url.",
                     "Choose format explicitly; csv uses csv_options, while json/jsonl use json_options and optional data_key.",
                     "For headerless CSV set csv_options.has_header=false and provide columns; columns is invalid for headered CSV or non-CSV blobs.",
-                    "If you have been asked to generate source rows yourself, do not pick `azure_blob` — this source reads pre-existing storage blobs, not LLM-authored content. Switch to a local-blob source (`csv`, `json`, or `text`) via `create_blob` plus `set_source_from_blob`. Never synthesise an Azure container name, blob path, account URL, or credential for content you authored — the audit trail must reference a real, addressable blob.",
+                    "If you have been asked to generate source rows yourself, do not pick `azure_blob` — this source reads pre-existing storage blobs, not LLM-authored content. Switch to a local-blob source (`csv`, `json`, or `text`) via `create_blob` plus `set_source_from_blob`.",
+                    "Never synthesise an Azure container name, blob path, account URL, or credential for content you authored — the audit trail must reference a real, addressable blob.",
                     "Use field_mapping only to override normalized field names at the source boundary.",
                     "Set on_validation_failure to a quarantine sink unless deliberate discard is acceptable.",
                 ),
@@ -615,11 +621,35 @@ class AzureBlobSource(BaseSource):
                     )
                 return
 
-            self._field_resolution = resolve_field_names(
-                raw_headers=raw_headers,
-                field_mapping=self._field_mapping,
-                columns=None,
-            )
+            # External-header faults (normalization collision, empty/duplicate headers)
+            # are Tier 3 (the blob's own header bytes are bad): record + quarantine/
+            # discard like the sibling csv.Error header path above. Config faults (a bad
+            # field_mapping) raise plain ValueError and crash — they are ours.
+            try:
+                self._field_resolution = resolve_field_names(
+                    raw_headers=raw_headers,
+                    field_mapping=self._field_mapping,
+                    columns=None,
+                )
+            except ExternalHeaderError as e:
+                raw_row = {
+                    "__raw_blob_preview__": text_data[:200],
+                    "__encoding__": encoding,
+                }
+                error_msg = f"CSV header could not be resolved: {e}"
+                ctx.record_validation_error(
+                    row=raw_row,
+                    error=error_msg,
+                    schema_mode="parse",
+                    destination=self._on_validation_failure,
+                )
+                if self._on_validation_failure != "discard":
+                    yield SourceRow.quarantined(
+                        row=raw_row,
+                        error=error_msg,
+                        destination=self._on_validation_failure,
+                    )
+                return
             headers = self._field_resolution.final_headers
         elif self._columns is not None:
             self._field_resolution = resolve_field_names(

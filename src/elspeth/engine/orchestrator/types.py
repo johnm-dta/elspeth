@@ -98,6 +98,10 @@ class TelemetryManagerProtocol(Protocol):
         """Handle one telemetry event emitted by the engine."""
         ...
 
+    def flush(self) -> None:
+        """Flush queued telemetry to exporters before returning control."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class PipelineConfig:

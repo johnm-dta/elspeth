@@ -47,6 +47,7 @@ from elspeth.web.interpretation_state import (
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
     InterpretationReviewPending,
+    _validate_model_choice_review,
     materialize_state_for_execution,
 )
 from elspeth.web.sessions.converters import state_from_record
@@ -1634,6 +1635,75 @@ def test_14_patch_helper_succeeds_on_clean_template() -> None:
     assert "kind" not in patched
 
 
+def test_15_patch_helper_legacy_placeholder_resolves_with_autostaged_nonvague_requirements() -> None:
+    """Regression: the production hello-world shape resolves via the legacy path.
+
+    Every LLM node carries auto-staged ``llm_prompt_template`` and
+    ``llm_model_choice`` requirements, so ``interpretation_requirements`` is
+    non-empty even when the vague term is wired only by a legacy
+    ``{{interpretation:cool}}`` placeholder. The resolver must fall back to the
+    placeholder path for the vague term rather than demanding
+    ``prompt_template_parts`` — the exact omission that 422'd the composer.
+    """
+    node = _llm_node(prompt_template="Rate how {{interpretation:cool}} this is.")
+    node["options"]["interpretation_requirements"] = [
+        {
+            "id": "prompt_template_review:llm_transform_1",
+            "kind": "llm_prompt_template",
+            "user_term": "llm_prompt_template:llm_transform_1",
+            "status": "pending",
+        },
+        {
+            "id": "model_choice_review:llm_transform_1",
+            "kind": "llm_model_choice",
+            "user_term": "llm_model_choice:llm_transform_1",
+            "status": "pending",
+        },
+    ]
+    state = _state_with_node(node)
+
+    nodes_out = list(
+        _patch_llm_transform_prompt(
+            state,
+            affected_node_id="llm_transform_1",
+            user_term="cool",
+            accepted_value="Innovative and creative",
+        )
+    )
+
+    assert nodes_out[0]["options"]["prompt_template"] == "Rate how Innovative and creative this is."
+
+
+def test_16_patch_helper_structured_requirement_without_ref_part_raises() -> None:
+    """Backstop: a matched vague_term requirement with no interpretation_ref part
+    would silently drop the accepted value from the rendered prompt — a resolved
+    review whose decision never reaches the runtime. The resolver must raise.
+    """
+    node = _llm_node(prompt_template="Rate this row.")
+    node["options"]["prompt_template_parts"] = [{"kind": "text", "text": "Rate this row."}]
+    node["options"]["interpretation_requirements"] = [
+        {
+            "id": "cool",
+            "kind": "vague_term",
+            "user_term": "cool",
+            "status": "pending",
+            "draft": "well-designed",
+            "event_id": None,
+            "accepted_value": None,
+            "resolved_prompt_template_hash": None,
+        }
+    ]
+    state = _state_with_node(node)
+
+    with pytest.raises(ValueError, match=r"interpretation_ref|silently dropped"):
+        _patch_llm_transform_prompt(
+            state,
+            affected_node_id="llm_transform_1",
+            user_term="cool",
+            accepted_value="Innovative",
+        )
+
+
 def test_patch_helper_resolves_structured_requirement_without_legacy_placeholder() -> None:
     state = _state_with_node(_structured_llm_node())
 
@@ -2254,3 +2324,158 @@ async def test_19_refresh_pending_isolates_orphans_by_session(service) -> None:
 
     assert [e.id for e in a_pending] == [orphan_a.id]
     assert [e.id for e in b_pending] == [orphan_b.id]
+
+
+# --------------------------------------------------------------------------- #
+# llm_model_choice resolve (regression: unhandled kind raised AssertionError
+# -> HTTP 500 once the review became reachable via the tool + DB boundaries).
+# --------------------------------------------------------------------------- #
+
+
+def _model_choice_review_node(
+    *,
+    node_id: str = "rate_node",
+    model: str = "anthropic/claude-haiku-4.5",
+) -> dict:
+    """LLM node carrying a pending ``llm_model_choice`` requirement.
+
+    Mirrors the state the mutation-time auto-stager produces: ``options.model``
+    is set and a pending ``llm_model_choice`` requirement (draft == the model
+    identifier) is staged for review.
+    """
+    state = CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id=node_id,
+                node_type="transform",
+                plugin="llm",
+                input="input",
+                on_success="out",
+                on_error="quarantine",
+                options={
+                    "provider": "openrouter",
+                    "model": model,
+                    "prompt_template": "Rate how cool {{ row.url }} is.",
+                    INTERPRETATION_REQUIREMENTS_KEY: [
+                        {
+                            "id": f"llm_model_choice:{node_id}",
+                            "kind": InterpretationKind.LLM_MODEL_CHOICE.value,
+                            "user_term": f"llm_model_choice:{node_id}",
+                            "status": "pending",
+                            "draft": model,
+                            "event_id": None,
+                            "accepted_value": None,
+                            "accepted_artifact_hash": None,
+                            "resolved_prompt_template_hash": None,
+                        }
+                    ],
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Test", description=""),
+        version=1,
+    )
+    return state.to_dict()["nodes"][0]
+
+
+@pytest.mark.asyncio
+async def test_resolve_llm_model_choice_accepted_as_drafted(service) -> None:
+    """accepted_as_drafted stamps the requirement and preserves options.model.
+
+    Pre-fix this raised ``AssertionError('unhandled InterpretationKind ...')``
+    (surfaced as HTTP 500) because the resolve dispatch had no LLM_MODEL_CHOICE
+    branch.
+    """
+    session_id = uuid4()
+    model = "anthropic/claude-haiku-4.5"
+    state = await _seed_state_with_llm_node(service, session_id=session_id, node=_model_choice_review_node(model=model))
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="rate_node",
+        tool_call_id="call_mc",
+        user_term="llm_model_choice:rate_node",
+        kind=InterpretationKind.LLM_MODEL_CHOICE,
+        llm_draft=model,
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+    )
+
+    assert resolved.kind is InterpretationKind.LLM_MODEL_CHOICE
+    assert resolved.choice is InterpretationChoice.ACCEPTED_AS_DRAFTED
+    assert resolved.accepted_value == model
+    assert resolved.resolved_at is not None
+
+    patched = next(n for n in new_state.nodes if n["id"] == "rate_node")
+    assert patched["options"]["model"] == model
+    req = next(r for r in patched["options"][INTERPRETATION_REQUIREMENTS_KEY] if r["kind"] == InterpretationKind.LLM_MODEL_CHOICE.value)
+    assert req["status"] == "resolved"
+    assert req["accepted_value"] == model
+    assert req["event_id"] == str(event.id)
+    # Read-side drift guard (_validate_model_choice_review) compares this hash
+    # to stable_hash(options.model); they must match or execution 404s
+    # ("model-choice review hash drifted").
+    assert req["resolved_prompt_template_hash"] == stable_hash(model)
+    node_spec = next(n for n in state_from_record(new_state).nodes if n.id == "rate_node")
+    _validate_model_choice_review(node_spec, model)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_resolve_llm_model_choice_amended_patches_options_model(service) -> None:
+    """amended writes the operator's substituted model into options.model.
+
+    Guards the Tier-1 invariant that the approved model (audit) and the model
+    the node will run (pipeline) cannot diverge.
+    """
+    session_id = uuid4()
+    drafted = "anthropic/claude-haiku-4.5"
+    chosen = "openai/gpt-5.4-mini"
+    state = await _seed_state_with_llm_node(service, session_id=session_id, node=_model_choice_review_node(model=drafted))
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="rate_node",
+        tool_call_id="call_mc2",
+        user_term="llm_model_choice:rate_node",
+        kind=InterpretationKind.LLM_MODEL_CHOICE,
+        llm_draft=drafted,
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.AMENDED,
+        amended_value=chosen,
+        actor="user:alice",
+    )
+
+    assert resolved.kind is InterpretationKind.LLM_MODEL_CHOICE
+    assert resolved.accepted_value == chosen
+    patched = next(n for n in new_state.nodes if n["id"] == "rate_node")
+    assert patched["options"]["model"] == chosen
+    # Drift guard must follow the amended model, not the drafted one.
+    node_spec = next(n for n in state_from_record(new_state).nodes if n.id == "rate_node")
+    _validate_model_choice_review(node_spec, chosen)  # must not raise

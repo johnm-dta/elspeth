@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useSessionStore } from "./sessionStore";
+import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
 import type {
   ChatMessage,
@@ -8,8 +9,10 @@ import type {
   CompositionState,
   CompositionProposal,
 } from "@/types/api";
+import type { InterpretationEvent } from "@/types/interpretation";
 
 const clearValidationMock = vi.hoisted(() => vi.fn());
+const validateMock = vi.hoisted(() => vi.fn());
 
 // Mock the API client — store tests verify state logic, not HTTP calls
 vi.mock("@/api/client", () => ({
@@ -53,7 +56,10 @@ vi.mock("@/api/client", () => ({
 // Mock the execution store dependency
 vi.mock("./executionStore", () => ({
   useExecutionStore: {
-    getState: () => ({ clearValidation: clearValidationMock }),
+    getState: () => ({
+      clearValidation: clearValidationMock,
+      validate: validateMock,
+    }),
   },
 }));
 
@@ -74,6 +80,34 @@ function makeCompositionState(version: number, nodeIds: string[] = []): Composit
     edges: [],
     outputs: [],
     metadata: { name: null, description: null },
+  };
+}
+
+function makePendingInterpretationEvent(id: string): InterpretationEvent {
+  return {
+    id,
+    session_id: "session-1",
+    composition_state_id: "state-1",
+    affected_node_id: "analyze_colors",
+    tool_call_id: "call-1",
+    user_term: "llm_model_choice:analyze_colors",
+    kind: "llm_model_choice",
+    llm_draft: "openrouter/openai/gpt-5.4-mini",
+    accepted_value: null,
+    choice: "pending",
+    created_at: "2026-05-29T12:00:00Z",
+    resolved_at: null,
+    actor: "system:composer",
+    interpretation_source: "user_approved",
+    model_identifier: null,
+    model_version: null,
+    provider: null,
+    composer_skill_hash: null,
+    arguments_hash: null,
+    hash_domain_version: null,
+    runtime_model_identifier_at_resolve: null,
+    runtime_model_version_at_resolve: null,
+    resolved_prompt_template_hash: null,
   };
 }
 
@@ -226,6 +260,110 @@ describe("sessionStore", () => {
       // Assistant message should be appended
       const asstMsg = state.messages.find((m) => m.role === "assistant");
       expect(asstMsg?.content).toBe("Hello back");
+    });
+
+    it("refreshes pending interpretation events after a successful freeform compose turn", async () => {
+      // Regression: a freeform compose turn can create new pending
+      // interpretation events (invented_source / llm_prompt_template /
+      // llm_model_choice / pipeline_decision). Unlike guided mode (review
+      // delivered as a guided turn) and the tutorial (explicit refreshAll),
+      // the freeform path had no trigger to pull them into the
+      // interpretationEventsStore — so the inline review widgets and their
+      // sign-off buttons never rendered mid-session, while the run-gate still
+      // blocked execution on the pending rows. selectSession refreshes on
+      // reload, which previously masked the gap.
+      resetStore(useInterpretationEventsStore);
+      const apiMod = await import("@/api/client");
+      (apiMod.sendMessage as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        message: {
+          id: "asst-1",
+          session_id: "session-1",
+          role: "assistant",
+          content: "Drafted.",
+          tool_calls: null,
+          created_at: new Date().toISOString(),
+        },
+        state: null,
+      });
+      (apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makePendingInterpretationEvent("evt-1"),
+      ]);
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      await useSessionStore.getState().sendMessage("rate these pages");
+
+      // refreshAll is fire-and-forget inside sendMessage; await the microtask.
+      await vi.waitFor(() => {
+        const map =
+          useInterpretationEventsStore.getState().pendingBySession["session-1"];
+        expect(map?.["evt-1"]).toBeDefined();
+      });
+    });
+
+    it("refreshes pending interpretation events after a successful recompose (retry)", async () => {
+      // Same bug class as the freeform sendMessage path: recompose can mint new
+      // interpretive decisions, and without a refresh the inline review widgets
+      // never surface mid-session.
+      resetStore(useInterpretationEventsStore);
+      const apiMod = await import("@/api/client");
+      (apiMod.recompose as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        message: {
+          id: "asst-r",
+          session_id: "session-1",
+          role: "assistant",
+          content: "Redone.",
+          tool_calls: null,
+          created_at: new Date().toISOString(),
+        },
+        state: null,
+      });
+      (apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makePendingInterpretationEvent("evt-recompose"),
+      ]);
+
+      const userMessage: ChatMessage = {
+        id: "user-1",
+        session_id: "session-1",
+        role: "user",
+        content: "hello",
+        tool_calls: null,
+        created_at: new Date().toISOString(),
+      };
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        messages: [userMessage],
+      });
+      await useSessionStore.getState().retryMessage("user-1");
+
+      await vi.waitFor(() => {
+        const map =
+          useInterpretationEventsStore.getState().pendingBySession["session-1"];
+        expect(map?.["evt-recompose"]).toBeDefined();
+      });
+    });
+
+    it("refreshes pending interpretation events after accepting a proposal", async () => {
+      // Same bug class: accepting a proposal (explicit_approve path) can create
+      // interpretation events that must surface their review widgets.
+      resetStore(useInterpretationEventsStore);
+      const apiMod = await import("@/api/client");
+      (apiMod.acceptCompositionProposal as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "proposal-1",
+      });
+      (apiMod.fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+      (apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiMod.listInterpretationEvents as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makePendingInterpretationEvent("evt-accept"),
+      ]);
+
+      useSessionStore.setState({ activeSessionId: "session-1" });
+      await useSessionStore.getState().acceptProposal("proposal-1");
+
+      await vi.waitFor(() => {
+        const map =
+          useInterpretationEventsStore.getState().pendingBySession["session-1"];
+        expect(map?.["evt-accept"]).toBeDefined();
+      });
     });
 
     it("handles convergence error with specific message", async () => {
@@ -689,6 +827,48 @@ describe("sessionStore", () => {
       expect(useSessionStore.getState().staleProposalIds).toContain(
         "proposal-1",
       );
+    });
+  });
+
+  describe("applyResolvedInterpretation", () => {
+    it("applies the patched composition state and re-validates so the run-gate can reopen", () => {
+      const newState = makeCompositionState(3, ["analyze_colors"]);
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        compositionState: makeCompositionState(2, ["analyze_colors"]),
+      });
+
+      useSessionStore.getState().applyResolvedInterpretation(newState);
+
+      // Display sync: the resolved interpretation's patched pipeline is shown.
+      expect(useSessionStore.getState().compositionState).toBe(newState);
+      // Gate clearing: an explicit re-validate runs (the auto-validate
+      // subscription only fires on a version bump, which a resolve can't
+      // guarantee).
+      expect(validateMock).toHaveBeenCalledWith("session-1");
+    });
+
+    it("re-validates even when the resolve returns no new state (null)", () => {
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        compositionState: makeCompositionState(2),
+      });
+
+      useSessionStore.getState().applyResolvedInterpretation(null);
+
+      // No state to apply, but the gate must still be re-checked.
+      expect(useSessionStore.getState().compositionState?.version).toBe(2);
+      expect(validateMock).toHaveBeenCalledWith("session-1");
+    });
+
+    it("is a no-op without an active session", () => {
+      useSessionStore.setState({ activeSessionId: null });
+
+      useSessionStore
+        .getState()
+        .applyResolvedInterpretation(makeCompositionState(3));
+
+      expect(validateMock).not.toHaveBeenCalled();
     });
   });
 

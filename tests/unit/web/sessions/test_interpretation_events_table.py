@@ -609,6 +609,28 @@ class TestSourceNullability:
             row["user_term"] = "drop_raw_html_fields"
             conn.execute(insert(interpretation_events_table).values(row))
 
+    def test_llm_model_choice_kind_is_allowed(self, engine) -> None:
+        # Regression for the deadlock where the composer's auto-staged
+        # ``llm_model_choice`` review (InterpretationKind.LLM_MODEL_CHOICE,
+        # added in 0a7a05e24) could not be persisted because the kind CHECK
+        # constraint had not been extended — every LLM node that the composer
+        # authored a model for stalled in a "forced repair" loop. The write
+        # path must accept the kind the contract enum already declares.
+        session_id = str(uuid.uuid4())
+        state_id = str(uuid.uuid4())
+        with engine.begin() as conn:
+            _insert_session(conn, session_id)
+            _seed_composition_state(conn, state_id=state_id, session_id=session_id)
+            row = _user_approved_row(
+                row_id=str(uuid.uuid4()),
+                session_id=session_id,
+                state_id=state_id,
+                kind="llm_model_choice",
+            )
+            row["affected_node_id"] = "identify_colors"
+            row["user_term"] = "llm_model_choice:identify_colors"
+            conn.execute(insert(interpretation_events_table).values(row))
+
     # Test 4a — opted_out + composition_state_id non-NULL → IntegrityError
     def test_opted_out_with_non_null_composition_state_id_raises(self, engine) -> None:
         session_id = str(uuid.uuid4())

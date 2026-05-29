@@ -449,6 +449,7 @@ def test_01_tool_registered_in_get_tool_definitions() -> None:
         "invented_source",
         "llm_prompt_template",
         "pipeline_decision",
+        "llm_model_choice",
     ]
     assert "Do not ask the user in assistant prose" in tool["description"]
     assert "review surface" in tool["description"]
@@ -651,6 +652,39 @@ def test_05e_legacy_structured_pending_requirement_without_kind_defaults_to_vagu
     state = _state_with(replace(node, options=options))
 
     _assert_affected_component(state, "rate_node", InterpretationKind.VAGUE_TERM, "cool")
+
+
+def test_05f_structured_vague_term_without_parts_wiring_rejected() -> None:
+    """A pending vague_term requirement with NO prompt_template_parts is
+    unresolvable: the resolver raises at ``prompt_template_parts is required``.
+
+    The Tier-3 tool boundary must reject the handoff so no dead interpretation
+    event is ever created — otherwise the operator approves the review and hits
+    a 422 at resolve (the demo-blocking defect).
+    """
+    node = _structured_llm_node()
+    options = dict(node.options)
+    del options[PROMPT_TEMPLATE_PARTS_KEY]
+    state = _state_with(replace(node, options=options))
+
+    with pytest.raises(ToolArgumentError, match=r"interpretation_ref|prompt_template_parts|placeholder|wire"):
+        _assert_affected_component(state, "rate_node", InterpretationKind.VAGUE_TERM, "cool")
+
+
+def test_05g_structured_vague_term_with_parts_but_no_ref_rejected() -> None:
+    """prompt_template_parts present but carrying no ``interpretation_ref`` for
+    the requirement: the resolver would "succeed" while silently dropping the
+    accepted value from the prompt — an audit divergence worse than a 422.
+
+    The boundary must reject it.
+    """
+    node = _structured_llm_node()
+    options = dict(node.options)
+    options[PROMPT_TEMPLATE_PARTS_KEY] = [{"kind": "text", "text": "Rate this row: {{ row.text }}"}]
+    state = _state_with(replace(node, options=options))
+
+    with pytest.raises(ToolArgumentError, match=r"interpretation_ref|prompt_template_parts|placeholder|wire"):
+        _assert_affected_component(state, "rate_node", InterpretationKind.VAGUE_TERM, "cool")
 
 
 def test_pipeline_decision_boundary_accepts_non_llm_transform_with_matching_requirement() -> None:

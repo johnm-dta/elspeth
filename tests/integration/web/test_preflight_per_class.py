@@ -171,7 +171,17 @@ async def test_execute_rejects_unreviewed_vague_term(tmp_path: Path) -> None:
         ),
     )
 
-    assert [(site.component_id, site.kind) for site in exc.sites] == [("rate", InterpretationKind.VAGUE_TERM)]
+    # This hand-built fixture skips the mutation-time auto-stager, so the LLM
+    # node also surfaces the prompt-template and (because it declares a model)
+    # model-choice review sites. Assert the vague_term site this test owns is
+    # flagged; the sibling auto-stage sites are expected, not a regression.
+    site_pairs = [(site.component_id, site.kind) for site in exc.sites]
+    assert ("rate", InterpretationKind.VAGUE_TERM) in site_pairs
+    assert {kind for _, kind in site_pairs} <= {
+        InterpretationKind.VAGUE_TERM,
+        InterpretationKind.LLM_PROMPT_TEMPLATE,
+        InterpretationKind.LLM_MODEL_CHOICE,
+    }
     assert "{{interpretation:primary colour}}" in str(exc)
 
 
@@ -236,5 +246,13 @@ async def test_execute_rejects_unreviewed_llm_prompt_template(tmp_path: Path) ->
         ),
     )
 
-    assert [(site.component_id, site.kind) for site in exc.sites] == [("rate", InterpretationKind.LLM_PROMPT_TEMPLATE)]
+    # Hand-built fixture (no auto-stager): the declared model also surfaces a
+    # model-choice review site. Assert the prompt-template site this test owns
+    # is flagged; the model-choice sibling is expected, not a regression.
+    site_pairs = [(site.component_id, site.kind) for site in exc.sites]
+    assert ("rate", InterpretationKind.LLM_PROMPT_TEMPLATE) in site_pairs
+    assert {kind for _, kind in site_pairs} <= {
+        InterpretationKind.LLM_PROMPT_TEMPLATE,
+        InterpretationKind.LLM_MODEL_CHOICE,
+    }
     assert "llm_prompt_template" in str(exc)

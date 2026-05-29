@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from elspeth.contracts.types import AggregationName
 from elspeth.contracts.value_source import (
@@ -225,6 +225,40 @@ def validate_value_source_compliance(transforms: Sequence[WiredTransform]) -> No
     if findings:
         message = f"{len(findings)} field(s) violated value-source declarations: " + "; ".join(f.format() for f in findings)
         raise ValueSourceValidationError(message, findings=tuple(findings))
+
+
+def check_config_value_sources(config: object, *, component_id: str) -> tuple[ValueSourceFinding, ...]:
+    """Run one already-constructed config's ``VALUE_SOURCES`` declarations.
+
+    Per-config counterpart to :func:`validate_value_source_compliance` (which
+    walks a wired bundle). It lets per-node callers — notably the composer's
+    pre-wiring option prevalidation — surface the same structured findings
+    (catalog membership, sibling derivation) without constructing a bundle, so a
+    hallucinated catalog value (e.g. an unknown OpenRouter ``model``) is caught
+    at authoring time with an actionable ``list_models`` hint rather than only at
+    instantiation. Returns ``()`` when the config's class declares no protocols.
+    """
+    return tuple(
+        finding
+        for declaration in _declared_value_sources(type(config))
+        if (finding := _check_value_source(declaration, config, component_id)) is not None
+    )
+
+
+def _declared_value_sources(config_cls: type) -> tuple[ValueSource, ...]:
+    """Return ``config_cls``'s ``VALUE_SOURCES`` ClassVar, or ``()`` if it declares none.
+
+    ``VALUE_SOURCES`` is an optional ClassVar — config classes with no
+    value-source protocols omit it entirely (see
+    :mod:`elspeth.contracts.value_source`). Walk the MRO's class ``__dict__``
+    directly so a genuinely-absent declaration is distinguished from a
+    present-but-empty one, without ``getattr(..., default)`` defensively
+    suppressing the attribute.
+    """
+    for klass in config_cls.__mro__:
+        if "VALUE_SOURCES" in klass.__dict__:
+            return cast("tuple[ValueSource, ...]", klass.__dict__["VALUE_SOURCES"])
+    return ()
 
 
 def _check_value_source(

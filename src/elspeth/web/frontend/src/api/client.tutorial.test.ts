@@ -25,6 +25,7 @@ describe("api/client tutorial helpers", () => {
           output: {
             rows: [{ url: "https://www.australia.gov.au", score: 6 }],
             source_data_hash: "a7f3e2",
+            discarded_row_count: 0,
           },
           seeded_from_cache: false,
           cache_key: null,

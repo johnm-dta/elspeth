@@ -271,8 +271,11 @@ def _composer_to_thread_uses_test_worker(monkeypatch: pytest.MonkeyPatch) -> Non
 # (set_pipeline) so the test exercises the same prevalidation/proof path the
 # live RGR harness would. Triggers csv_fixed_schema_omits_observed_columns
 # on turn 1 by declaring a fixed schema with only one of the five observed
-# columns; turn 2 claims completion → repair fires; turn 3 patches the
-# source schema to mode=observed; turn 4 claims completion → GREEN.
+# columns; turn 2 claims completion → schema repair fires; turn 3 patches the
+# source schema to mode=observed; turn 4 claims completion → the mandatory
+# llm_prompt_template interpretation review re-prompts (turn 5) → GREEN. The
+# authored prompt_template now requires an interpretation review, adding a second
+# forced repair turn on top of the schema fix (5 calls / 2 repair turns).
 # --------------------------------------------------------------------------
 
 
@@ -280,7 +283,7 @@ class TestCsvClassifierScenario:
     """End-to-end mocked-LLM run for the csv-classifier convergence scenario."""
 
     @pytest.mark.asyncio
-    async def test_csv_classifier_converges_with_one_repair_turn(self, tmp_path: Path) -> None:
+    async def test_csv_classifier_converges_in_two_repair_turns(self, tmp_path: Path) -> None:
         engine, session_id, sessions_service = _session_engine()
         # Five observed columns, mirroring the scenario's prompt CSV.
         body = b"ticket_id,customer_name,subject,body,received_at\nT-001,Alice,Issue,desc,2026-05-06\n"
@@ -377,7 +380,14 @@ class TestCsvClassifierScenario:
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch.object(service, "_runtime_preflight", return_value=passing_preflight),
         ):
-            mock_llm.side_effect = [turn1, turn2, turn3, turn4]
+            # Turn 5 (completion): the LLM node carries an authored prompt_template,
+            # which now triggers a mandatory llm_prompt_template interpretation review
+            # ("surface every authored LLM decision through interpretation review").
+            # The compose loop re-prompts for that unresolved review (CALL3 and CALL5
+            # are the assumption-review re-prompts) on top of the schema-mode repair,
+            # so this scenario converges to a valid (GREEN) structural state in
+            # 5 LLM calls / 2 forced repair turns rather than the pre-review 4 / 1.
+            mock_llm.side_effect = [turn1, turn2, turn3, turn4, turn4]
             result = await service.compose(
                 "Classify these tickets",
                 [],
@@ -386,9 +396,10 @@ class TestCsvClassifierScenario:
                 user_id="test-user",
             )
 
-        # Convergence behaviour: exactly one forced repair turn.
-        assert mock_llm.call_count == 4, f"expected 4 LLM calls, got {mock_llm.call_count}"
-        assert result.repair_turns_used == 1, f"expected 1 repair turn, got {result.repair_turns_used}"
+        # Convergence behaviour: two forced repair turns (schema-mode + the
+        # mandatory interpretation-review re-prompt for the authored prompt_template).
+        assert mock_llm.call_count == 5, f"expected 5 LLM calls, got {mock_llm.call_count}"
+        assert result.repair_turns_used == 2, f"expected 2 repair turns, got {result.repair_turns_used}"
 
         # Score against the scenario file.
         scenario = _load_scenario("csv-classifier")

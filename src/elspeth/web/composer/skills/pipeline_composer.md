@@ -234,6 +234,20 @@ same turn by the same actor (you), so disagreement is silent corruption rather
 than a validator-visible error. Apply the following rules unconditionally for
 generated content.
 
+- **Author free-text generated sources as JSON, not CSV — this is a rule, not a
+  preference.** Agency names, page titles, descriptions, and sentences routinely
+  contain commas, quotes, or apostrophes. In CSV those characters are
+  delimiter-significant and a single unquoted comma splits the row, producing a
+  column-count mismatch that the source silently discards (or quarantines) — the
+  canonical "5 rows requested, 2 arrived" failure. JSON has no delimiter inside
+  string values, so it is comma-safe by construction. **When ANY value in a source
+  you author yourself is free text (a name, title, description, or sentence — not a
+  bare number, single identifier, or plain URL), you MUST use the `json` source: a
+  bare top-level array of objects. Do NOT use `csv` for free-text generated
+  content.** Reserve generated `csv` only for sources where every value is
+  guaranteed delimiter-free. This rule exists because CSV quoting of generated
+  values is error-prone for the model authoring them; JSON removes the failure mode
+  entirely.
 - **CSV.** Always write a header row as the first non-skipped line of the
   generated CSV, and always leave `source.options.columns` unset. `columns` and a
   header row are mutually exclusive: when `columns` is set, `csv` source treats
@@ -242,10 +256,18 @@ generated content.
   Headered mode (no `columns`) is the only correct shape for generated CSV.
   Declare the same column names in `schema.fields` or `schema.guaranteed_fields`
   so the header, the source options, and the source contract all agree.
+  **Quote every value that contains the delimiter (comma), a double-quote, or a
+  newline, per RFC 4180:** wrap the field in double-quotes and double any embedded
+  double-quote (`Department of Health, Aged Care` → `"Department of Health, Aged Care"`;
+  `She said "hi"` → `"She said ""hi"""`). An unquoted delimiter in a value is the
+  dominant cause of dropped generated rows. If you cannot reliably quote the values,
+  use JSON instead.
 - **JSON.** Emit a bare top-level JSON array of objects (or JSONL with one object
   per line). Do not wrap in `{"results": [...]}` or any other envelope; the
   envelope forces a `data_key` you do not need. Every object must carry the same
-  keys; declare those keys in the source schema.
+  keys; declare those keys in the source schema. JSON is the preferred format for
+  any generated source carrying free-text values (see above) precisely because it
+  needs no delimiter escaping.
 - **Text.** Emit one data record per line with no header line — `text` source
   treats every non-blank line as a data row. Pick a `column` value that names
   what each line contains (e.g. `url`, `prompt`, `line_text`); it must be a valid
@@ -461,7 +483,12 @@ LLM node preflight has three independent review checks:
 
 - Did I author the prompt text? Stage `llm_prompt_template`.
 - Did I author judgement, scoring, ranking, category, threshold, or rubric
-  semantics? Stage `vague_term`.
+  semantics? Stage `vague_term` **and wire it** — the same LLM node MUST carry
+  `prompt_template_parts` with an `interpretation_ref` slot for that criterion.
+  A `vague_term` on a node that has only a flat `prompt_template` (no
+  `prompt_template_parts`) is **rejected at staging** and the build dead-ends.
+  Never stage a `vague_term` without setting `prompt_template_parts` on the same
+  node in the same `set_pipeline`. See the wiring rule below.
 - Did I choose the `model` identifier? Stage `llm_model_choice`. Model choice is
   authored by you any time the user did not name the exact slug — picking a
   default, the cheapest, the latest, or any slug from `list_models` counts as
@@ -520,7 +547,10 @@ own choices before staging the node:
 - Did I define how a subjective user criterion will be operationalized?
 
 If the answer to any question is yes, stage a pending `kind="vague_term"`
-requirement on that same LLM node before `set_pipeline`, then call
+requirement on that same LLM node before `set_pipeline` — and in that SAME
+`set_pipeline`, set `prompt_template_parts` on the node with an
+`interpretation_ref` slot wiring that requirement (see the wiring rule below);
+an unwired `vague_term` is rejected at staging. Then call
 `request_interpretation_review` after the state mutation succeeds. This is about
 authorship, not vocabulary. Do not scan for a list of magic vague words; inspect
 whether you authored rubric semantics the user did not supply.
@@ -557,35 +587,77 @@ also has a prompt template you wrote, stage both requirements in the same
 judgement/rubric definition and one `llm_prompt_template` entry for the raw
 prompt template. Surface both review cards before stopping.
 
-Construction pattern for an LLM-authored scoring prompt:
+Wire the authored semantics into the prompt as a substitution slot — REQUIRED.
+The authored definition must occupy a substitution slot in the prompt, not be
+baked in as fixed prose. The operator's approved definition is substituted into
+that slot before the run. If the definition lives only as fixed text, the
+operator's amendment never reaches the model and the audit trail asserts a
+meaning the run did not use. An unwired `vague_term` is also **rejected at
+staging** (`request_interpretation_review` fails — the build dead-ends), so the
+`draft` restating the rubric is not enough on its own.
+
+Wire it with `prompt_template_parts`: an ordered list of `{"kind": "text",
+"text": ...}` segments and at least one `{"kind": "interpretation_ref",
+"requirement_id": "<vague_term id>"}` slot, placed where the definition belongs.
+Each distinct authored criterion gets its own `requirement_id`; a single
+criterion may be referenced by more than one `interpretation_ref` slot (each is
+filled with the same approved value). The `requirement_id` MUST equal the
+`vague_term` requirement's `id` — not the `user_term`, not the node id.
+
+Author the prompt ONCE, as `prompt_template_parts`. Then produce
+`prompt_template` by rendering your own *draft* definition into each
+`interpretation_ref` slot — i.e. `prompt_template` is the parts with the drafts
+substituted in, a valid readable prompt that the system re-renders with the
+operator's accepted value on resolve. Do not write the two fields independently:
+only the parts skeleton is validated, so two hand-written prompts that disagree
+pass staging silently and the model receives wording the operator never saw.
+Concatenating the parts (with each slot replaced by its draft) must reproduce
+`prompt_template` exactly; the only difference between the two fields is that the
+criterion slot is a readable draft in `prompt_template` and an
+`interpretation_ref` in `prompt_template_parts`.
+
+Anchor the structure, not the bytes: the `llm_prompt_template` review is checked
+against the prompt *skeleton* (the parts structure), so resolving the
+`vague_term` — which rewrites the rendered prompt — does not drift it, in either
+operator resolution order. A flat `{{interpretation:<term>}}` placeholder also
+wires the slot, but it drifts the prompt-template review when the operator
+resolves the prompt-template card first; prefer `prompt_template_parts`.
+
+Construction pattern for an LLM-authored scoring prompt (criterion "cool", node
+id "rate_cool"):
 
 ```json
 {
   "provider": "openrouter",
   "model": "<model returned by list_models>",
-  "prompt_template": "<prompt text you authored, including {{ field_name }} interpolations for every entry in required_input_fields, plus the scoring/rubric/cutoff/category semantics>",
-  "required_input_fields": ["<field_used_by_prompt>"],
-  "response_field": "<llm_response_field>",
+  "prompt_template": "Rate how <your draft definition of \"cool\"> the page is, on a 1-10 scale. Page content: {{ row['content'] }}. Return JSON {\"score\": <int>, \"reason\": <str>}.",
+  "prompt_template_parts": [
+    {"kind": "text", "text": "Rate how "},
+    {"kind": "interpretation_ref", "requirement_id": "cool_semantics_review"},
+    {"kind": "text", "text": " the page is, on a 1-10 scale. Page content: {{ row['content'] }}. Return JSON {\"score\": <int>, \"reason\": <str>}."}
+  ],
+  "required_input_fields": ["content"],
+  "response_field": "llm_response",
   "temperature": 0,
   "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
   "interpretation_requirements": [
     {
-      "id": "<criterion>_semantics_review",
+      "id": "cool_semantics_review",
       "kind": "vague_term",
-      "user_term": "<user criterion>",
+      "user_term": "cool",
       "status": "pending",
-      "draft": "<the exact scale/rubric/cutoff/ranking/category semantics you authored>",
+      "draft": "<your draft definition of \"cool\" — the exact scale/rubric/cutoff/category semantics you authored>",
       "event_id": null,
       "accepted_value": null,
       "accepted_artifact_hash": null,
       "resolved_prompt_template_hash": null
     },
     {
-      "id": "prompt_template_review:<llm_node_id>",
+      "id": "prompt_template_review:rate_cool",
       "kind": "llm_prompt_template",
-      "user_term": "llm_prompt_template:<llm_node_id>",
+      "user_term": "llm_prompt_template:rate_cool",
       "status": "pending",
-      "draft": "<the exact raw prompt_template text>",
+      "draft": "<the exact raw prompt_template text above>",
       "event_id": null,
       "accepted_value": null,
       "accepted_artifact_hash": null,
@@ -595,10 +667,21 @@ Construction pattern for an LLM-authored scoring prompt:
 }
 ```
 
+This node has THREE review cards to surface, not two: `vague_term`,
+`llm_prompt_template`, and `llm_model_choice`. The example
+`interpretation_requirements` list shows only the first two because
+`llm_model_choice` is auto-staged from `options.model` by the mutation layer —
+it is still a third pending card you MUST surface with `request_interpretation_review`.
+Do not undercount to two. The `1-10` scale here is fixed prompt wording covered
+by the `llm_prompt_template` review — only the criterion *meaning* (`"cool"`)
+needs the wired `vague_term` slot.
+
 Do not omit the `vague_term` entry and expect the `llm_prompt_template` entry to
-cover it. The prompt-template review covers the bytes of the prompt; the
-`vague_term` review covers the authored rubric, scale, threshold, category, or
-selection semantics inside those bytes.
+cover it. The two reviews approve different things: the prompt-template review
+approves the prompt *skeleton* (the fixed wording and where each slot sits); the
+`vague_term` review approves the *value* that fills its slot. The criterion
+definition must occupy an `interpretation_ref` slot — never fixed prose — so the
+operator's approved value governs what the model actually sees.
 
 If your prompt asks the model to return a score, rating, rank, class, or
 pass/fail result, that output shape is authored judgement semantics when you
@@ -610,11 +693,13 @@ Before staging an LLM node, decide eligibility for `vague_term` independently of
 eligibility for `llm_prompt_template`. Do not ask "is the prompt already being
 reviewed?" Ask "did I author separate judgement semantics that the user did not
 already define?" If yes, the judgement semantics need their own review card.
-Those semantics may exist only inside the prompt text; they do not need to be a
-separate rubric object, field, or configuration block to be eligible for review.
-If your prompt text contains the scale, category meaning, threshold, or rubric
-you authored, stage `llm_prompt_template` for the prompt text and `vague_term`
-for the embedded authored judgement semantics.
+Such semantics need their own review card even when they would otherwise appear
+only as wording in the prompt — they do not need to be a separate rubric object,
+field, or configuration block to be reviewable. When you author them, give the
+criterion meaning its own `interpretation_ref` slot (per the wiring rule above),
+stage the `vague_term` for that slot, and stage `llm_prompt_template` for the
+surrounding prompt wording. The criterion meaning belongs in the slot, not baked
+into the fixed text.
 
 Objective extraction does not become vague merely because the content is visual
 or design-related. Asking for `"primary colours used"` in a design-analysis

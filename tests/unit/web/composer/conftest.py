@@ -97,6 +97,7 @@ from elspeth.web.composer.redaction import (
     _PipelineMetadataModel,
     _PipelineNodeModel,
     _PipelineOutputModel,
+    _RepairToolCallShadowModel,
     _SetPipelineSourceModel,
 )
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
@@ -232,10 +233,39 @@ def _pipeline_output_strategy() -> st.SearchStrategy[_PipelineOutputModel]:
     )
 
 
+def _repair_tool_call_strategy() -> st.SearchStrategy[_RepairToolCallShadowModel]:
+    """Resolve ``_RepairToolCallShadowModel`` for the property test.
+
+    The shadow model's ``arguments`` field is typed ``Mapping[str, object]`` to
+    mirror ``_RepairToolCall`` (tools/_common.py) faithfully. ``st.from_type``
+    would fill ``object`` with arbitrary, sometimes non-JSON, non-deepcopy-able
+    instances (e.g. ``super(NoneType)``), which crashes the redactor's
+    ``copy.deepcopy(model_dump())`` step — a pure strategy artifact, since at
+    runtime the value always originates from a parsed JSON response dict.
+
+    We constrain ``arguments`` to a string-keyed dict of JSON scalars so the
+    generated examples are deepcopy-safe and faithful to the real wire shape.
+    The ``arguments`` leaf carries a Sensitive summarizer
+    (:func:`_summarize_repair_arguments`); the property test asserts only that
+    the redacted value differs from the raw value at that Sensitive path, so the
+    scalar value-space is sufficient — it does not assert on the contents.
+    """
+    return st.builds(
+        _RepairToolCallShadowModel,
+        tool=st.text(),
+        arguments=st.dictionaries(
+            st.text(min_size=1, max_size=8),
+            st.one_of(st.text(max_size=16), st.integers(), st.booleans(), st.none()),
+            max_size=3,
+        ),
+    )
+
+
 st.register_type_strategy(SetSourceFromBlobArgumentsModel, _set_source_from_blob_strategy())
 st.register_type_strategy(_SetPipelineSourceModel, _set_pipeline_source_strategy())
 st.register_type_strategy(_PipelineNodeModel, _pipeline_node_strategy())
 st.register_type_strategy(_PipelineOutputModel, _pipeline_output_strategy())
+st.register_type_strategy(_RepairToolCallShadowModel, _repair_tool_call_strategy())
 
 
 # Mirror of the four explicit ``st.register_type_strategy`` calls above.  This
@@ -881,7 +911,7 @@ def fake_llm_tool_argument_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _
             raise ToolArgumentError(argument="phase3", expected="valid fixture input", actual_type="invalid")
         return original_execute_tool(tool_name, *args, **kwargs)
 
-    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _execute)
+    monkeypatch.setattr("elspeth.web.composer.tool_batch.execute_tool", _execute)
     return _FakeComposeLLM(
         (
             _fake_llm_response(
@@ -910,7 +940,7 @@ def fake_llm_assertion_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _Fake
             raise AssertionError("phase3 synthetic invariant")
         return original_execute_tool(tool_name, *args, **kwargs)
 
-    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _execute)
+    monkeypatch.setattr("elspeth.web.composer.tool_batch.execute_tool", _execute)
     return _FakeComposeLLM(
         (
             _fake_llm_response(
@@ -938,7 +968,7 @@ def fake_llm_runtime_error_on_second(monkeypatch: pytest.MonkeyPatch) -> _FakeCo
             raise RuntimeError("phase3 synthetic runtime error")
         return original_execute_tool(tool_name, *args, **kwargs)
 
-    monkeypatch.setattr("elspeth.web.composer.service.execute_tool", _execute)
+    monkeypatch.setattr("elspeth.web.composer.tool_batch.execute_tool", _execute)
     return _FakeComposeLLM(
         (
             _fake_llm_response(

@@ -309,6 +309,41 @@ describe("InterpretationReviewTurn — kind-aware surfaces", () => {
     });
   });
 
+  it("shows a stale-review message when the prompt template changed before resolve", async () => {
+    const user = userEvent.setup();
+    const event = makeEvent({
+      kind: "llm_prompt_template",
+      llm_draft: "Classify {{ row.body }}.",
+    });
+    vi.mocked(api.resolveInterpretation).mockRejectedValue(
+      {
+        ...makeApiError(
+          422,
+          "The affected LLM prompt no longer contains the expected interpretation placeholder.",
+        ),
+        error_type: "interpretation_placeholder_unavailable",
+      },
+    );
+
+    render(<InterpretationReviewTurn event={event} sessionId="sess-1" />);
+
+    const accept = screen.getByRole("button", {
+      name: /accept llm prompt template/i,
+    }) as HTMLButtonElement;
+    await waitFor(() => {
+      expect(accept.disabled).toBe(false);
+    });
+
+    await user.click(accept);
+
+    expect(
+      await screen.findByRole("alert"),
+    ).toHaveTextContent(/reload the session/i);
+    expect(
+      screen.getByRole("alert"),
+    ).toHaveTextContent(/stale review/i);
+  });
+
   it("renders pipeline-decision copy and hides amendment", () => {
     const event = makeEvent({
       kind: "pipeline_decision",

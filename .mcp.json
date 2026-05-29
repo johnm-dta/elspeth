@@ -19,12 +19,16 @@
     "filigree": {
       "type": "stdio",
       "command": "/home/john/.local/bin/filigree-mcp",
-      "args": ["--project", "/home/john/elspeth"]
+      "args": []
     },
     "clarion-elspeth": {
       "type": "stdio",
       "command": "/home/john/clarion/target/release/clarion",
-      "args": ["serve", "--path", "/home/john/elspeth"],
+      "args": [
+        "serve",
+        "--path",
+        "/home/john/elspeth"
+      ],
       "env": {
         "PATH": "/home/john/clarion/plugins/python/.venv/bin:/home/john/.local/bin:/home/john/elspeth/.venv/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/john/.cargo/bin:/home/john/.nvm/versions/node/v20.19.3/bin:/home/john/miniconda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       }

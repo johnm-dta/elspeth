@@ -21,8 +21,10 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
     pipeline_decision_artifact_hash,
-    prompt_shield_recommendation_contract_error,
+    prompt_shield_recommendation_warning_pairs,
+    prompt_structure_hash_from_options,
     strip_authoring_options,
+    vague_term_wiring_count,
 )
 
 
@@ -333,6 +335,10 @@ def test_resolved_requirement_materializes_prompt_and_hash() -> None:
     requirement["status"] = "resolved"
     requirement["accepted_value"] = "well-designed and useful"
     prompt = "Rate well-designed and useful: {{ row.text }}"
+    # The prompt-template review anchors to the prompt SKELETON (parts structure),
+    # not the substituted text — so it stays valid after the vague term resolves.
+    skeleton_hash = prompt_structure_hash_from_options(options)
+    assert skeleton_hash is not None
     options[INTERPRETATION_REQUIREMENTS_KEY] = [
         requirement,
         {
@@ -344,7 +350,7 @@ def test_resolved_requirement_materializes_prompt_and_hash() -> None:
             "event_id": "event-2",
             "accepted_value": prompt,
             "accepted_artifact_hash": None,
-            "resolved_prompt_template_hash": stable_hash(prompt),
+            "resolved_prompt_template_hash": skeleton_hash,
         },
     ]
     state = _state_with_llm(options)
@@ -354,6 +360,7 @@ def test_resolved_requirement_materializes_prompt_and_hash() -> None:
     assert isinstance(materialized, CompositionState)
     materialized_prompt = materialized.nodes[0].options["prompt_template"]
     assert materialized_prompt == prompt
+    # Node-level hash remains the final-prompt-string hash (runtime reads it).
     assert materialized.nodes[0].options["resolved_prompt_template_hash"] == stable_hash(prompt)
 
 
@@ -460,24 +467,31 @@ def test_unreviewed_field_mapper_drop_of_web_scrape_raw_fields_blocks_execution(
     assert result.sites[0].kind is InterpretationKind.PIPELINE_DECISION
 
 
-def test_gate_routed_web_scrape_into_llm_requires_prompt_shield_review() -> None:
+def test_gate_routed_web_scrape_into_llm_warns_without_prompt_shield() -> None:
+    # The gate topology routes web_scrape output into the LLM via gate routes,
+    # exercising the enhanced _producer_by_output_stream (routes/fork_to). The
+    # prompt-shield recommendation is advisory, not blocking (elspeth-abb2cb0931):
+    # an unshielded LLM-over-scrape surfaces a warning and still composes.
     state = _state_with_web_scrape_gate_to_llm()
 
-    error = prompt_shield_recommendation_contract_error(state)
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
     result = materialize_state_for_execution(state)
 
-    assert error is not None
-    assert PROMPT_SHIELD_USER_TERM in error
+    assert warning_pairs
+    assert any(component == "node:summarise_pages" for component, _message in warning_pairs)
+    assert any("prompt-injection shield" in message for _component, message in warning_pairs)
+    # Advisory, not blocking: the LLM node still triggers a prompt-template
+    # review, but the prompt-shield recommendation is NOT a blocking review site.
     assert isinstance(result, InterpretationReviewPending)
-    assert any(site.component_id == "summarise_pages" and site.user_term == PROMPT_SHIELD_USER_TERM for site in result.sites)
+    assert all(site.user_term != PROMPT_SHIELD_USER_TERM for site in result.sites)
 
 
-def test_gate_routed_web_scrape_through_prompt_shield_needs_no_recommendation() -> None:
+def test_gate_routed_web_scrape_through_prompt_shield_emits_no_warning() -> None:
     state = _state_with_web_scrape_gate_shield_to_llm()
 
-    error = prompt_shield_recommendation_contract_error(state)
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
 
-    assert error is None
+    assert warning_pairs == ()
 
 
 def test_field_mapper_projection_without_web_scrape_raw_fields_does_not_create_cleanup_review_site() -> None:
@@ -883,6 +897,39 @@ def _shield_review_llm_options(*, model: str, prompt_template: str) -> dict[str,
     }
 
 
+def _unshielded_review_llm_options(*, model: str, prompt_template: str) -> dict[str, Any]:
+    return {
+        "provider": "openrouter",
+        "model": model,
+        "prompt_template": prompt_template,
+        "temperature": 0,
+        INTERPRETATION_REQUIREMENTS_KEY: [
+            {
+                "id": "prompt_template_review:identify_colours",
+                "kind": "llm_prompt_template",
+                "user_term": "llm_prompt_template:identify_colours",
+                "status": "resolved",
+                "draft": prompt_template,
+                "event_id": "prompt-resolve-1",
+                "accepted_value": prompt_template,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(prompt_template),
+            },
+            {
+                "id": "model_choice_review:identify_colours",
+                "kind": "llm_model_choice",
+                "user_term": "llm_model_choice:identify_colours",
+                "status": "resolved",
+                "draft": model,
+                "event_id": "model-resolve-1",
+                "accepted_value": model,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(model),
+            },
+        ],
+    }
+
+
 def test_prompt_shield_hash_is_stable_across_model_swap() -> None:
     """Regression: changing the LLM model after the shield review must not drift the hash.
 
@@ -975,6 +1022,23 @@ def test_prompt_shield_hash_survives_model_swap() -> None:
     assert pre_swap_hash == post_swap_hash
 
 
+def test_prompt_shield_warning_is_advisory_not_blocking() -> None:
+    state = _state_with_web_scrape_llm_pair(
+        _unshielded_review_llm_options(
+            model="anthropic/claude-3.7-sonnet", prompt_template="Identify colours: {{ row.url }} {{ row.content }}"
+        )
+    )
+
+    validation = state.validate()
+    warning_text = " ".join(w.message for w in validation.warnings)
+
+    assert "prompt_injection_shield_recommendation" in warning_text
+    assert "continuing without it is allowed" in warning_text
+
+    materialized = materialize_state_for_execution(state)
+    assert isinstance(materialized, CompositionState)
+
+
 def test_raw_html_cleanup_hash_includes_upstream_raw_field_set() -> None:
     """Adding a new raw field to upstream web_scrape re-stages cleanup review.
 
@@ -1031,3 +1095,91 @@ def test_pipeline_decision_artifact_hash_rejects_unknown_user_term() -> None:
 
     with pytest.raises(ValueError, match="unknown pipeline_decision user_term"):
         pipeline_decision_artifact_hash(state.nodes[0], state.nodes, user_term="some_new_review_we_havent_implemented")
+
+
+# --------------------------------------------------------------------------- #
+# vague_term_wiring_count — the single resolvability contract shared by the
+# tool boundary, the staging repair loop, and (mirrored) the resolver.
+# --------------------------------------------------------------------------- #
+
+
+def _vague_requirement(*, term: str = "cool", status: str = "pending") -> dict[str, object]:
+    return {
+        "id": term,
+        "kind": InterpretationKind.VAGUE_TERM.value,
+        "user_term": term,
+        "status": status,
+        "draft": "visually appealing",
+        "event_id": None,
+        "accepted_value": None,
+        "resolved_prompt_template_hash": None,
+    }
+
+
+def test_wiring_count_structured_with_ref_is_resolvable() -> None:
+    options = {
+        "prompt_template": "Rate pending: {{ row.text }}",
+        PROMPT_TEMPLATE_PARTS_KEY: [
+            {"kind": "text", "text": "Rate "},
+            {"kind": "interpretation_ref", "requirement_id": "cool"},
+            {"kind": "text", "text": ": {{ row.text }}"},
+        ],
+        INTERPRETATION_REQUIREMENTS_KEY: [_vague_requirement()],
+    }
+    assert vague_term_wiring_count(options, user_term="cool") == 1
+
+
+def test_wiring_count_structured_requirement_without_parts_is_unresolvable() -> None:
+    """The demo-blocking shape: a requirement with no prompt_template_parts."""
+    options = {
+        "prompt_template": "Rate pending: {{ row.text }}",
+        INTERPRETATION_REQUIREMENTS_KEY: [_vague_requirement()],
+    }
+    assert vague_term_wiring_count(options, user_term="cool") == 0
+
+
+def test_wiring_count_structured_parts_without_ref_is_unresolvable() -> None:
+    """Parts present but no interpretation_ref → the resolver would silent-drop."""
+    options = {
+        "prompt_template": "Rate pending: {{ row.text }}",
+        PROMPT_TEMPLATE_PARTS_KEY: [{"kind": "text", "text": "Rate this row"}],
+        INTERPRETATION_REQUIREMENTS_KEY: [_vague_requirement()],
+    }
+    assert vague_term_wiring_count(options, user_term="cool") == 0
+
+
+def test_wiring_count_legacy_placeholder_coexists_with_autostaged_requirements() -> None:
+    """A legacy {{interpretation:cool}} placeholder is resolvable even when the
+    node carries auto-staged prompt-template / model-choice requirements (which
+    are NOT vague_term). This is the production hello-world shape.
+    """
+    options = {
+        "prompt_template": "Rate how {{interpretation:cool}} this row is.",
+        INTERPRETATION_REQUIREMENTS_KEY: [
+            {
+                "id": "prompt_template_review:rate_node",
+                "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                "user_term": "llm_prompt_template:rate_node",
+                "status": "pending",
+            },
+            {
+                "id": "model_choice_review:rate_node",
+                "kind": InterpretationKind.LLM_MODEL_CHOICE.value,
+                "user_term": "llm_model_choice:rate_node",
+                "status": "pending",
+            },
+        ],
+    }
+    assert vague_term_wiring_count(options, user_term="cool") == 1
+
+
+def test_wiring_count_no_wiring_at_all_is_unresolvable() -> None:
+    options = {"prompt_template": "Rate how this row is."}
+    assert vague_term_wiring_count(options, user_term="cool") == 0
+
+
+def test_wiring_count_wrong_term_is_unresolvable() -> None:
+    options = {
+        "prompt_template": "Rate how {{interpretation:important}} this row is.",
+    }
+    assert vague_term_wiring_count(options, user_term="cool") == 0

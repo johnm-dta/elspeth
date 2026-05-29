@@ -310,7 +310,19 @@ warn_unreachable = true
 show_error_codes = true
 plugins = ["pydantic.mypy"]
 warn_unused_ignores = true
-exclude = "elspeth-lints/src/elspeth_lints/rules/.*/fixtures/"
+# exclude is a list of regexes (mypy joins them with `|`).
+#   - rules/.../fixtures/: deliberately malformed lint-rule test fixtures.
+#   - examples/: standalone runnable demo scripts, not a type-checked surface.
+#     Some share module names across dirs (e.g. seed_collection.py), which
+#     collides hard under `mypy .` (exit 2, "errors prevented further
+#     checking") since they aren't packages. Excluding them stops that crash.
+# NOTE: the gated surface is `src/ elspeth-lints/src/` (see CI) and is
+# strict-clean. A bare `mypy .` still reports findings in tests/ and scripts/,
+# which are deliberately outside the gate and not held to the strict bar.
+exclude = [
+    "elspeth-lints/src/elspeth_lints/rules/.*/fixtures/",
+    "^examples/",
+]
 
 [[tool.mypy.overrides]]
 # Third-party modules without inline type information (no py.typed marker

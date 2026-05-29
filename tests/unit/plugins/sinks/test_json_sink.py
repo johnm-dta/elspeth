@@ -457,7 +457,15 @@ class TestJSONSink:
 
 
 class TestJSONSinkNonFiniteRejection:
-    """Non-finite floats must be rejected at the JSON serialization boundary."""
+    """Non-finite/non-serializable values are per-row Tier-2 faults.
+
+    A single row's value that cannot be encoded as standard JSON (NaN/Infinity, or
+    a non-serializable object) must NOT be emitted as non-standard JSON, and must NOT
+    abort the whole batch. With on_write_failure configured the offending row is
+    diverted (recorded + routed) and the remaining rows are written; with no
+    on_write_failure configured the sink fails closed (the framework refuses to guess
+    the operator's discard-vs-preserve intent).
+    """
 
     @pytest.fixture
     def ctx(self) -> PluginContext:
@@ -466,27 +474,53 @@ class TestJSONSinkNonFiniteRejection:
         return make_context(landscape=factory.plugin_audit_writer())
 
     @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "neg_inf"])
-    def test_jsonl_rejects_non_finite_float(self, tmp_path: Path, ctx: PluginContext, bad_value: float) -> None:
-        """JSONL format must reject NaN/Infinity instead of emitting non-standard JSON."""
+    def test_jsonl_non_finite_float_diverts_row_not_batch(self, tmp_path: Path, ctx: PluginContext, bad_value: float) -> None:
+        """JSONL: the non-finite row is diverted; the surrounding good rows are written."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.jsonl"
         sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA}))
 
-        with pytest.raises(ValueError, match="Out of range float values"):
-            sink.write([{"id": 1, "value": bad_value}], ctx)
+        result = sink.write([{"id": 1, "value": 1.0}, {"id": 2, "value": bad_value}, {"id": 3, "value": 3.0}], ctx)
 
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        written = [json.loads(line) for line in output_file.read_text().splitlines() if line.strip()]
+        assert {r["id"] for r in written} == {1, 3}
+        # The non-standard value never reached the file.
+        assert "NaN" not in output_file.read_text() and "Infinity" not in output_file.read_text()
         sink.close()
 
     @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "neg_inf"])
-    def test_json_array_rejects_non_finite_float(self, tmp_path: Path, ctx: PluginContext, bad_value: float) -> None:
-        """JSON array format must reject NaN/Infinity instead of emitting non-standard JSON."""
+    def test_json_array_non_finite_float_diverts_row_not_batch(self, tmp_path: Path, ctx: PluginContext, bad_value: float) -> None:
+        """JSON array: the non-finite row is diverted; the surrounding good rows are written."""
         from elspeth.plugins.sinks.json_sink import JSONSink
 
         output_file = tmp_path / "output.json"
         sink = inject_write_failure(JSONSink({"path": str(output_file), "format": "json", "schema": DYNAMIC_SCHEMA}))
 
-        with pytest.raises(ValueError, match="Out of range float values"):
-            sink.write([{"id": 1, "value": bad_value}], ctx)
+        result = sink.write([{"id": 1, "value": 1.0}, {"id": 2, "value": bad_value}, {"id": 3, "value": 3.0}], ctx)
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        written = json.loads(output_file.read_text())
+        assert {r["id"] for r in written} == {1, 3}
+        sink.close()
+
+    def test_non_finite_without_on_write_failure_fails_closed(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """With no on_write_failure configured, a per-row write fault fails closed.
+
+        The framework will not silently pick discard-vs-preserve, so _divert_row raises
+        FrameworkBugError directing the operator to configure on_write_failure.
+        """
+        from elspeth.contracts.tier_registry import FrameworkBugError
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.jsonl"
+        sink = JSONSink({"path": str(output_file), "format": "jsonl", "schema": DYNAMIC_SCHEMA})
+        assert sink._on_write_failure is None
+
+        with pytest.raises(FrameworkBugError, match="on_write_failure"):
+            sink.write([{"id": 1, "value": float("nan")}], ctx)
 
         sink.close()

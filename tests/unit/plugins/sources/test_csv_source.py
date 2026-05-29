@@ -367,6 +367,82 @@ class TestCSVSourceQuarantineYielding:
         assert results[0].row == {"id": "1", "name": "alice"}
         assert results[1].row == {"id": "3", "name": "carol"}
 
+    def test_header_normalization_collision_quarantined_not_crash(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Two EXTERNAL headers normalizing to the same name is Tier-3 garbage, not a crash.
+
+        ``"Case Study"`` and ``"case-study"`` both normalize to ``case_study``. A
+        collision means no rows are parseable, so the correct outcome mirrors the
+        sibling csv.Error header path: record a parse-level validation error and yield
+        a single header-level quarantined row — never an uncaught ValueError that
+        aborts the whole run on bad external header data.
+        """
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_text("Case Study,case-study\n1,2\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 1
+        quarantined = results[0]
+        assert quarantined.is_quarantined is True
+        assert quarantined.quarantine_destination == "quarantine"
+        assert quarantined.quarantine_error is not None
+        assert "collision" in quarantined.quarantine_error.lower()
+
+    def test_header_normalization_collision_discard_mode_yields_nothing(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Header collision under discard mode records the error and yields nothing (no crash)."""
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_text("Case Study,case-study\n1,2\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "discard",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert results == []
+
+    def test_field_mapping_config_collision_still_crashes(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A field_mapping CONFIG bug (Tier-1, our code) must STILL crash — not be quarantined.
+
+        ``field_mapping`` is operator/system configuration, not external data. A key that
+        does not exist in the source headers is a configuration error that ELSPETH owns,
+        so it must surface as an uncaught error (crash loud), NOT be silently swallowed as
+        if it were bad external header data. This guards against over-broadening the
+        Tier-3 header-quarantine catch to also absorb Tier-1 config faults.
+        """
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_text("id,name\n1,alice\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+                "field_mapping": {"nonexistent_column": "renamed"},
+            }
+        )
+
+        with pytest.raises(ValueError, match="field_mapping keys not found"):
+            list(source.load(ctx))
+
     def test_csv_error_handling_defensive(self, tmp_path: Path, ctx: PluginContext) -> None:
         """CSV parsing with manual iteration handles csv.Error defensively.
 
@@ -886,8 +962,13 @@ class TestCSVSourceFieldNormalization:
         assert rows[0].row == {"id": "1", "name": "alice", "amount": "100"}
         assert rows[1].row == {"id": "2", "name": "bob", "amount": "200"}
 
-    def test_collision_raises_at_load(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """Header collision detected at load() start."""
+    def test_collision_quarantined_at_load(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """External header collision is Tier-3 bad data: quarantined at load(), not crashed.
+
+        ``"User ID"`` and ``"user-id"`` both normalize to ``user_id``. The collision is in
+        the source's own header bytes (Tier 3), so it is recorded and quarantined per
+        on_validation_failure — it does not raise an uncaught ValueError that aborts the run.
+        """
         from elspeth.plugins.sources.csv_source import CSVSource
 
         csv_file = tmp_path / "collision.csv"
@@ -901,11 +982,19 @@ class TestCSVSourceFieldNormalization:
             }
         )
 
-        with pytest.raises(ValueError, match="collision"):
-            list(source.load(ctx))
+        results = list(source.load(ctx))
 
-    def test_duplicate_raw_headers_raise_at_load(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """Duplicate raw headers that normalize to the same value raise collision error."""
+        assert len(results) == 1
+        assert results[0].is_quarantined is True
+        assert results[0].quarantine_error is not None
+        assert "collision" in results[0].quarantine_error.lower()
+
+    def test_duplicate_raw_headers_quarantined_at_load(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Duplicate raw headers that normalize to the same value are Tier-3 bad data: quarantined.
+
+        ``"id"`` and ``"ID"`` both normalize to ``id``. Like any malformed external header,
+        this is recorded and quarantined, not raised as an uncaught crash.
+        """
         from elspeth.plugins.sources.csv_source import CSVSource
 
         csv_file = tmp_path / "duplicate_raw_headers.csv"
@@ -919,8 +1008,12 @@ class TestCSVSourceFieldNormalization:
             }
         )
 
-        with pytest.raises(ValueError, match="collision"):
-            list(source.load(ctx))
+        results = list(source.load(ctx))
+
+        assert len(results) == 1
+        assert results[0].is_quarantined is True
+        assert results[0].quarantine_error is not None
+        assert "collision" in results[0].quarantine_error.lower()
 
     def test_field_resolution_stored_for_audit(self, tmp_path: Path, ctx: PluginContext) -> None:
         """field_resolution is stored on source for audit trail."""

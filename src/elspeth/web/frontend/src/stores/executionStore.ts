@@ -28,10 +28,12 @@ import type {
   ExecutionFanoutAck,
   ExecutionFanoutGuard,
 } from "@/types/index";
+import type { InterpretationEvent } from "@/types/interpretation";
 import * as api from "@/api/client";
 import { connectToRun, type WebSocketConnection } from "@/api/websocket";
 import { useAuthStore } from "./authStore";
 import { useBlobStore } from "./blobStore";
+import { useInterpretationEventsStore } from "./interpretationEventsStore";
 import { useSessionStore } from "./sessionStore";
 
 
@@ -97,6 +99,43 @@ function shouldApplyValidationResult(
     return false;
   }
   return true;
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled interpretation kind: ${String(value)}`);
+}
+
+function describePendingInterpretation(event: InterpretationEvent): string {
+  const nodeLabel = event.affected_node_id ?? "this transform";
+  switch (event.kind) {
+    case "invented_source":
+      return `Resolve invented source data for ${nodeLabel} before running.`;
+    case "llm_prompt_template":
+      return `Resolve the LLM prompt template for ${nodeLabel} before running.`;
+    case "pipeline_decision":
+      return `Resolve the pipeline decision for ${nodeLabel} before running.`;
+    case "llm_model_choice":
+      return `Set the LLM model choice for ${nodeLabel} before running.`;
+    case "vague_term":
+    case null:
+      return `Resolve the pending interpretation for ${nodeLabel} before running.`;
+    default: {
+      return assertNever(event.kind);
+    }
+  }
+}
+
+function getRunBlockError(sessionId: string): string | null {
+  const interpretationState = useInterpretationEventsStore.getState();
+  if (interpretationState.optedOutBySession[sessionId] === true) {
+    return null;
+  }
+  const pending = interpretationState.pendingBySession[sessionId];
+  if (!pending || Object.keys(pending).length === 0) {
+    return null;
+  }
+  const firstPending = Object.values(pending)[0];
+  return describePendingInterpretation(firstPending);
 }
 
 /**
@@ -319,6 +358,11 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
   },
 
   async execute(sessionId: string, fanoutAck?: ExecutionFanoutAck) {
+    const blockedByInterpretation = getRunBlockError(sessionId);
+    if (blockedByInterpretation !== null) {
+      set({ isExecuting: false, error: blockedByInterpretation });
+      return null;
+    }
     set({ isExecuting: true, error: null });
     try {
       const { run_id } =

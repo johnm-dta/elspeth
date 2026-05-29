@@ -271,7 +271,14 @@ def test_get_blob_content_redacts_tool_result_envelope_content() -> None:
 
     response = {
         "success": True,
-        "validation": {"is_valid": True, "errors": []},
+        "validation": {
+            "is_valid": True,
+            "errors": [],
+            "warnings": [],
+            "suggestions": [],
+            "semantic_contracts": [],
+            "graph_repair_suggestions": [],
+        },
         "affected_nodes": [],
         "version": 2,
         "data": {
@@ -295,7 +302,14 @@ def test_get_blob_content_redacts_tool_result_failure_envelope() -> None:
 
     response = {
         "success": False,
-        "validation": {"is_valid": False, "errors": []},
+        "validation": {
+            "is_valid": False,
+            "errors": [],
+            "warnings": [],
+            "suggestions": [],
+            "semantic_contracts": [],
+            "graph_repair_suggestions": [],
+        },
         "affected_nodes": [],
         "version": 2,
         "data": {"error": "Blob 'blob-1' not found."},
@@ -304,6 +318,112 @@ def test_get_blob_content_redacts_tool_result_failure_envelope() -> None:
     result = redact_tool_call_response("get_blob_content", response, telemetry=NoopRedactionTelemetry())
 
     assert result == response
+
+
+def test_get_blob_content_populated_validation_envelope_redacts_only_repair_arguments() -> None:
+    """A fully-populated validation envelope round-trips with only ``arguments`` redacted.
+
+    Mechanically pins that ``GetBlobContentValidationModel`` (and its nested
+    shadow models) matches the real ``ToolResult.to_dict()`` validation-envelope
+    shape — every key produced by ``_semantic_contracts_payload`` and
+    ``_graph_repair_suggestions`` in tools/_common.py must be accepted by the
+    ``extra="forbid"`` shadow models. The other fixtures use empty lists and
+    never exercise a populated ``semantic_contracts`` / ``graph_repair_suggestions``
+    element, so a key-name drift between the builder and the shadow model would
+    pass them silently; this test fails loudly on such drift.
+
+    It also confirms the ONE Sensitive leaf — the heterogeneous repair-tool-call
+    ``arguments`` mapping — is summarized to the structural sketch while every
+    surrounding structural scalar (component, message, severity, edge-contract
+    fields, repair codes, affected-consumer ids) passes through verbatim. The
+    non-sensitive validation metadata MUST survive redaction; only ``arguments``
+    is collapsed.
+    """
+    response = {
+        "success": True,
+        "validation": {
+            "is_valid": False,
+            "errors": [
+                {"component": "connection:shared", "message": "Duplicate consumer for connection shared", "severity": "high"},
+            ],
+            "warnings": [
+                {"component": "node:t1", "message": "Observed schema in use", "severity": "low"},
+            ],
+            "suggestions": [
+                {"component": "graph", "message": "Consider a fork gate", "severity": "medium"},
+            ],
+            "semantic_contracts": [
+                {
+                    "from_id": "source",
+                    "to_id": "t1",
+                    "consumer_plugin": "passthrough",
+                    "producer_plugin": "csv",
+                    "producer_field": "url",
+                    "consumer_field": "url",
+                    "outcome": "satisfied",
+                    "requirement_code": "REQ-001",
+                },
+                {
+                    "from_id": "source",
+                    "to_id": "t2",
+                    "consumer_plugin": "llm",
+                    "producer_plugin": None,
+                    "producer_field": "rating",
+                    "consumer_field": "rating",
+                    "outcome": "unsatisfied",
+                    "requirement_code": "REQ-002",
+                },
+            ],
+            "graph_repair_suggestions": [
+                {
+                    "code": "duplicate_consumer_connection",
+                    "connection": "shared",
+                    "strategy": "insert_fork_gate",
+                    "reason": "Give each consumer a unique branch input.",
+                    "affected_consumers": [
+                        {"id": "t1", "current_input": "shared", "new_input": "shared_to_t1"},
+                    ],
+                    "tool_sequence": [
+                        {"tool": "upsert_node", "arguments": {"id": "t1", "input": "shared_to_t1", "node_type": "transform"}},
+                        {"tool": "preview_pipeline", "arguments": {}},
+                    ],
+                },
+            ],
+        },
+        "affected_nodes": ["t1"],
+        "version": 3,
+        "data": {
+            "blob_id": "blob-1",
+            "filename": "input.csv",
+            "mime_type": "text/csv",
+            "content": "secret,row\n1,2\n",
+            "truncated": False,
+            "size_bytes": 15,
+        },
+    }
+
+    result = redact_tool_call_response("get_blob_content", response, telemetry=NoopRedactionTelemetry())
+
+    # Blob bytes redacted (existing behaviour).
+    assert result["data"]["content"] == "<blob-content:15-bytes>"
+
+    # The single Sensitive repair-arguments leaf is summarized to sorted keys.
+    repair = result["validation"]["graph_repair_suggestions"][0]
+    assert repair["tool_sequence"][0]["arguments"] == "<repair-args:id,input,node_type>"
+    assert repair["tool_sequence"][1]["arguments"] == "<repair-args:>"
+
+    # All surrounding non-sensitive validation metadata survives verbatim.
+    assert result["validation"]["is_valid"] is False
+    assert result["validation"]["errors"][0]["message"] == "Duplicate consumer for connection shared"
+    assert result["validation"]["semantic_contracts"][1]["producer_plugin"] is None
+    assert result["validation"]["semantic_contracts"][0]["requirement_code"] == "REQ-001"
+    assert repair["affected_consumers"][0]["new_input"] == "shared_to_t1"
+    assert repair["code"] == "duplicate_consumer_connection"
+
+    # The repair-argument VALUES never reach the redacted output (only the
+    # affected_consumers descriptor — a non-sensitive structural field — may
+    # legitimately echo the new input name).
+    assert "'input': 'shared_to_t1'" not in str(result)
 
 
 # ---------------------------------------------------------------------------

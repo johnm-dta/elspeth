@@ -39,7 +39,7 @@ from tests.property.web.composer.strategies import (
     st_tool_call,
 )
 
-import elspeth.web.composer.service as composer_service_module
+import elspeth.web.composer.tool_batch as composer_tool_batch_module
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.protocol import ComposerConvergenceError
@@ -356,7 +356,7 @@ async def _drive_trace_async(
         def _cancel_at_tool_boundary(*_args: Any, **_kwargs: Any) -> ToolResult:
             raise asyncio.CancelledError()
 
-        with patch.object(composer_service_module, "execute_tool", _cancel_at_tool_boundary), pytest.raises(asyncio.CancelledError):
+        with patch.object(composer_tool_batch_module, "execute_tool", _cancel_at_tool_boundary), pytest.raises(asyncio.CancelledError):
             await _run_one_turn(harness, llm)
         return True
 
@@ -662,7 +662,7 @@ def _drive_unknown_response_key_trace(
             _make_llm_response(content="Done."),
         )
     )
-    with patch.object(composer_service_module, "execute_tool", _return_stray_result):
+    with patch.object(composer_tool_batch_module, "execute_tool", _return_stray_result):
         asyncio.run(_run_one_turn(harness, llm))
 
 

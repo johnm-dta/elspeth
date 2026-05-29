@@ -157,7 +157,9 @@ export async function parseResponse<T>(response: Response): Promise<T> {
           ? body.error_type
           : typeof nestedDetail?.error_type === "string"
             ? nestedDetail.error_type
-            : undefined;
+            : typeof nestedDetail?.code === "string"
+              ? nestedDetail.code
+              : undefined;
 
       if (typeof nestedDetail?.detail === "string") {
         detail = nestedDetail.detail;

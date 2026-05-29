@@ -113,7 +113,7 @@ class CSVSink(BaseSink):
     name = "csv"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5011995a6ff8fd24"
+    source_file_hash: str | None = "sha256:08dc7bc1f1c7baa7"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -321,16 +321,11 @@ class CSVSink(BaseSink):
             self._fieldnames = data_fields
 
             # Stage rows in memory — if any row is invalid, we fail here
-            # BEFORE the file is created/truncated.
-            staging_buffer = io.StringIO()
-            staging_writer = csv.DictWriter(
-                staging_buffer,
-                fieldnames=data_fields,
-                delimiter=self._delimiter,
-            )
-            for row in rows:
-                staging_writer.writerow(row)
-            staged_content = staging_buffer.getvalue()
+            # BEFORE the file is created/truncated. A row that can't be staged
+            # is a per-row Tier-2 data fault (one row's value/shape, not a batch
+            # failure): it is diverted (recorded + routed per on_write_failure)
+            # and the remaining rows are written, rather than aborting the batch.
+            staged_content = self._stage_rows_per_row(data_fields, rows)
 
             # Staging succeeded — now safe to open (truncate) and write.
             self._open_file_write_mode(data_fields, display_fields)
@@ -387,18 +382,14 @@ class CSVSink(BaseSink):
             # extra fields rejected by DictWriter), NO rows are written to disk.
             # Without this, row N failing after rows 0..N-1 are written causes
             # audit divergence -- CSV has rows the Landscape marks as FAILED.
-            staging_buffer = io.StringIO()
+            #
+            # A row that can't be staged is a per-row Tier-2 data fault (one
+            # row's value/shape, not a batch failure): it is diverted (recorded +
+            # routed per on_write_failure) and the remaining rows are written.
             fieldnames = self._fieldnames
             if fieldnames is None:
                 raise RuntimeError("write() called before _fieldnames set by _write_header()")
-            staging_writer = csv.DictWriter(
-                staging_buffer,
-                fieldnames=fieldnames,
-                delimiter=self._delimiter,
-            )
-            for row in rows:
-                staging_writer.writerow(row)
-            staged_content = staging_buffer.getvalue()
+            staged_content = self._stage_rows_per_row(fieldnames, rows)
 
             # Track write position before writing for incremental hashing.
             # Use file.tell() not stat().st_size — stat() has a TOCTOU race where
@@ -439,8 +430,56 @@ class CSVSink(BaseSink):
                 path=str(self._path),
                 content_hash=content_hash,
                 size_bytes=size_bytes,
-            )
+            ),
+            diversions=self._get_diversions(),
         )
+
+    def _stage_rows_per_row(self, fieldnames: Sequence[str], rows: list[dict[str, Any]]) -> str:
+        """Stage rows for write, diverting any row that cannot be staged.
+
+        Each row is trial-encoded INDIVIDUALLY into a throwaway in-memory buffer
+        so a row that csv.DictWriter cannot serialize never leaves partial bytes
+        in the staging buffer handed to the file. A row that fails staging with a
+        CSV serialization error — a ``ValueError`` from DictWriter's
+        ``extrasaction='raise'`` default (a field outside the established column
+        lock), or a ``csv.Error`` from the underlying writer — is a per-row
+        Tier-2 data fault attributable to that single row. Such a row is diverted
+        (recorded + routed per on_write_failure) and the surrounding good rows
+        are still staged, rather than aborting the batch.
+
+        The catch is deliberately narrow, mirroring the json_sink reference: only
+        serialization-shaped errors are diverted. A value whose ``str()`` itself
+        raises an arbitrary exception is a broken object (an upstream bug), not
+        operation-unsafe data — it propagates and crashes (Plugin Ownership).
+
+        The trial-encode targets an in-memory StringIO only — it touches no file,
+        no shared state, and no external system. (Batch-integrity failures — file
+        open/permission, disk-full on the real write, the rollback path — happen
+        in write() AFTER this method returns and remain raises.)
+
+        Args:
+            fieldnames: The locked column names for the DictWriter.
+            rows: The original input batch. ``row_index`` in each diversion is the
+                index into THIS list, so the executor can correlate to tokens.
+
+        Returns:
+            The staged CSV text for the rows that encoded successfully (no header).
+        """
+        staging_buffer = io.StringIO()
+        for row_index, row in enumerate(rows):
+            row_buffer = io.StringIO()
+            row_writer = csv.DictWriter(
+                row_buffer,
+                fieldnames=fieldnames,
+                delimiter=self._delimiter,
+            )
+            try:
+                row_writer.writerow(row)
+            except (ValueError, csv.Error) as exc:
+                self._divert_row(row, row_index=row_index, reason=f"CSV serialization failed: {exc}")
+                continue
+            staging_buffer.write(row_buffer.getvalue())
+        return staging_buffer.getvalue()
 
     def _open_file(self, rows: list[dict[str, Any]]) -> None:
         """Open file for append mode.

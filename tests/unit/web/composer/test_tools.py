@@ -7670,7 +7670,7 @@ class TestGetPluginAssistance:
         assert "If an LLM routes directly to a JSON sink whose name sounds like cleanup" in hints
         assert "the LLM passes through raw scrape fields until this field_mapper whitelists them" in hints
         assert "route the mapper directly to the existing sink" in hints
-        assert "Do not remove the cleanup mapper or output" in hints
+        assert "do not remove the cleanup mapper or output" in hints
         assert "before raw scraped fields exist cannot satisfy scraped-content cleanup" in hints
         assert "preserve requested enrichment, extraction, scoring, or LLM response fields" in hints
         assert "stage a pipeline_decision interpretation requirement" in hints
@@ -8238,6 +8238,35 @@ class TestPrevalidatePluginOptions:
         assert "model" in result
         assert "api_key" in result
         assert "template" in result
+
+    def test_llm_openrouter_invalid_model_surfaces_list_models_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Composer prevalidation must reject unknown OpenRouter models with a repair hint.
+
+        Catalog membership is now enforced via the value-source walker
+        (check_config_value_sources), so patch the catalog at the walker's lookup
+        site rather than the (removed) construction-time validator's.
+        """
+        monkeypatch.setattr(
+            "elspeth.engine.orchestrator.preflight.get_catalog_values",
+            lambda catalog_id: frozenset({"openai/gpt-4o"}),
+        )
+
+        result = _prevalidate_plugin_options(
+            "transform",
+            "llm",
+            {
+                "provider": "openrouter",
+                "api_key": "sk-test-key",
+                "model": "anthropic/claude-3-opus",
+                "prompt_template": "Analyze: {{ row.text }}",
+                "schema": {"mode": "observed"},
+                "required_input_fields": [],
+            },
+        )
+        assert result is not None
+        assert result.startswith("Invalid options for transform 'llm':")
+        assert "list_models" in result
+        assert "anthropic/claude-3-opus" in result
 
     def test_unreachable_plugin_type_raises_assertion(self) -> None:
         """Passing an invalid plugin_type triggers the unreachable-branch assertion (not silent bypass)."""

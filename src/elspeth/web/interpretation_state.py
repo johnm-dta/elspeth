@@ -31,11 +31,12 @@ PENDING_INTERPRETATION_AUTHORING_TEXT = "pending interpretation"
 RAW_HTML_CLEANUP_USER_TERM: Final[str] = "drop_raw_html_fields"
 RAW_HTML_CLEANUP_REVIEW_DRAFT: Final[str] = "Drop the scraped raw HTML and fingerprint fields before saving the JSON output."
 PROMPT_SHIELD_USER_TERM: Final[str] = "prompt_injection_shield_recommendation"
-PROMPT_SHIELD_REVIEW_DRAFT: Final[str] = (
+PROMPT_SHIELD_WARNING_DRAFT: Final[str] = (
     "Recommend inserting azure_prompt_shield (or the deployment equivalent prompt-injection shield) "
     "between the external-content fetch step and this LLM. The current draft routes "
     "internet-controlled text directly into the LLM without that shield, which is a prompt-injection "
-    "exposure on untrusted remote content."
+    "exposure on untrusted remote content, but continuing without it is allowed. "
+    "[user_term: prompt_injection_shield_recommendation]"
 )
 
 _RAW_HTML_CLEANUP_DRAFT_MARKERS: Final[tuple[str, ...]] = ("raw html", "fingerprint")
@@ -201,26 +202,25 @@ def raw_html_cleanup_review_contract_error(state: CompositionState) -> str | Non
 
 
 def composition_review_contract_error(state: CompositionState) -> str | None:
-    """Return the first state-level interpretation-review contract error."""
+    """Return the first state-level interpretation-review *contract* error.
 
-    raw_cleanup_error = raw_html_cleanup_review_contract_error(state)
-    if raw_cleanup_error is not None:
-        return raw_cleanup_error
-    return prompt_shield_recommendation_contract_error(state)
-
-
-def prompt_shield_recommendation_contract_error(state: CompositionState) -> str | None:
-    """Return a composer-facing error when an LLM consumes untrusted remote content unreviewed.
-
-    An LLM node that ingests output from an untrusted-remote-content producer
-    (currently ``web_scrape``) without an authorized prompt-injection shield
-    between them must carry a pending ``pipeline_decision`` review with
-    ``user_term`` :data:`PROMPT_SHIELD_USER_TERM`. The review is reviewable
-    prose recommending an actual shield — it is NOT a topology change. This
-    contract is the server-side analogue of the raw-HTML cleanup contract.
+    Only blocking contracts are aggregated here. The prompt-injection-shield
+    recommendation is advisory, not blocking (see
+    :func:`prompt_shield_recommendation_warning_pairs` and filigree
+    elspeth-abb2cb0931): shield availability is not yet testable, so an
+    unshielded LLM-over-untrusted-content composition surfaces a warning rather
+    than failing the contract. Composition is therefore gated solely on the
+    raw-HTML-cleanup review contract here.
     """
 
+    return raw_html_cleanup_review_contract_error(state)
+
+
+def prompt_shield_recommendation_warning_pairs(state: CompositionState) -> tuple[tuple[str, str], ...]:
+    """Return advisory warnings for unshielded untrusted content entering an LLM."""
+
     producer_by_output_stream = _producer_by_output_stream(state.nodes)
+    warnings: list[tuple[str, str]] = []
     for node in state.nodes:
         if node.plugin != "llm":
             continue
@@ -228,21 +228,17 @@ def prompt_shield_recommendation_contract_error(state: CompositionState) -> str 
             continue
         if _llm_has_shield_recommendation(node):
             continue
-        return (
-            f"LLM node {node.id!r} consumes externally-fetched content from a web_scrape "
-            "upstream without an authorized prompt-injection shield between them. Stage a "
-            "pending pipeline_decision interpretation_requirements entry on this LLM node "
-            f"with user_term {PROMPT_SHIELD_USER_TERM!r} and a draft recommending "
-            "azure_prompt_shield (or the deployment equivalent) between the external-content "
-            "step and the LLM. interpretation_requirements is a sibling of prompt_template "
-            "in the llm options object. Do NOT add azure_prompt_shield or azure_content_safety "
-            "to the graph for this requirement — the recommendation is a reviewable record, "
-            "not a topology change. After the next successful set_pipeline, call "
-            "request_interpretation_review with kind='pipeline_decision', "
-            f"affected_node_id={node.id!r}, user_term={PROMPT_SHIELD_USER_TERM!r}, and an "
-            "llm_draft that mentions azure_prompt_shield or 'prompt injection'."
+        warnings.append(
+            (
+                f"node:{node.id}",
+                (
+                    f"LLM node {node.id!r} consumes externally-fetched content from a web_scrape upstream "
+                    "without an authorized prompt-injection shield between them. "
+                    f"{PROMPT_SHIELD_WARNING_DRAFT}"
+                ),
+            )
         )
-    return None
+    return tuple(warnings)
 
 
 def _producer_by_output_stream(nodes: Sequence[NodeSpec]) -> dict[str, NodeSpec]:
@@ -303,27 +299,6 @@ def _llm_has_shield_recommendation(node: NodeSpec) -> bool:
         if requirement["user_term"].strip() == PROMPT_SHIELD_USER_TERM:
             return True
     return False
-
-
-def _missing_prompt_shield_recommendation_review_sites(
-    node: NodeSpec,
-    *,
-    llm_ids_consuming_untrusted: frozenset[str],
-) -> tuple[InterpretationReviewSite, ...]:
-    """Return the required review site for an LLM that needs the shield recommendation."""
-
-    if node.id not in llm_ids_consuming_untrusted:
-        return ()
-    if _llm_has_shield_recommendation(node):
-        return ()
-    return (
-        InterpretationReviewSite(
-            component_id=node.id,
-            component_type="transform",
-            user_term=PROMPT_SHIELD_USER_TERM,
-            kind=InterpretationKind.PIPELINE_DECISION,
-        ),
-    )
 
 
 def _raw_html_cleanup_requirement_contract_error(node: NodeSpec) -> str | None:
@@ -395,15 +370,10 @@ def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewS
     if state.source is not None:
         sites.extend(_pending_source_sites(state.source))
     web_scrape_raw_fields = _web_scrape_raw_fields(state.nodes)
-    producer_by_output_stream = _producer_by_output_stream(state.nodes)
-    llm_ids_consuming_untrusted = frozenset(
-        node.id for node in state.nodes if _llm_consumes_untrusted_remote_content(node, producer_by_output_stream)
-    )
     for node in state.nodes:
         node_sites = [*_pending_node_sites(node), *_legacy_placeholder_sites(node)]
         sites.extend(node_sites)
         sites.extend(_missing_raw_html_cleanup_review_sites(node, web_scrape_raw_fields=web_scrape_raw_fields))
-        sites.extend(_missing_prompt_shield_recommendation_review_sites(node, llm_ids_consuming_untrusted=llm_ids_consuming_untrusted))
         if not any(site.kind is InterpretationKind.LLM_PROMPT_TEMPLATE for site in node_sites):
             sites.extend(_missing_prompt_template_review_sites(node))
         if not any(site.kind is InterpretationKind.LLM_MODEL_CHOICE for site in node_sites):
@@ -864,7 +834,18 @@ def _validate_prompt_template_review(node: NodeSpec, prompt_template: str) -> No
     resolved = _resolved_requirement_for_kind(requirements, InterpretationKind.LLM_PROMPT_TEMPLATE)
     if resolved is None:
         return
-    expected_hash = stable_hash(prompt_template)
+    parts = _prompt_parts(node.options)
+    if parts is not None:
+        # Structured nodes attest the prompt *skeleton*, not the substituted
+        # text. The vague-term slot values are reviewed independently, so the
+        # prompt-template review must be invariant under their resolution —
+        # otherwise resolving a vague term (which rewrites the rendered prompt)
+        # spuriously drifts a prompt-template review the operator already
+        # approved. A genuine edit to a fixed text segment, or re-pointing a
+        # slot to a different requirement, still changes the skeleton and drifts.
+        expected_hash = prompt_structure_hash(parts)
+    else:
+        expected_hash = stable_hash(prompt_template)
     if resolved["resolved_prompt_template_hash"] != expected_hash:
         raise ValueError(f"llm node {node.id!r} prompt-template review hash drifted")
 
@@ -1038,6 +1019,44 @@ def _prompt_parts(options: Mapping[str, Any]) -> tuple[PromptPart, ...] | None:
     return tuple(parts)
 
 
+def prompt_structure_hash(parts: tuple[PromptPart, ...]) -> str:
+    """Canonical hash of a prompt's *structure* — text segments and the
+    requirement each interpretation slot references — independent of whether
+    those slots are pending or resolved and of their accepted values.
+
+    This is the attestation domain for the ``llm_prompt_template`` review: that
+    review approves the LLM-authored prompt skeleton. The vague-term reviews
+    approve the slot *values* separately. Anchoring the prompt-template review
+    to this skeleton makes it invariant under interpretation resolution — so
+    resolving a vague term (which rewrites the rendered ``prompt_template``)
+    does not drift the prompt-template review, while a genuine edit to a fixed
+    text segment or a re-pointed slot still does.
+
+    The projection deliberately excludes requirement status and accepted_value:
+    those belong to the vague-term reviews' own attestations.
+    """
+    skeleton: list[tuple[str, str]] = []
+    for part in parts:
+        kind = part["kind"]
+        if kind == "text":
+            skeleton.append(("text", part["text"]))
+        elif kind == "interpretation_ref":
+            skeleton.append(("interpretation_ref", part["requirement_id"]))
+        else:
+            raise ValueError(f"unknown prompt part kind {kind!r}")
+    return stable_hash(skeleton)
+
+
+def prompt_structure_hash_from_options(options: Mapping[str, Any]) -> str | None:
+    """Skeleton hash for a node's prompt parts, or ``None`` for a legacy
+    (no-parts) node. Single derivation shared by the resolve-time anchor and the
+    execution-time drift guard so they cannot diverge."""
+    parts = _prompt_parts(options)
+    if parts is None:
+        return None
+    return prompt_structure_hash(parts)
+
+
 def _render_prompt_parts(
     parts: tuple[PromptPart, ...],
     requirements_by_id: Mapping[str, InterpretationRequirement],
@@ -1070,3 +1089,67 @@ def _render_prompt_parts(
 
 def _legacy_terms(prompt_template: str) -> tuple[str, ...]:
     return tuple(match.group(1).strip() for match in INTERPRETATION_PLACEHOLDER_RE.finditer(prompt_template))
+
+
+def vague_term_wiring_count(options: Mapping[str, Any], *, user_term: str) -> int:
+    """Count the resolvable ``vague_term`` wirings for ``user_term`` in a node's options.
+
+    This is the single source of truth for "is a vague-term review actually
+    resolvable?", shared by every staging-time gate so they cannot drift from
+    the resolver contract. It mirrors the substitution wiring the resolver
+    consumes in ``sessions/service.py::_patch_llm_transform_prompt``:
+
+    * **Structured form** (``interpretation_requirements`` present): there must
+      be exactly one *pending* ``vague_term`` requirement whose ``user_term``
+      matches, AND a well-formed ``prompt_template_parts`` carrying at least one
+      ``interpretation_ref`` part that references that requirement's ``id``.
+      Returns ``1`` when wired; ``0`` when the requirement exists but no part
+      references it (``prompt_template_parts`` absent, malformed, or missing the
+      ref) — the deterministic root cause of the resolve-time 422 and the
+      latent silent-drop; or the count of matching requirements when that count
+      is not exactly one (caller treats any value ``!= 1`` as unresolvable).
+    * **Legacy form** (no ``interpretation_requirements``): the number of
+      ``{{interpretation:<user_term>}}`` placeholders in
+      ``options.prompt_template``.
+
+    Reads are lenient (Tier-3 staging idiom): a malformed sub-shape contributes
+    ``0`` so the node reads as *unresolvable* and is routed back to the composer
+    for repair, rather than crashing the request. Strict offensive validation
+    lives at the resolve boundary, where the operator-approved mutation runs.
+    """
+    normalized_user_term = user_term.strip()
+    requirements = options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None
+    matching_ids: list[Any] = []
+    if isinstance(requirements, (list, tuple)):
+        matching_ids = [
+            requirement["id"]
+            for requirement in requirements
+            if isinstance(requirement, Mapping)
+            and requirement.get("status") == "pending"
+            and isinstance(requirement.get("user_term"), str)
+            and requirement["user_term"].strip() == normalized_user_term
+            and requirement.get("kind", InterpretationKind.VAGUE_TERM.value) == InterpretationKind.VAGUE_TERM.value
+        ]
+    if len(matching_ids) == 1:
+        requirement_id = matching_ids[0]
+        if not isinstance(requirement_id, str) or not requirement_id:
+            return 0
+        parts = options[PROMPT_TEMPLATE_PARTS_KEY] if PROMPT_TEMPLATE_PARTS_KEY in options else None
+        if not isinstance(parts, (list, tuple)):
+            return 0
+        ref_count = sum(
+            1
+            for part in parts
+            if isinstance(part, Mapping) and part.get("kind") == "interpretation_ref" and part.get("requirement_id") == requirement_id
+        )
+        return 1 if ref_count >= 1 else 0
+    if len(matching_ids) > 1:
+        return len(matching_ids)
+    # No matching pending vague_term requirement: the term is either wired by a
+    # legacy ``{{interpretation:<term>}}`` placeholder (which coexists with the
+    # auto-staged prompt-template / model-choice requirements) or not wired at
+    # all. Mirror the resolver's legacy fall-back and count placeholders.
+    prompt_template = options["prompt_template"] if "prompt_template" in options else None
+    if isinstance(prompt_template, str):
+        return sum(1 for term in _legacy_terms(prompt_template) if term == normalized_user_term)
+    return 0

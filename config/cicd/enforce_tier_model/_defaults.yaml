@@ -208,7 +208,52 @@ defaults:
     # TODO-corpus cleanup; one per-file-rule entry no longer needed after
     # the cleanup absorbed its coverage into individual fingerprinted
     # entries with source-line-specific justifications.
-    max_per_file_rules: 92
+    #
+    # Bumped from 92 → 94 on 2026-05-29 (net +2) to collapse the R1/R5
+    # fingerprint corpus of two high-edit-cadence Tier-3 files —
+    # ``web/interpretation_state.py`` (max_hits=71) and
+    # ``web/sessions/service.py`` (max_hits=41) — into one bounded per-file
+    # rule each. These files churn ~6 commits/month; every AST shift rotated
+    # all their fingerprints, so the prior individual entries re-broke CI on
+    # each edit. The two rules REMOVED 112 individual allow_hits entries
+    # (net allow_hits −112, far under the 652 ceiling), so this is a net
+    # tightening of the suppression surface, not new debt; max_hits caps each
+    # rule so a NEW R1/R5 in either file still trips review. R6/R7 in
+    # sessions/service.py remain individually fingerprinted for per-site
+    # scrutiny and are NOT covered by the rule.
+    #
+    # Bumped from 94 → 95 on 2026-05-29 (net +1) on merge of
+    # refactor/engine-orchestrator-processor into RC5.2: the orchestrator
+    # god-class decomposition extracted ``_cleanup_plugins`` into
+    # ``engine/orchestrator/cleanup.py``, relocating the Tier-1 re-raise R5
+    # guard out of the ``core.py`` R5 pattern into a new per-file pattern
+    # entry for ``cleanup.py`` (the ``core.py`` R5 ``max_hits`` was
+    # decremented 3 → 2 to compensate on the hit axis). Splitting one file
+    # into two costs exactly one new per_file_rules entry; this +1 lands on
+    # top of the web-rotation bump above (RC5.2 took it 92 → 94; this merge
+    # takes it 94 → 95). Honest accounting of the file split, not new
+    # defensive surface.
+    #
+    # Bumped from 98 → 99 on 2026-05-30 on merge of composer-service-decomp
+    # into RC5.2. The decomposition extracted ComposerServiceImpl._dispatch_tool_batch
+    # into the module-level run_tool_batch in web/composer/tool_batch.py. The three
+    # R6 Tier-3 LLM-tool-argument sites (json.JSONDecodeError parse, redaction-time
+    # PydanticValidationError fallback, ToolArgumentError after audit-write) were
+    # previously covered by the existing web/composer/service.py R6 per_file_rule;
+    # the file split relocated them to a new web/composer/tool_batch.py R6
+    # per_file_rule (max_hits=3). Same boundary semantics, one extra per-file rule
+    # for the one extra file — honest accounting of the split, not new defensive
+    # surface. The 10 in-place fingerprint rotations and 2 R4 + 1 R5 fingerprinted
+    # entries this merge also rotated/added stay within the allow_hits ceilings.
+    max_per_file_rules: 99
+    # Bumped from 95 → 98 on 2026-05-30: collapsed 17 fragile per-fingerprint
+    # allow_hits entries for web/composer/tools/_common.py into 3 durable
+    # per_file_rules (R1/R5/R9) after an import addition rotated every one of
+    # the file's fingerprints. Net allowlist change is −14 entries (allow_hits
+    # −17, well under its 652 ceiling); the per_file_rules count rises +3. This
+    # is the high-churn-file collapse recommended over fingerprint rotation
+    # (feedback_rotate_tier_model_dup_key_dataloss): _common.py is the composer's
+    # Tier-3 prevalidation boundary and its defensive reads are inherent, not debt.
     # Bumped from 485 → 486 on 2026-05-19 for the same Phase 8 PR-review
     # S4 entry as ``max_allow_hits`` above.
     #
@@ -267,7 +312,15 @@ defaults:
     # Bumped to 744 on 2026-05-25 (net +7) for the same llm_model_choice
     # algorithmic-surfacing addition accounted for in ``max_allow_hits``
     # above.
-    max_total_entries: 744
+    #
+    # Bumped to 745 on 2026-05-29 (net +1) for the same orchestrator
+    # decomposition cleanup.py R5 file-split entry as ``max_per_file_rules``
+    # above. ``max_allow_hits`` is NOT paired: the R4 ``run_hook`` allow_hit
+    # key was relocated core.py → cleanup.py (net-zero on hits), so only the
+    # new R5 pattern entry adds to the total-entry count. The pre-existing
+    # total_entries overage (RC5.2's DECAYING cicd-allowlist-audit track) is
+    # left visible, NOT absorbed by this bump.
+    max_total_entries: 745
     # Permanent exemptions must be renewed or deliberately re-ratcheted during
     # quarterly allowlist review. New suggested entries default to a bounded
     # three-month expiry window instead of expires: null.
@@ -297,6 +350,13 @@ defaults:
     # Ratcheted 2026-05-23: max_permanent_per_file_rules 93 → 92 matching
     # the ``max_per_file_rules`` ratchet above.
     #
+    # Bumped 2026-05-29: max_permanent_total_entries 412 → 413 for the
+    # orchestrator decomposition cleanup.py R5 file-split entry (expires:
+    # null, so it counts in the permanent subset). Same +1 accounting as the
+    # ``max_total_entries`` bump above. The matching
+    # max_permanent_per_file_rules +1 is recorded at that ceiling below,
+    # where it stacks onto RC5.2's web-rotation bump (92 → 94 → 95).
+    #
     # Bumped on merge of refactor/composer-tools-rearchitect into RC5.2
     # (commits 7114e78cc + 1e7e42d7a, plus this merge commit):
     # max_permanent_allow_hits 275 → 330 (+55) and
@@ -315,11 +375,35 @@ defaults:
     # lifespan (documented graceful-degradation for the OpenRouter catalog
     # probe) are permanent (expires: null) with full rationale.
     max_permanent_allow_hits: 320
-    max_permanent_per_file_rules: 92
+    # Bumped from 92 → 94 on 2026-05-29 (net +2) for the two permanent
+    # (expires: null) per-file rules collapsing R1/R5 in
+    # web/interpretation_state.py and web/sessions/service.py — same change as
+    # the ``max_per_file_rules`` bump above. The 112 removed allow_hits were
+    # likewise permanent, so the permanent exact-hit and total subsets both
+    # fall well below their ceilings; only the per-file-rule subset rises.
+    #
+    # Bumped from 94 → 95 on 2026-05-29 (net +1) on merge of
+    # refactor/engine-orchestrator-processor: the permanent cleanup.py R5
+    # file-split entry (expires: null) lands on top of the web-rotation bump
+    # above. Same +1 accounting as the ``max_per_file_rules`` merge bump.
+    #
+    # Bumped from 98 → 99 on 2026-05-30 on merge of composer-service-decomp:
+    # the new web/composer/tool_batch.py R6 per_file_rule (expires: null) is
+    # permanent, so it lands on this ceiling too. Same +1 file-split accounting
+    # as the ``max_per_file_rules`` merge bump above.
+    max_permanent_per_file_rules: 99
+    # Bumped from 95 → 98 on 2026-05-30: the 3 new web/composer/tools/_common.py
+    # per_file_rules are permanent (expires: null, matching the Tier-3-boundary
+    # convention used by core/secrets.py et al.), so they also land on the
+    # permanent ceiling. Same collapse rationale as max_per_file_rules above.
     # Ratcheted to 410 on 2026-05-25 after stale-fingerprint pruning in the
     # tutorial-assumption-surfacing rebase reduced the permanent total corpus
     # below the prior ceiling.
     #
     # Bumped to 412 on 2026-05-25 (net +2) for the same model-catalog-snapshot
     # permanent entries as ``max_permanent_allow_hits`` above.
-    max_permanent_total_entries: 412
+    #
+    # Bumped to 413 on 2026-05-29 (net +1) for the same orchestrator
+    # decomposition cleanup.py R5 file-split entry as
+    # ``max_permanent_per_file_rules`` above.
+    max_permanent_total_entries: 413

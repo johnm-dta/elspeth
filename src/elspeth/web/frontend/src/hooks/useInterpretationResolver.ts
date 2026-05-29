@@ -105,6 +105,38 @@ export function describeError(err: unknown): DisplayedError {
       };
     }
     if (err.status === 422) {
+      if (err.error_type === "interpretation_placeholder_unavailable") {
+        return {
+          heading: "Stale review",
+          body:
+            "This prompt template has already changed. Reload the session " +
+            "and review the current prompt template again.",
+        };
+      }
+      if (err.error_type === "interpretation_node_missing") {
+        return {
+          heading: "Review target removed",
+          body:
+            "The affected node was removed from the composition. Reload the " +
+            "session to review the current draft.",
+        };
+      }
+      if (err.error_type === "interpretation_node_mutated") {
+        return {
+          heading: "Review target changed",
+          body:
+            "The affected node is no longer the same LLM transform. Reload " +
+            "the session and review the current draft.",
+        };
+      }
+      if (err.error_type === "interpretation_resolution_unsupported") {
+        return {
+          heading: "Unsupported review",
+          body:
+            "This interpretation kind cannot be accepted inline in this " +
+            "release.",
+        };
+      }
       return {
         heading: "Invalid amendment",
         body: err.detail || "The server rejected the amendment.",

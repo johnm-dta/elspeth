@@ -83,6 +83,16 @@ allowed_dict_patterns:
   - "src/elspeth/plugins/sinks/csv_sink.py:CSVSink._get_field_names_and_display:row"
   - "src/elspeth/plugins/sinks/json_sink.py:JSONSink.write:rows (list)"
   - "src/elspeth/plugins/sinks/json_sink.py:JSONSink._write_jsonl_content:rows (list)"
+  # Per-row diversion paths (tier-handling audit, ca1e65214). Each diverts the
+  # single row whose VALUE fails the write — DB constraint violation, CSV/JSON
+  # encode failure — instead of crashing the whole batch (Tier-2 operation
+  # fault on one row's value). They carry the same opaque row-dict shape as the
+  # public ``write`` entries above; the diversion sieve never inspects schema.
+  - "src/elspeth/plugins/sinks/database_sink.py:DatabaseSink._insert_with_per_row_diversion:rows (list)"
+  - "src/elspeth/plugins/sinks/database_sink.py:DatabaseSink._insert_with_per_row_diversion:insert_rows (list)"
+  - "src/elspeth/plugins/sinks/database_sink.py:DatabaseSink._insert_with_per_row_diversion:return (list)"
+  - "src/elspeth/plugins/sinks/csv_sink.py:CSVSink._stage_rows_per_row:rows (list)"
+  - "src/elspeth/plugins/sinks/json_sink.py:JSONSink._write_jsonl_content:original_rows (list)"
   - "src/elspeth/plugins/infrastructure/display_headers.py:apply_display_headers:rows (list)"
   - "src/elspeth/plugins/infrastructure/display_headers.py:apply_display_headers:return (list)"
 
@@ -680,6 +690,11 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_model_turn:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_model_turn:tools (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._dispatch_tool_batch:llm_messages (list)"
+  # Extracted body of _dispatch_tool_batch: the verbatim move to the module-level
+  # run_tool_batch (composer/service.py decomposition) carries the same OpenAI
+  # chat-completion message list. The service.py:_dispatch_tool_batch entry above
+  # remains valid for the thin delegator that still builds and forwards the list.
+  - "src/elspeth/web/composer/tool_batch.py:run_tool_batch:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._classify_and_budget_turn:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._classify_and_budget_turn:tools (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._try_terminate_no_tools:llm_messages (list)"
@@ -775,6 +790,12 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._dispatch_session_aware_tool:llm_messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_session_aware_kwargs:arguments"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_session_aware_kwargs:return"
+  # ``_apply_openrouter_app_identity`` mutates the LiteLLM ``acompletion``
+  # kwargs in place to brand OpenRouter-routed composer calls as ELSPETH. The
+  # kwargs are LiteLLM's open-ended completion surface (``acompletion(**kwargs:
+  # Any)``) — the same untyped external-library boundary as the entries above —
+  # so it cannot be reduced to a TypedDict without shadowing LiteLLM's own API.
+  - "src/elspeth/web/composer/service.py:_apply_openrouter_app_identity:kwargs"
   # Blob sync helpers — return dicts for LLM-visible tool response payloads.
   # The list_composer_blobs shape is deliberately metadata-only, enforced by
   # the construction helper; bytes/previews/storage paths stay outside the
@@ -857,7 +878,10 @@ allowed_dict_patterns:
   # parsed dict (LLM-supplied tool call arguments — no schema available
   # at this site, validation already happened above) and the closure
   # default-argument pattern shadows it as `_arguments` to silence B023.
-  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._do_dispatch:_arguments"
+  # Moved service.py -> tool_batch.py: the _do_dispatch closure was extracted
+  # verbatim into the module-level run_tool_batch (composer/service.py
+  # decomposition); same Tier-3 parsed-dict semantics, no enclosing class now.
+  - "src/elspeth/web/composer/tool_batch.py:_do_dispatch:_arguments"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_messages:return (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._get_litellm_tools:return (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._call_llm:messages (list)"

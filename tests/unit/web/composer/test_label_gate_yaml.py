@@ -24,11 +24,22 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[4]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "composer-redaction-gate.yml"
 
+# NOTE: ``src/elspeth/web/composer/tools/`` is the package directory, not the
+# legacy ``tools.py`` monolith (which no longer exists). The diff step passes
+# these to ``git diff -- <pathspec>``, where a trailing-slash directory matches
+# every file under the package recursively, so any redaction-bearing tool
+# module trips the gate. Watching the whole package is intentional and
+# cost-free: the gate only *enforces* a label when the redaction snapshot also
+# changes, so a non-redaction tools/ edit trips the path filter but requires no
+# label. See elspeth-d6c1e4d907.
+TOOLS_PACKAGE_PATH = "src/elspeth/web/composer/tools/"
+LEGACY_TOOLS_MODULE_PATH = "src/elspeth/web/composer/tools.py"
+
 REQUIRED_PATHS = frozenset(
     {
         "src/elspeth/web/composer/redaction.py",
         "src/elspeth/web/composer/redaction_telemetry.py",
-        "src/elspeth/web/composer/tools.py",
+        TOOLS_PACKAGE_PATH,
         "tests/unit/web/composer/redaction_policy_snapshot.json",
         "tests/unit/web/composer/test_adequacy_guard.py",
         "tests/unit/web/composer/test_walk_model_schema.py",
@@ -68,6 +79,53 @@ def test_workflow_triggers_on_required_paths() -> None:
 
     missing = REQUIRED_PATHS - paths
     assert not missing, f"workflow paths missing required entries: {sorted(missing)}"
+
+
+def _diff_run_block() -> str:
+    workflow = _load_workflow()
+    steps = workflow["jobs"]["redaction-gate"]["steps"]
+    diff_steps = [s for s in steps if s.get("id") == "diff"]
+    assert len(diff_steps) == 1, "exactly one step must carry id=diff"
+    return diff_steps[0]["run"]
+
+
+def test_workflow_watches_tools_package_not_legacy_module() -> None:
+    """Regression guard for elspeth-d6c1e4d907.
+
+    The composer tool surface is the ``tools/`` package; the ``tools.py``
+    monolith it watched is gone. If the workflow still names ``tools.py``,
+    redaction-bearing changes under ``tools/`` silently bypass the required
+    label gate (the dead path matches nothing in ``git diff``).
+    """
+    run_block = _diff_run_block()
+    assert TOOLS_PACKAGE_PATH in run_block, "diff step must watch the tools/ package directory"
+    assert LEGACY_TOOLS_MODULE_PATH not in run_block, (
+        "diff step still references the removed tools.py monolith; redaction-bearing changes under the tools/ package would bypass the gate"
+    )
+
+
+def test_tools_package_modules_activate_gate() -> None:
+    """Negative fixture: every real tools/ module is covered by a watched path.
+
+    ``git diff -- src/elspeth/web/composer/tools/`` matches any file whose path
+    is prefixed by that directory. We assert here that the directory the
+    workflow watches actually prefixes the live package modules — so editing
+    any of them (e.g. ``tools/_dispatch.py``) activates the gate, which the
+    pre-fix ``tools.py`` predicate did not.
+    """
+    run_block = _diff_run_block()
+    assert TOOLS_PACKAGE_PATH in run_block
+
+    package_dir = REPO_ROOT / "src" / "elspeth" / "web" / "composer" / "tools"
+    assert package_dir.is_dir(), "tools/ must be a package directory, not a module"
+    modules = [p for p in package_dir.glob("*.py") if p.name != "__init__.py"]
+    assert modules, "expected redaction-bearing modules under the tools/ package"
+    for module in modules:
+        rel = module.relative_to(REPO_ROOT).as_posix()
+        assert rel.startswith(TOOLS_PACKAGE_PATH), (
+            f"tools module {rel} is not covered by the watched path {TOOLS_PACKAGE_PATH!r}; "
+            "a change to it would not trip the redaction gate"
+        )
 
 
 def test_workflow_has_direction_output_step() -> None:

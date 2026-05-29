@@ -55,6 +55,7 @@ from elspeth.web.interpretation_state import (
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
     pipeline_decision_artifact_hash,
+    prompt_structure_hash_from_options,
     validate_pipeline_decision_semantics,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
@@ -717,11 +718,6 @@ def _patch_structured_interpretation_prompt(
         raise InterpretationPlaceholderConsumedError(
             f"_patch_llm_transform_prompt: node {affected_node_id!r} options.interpretation_requirements is not a list"
         )
-    parts_value = options[PROMPT_TEMPLATE_PARTS_KEY] if PROMPT_TEMPLATE_PARTS_KEY in options else None
-    if not isinstance(parts_value, (list, tuple)):
-        raise InterpretationPlaceholderConsumedError(
-            f"_patch_llm_transform_prompt: node {affected_node_id!r} options.prompt_template_parts is required for structured interpretation resolution"
-        )
 
     matching_indexes: list[int] = []
     normalized_user_term = user_term.strip()
@@ -757,16 +753,35 @@ def _patch_structured_interpretation_prompt(
             matching_indexes.append(index)
         requirements.append(requirement)
 
+    # A node can legitimately carry interpretation_requirements for OTHER kinds
+    # (the prompt-template and model-choice auto-stagers add one each to every
+    # LLM node) while its vague term is wired by a legacy
+    # ``{{interpretation:<term>}}`` placeholder. When no pending vague_term
+    # requirement matches this user_term, the structured path does not apply —
+    # fall back to the legacy placeholder path rather than demanding
+    # prompt_template_parts the node never needed.
+    if not matching_indexes:
+        return None
     if len(matching_indexes) != 1:
         raise InterpretationPlaceholderConsumedError(
             f"_patch_llm_transform_prompt: node {affected_node_id!r} does not contain exactly one pending "
             f"interpretation requirement for {user_term!r}; found {len(matching_indexes)}"
         )
+
+    # The vague term is structured (a matching requirement exists); the prompt
+    # parts that carry its substitution are now required.
+    parts_value = options[PROMPT_TEMPLATE_PARTS_KEY] if PROMPT_TEMPLATE_PARTS_KEY in options else None
+    if not isinstance(parts_value, (list, tuple)):
+        raise InterpretationPlaceholderConsumedError(
+            f"_patch_llm_transform_prompt: node {affected_node_id!r} options.prompt_template_parts is required for structured interpretation resolution"
+        )
+
     matching_index = matching_indexes[0]
     matching_requirement = requirements[matching_index]
     matching_requirement_id = matching_requirement["id"]
 
     rendered: list[str] = []
+    matched_ref_count = 0
     for part_value in parts_value:
         if not isinstance(part_value, Mapping):
             raise InterpretationPlaceholderConsumedError(
@@ -800,6 +815,7 @@ def _patch_structured_interpretation_prompt(
                         f"{affected_node_id!r} is immediately preceded by structural directive {directive!r}; "
                         f"substituting into a directive position would produce a broken prompt"
                     )
+            matched_ref_count += 1
             rendered.append(accepted_value)
             continue
         if stored_requirement.get("status") == "resolved":
@@ -811,6 +827,19 @@ def _patch_structured_interpretation_prompt(
             rendered.append(accepted)
             continue
         rendered.append(PENDING_INTERPRETATION_AUTHORING_TEXT)
+
+    # Defense-in-depth backstop: the matched requirement must be referenced by
+    # at least one ``interpretation_ref`` part, or the accepted value never
+    # lands in the rendered prompt — a "resolved" review whose decision silently
+    # never reaches the runtime, i.e. the exact audit divergence CLAUDE.md
+    # forbids. Unreachable once the staging gate (vague_term_wiring_count) holds;
+    # present so a bypass crashes loudly instead of corrupting the prompt.
+    if matched_ref_count == 0:
+        raise InterpretationPlaceholderConsumedError(
+            f"_patch_llm_transform_prompt: node {affected_node_id!r} prompt_template_parts contains no "
+            f"interpretation_ref part referencing the resolved requirement {matching_requirement_id!r}; "
+            "the accepted interpretation value would be silently dropped from the prompt"
+        )
 
     new_template = "".join(rendered)
     resolved_prompt_template_hash = stable_hash(new_template)
@@ -1059,12 +1088,22 @@ def _resolve_prompt_template_review(
         user_term=user_term,
         context="resolve_interpretation_event",
     )
+    # Node-level / returned hash stays the final-prompt-string hash (the runtime
+    # LLM plugin reads options.resolved_prompt_template_hash to populate
+    # calls.resolved_prompt_template_hash). The REQUIREMENT-level attestation
+    # anchor, by contrast, is the prompt *skeleton* for structured nodes: the
+    # prompt-template review approves the LLM-authored structure, while the
+    # vague-term reviews approve the slot values. Anchoring the requirement to
+    # the skeleton keeps it invariant under vague-term resolution (which rewrites
+    # the rendered prompt) — see interpretation_state.prompt_structure_hash.
     resolved_prompt_template_hash = stable_hash(prompt_template)
+    structure_hash = prompt_structure_hash_from_options(options)
+    requirement_anchor_hash = structure_hash if structure_hash is not None else resolved_prompt_template_hash
     requirement = dict(requirements[matching_index])
     requirement["status"] = "resolved"
     requirement["event_id"] = event_id
     requirement["accepted_value"] = accepted_value
-    requirement["resolved_prompt_template_hash"] = resolved_prompt_template_hash
+    requirement["resolved_prompt_template_hash"] = requirement_anchor_hash
     requirements[matching_index] = requirement
 
     final_nodes: list[Mapping[str, Any]] = []
@@ -1195,6 +1234,89 @@ def _resolve_pipeline_decision_review(
             patched_node = dict(current_node)
             patched_options = dict(options)
             patched_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
+            patched_node["options"] = patched_options
+            final_nodes.append(patched_node)
+        else:
+            final_nodes.append(current_node)
+    return state_record.source, final_nodes, None
+
+
+def _resolve_model_choice_review(
+    state_record: CompositionStateRecord,
+    *,
+    event_id: str,
+    affected_node_id: str,
+    user_term: str,
+    llm_draft: str,
+    accepted_value: str,
+) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], None]:
+    """Resolve an ``llm_model_choice`` review on an LLM node.
+
+    Parallel to :func:`_resolve_pipeline_decision_review`. The reviewed
+    artifact is the LLM node's ``options.model`` identifier, which the
+    composer authored and the mutation-time auto-stager
+    (:func:`elspeth.web.interpretation_state._options_with_default_model_choice_review`)
+    surfaced for review. Resolving stamps the requirement and writes
+    ``accepted_value`` into ``options.model`` so the audit record (what the
+    operator approved) and the runnable pipeline (what executes) cannot
+    diverge:
+
+    * ``accepted_as_drafted`` — ``accepted_value`` equals the existing
+      ``options.model`` (the drafted identifier); the write is idempotent.
+    * ``amended`` — ``accepted_value`` is the operator's substituted model
+      identifier; the write applies it so the node runs the approved model.
+
+    No prompt-template patch occurs (model choice is a different field than
+    the prompt), so the resolved-prompt-template hash is ``None``.
+    """
+    node = _find_interpretation_review_node(
+        state_record,
+        affected_node_id=affected_node_id,
+        context="resolve_interpretation_event",
+    )
+    plugin = node["plugin"] if "plugin" in node else None
+    if plugin != "llm":
+        # Tier 1 invariant: an llm_model_choice requirement is only ever
+        # auto-staged on an llm node. A resolve targeting any other plugin
+        # means our own state is corrupt — fail loud, do not coerce.
+        raise AuditIntegrityError(
+            f"resolve_interpretation_event: llm_model_choice review targets node "
+            f"{affected_node_id!r} with plugin {plugin!r}; expected 'llm'"
+        )
+    options = _require_mapping(
+        node["options"] if "options" in node else None,
+        message=f"resolve_interpretation_event: node {affected_node_id!r} options is not a mapping",
+    )
+    requirements, matching_index = _matching_pending_requirement_index(
+        options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None,
+        kind=InterpretationKind.LLM_MODEL_CHOICE,
+        user_term=user_term,
+        context="resolve_interpretation_event",
+    )
+    requirement = dict(requirements[matching_index])
+    draft = requirement["draft"] if "draft" in requirement else None
+    if isinstance(draft, str) and draft != llm_draft:
+        raise InterpretationPlaceholderConsumedError(
+            "resolve_interpretation_event: llm_model_choice event draft does not match the node review requirement draft"
+        )
+    requirement["status"] = "resolved"
+    requirement["event_id"] = event_id
+    requirement["accepted_value"] = accepted_value
+    # Read-side drift guard (_validate_model_choice_review) recomputes
+    # stable_hash(options.model) and compares it to this field, so the
+    # resolved requirement must carry the hash of the accepted model. The
+    # field is named for the prompt-template case but is reused here as the
+    # model-choice review's anchor hash (mirroring _resolve_prompt_template_review).
+    requirement["resolved_prompt_template_hash"] = stable_hash(accepted_value)
+    requirements[matching_index] = requirement
+
+    final_nodes: list[Mapping[str, Any]] = []
+    for current_node in state_record.nodes or ():
+        if current_node["id"] == affected_node_id:
+            patched_node = dict(current_node)
+            patched_options = dict(options)
+            patched_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
+            patched_options["model"] = accepted_value
             patched_node["options"] = patched_options
             final_nodes.append(patched_node)
         else:
@@ -2757,6 +2879,15 @@ class SessionServiceImpl:
                             llm_draft=llm_draft,
                             accepted_value=llm_draft,
                         )
+                    elif kind is InterpretationKind.LLM_MODEL_CHOICE:
+                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_model_choice_review(
+                            live_state_record,
+                            event_id=event_id,
+                            affected_node_id=affected_node_id,
+                            user_term=user_term,
+                            llm_draft=llm_draft,
+                            accepted_value=llm_draft,
+                        )
                     else:
                         raise AssertionError(f"unhandled InterpretationKind {kind!r}")
 
@@ -3043,6 +3174,15 @@ class SessionServiceImpl:
                     )
                 elif kind is InterpretationKind.PIPELINE_DECISION:
                     final_source, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
+                        state_record,
+                        event_id=eid,
+                        affected_node_id=event_row.affected_node_id,
+                        user_term=event_row.user_term,
+                        llm_draft=event_row.llm_draft,
+                        accepted_value=accepted_value,
+                    )
+                elif kind is InterpretationKind.LLM_MODEL_CHOICE:
+                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_model_choice_review(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,

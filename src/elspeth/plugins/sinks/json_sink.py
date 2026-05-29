@@ -104,7 +104,7 @@ class JSONSink(BaseSink):
     name = "json"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4471f2684a139a34"
+    source_file_hash: str | None = "sha256:392d93200c10b2e1"
     config_model = JSONSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -336,7 +336,7 @@ class JSONSink(BaseSink):
             pre_write_pos = self._file.tell()  # type: ignore[union-attr]
 
             try:
-                self._write_jsonl_content(output_rows)
+                self._write_jsonl_content(output_rows, rows)
 
                 # Flush persistent file handle to ensure content is on disk for hashing.
                 if self._file is not None:
@@ -357,8 +357,18 @@ class JSONSink(BaseSink):
                         ) from rollback_err
                 raise
         else:
-            # Buffer rows for JSON array format
-            self._rows.extend(output_rows)
+            # JSON array dumps the whole buffer atomically, so a non-serializable
+            # value would abort the entire (cumulative) file. Pre-encode each row of
+            # THIS batch individually: divert the rows whose values can't be encoded
+            # (per-row Tier-2 fault) and buffer only the good ones, so one bad value
+            # doesn't drop the whole batch. row_index is relative to the current batch.
+            for i, output_row in enumerate(output_rows):
+                try:
+                    json.dumps(output_row, allow_nan=False)
+                except (ValueError, TypeError) as exc:
+                    self._divert_row(rows[i], row_index=i, reason=f"JSON serialization failed: {exc}")
+                    continue
+                self._rows.append(output_row)
             # Write immediately (file is rewritten on each write for JSON format).
             # JSON array uses atomic temp-file writes (already safe), no rollback needed.
             self._write_json_array()
@@ -371,7 +381,8 @@ class JSONSink(BaseSink):
                 path=str(self._path),
                 content_hash=content_hash,
                 size_bytes=size_bytes,
-            )
+            ),
+            diversions=self._get_diversions(),
         )
 
     def _ensure_jsonl_file_open(self) -> None:
@@ -404,13 +415,29 @@ class JSONSink(BaseSink):
             self._ensure_output_parent_exists()
             self._file = open(self._path, file_mode, encoding=self._encoding)  # noqa: SIM115
 
-    def _write_jsonl_content(self, rows: list[dict[str, Any]]) -> None:
-        """Stage and write JSONL rows to the already-open file handle."""
+    def _write_jsonl_content(self, rows: list[dict[str, Any]], original_rows: list[dict[str, Any]]) -> None:
+        """Stage and write JSONL rows; divert rows whose VALUES can't be encoded.
+
+        A value that cannot be encoded as standard JSON (NaN/Infinity, or a
+        non-serializable object) is a per-row Tier-2 data fault — one row's value,
+        not a batch failure. Such a row is diverted (recorded + routed per
+        on_write_failure) and the remaining rows are written, rather than aborting
+        the whole batch. ``original_rows`` is the unmapped input batch (1:1 with
+        ``rows``); it is the canonical payload handed to the failsink.
+
+        Serialization is done to a string FIRST so a mid-encode failure never writes
+        partial bytes to the staging buffer.
+        """
         if self._file is None:
             raise RuntimeError("JSONL file not open — call _ensure_jsonl_file_open() first")
         with io.StringIO() as staging:
-            for row in rows:
-                json.dump(row, staging, allow_nan=False)
+            for i, row in enumerate(rows):
+                try:
+                    serialized = json.dumps(row, allow_nan=False)
+                except (ValueError, TypeError) as exc:
+                    self._divert_row(original_rows[i], row_index=i, reason=f"JSON serialization failed: {exc}")
+                    continue
+                staging.write(serialized)
                 staging.write("\n")
             self._file.write(staging.getvalue())
 

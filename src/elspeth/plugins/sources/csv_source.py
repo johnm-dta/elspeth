@@ -27,7 +27,7 @@ from elspeth.contracts.schema_contract_factory import create_contract_from_confi
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import TabularSourceDataConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
-from elspeth.plugins.sources.field_normalization import FieldResolution, resolve_field_names
+from elspeth.plugins.sources.field_normalization import ExternalHeaderError, FieldResolution, resolve_field_names
 
 
 class CSVSourceConfig(TabularSourceDataConfig):
@@ -84,7 +84,7 @@ class CSVSource(BaseSource):
     name = "csv"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e12abb9306a7ab9f"
+    source_file_hash: str | None = "sha256:ee9a47f7b7a55bd7"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -386,13 +386,39 @@ class CSVSource(BaseSource):
                         destination=self._on_validation_failure,
                     )
                 return
-        # Resolve field names (normalization + mapping)
-        # This may raise ValueError on collision
-        self._field_resolution = resolve_field_names(
-            raw_headers=raw_headers,
-            field_mapping=self._field_mapping,
-            columns=self._columns,
-        )
+        # Resolve field names (normalization + mapping).
+        # External-header faults (normalization collision, empty/duplicate headers) are
+        # Tier 3 (the source's own header bytes are bad): record + quarantine/discard
+        # like a malformed data row — a collision means no rows are parseable. Config
+        # faults (a bad field_mapping) raise plain ValueError and crash; they are ours.
+        try:
+            self._field_resolution = resolve_field_names(
+                raw_headers=raw_headers,
+                field_mapping=self._field_mapping,
+                columns=self._columns,
+            )
+        except ExternalHeaderError as e:
+            # ExternalHeaderError is only raised on the normalization path, which
+            # resolve_field_names takes exclusively when raw_headers is not None.
+            assert raw_headers is not None, "ExternalHeaderError implies raw_headers was present"
+            raw_row = {
+                "file_path": str(self._path),
+                "__raw_line__": self._delimiter.join(raw_headers),
+            }
+            error_msg = f"CSV header could not be resolved: {e}"
+            ctx.record_validation_error(
+                row=raw_row,
+                error=error_msg,
+                schema_mode="parse",
+                destination=self._on_validation_failure,
+            )
+            if self._on_validation_failure != "discard":
+                yield SourceRow.quarantined(
+                    row=raw_row,
+                    error=error_msg,
+                    destination=self._on_validation_failure,
+                )
+            return
         headers = self._field_resolution.final_headers
         expected_count = len(headers)
 
@@ -575,10 +601,13 @@ class CSVSource(BaseSource):
                     "Default schema.mode to 'observed' unless the user explicitly asked to project to a smaller schema.",
                     "Call inspect_source before declaring schema.mode: 'fixed' — fixed mode silently drops rows that don't match.",
                     "Decide whether the CSV is headered: without columns CSVSource treats the first non-skipped row as headers; for headerless data set columns=[...] so the first data row stays data. Do not copy a header row into inline source data unless it is real headered CSV.",
-                    "If you have been asked to generate CSV rows yourself (the invented_source path): always emit a header row as the first non-skipped line of the generated CSV, always leave the `columns` option unset so CSVSource treats your first row as headers, and declare those generated column names in `schema.fields` (or `schema.guaranteed_fields`). The header row, the `columns` decision, and the schema must all agree. Never generate headerless CSV — the audit trail and downstream contracts need the header to be self-describing.",
+                    "If you have been asked to generate CSV rows yourself (the invented_source path): always emit a header row as the first non-skipped line of the generated CSV, and always leave the `columns` option unset so CSVSource treats your first row as headers.",
+                    "When generating CSV rows yourself, declare those generated column names in `schema.fields` (or `schema.guaranteed_fields`).",
+                    "When generating CSV rows yourself, the header row, the `columns` decision, and the schema must all agree. Never generate headerless CSV — the audit trail and downstream contracts need the header to be self-describing.",
                     "columns tells CSVSource how to parse headerless rows, but downstream DAG validation still needs a schema guarantee. If transforms consume a CSV column, declare it in schema.guaranteed_fields or explicit schema fields.",
                     "CSV source options do not have url_field; if a downstream web_scrape needs URLs, keep the URL column in the CSV schema and set url_field on the web_scrape node.",
-                    "If you authored CSV rows or chose source values for this CSV, bind the exact artifact as a blob-backed source, stage invented_source on source.options.interpretation_requirements, then call request_interpretation_review with affected_node_id='source' and llm_draft equal to the exact CSV text.",
+                    "If you authored CSV rows or chose source values for this CSV, bind the exact artifact as a blob-backed source and stage invented_source on source.options.interpretation_requirements.",
+                    "After staging invented_source for an authored CSV, call request_interpretation_review with affected_node_id='source' and llm_draft equal to the exact CSV text.",
                     "For source-level interpretation reviews, source is not a transform node; do not search nodes[] for source before calling the review tool.",
                     "Excel-exported CSVs are often cp1252 or have a UTF-16 BOM — verify encoding before pinning schema.",
                     "Set on_validation_failure to a sink name for quarantine/review, or 'discard' to drop with audit. Default is 'discard'.",

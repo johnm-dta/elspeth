@@ -370,11 +370,11 @@ class TestBuildSystemPrompt:
         assert "Before any mutation that creates or updates an LLM prompt you wrote" in result
         assert "the LLM node options must already contain a pending" in flattened
         assert "Do not stop with prose saying the rubric is part of the reviewed prompt" in flattened
-        assert "LLM node preflight has four independent review checks" in result
+        assert "LLM node preflight has three independent review checks" in result
         assert "Every create, update, upsert, or patch of an LLM node with a `prompt_template` must repeat this preflight" in flattened
         assert "carry forward existing pending LLM interpretation requirements and add any missing ones" in flattened
         assert "These checks stack" in result
-        assert "may need all four LLM-node review requirements" in flattened
+        assert "may need all three LLM-node review requirements" in flattened
         assert "Interpretation reviews are not pipeline stages" in result
         assert "Never create a transform, passthrough node, sink, output, edge, or placeholder plugin" in flattened
         assert "rejected mutations do not persist partial nodes to remove" in flattened
@@ -387,12 +387,13 @@ class TestBuildSystemPrompt:
         assert 'choose "over 6 ft" or "top quartile"' in result
         assert "Prompt-template review is not a substitute" in result
         assert "Construction pattern for an LLM-authored scoring prompt" in result
-        assert '"id": "<criterion>_semantics_review"' in result
+        assert "Wire the authored semantics into the prompt as a substitution slot" in result
         assert '"kind": "vague_term"' in result
-        assert '"id": "prompt_template_review:<llm_node_id>"' in result
-        assert "the exact scale/rubric/cutoff/ranking/category semantics you authored" in result
+        assert '"kind": "interpretation_ref"' in result
+        assert "prompt_template_parts" in result
+        assert "the exact scale/rubric/cutoff/category semantics you authored" in result
         assert "Do not omit the `vague_term` entry" in result
-        assert "the authored rubric, scale, threshold, category, or" in result
+        assert "never fixed prose" in result
         assert "If your prompt asks the model to return a score, rating, rank, class, or pass/fail result" in flattened
         assert "that output shape is authored judgement semantics when you chose the scale" in flattened
         assert "decide eligibility for `vague_term` independently" in result

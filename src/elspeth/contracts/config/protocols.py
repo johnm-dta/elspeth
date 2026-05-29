@@ -37,12 +37,33 @@ if TYPE_CHECKING:
 
 
 class RetrySettingsProtocol(Protocol):
-    """Settings-side shape needed to build RuntimeRetryConfig."""
+    """Settings-side shape needed to build RuntimeRetryConfig.
 
-    max_attempts: int
-    initial_delay_seconds: float
-    max_delay_seconds: float
-    exponential_base: float
+    Members are read-only ``@property`` getters because the concrete settings
+    object (``RetrySettings``) is a frozen Pydantic model: a mutable protocol
+    attribute would not be satisfied by a read-only field. A read-only protocol
+    member accepts both frozen and mutable implementations.
+    """
+
+    @property
+    def max_attempts(self) -> int:
+        """Maximum number of attempts (includes the initial try)."""
+        ...
+
+    @property
+    def initial_delay_seconds(self) -> float:
+        """Initial backoff delay in seconds."""
+        ...
+
+    @property
+    def max_delay_seconds(self) -> float:
+        """Maximum backoff delay in seconds."""
+        ...
+
+    @property
+    def exponential_base(self) -> float:
+        """Exponential backoff multiplier (e.g. 2.0 for doubling)."""
+        ...
 
 
 class ServiceRateLimitSettingsProtocol(Protocol):

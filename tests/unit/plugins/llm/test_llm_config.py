@@ -20,6 +20,11 @@ from elspeth.plugins.transforms.llm.base import LLMConfig
 # Shared observed schema for test convenience
 _OBSERVED_SCHEMA = SchemaConfig(mode="observed", fields=None)
 
+# A valid OpenRouter catalog model id (the retired anthropic/claude-3-opus was
+# dropped from the litellm-derived catalog; OpenRouterConfig now rejects models
+# absent from it). Mirrors test_openrouter.py.
+_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
+
 
 # ---------------------------------------------------------------------------
 # LLMConfig base changes
@@ -399,7 +404,7 @@ class TestOpenRouterConfigTracing:
         """Create base config with all required fields for OpenRouter."""
         return {
             "provider": "openrouter",
-            "model": "anthropic/claude-3-opus",
+            "model": _OPENROUTER_MODEL,
             "api_key": "test-key",
             "prompt_template": "Hello {{ row.name }}",
             "schema": {"mode": "observed"},

@@ -42,6 +42,16 @@ allow_hits:
     reason: "Composer redaction TraversalNode: substitute_provider sibling to value_provider (Task 8). Same Callable-receives-root-dict shape; the closure mutates the consumer-supplied dict in place at every reachable leaf for this node's path. Frozen TraversalNode holds the callable reference, not the dict; the dict is the caller's local (rev-3 W8b walker-atomicity)."
     safety: "pre-existing exemption — content audit pending in Plan B"
 
+  # Composer dispatch ToolBatchContext: discovery_cache is an intentionally-mutable
+  # shared cache the dispatch loop writes into across batches of one compose call.
+  # The dict[...] annotation accurately reflects the runtime type — retyping it as
+  # Mapping would misrepresent a field run_tool_batch mutates by design. Paired with
+  # the FG3 per_file_rules entry in enforce_freeze_guards/web.yaml. Documented at the field.
+  - key: "src/elspeth/web/composer/tool_batch.py:immutability.frozen_annotations:_module_:fp=src/elspeth/web/composer/tool_batch.py:ToolBatchContext:discovery_cache"
+    owner: "@elspeth-maintainers"
+    reason: "Composer dispatch ToolBatchContext: discovery_cache is an intentionally-mutable shared cache the dispatch loop writes into across batches of one compose call. The dict[...] annotation accurately reflects the runtime type; the frozen context holds the reference (batch-invariant) while the contents are deliberately exempt from deep_freeze. Paired with the FG3 per_file_rules entry in enforce_freeze_guards/web.yaml."
+    safety: "Verified: run_tool_batch writes discovery_cache[cache_key]; the frozen dataclass holds only the reference, and the cache outlives a single batch (per-compose-call lifecycle) so it cannot move to the per-batch BatchAccumulator."
+
   # Dataverse API response — Tier 3 external data, genuinely mutable
   - key: "src/elspeth/plugins/infrastructure/clients/dataverse.py:immutability.frozen_annotations:_module_:fp=src/elspeth/plugins/infrastructure/clients/dataverse.py:DataversePageResponse:rows"
     owner: "@elspeth-maintainers"

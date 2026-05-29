@@ -188,7 +188,7 @@ class TestValidatePipelineEmptyComposition:
             patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as mock_inst,
         ):
             mock_inst.side_effect = PluginNotFoundError("placeholder")
-            mock_yaml = MagicMock()
+            mock_yaml = MagicMock(spec=YamlGenerator)
             mock_yaml.generate_yaml.return_value = "source:\n  plugin: csv"
             result = validate_pipeline(state, settings, mock_yaml)
 
@@ -207,7 +207,7 @@ class TestValidatePipelinePathAllowlist:
             source_options={"path": "/tmp/test_data/blobs/data.csv"},
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
@@ -221,7 +221,7 @@ class TestValidatePipelinePathAllowlist:
             source_options={"path": "/etc/passwd"},
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         result = validate_pipeline(state, settings, mock_yaml_gen)
         assert result.is_valid is False
         assert _check(result, "path_allowlist").passed is False
@@ -232,7 +232,7 @@ class TestValidatePipelinePathAllowlist:
             source_options={"path": "/tmp/test_data/blobs/../../secret.csv"},
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         result = validate_pipeline(state, settings, mock_yaml_gen)
         assert result.is_valid is False
 
@@ -240,7 +240,7 @@ class TestValidatePipelinePathAllowlist:
         """B11 fix: path allowlist check is always recorded, even when skipped."""
         state = _make_state(source_options={})
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
@@ -289,7 +289,7 @@ class TestValidatePipelineBatchTransformOptions:
             version=1,
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n"
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
@@ -337,7 +337,7 @@ class TestValidatePipelineBatchTransformOptions:
             version=1,
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n"
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
@@ -394,7 +394,7 @@ class TestValidatePipelineBatchTransformOptions:
             version=1,
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n"
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
@@ -443,7 +443,7 @@ class TestValidatePipelinePendingInterpretationPlaceholders:
             )
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
@@ -490,7 +490,7 @@ class TestValidatePipelinePendingInterpretationPlaceholders:
             }
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
@@ -536,7 +536,7 @@ class TestValidatePipelinePendingInterpretationPlaceholders:
         )
         settings = _make_settings()
         captured_states: list[CompositionState] = []
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
 
         def _generate_yaml(candidate: CompositionState) -> str:
             captured_states.append(candidate)
@@ -571,7 +571,7 @@ class TestValidatePipelinePendingInterpretationPlaceholders:
         )
         settings = _make_settings()
         captured_states: list[CompositionState] = []
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
 
         def _generate_yaml(candidate: CompositionState) -> str:
             captured_states.append(candidate)
@@ -600,7 +600,7 @@ class TestValidatePipelineSinkPathAllowlist:
             outputs=(_make_output(name="evil_sink", options={"path": "/etc/cron.d/backdoor.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         result = validate_pipeline(state, settings, mock_yaml_gen)
         assert result.is_valid is False
         assert any("Path traversal" in e.message for e in result.errors)
@@ -612,7 +612,7 @@ class TestValidatePipelineSinkPathAllowlist:
             outputs=(_make_output(name="tricky", options={"path": "/tmp/test_data/outputs/../../etc/passwd"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         result = validate_pipeline(state, settings, mock_yaml_gen)
         assert result.is_valid is False
 
@@ -622,7 +622,7 @@ class TestValidatePipelineSinkPathAllowlist:
             outputs=(_make_output(name="primary", options={"path": "/tmp/test_data/outputs/result.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
@@ -637,7 +637,7 @@ class TestValidatePipelineSinkPathAllowlist:
             outputs=(_make_output(name="blob_out", options={"path": "/tmp/test_data/blobs/out.json"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
@@ -652,7 +652,7 @@ class TestValidatePipelineSinkPathAllowlist:
             outputs=(_make_output(name="db_sink", options={"connection_string": "sqlite:///out.db"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
@@ -764,7 +764,7 @@ class TestValidatePipelineSemanticContractsLegacy:
     def test_compact_web_scrape_text_fails_before_yaml_generation(self) -> None:
         state = self._make_web_scrape_line_explode_state()
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
 
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
@@ -789,7 +789,7 @@ class TestValidatePipelineSemanticContractsLegacy:
             scrape_options={"text_separator": "\n"},
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
@@ -892,7 +892,7 @@ class TestValidatePipelineSemanticContracts:
     def test_compact_text_fails_with_semantic_contracts_check_name(self) -> None:
         state = self._make_state(text_separator=" ")
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
@@ -903,7 +903,7 @@ class TestValidatePipelineSemanticContracts:
     def test_newline_text_passes_semantic_contracts_check(self) -> None:
         state = self._make_state(text_separator="\n")
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
 
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
@@ -985,7 +985,7 @@ class TestValidatePipelineSemanticContracts:
             ),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
 
         result = validate_pipeline(state, settings, mock_yaml_gen)
@@ -1016,7 +1016,7 @@ class TestValidatePipelineRelativePaths:
             outputs=(_make_output(name="primary", options={"path": "outputs/result.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
@@ -1030,7 +1030,7 @@ class TestValidatePipelineRelativePaths:
             source_options={"path": "blobs/data.csv"},
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
@@ -1045,7 +1045,7 @@ class TestValidatePipelineRelativePaths:
             outputs=(_make_output(name="evil", options={"path": "../etc/passwd"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         result = validate_pipeline(state, settings, mock_yaml_gen)
         assert result.is_valid is False
         assert any("Path traversal" in e.message for e in result.errors)
@@ -1057,7 +1057,7 @@ class TestValidatePipelineRelativePaths:
             outputs=(_make_output(name="blob_out", options={"path": "blobs/out.json"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
@@ -1078,7 +1078,7 @@ class TestValidatePipelineSuccess:
         mock_load: MagicMock,
         mock_assemble: MagicMock,
     ) -> None:
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         mock_settings = MagicMock()
         mock_load.return_value = mock_settings
@@ -1131,7 +1131,7 @@ class TestValidatePipelineSettingsFailure:
         self,
         mock_load: MagicMock,
     ) -> None:
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "bad: yaml"
         # Note: from_exception_data() is a Pydantic v2 internal API. If this breaks
         # on a Pydantic upgrade, replace with: `ElspethSettings(bad_field="x")` to
@@ -1166,7 +1166,7 @@ class TestValidatePipelineSettingsFailure:
         self,
         mock_load: MagicMock,
     ) -> None:
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source: {}"
         mock_load.side_effect = ValueError("invalid settings")
 
@@ -1186,7 +1186,7 @@ class TestValidatePipelinePluginFailure:
         mock_instantiate: MagicMock,
         mock_load: MagicMock,
     ) -> None:
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: unknown"
         mock_load.return_value = MagicMock()
         from elspeth.plugins.infrastructure.manager import PluginNotFoundError
@@ -1203,7 +1203,7 @@ class TestValidatePipelinePluginFailure:
         assert any("unknown" in e.message.lower() for e in result.errors)
 
     def test_real_text_source_config_error_returns_validation_result(self) -> None:
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
 source:
   plugin: text
@@ -1264,7 +1264,7 @@ class TestValidatePipelineGraphFailure:
         mock_instantiate: MagicMock,
         mock_load: MagicMock,
     ) -> None:
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         mock_load.return_value = MagicMock()
         mock_bundle = MagicMock()
@@ -1296,7 +1296,7 @@ class TestValidatePipelineGraphFailure:
         mock_instantiate: MagicMock,
         mock_load: MagicMock,
     ) -> None:
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         mock_load.return_value = MagicMock()
         mock_bundle = MagicMock()
@@ -1329,7 +1329,7 @@ class TestValidatePipelineNoBareCatch:
         self,
         mock_load: MagicMock,
     ) -> None:
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         mock_load.side_effect = RuntimeError("Unexpected engine bug")
 
@@ -1353,7 +1353,7 @@ class TestValidatePipelineInMemoryLoading:
         mock_load: MagicMock,
     ) -> None:
         """Settings are loaded via load_settings_from_yaml_string, not file-based."""
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         mock_settings = MagicMock()
         mock_load.return_value = mock_settings
@@ -1456,7 +1456,7 @@ class TestValidatePipelineSecretRefs:
             source_options={"api_key": {"secret_ref": "MISSING_KEY"}},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         secret_svc = FakeSecretService(available_refs=set())
 
         result = validate_pipeline(
@@ -1483,7 +1483,7 @@ class TestValidatePipelineSecretRefs:
             source_options={"api_key": {"secret_ref": "MY_KEY"}},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         secret_svc = FakeSecretService(available_refs={"MY_KEY"})
 
@@ -1506,7 +1506,7 @@ class TestValidatePipelineSecretRefs:
         """A composition with no secret markers records that fact structurally."""
         state = _make_state(source_options={})
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         secret_svc = FakeSecretService(available_refs=set())
 
@@ -1530,7 +1530,7 @@ class TestValidatePipelineSecretRefs:
             source_options={"api_key": {"secret_ref": "KEY"}},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
 
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
@@ -1549,7 +1549,7 @@ class TestValidatePipelineSecretRefs:
             nodes=(_make_node(options={"token": {"secret_ref": "NODE_TOKEN"}}),),
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         secret_svc = FakeSecretService(available_refs=set())
 
         result = validate_pipeline(
@@ -1570,7 +1570,7 @@ class TestValidatePipelineSecretRefs:
             outputs=(_make_output(options={"password": {"secret_ref": "DB_PASS"}}),),
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         secret_svc = FakeSecretService(available_refs=set())
 
         result = validate_pipeline(
@@ -1593,7 +1593,7 @@ class TestValidatePipelineSecretRefs:
             },
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         secret_svc = FakeSecretService(available_refs={"REF_A"})  # REF_B missing
 
         result = validate_pipeline(
@@ -1615,7 +1615,7 @@ class TestValidatePipelineSecretRefs:
             source_options={"api_key": "${OPENROUTER_API_KEY}"},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         secret_svc = FakeSecretService(
             available_refs=set(),
             inventory_refs={"OPENROUTER_API_KEY"},
@@ -1681,7 +1681,7 @@ class TestValidatePipelineFabricatedCredentials:
             ),
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         secret_svc = FakeSecretService(available_refs=set())
 
         result = validate_pipeline(
@@ -1714,7 +1714,7 @@ class TestValidatePipelineFabricatedCredentials:
             source_options={"api_key": "PLACEHOLDER_TOKEN"},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         secret_svc = FakeSecretService(available_refs=set())
 
         result = validate_pipeline(
@@ -1738,7 +1738,7 @@ class TestValidatePipelineFabricatedCredentials:
             outputs=(_make_output(options={"password": "fake-pwd"}, name="db_sink"),),
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         secret_svc = FakeSecretService(available_refs=set())
 
         result = validate_pipeline(
@@ -1761,7 +1761,7 @@ class TestValidatePipelineFabricatedCredentials:
             source_options={"custom_token": "literal-token-string"},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         secret_svc = FakeSecretService(available_refs=set())
 
         result = validate_pipeline(
@@ -1784,7 +1784,7 @@ class TestValidatePipelineFabricatedCredentials:
             source_options={"auth": {"api_key": "BOGUS"}},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         secret_svc = FakeSecretService(available_refs=set())
 
         result = validate_pipeline(
@@ -1809,7 +1809,7 @@ class TestValidatePipelineFabricatedCredentials:
             source_options={"api_key": "${SOME_UNREGISTERED_NAME}"},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         # No matching inventory entry — env-marker name unknown.
         secret_svc = FakeSecretService(available_refs=set(), inventory_refs=set())
 
@@ -1834,7 +1834,7 @@ class TestValidatePipelineFabricatedCredentials:
             source_options={"api_key": {"secret_ref": "REAL_KEY"}},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         secret_svc = FakeSecretService(available_refs={"REAL_KEY"})
 
@@ -1869,7 +1869,7 @@ class TestValidatePipelineFabricatedCredentials:
             ),
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         secret_svc = FakeSecretService(available_refs={"ANY_SECRET"})
 
@@ -1911,7 +1911,7 @@ class TestValidatePipelineFabricatedCredentials:
             ),
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         secret_svc = FakeSecretService(available_refs={"DATABASE_URL"})
 
@@ -1933,7 +1933,7 @@ class TestValidatePipelineFabricatedCredentials:
             source_options={"api_key": "${OPENROUTER_API_KEY}"},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         secret_svc = FakeSecretService(
             available_refs={"OPENROUTER_API_KEY"},
@@ -1959,7 +1959,7 @@ class TestValidatePipelineFabricatedCredentials:
             source_options={"api_key": ""},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         secret_svc = FakeSecretService(available_refs=set())
 
@@ -1982,7 +1982,7 @@ class TestValidatePipelineFabricatedCredentials:
             source_options={"path": "/tmp/test_data/blobs/data.csv", "delimiter": ","},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         secret_svc = FakeSecretService(available_refs=set())
 
@@ -2049,7 +2049,7 @@ class TestReservedNameSecretRefPreflight:
             source_options={"api_key": {"secret_ref": "ELSPETH_FINGERPRINT_KEY"}},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
 
         # Must NOT raise — regression would have surfaced as SecretNotFoundError
         # propagating out of has_ref inside the missing_refs comprehension.
@@ -2090,7 +2090,7 @@ class TestSecretRefResolutionBeforeSettingsLoad:
             source_options={"api_key": {"secret_ref": "MY_KEY"}},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = (
             "source:\n  plugin: csv\n  on_success: transform_in\n"
             "  on_validation_failure: discard\n  options:\n"
@@ -2136,7 +2136,7 @@ class TestSecretRefResolutionBeforeSettingsLoad:
             source_options={"api_key": "${OPENROUTER_API_KEY}"},
         )
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = (
             "source:\n  plugin: csv\n  on_success: transform_in\n"
             "  on_validation_failure: discard\n  options:\n"
@@ -2181,7 +2181,7 @@ class TestSecretRefResolutionBeforeSettingsLoad:
         """
         state = _make_state(source_options={"url": "https://example.com/data"})
         settings = _make_settings()
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = (
             "source:\n  plugin: csv\n  on_success: transform_in\n"
             "  on_validation_failure: discard\n  options:\n"
@@ -2282,7 +2282,7 @@ class TestValidatePipelineRuntimePathResolution:
             version=1,
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
 source:
   plugin: csv
@@ -2328,7 +2328,7 @@ sinks:
             version=1,
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
 source:
   plugin: csv
@@ -2376,7 +2376,7 @@ class TestValidatePipelineRuntimeCheckBoundaries:
             outputs=(_make_output({"path": "/tmp/test_data/outputs/out.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
 source:
   plugin: csv
@@ -2420,7 +2420,7 @@ sinks:
             outputs=(_make_output({"path": "/tmp/test_data/outputs/out.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
 source:
   plugin: csv
@@ -2464,7 +2464,7 @@ sinks:
             outputs=(_make_output({"path": "/tmp/test_data/outputs/out.csv"}),),
         )
         settings = _make_settings(data_dir="/tmp/test_data")
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
 source:
   plugin: csv
@@ -2758,7 +2758,7 @@ class TestEdgeContractFailureFormatting:
     ) -> None:
         """validate_pipeline must surface the rich message + suggestion when
         graph.validate_edge_compatibility() raises EdgeContractError."""
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         mock_load.return_value = MagicMock()
         mock_bundle = MagicMock()
@@ -2823,7 +2823,7 @@ class TestEdgeContractFailureFormatting:
         """Non-edge-contract GraphValidationError keeps legacy str(exc)
         message and suggestion=None (other failure modes don't have
         structured per-field detail to enrich from)."""
-        mock_yaml_gen = MagicMock()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source"
         mock_load.return_value = MagicMock()
         mock_bundle = MagicMock()

@@ -106,6 +106,7 @@ export function TutorialTurn4Run({
           rows: response.output.rows,
           seededFromCache: response.seeded_from_cache,
           cacheKey: response.cache_key,
+          discardedRowCount: response.output.discarded_row_count,
         });
       })
       .catch((err: unknown) => {
@@ -216,6 +217,14 @@ export function TutorialTurn4Run({
             Done. {result.rows.length} rows returned
             {result.seededFromCache ? " from the tutorial cache" : ""}.
           </p>
+          {result.discardedRowCount > 0 && (
+            <p className="tutorial-run-discarded" role="status">
+              {result.discardedRowCount}{" "}
+              {result.discardedRowCount === 1 ? "row was" : "rows were"} discarded at the source
+              because the data could not be parsed. They were recorded in the audit trail but are
+              not shown above.
+            </p>
+          )}
           <TutorialResultTable rows={result.rows} />
           <div className="tutorial-actions">
             <button

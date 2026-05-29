@@ -477,7 +477,7 @@ class TestComposerSingleToolCall:
         done = _make_llm_response(content="Done.")
 
         with (
-            patch("elspeth.web.composer.service.execute_tool", side_effect=fake_execute_tool),
+            patch("elspeth.web.composer.tool_batch.execute_tool", side_effect=fake_execute_tool),
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         ):
             mock_llm.side_effect = [turn, done]
@@ -531,7 +531,7 @@ class TestComposerSingleToolCall:
         done = _make_llm_response(content="Done.")
 
         with (
-            patch("elspeth.web.composer.service.execute_tool", side_effect=fake_execute_tool),
+            patch("elspeth.web.composer.tool_batch.execute_tool", side_effect=fake_execute_tool),
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
         ):
             mock_llm.side_effect = [turn, done]
@@ -1380,7 +1380,7 @@ class TestComposerErrorHandling:
 
         with (
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ToolArgumentError(
                     argument="content",
                     expected="a string",
@@ -1660,7 +1660,7 @@ class TestComposerErrorHandling:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=KeyError("internal_state_key"),
             ),
         ):
@@ -1726,7 +1726,7 @@ class TestComposerErrorHandling:
 
         with (
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 wraps=_execute_tool,
             ) as mock_execute_tool,
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -1766,7 +1766,7 @@ class TestComposerErrorHandling:
 
         with (
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 wraps=_execute_tool,
             ) as mock_execute_tool,
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
@@ -2364,7 +2364,7 @@ class TestComposeTimeout:
         with (
             patch.object(service, "_call_llm", new=first_tool_then_timeout_llm),
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=_slow_mutation_tool,
             ),
             pytest.raises(ComposerConvergenceError) as exc_info,
@@ -3076,7 +3076,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("invalid expression syntax — plugin bug"),
             ),
         ):
@@ -3114,7 +3114,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=TypeError("NoneType + int — plugin bug"),
             ),
         ):
@@ -3151,7 +3151,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "plugin bug"),
             ),
         ):
@@ -3231,7 +3231,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=_fake_execute_tool,
             ),
         ):
@@ -3274,7 +3274,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ToolArgumentError(
                     argument="plugin",
                     expected="a string",
@@ -3341,7 +3341,7 @@ class TestPluginBugCrashesFromToolExecution:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=leaky,
             ),
         ):
@@ -3441,7 +3441,7 @@ class TestPluginCrashSessionPersistence:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("plugin bug: /etc/secrets/bootstrap.key is bad"),
             ),
         ):
@@ -3530,7 +3530,7 @@ class TestPluginCrashSessionPersistence:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("original plugin bug"),
             ),
             patch.object(
@@ -3618,7 +3618,7 @@ class TestPluginCrashSessionPersistence:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("plugin bug"),
             ),
             capture_logs() as cap_logs,
@@ -3690,7 +3690,7 @@ class TestPluginCrashSessionPersistence:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("original plugin bug"),
             ),
             patch.object(
@@ -3773,7 +3773,7 @@ class TestPluginCrashSessionPersistence:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=ValueError("plugin bug"),
             ),
             patch.object(service, "_persist_crashed_session", side_effect=capture_thread),
@@ -3835,7 +3835,7 @@ class TestToolExecutionThreadOffloading:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=_capture_thread,
             ),
         ):
@@ -3950,7 +3950,7 @@ class TestToolExecutionThreadOffloading:
         with (
             patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
             patch(
-                "elspeth.web.composer.service.execute_tool",
+                "elspeth.web.composer.tool_batch.execute_tool",
                 side_effect=_blocking_tool,
             ),
         ):

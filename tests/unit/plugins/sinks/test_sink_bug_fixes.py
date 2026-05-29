@@ -49,15 +49,29 @@ def ctx() -> PluginContext:
 class TestCSVSinkAtomicBatchWrite:
     """Regression tests for P1-2026-02-14: CSVSink partial batch writes.
 
-    CSVSink.write() must be all-or-nothing for each batch. If row N fails
-    serialization (e.g., extra fields), rows 0..N-1 must NOT be written.
+    CSVSink.write() must never leave a partial batch on disk on an *I/O* failure:
+    if the real file write/flush fails part-way, the batch is rolled back so no
+    bytes exist without a matching audit record. That batch-integrity guarantee
+    still holds.
+
+    Per-row *encode* faults (a row with a field outside the column lock — a
+    ValueError from DictWriter, attributable to one row) are NOT batch failures.
+    Per audit finding #6 they are diverted (recorded + routed via
+    on_write_failure) so the surrounding good rows are written, rather than
+    aborting the batch. The P1-2026-02-14 invariant — never a row on disk that
+    audit marks FAILED — is preserved: good rows are written AND audited as
+    written; the bad row is excluded from disk AND recorded as a diversion.
     """
 
-    def test_extra_field_in_batch_writes_nothing(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """If any row in the batch has extra fields, NO rows are written.
+    def test_extra_field_in_batch_diverts_only_bad_row(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A row with extra fields is diverted; the surrounding good rows write.
 
-        Before the fix, DictWriter wrote rows one-by-one, so rows before the
-        failing row would be in the CSV while the audit trail shows FAILED.
+        Previously this pinned crash-the-batch behavior: a single row with a
+        field outside the column lock raised ValueError and dropped the whole
+        batch (no rows written). That pinned audit finding #6. The good rows now
+        write and the bad row is recorded as a diversion (row on disk <-> audit
+        stays consistent: written rows are audited written, the diverted row is
+        recorded diverted, never written-but-FAILED).
         """
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
@@ -67,29 +81,28 @@ class TestCSVSinkAtomicBatchWrite:
         # First batch succeeds (establishes file)
         sink.write([{"id": 1, "name": "alice"}], ctx)
         sink.flush()
-        initial_size = output_file.stat().st_size
 
-        # Second batch: row 0 is valid, row 1 has extra field
-        with pytest.raises(ValueError, match="c"):
-            sink.write(
-                [
-                    {"id": 2, "name": "bob"},
-                    {"id": 3, "name": "carol", "c": "extra"},
-                ],
-                ctx,
-            )
+        # Second batch: row 0 is valid, row 1 has an extra field outside the lock.
+        result = sink.write(
+            [
+                {"id": 2, "name": "bob"},
+                {"id": 3, "name": "carol", "c": "extra"},
+            ],
+            ctx,
+        )
 
-        # File size must NOT have changed -- no partial write
-        assert output_file.stat().st_size == initial_size
+        # The bad row is recorded as a diversion (not written, not lost).
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        assert result.diversions[0].row_data == {"id": 3, "name": "carol", "c": "extra"}
 
         sink.close()
 
-        # Verify only the first batch is in the file
+        # The good rows from both batches are on disk; the diverted row is absent.
         with open(output_file) as f:
             reader = csv.DictReader(f)
             rows = list(reader)
-        assert len(rows) == 1
-        assert rows[0]["id"] == "1"
+        assert [r["id"] for r in rows] == ["1", "2"]
 
     def test_valid_batch_still_writes_correctly(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Valid batches still write correctly after the staging change."""
@@ -145,25 +158,36 @@ class TestCSVSinkWriteModeRollback:
     hash/stat phase fails, the newly-created file must be cleaned up.
     """
 
-    def test_staging_failure_never_creates_file(self, tmp_path: Path, ctx: PluginContext) -> None:
-        """If staging fails (extra fields), the file is never created.
+    def test_first_batch_extra_field_diverts_writes_header_only(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A first-batch row with extra fields is diverted; a header-only file results.
 
-        The deferred-truncation design means _open_file_write_mode is never
-        called when staging fails, so no file should exist.
+        Previously this pinned crash-the-batch behavior: an extra-field row in the
+        first batch raised ValueError and the file was never created. Per audit
+        finding #6 the bad row is now diverted (recorded + routed). In fixed mode
+        the columns come from the schema (not the row), so the file is created with
+        the header and the diverted row is excluded — header-only output, with the
+        fault recorded as a diversion rather than dropped.
         """
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         output_file = tmp_path / "output.csv"
         sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": FIXED_SCHEMA}))
 
-        # Row has an extra field that fixed schema rejects during staging
-        with pytest.raises(ValueError, match="c"):
-            sink.write([{"id": 1, "name": "alice", "c": "extra"}], ctx)
+        # Row has an extra field that the fixed schema column lock rejects.
+        result = sink.write([{"id": 1, "name": "alice", "c": "extra"}], ctx)
 
-        # File must never have been created
-        assert not output_file.exists()
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 0
+        assert result.diversions[0].row_data == {"id": 1, "name": "alice", "c": "extra"}
 
         sink.close()
+
+        # Header-only file created; no data rows reached disk.
+        assert output_file.exists()
+        with open(output_file) as f:
+            reader = csv.DictReader(f)
+            assert list(reader.fieldnames or []) == ["id", "name"]
+            assert list(reader) == []
 
     def test_write_failure_after_open_removes_file(self, tmp_path: Path, ctx: PluginContext) -> None:
         """If file.write() fails after open, the newly-created file is removed.

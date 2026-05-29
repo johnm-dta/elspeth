@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType, UnionType
 from typing import Annotated, Any, Union, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from elspeth.contracts.composer_interpretation import InterpretationKind
 from elspeth.contracts.errors import AuditIntegrityError
@@ -797,6 +797,58 @@ def _summarize_set_source_options(options: dict[str, Any]) -> str:
     )
 
 
+def _coerce_stringified_json_object(value: Any) -> Any:
+    """Tier-3 boundary deserialisation for LLM-supplied object arguments.
+
+    Some models — notably ``openrouter/openai/gpt-5.4-mini``, the deployed
+    composer model — intermittently serialise a nested-object tool-call
+    parameter as a JSON *string* (``options="{}"``,
+    ``patch="{\\"column\\":\\"url\\"}"``) instead of emitting a JSON object
+    (``options={}``). This was proven from the staging audit trail (sessions
+    ``fd551d98`` / ``71d57b4f``): every free-form ``options`` / ``patch`` field
+    arrived as a string while typed sibling fields (``blob_id``, ``nodes``)
+    arrived correctly, so the build failed wholesale on a ``dict[str, Any]``
+    ``ValidationError`` whenever the model stringified.
+
+    A JSON string is an equivalent wire encoding of the object it encodes;
+    parsing it back is *meaning-preserving coercion*, not fabrication
+    (CLAUDE.md "Data Manifesto" — Tier-3 boundary, the ``"42" -> 42`` class),
+    and is therefore exempt from the defensive-programming ban as a documented
+    trust-boundary deserialisation. The raw stringified form is recorded in the
+    per-dispatch audit envelope (``service.py`` ``begin_dispatch_or_arg_error``,
+    opened from the pre-coercion ``json.loads`` result) BEFORE this validator
+    runs, so the audit trail still records exactly what the model emitted.
+
+    The coercion is deliberately narrow: only a string that decodes to a JSON
+    *object* is coerced. A non-string, a string that is not valid JSON, or a
+    string that decodes to a non-object (list, scalar, ``null``) is returned
+    untouched so the field's ``dict[str, Any]`` validation still rejects
+    genuinely malformed input (fails closed).
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        decoded = json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
+    return decoded if isinstance(decoded, dict) else value
+
+
+# Reusable annotation for every LLM-supplied free-form object argument
+# (``options`` on the source/node/output binding tools; ``patch`` on the
+# patch_* tools). Combines the existing ``Sensitive`` redaction marker with the
+# stringified-object coercion above. The redaction walker selects the
+# ``_SensitiveMarker`` by ``isinstance`` (``_has_sensitive`` /
+# ``_count_sensitive``), so the extra ``BeforeValidator`` metadata entry is
+# transparent to the adequacy guard; pydantic's ``BeforeValidator`` is a frozen
+# dataclass, so it does not introduce mutable metadata.
+_LlmJsonObject = Annotated[
+    dict[str, Any],
+    Sensitive(summarizer=_summarize_set_source_options),
+    BeforeValidator(_coerce_stringified_json_object),
+]
+
+
 class SetSourceArgumentsModel(BaseModel):
     """Redaction-bearing argument model for the ``set_source`` tool.
 
@@ -822,7 +874,7 @@ class SetSourceArgumentsModel(BaseModel):
 
     plugin: str
     on_success: str
-    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    options: _LlmJsonObject
     on_validation_failure: str
 
     model_config = ConfigDict(extra="forbid")
@@ -951,7 +1003,7 @@ class SetSourceFromBlobArgumentsModel(BaseModel):
     on_success: str
     plugin: str | None = None
     on_validation_failure: str | None = None
-    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    options: _LlmJsonObject = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1174,7 +1226,7 @@ class _SetPipelineSourceModel(BaseModel):
     plugin: str
     on_success: str
     blob_id: str | None = None
-    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    options: _LlmJsonObject = Field(default_factory=dict)
     on_validation_failure: str | None = None
     inline_blob: _InlineBlobModel | None = None
 
@@ -1275,7 +1327,7 @@ class _PipelineNodeModel(BaseModel):
     plugin: str | None = None
     on_success: str | None = None
     on_error: str | None = None
-    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    options: _LlmJsonObject = Field(default_factory=dict)
     condition: str | None = None
     routes: dict[str, str] | None = None
     fork_to: list[str] | None = None
@@ -1332,7 +1384,7 @@ class _PipelineOutputModel(BaseModel):
 
     sink_name: str
     plugin: str
-    options: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)] = Field(default_factory=dict)
+    options: _LlmJsonObject = Field(default_factory=dict)
     on_write_failure: str | None = None
 
     model_config = ConfigDict(extra="forbid")
@@ -1406,7 +1458,7 @@ class ApplyPipelineRecipeArgumentsModel(BaseModel):
     """
 
     recipe_name: str
-    slots: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    slots: _LlmJsonObject
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1512,7 +1564,7 @@ class PatchSourceOptionsArgumentsModel(BaseModel):
     rejects misrouted argument shapes early.
     """
 
-    patch: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    patch: _LlmJsonObject
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1548,7 +1600,7 @@ class PatchNodeOptionsArgumentsModel(BaseModel):
     """
 
     node_id: str
-    patch: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    patch: _LlmJsonObject
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1575,7 +1627,7 @@ class PatchOutputOptionsArgumentsModel(BaseModel):
     """
 
     sink_name: str
-    patch: Annotated[dict[str, Any], Sensitive(summarizer=_summarize_set_source_options)]
+    patch: _LlmJsonObject
 
     model_config = ConfigDict(extra="forbid")
 
@@ -2223,6 +2275,150 @@ def _summarize_blob_content(content: str) -> str:
     return f"<blob-content:{len(content.encode('utf-8'))}-bytes>"
 
 
+def _summarize_repair_arguments(arguments: Mapping[str, object]) -> str:
+    """Summarizer for ``get_blob_content`` repair-tool-call ``arguments``.
+
+    The validation envelope's ``graph_repair_suggestions[*].tool_sequence[*].
+    arguments`` slot is the one genuinely heterogeneous leaf in the
+    ``get_blob_content`` response surface. It holds the keyword arguments the
+    composer would pass to a repair tool (field paths, node ids, connection
+    selectors) and varies per repair tool, so it cannot be closed-typed the way
+    the surrounding structural fields can. It is NOT source-data lineage — it is
+    derived, advisory repair guidance — so summarizing it to a structural sketch
+    in ``chat_messages.tool_calls`` does not break attributability.
+
+    The summary discloses only the SORTED argument key names, never their
+    values. Keys are pipeline-structural identifiers (e.g. ``field_path``,
+    ``node_id``) chosen by the composer's own repair planner, not operator
+    payload, so naming them is non-sensitive and aids audit readability.
+
+    Contract (spec §4.2.6, §9 RSK-03):
+      * MUST NOT raise on any reachable input value.
+      * MUST return ``str``.
+
+    Pydantic's ``Mapping[str, object]`` validation guarantees a real mapping
+    with string keys before this runs, so ``sorted(arguments)`` cannot raise on
+    a mixed-key set. An empty mapping yields ``<repair-args:>`` which is a valid
+    structural signal (the repair tool takes no arguments).
+    """
+    return f"<repair-args:{','.join(sorted(arguments))}>"
+
+
+class _RepairToolCallShadowModel(BaseModel):
+    """Redaction shadow for ``_RepairToolCall`` (tools/_common.py).
+
+    Mirrors the serialized ``tool_sequence[*]`` dict: a closed ``tool`` name
+    plus the heterogeneous ``arguments`` mapping. ``arguments`` is the only
+    leaf in the entire ``get_blob_content`` validation envelope that cannot be
+    closed-typed, so it carries a :class:`Sensitive` marker with a structural
+    summarizer (:func:`_summarize_repair_arguments`). It is advisory repair
+    guidance, not source-data lineage, so summarizing its keys is sound.
+    """
+
+    tool: str
+    arguments: Annotated[Mapping[str, object], Sensitive(summarizer=_summarize_repair_arguments)]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _AffectedConsumerShadowModel(BaseModel):
+    """Redaction shadow for ``_AffectedConsumer`` (tools/_common.py).
+
+    All three fields are pipeline-structural scalar strings (node id and the
+    before/after input descriptors); none carries operator payload.
+    """
+
+    id: str
+    current_input: str
+    new_input: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _GraphRepairSuggestionShadowModel(BaseModel):
+    """Redaction shadow for ``_GraphRepairSuggestion`` (tools/_common.py).
+
+    Mirrors a serialized ``graph_repair_suggestions[*]`` dict. Every scalar
+    field is a structural repair descriptor; the two nested lists descend into
+    :class:`_AffectedConsumerShadowModel` and :class:`_RepairToolCallShadowModel`
+    so the walker reaches the single Sensitive ``arguments`` leaf within.
+    """
+
+    code: str
+    connection: str
+    strategy: str
+    reason: str
+    affected_consumers: list[_AffectedConsumerShadowModel]
+    tool_sequence: list[_RepairToolCallShadowModel]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _SemanticEdgeContractShadowModel(BaseModel):
+    """Redaction shadow for ``_SemanticEdgeContractPayload`` (tools/_common.py).
+
+    Mirrors a serialized ``semantic_contracts[*]`` dict. All fields are
+    structural edge-contract metadata (node ids, plugin names, field names,
+    outcome / requirement codes). ``producer_plugin`` is ``str | None`` because
+    an unconnected consumer edge has no producer.
+    """
+
+    from_id: str
+    to_id: str
+    consumer_plugin: str
+    producer_plugin: str | None
+    producer_field: str
+    consumer_field: str
+    outcome: str
+    requirement_code: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _ValidationEntryShadowModel(BaseModel):
+    """Redaction shadow for ``ValidationEntry.to_dict()`` (state.py).
+
+    Mirrors a serialized validation message: ``component`` / ``message`` /
+    ``severity`` are all plain strings (``severity`` serializes from the
+    ``Severity`` literal alias to its string value). None carries operator
+    payload — these are composer-authored diagnostics about pipeline shape.
+    """
+
+    component: str
+    message: str
+    severity: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class GetBlobContentValidationModel(BaseModel):
+    """Redaction shadow for the serialized ``ToolResult`` validation envelope.
+
+    Faithfully mirrors the ``"validation"`` dict built in
+    ``ToolResult.to_dict()`` (tools/_common.py ~591-605). This replaces the
+    previous ``validation: dict[str, Any]`` on
+    :class:`GetBlobContentResponseModel`, which was an ``Any``-typed
+    redaction-bypass surface the adequacy guard (§4.4.2) fails closed on.
+
+    The validation envelope is NON-sensitive pipeline-validation metadata, not
+    blob bytes, so the field as a whole is intentionally NOT marked Sensitive —
+    redacting it would wrongly strip useful diagnostics from the audit trail.
+    Every leaf here is a closed scalar EXCEPT the single
+    ``graph_repair_suggestions[*].tool_sequence[*].arguments`` mapping, which
+    carries its own Sensitive structural summarizer in
+    :class:`_RepairToolCallShadowModel`.
+    """
+
+    is_valid: bool
+    errors: list[_ValidationEntryShadowModel]
+    warnings: list[_ValidationEntryShadowModel]
+    suggestions: list[_ValidationEntryShadowModel]
+    semantic_contracts: list[_SemanticEdgeContractShadowModel]
+    graph_repair_suggestions: list[_GraphRepairSuggestionShadowModel]
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class GetBlobContentArgumentsModel(BaseModel):
     """Redaction-bearing argument model for the ``get_blob_content`` tool.
 
@@ -2280,7 +2476,7 @@ class GetBlobContentResponseModel(BaseModel):
     """
 
     success: bool
-    validation: dict[str, Any]
+    validation: GetBlobContentValidationModel
     affected_nodes: list[str]
     version: int
     data: GetBlobContentDataModel | GetBlobContentFailureDataModel

@@ -27,6 +27,8 @@ from .conftest import chaosllm_openrouter_http_responses, chaosllm_openrouter_ht
 
 # Common schema config for dynamic field handling (accepts any fields)
 DYNAMIC_SCHEMA = {"mode": "observed"}
+_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
+_OPENROUTER_INVALID_MODEL = "anthropic/this-model-does-not-exist"
 
 
 def _create_mock_response(
@@ -102,7 +104,7 @@ def _openrouter_config(**overrides: Any) -> dict[str, Any]:
     config: dict[str, Any] = {
         "provider": "openrouter",
         "api_key": "sk-test-key",
-        "model": "anthropic/claude-3-opus",
+        "model": _OPENROUTER_MODEL,
         "prompt_template": "Analyze: {{ row.text }}",
         "schema": DYNAMIC_SCHEMA,
         "required_input_fields": [],
@@ -119,7 +121,7 @@ class TestOpenRouterConfig:
         with pytest.raises(PluginConfigError):
             OpenRouterConfig.from_dict(
                 {
-                    "model": "anthropic/claude-3-opus",
+                    "model": _OPENROUTER_MODEL,
                     "prompt_template": "Analyze: {{ row.text }}",
                     "schema": DYNAMIC_SCHEMA,
                     "required_input_fields": [],  # Explicit opt-out for this test
@@ -144,7 +146,7 @@ class TestOpenRouterConfig:
             OpenRouterConfig.from_dict(
                 {
                     "api_key": "sk-test-key",
-                    "model": "anthropic/claude-3-opus",
+                    "model": _OPENROUTER_MODEL,
                     "schema": DYNAMIC_SCHEMA,
                 }
             )  # Missing 'template'
@@ -155,7 +157,7 @@ class TestOpenRouterConfig:
             OpenRouterConfig.from_dict(
                 {
                     "api_key": "sk-test-key",
-                    "model": "anthropic/claude-3-opus",
+                    "model": _OPENROUTER_MODEL,
                     "prompt_template": "Analyze: {{ row.text }}",
                 }
             )  # Missing 'schema'
@@ -165,22 +167,57 @@ class TestOpenRouterConfig:
         config = OpenRouterConfig.from_dict(
             {
                 "api_key": "sk-test-key",
-                "model": "anthropic/claude-3-opus",
+                "model": _OPENROUTER_MODEL,
                 "prompt_template": "Analyze: {{ row.text }}",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
             }
         )
         assert config.api_key == "sk-test-key"
-        assert config.model == "anthropic/claude-3-opus"
+        assert config.model == _OPENROUTER_MODEL
         assert config.prompt_template == "Analyze: {{ row.text }}"
+
+    def test_config_construction_does_not_enforce_catalog_membership(self) -> None:
+        """Catalog membership is a value-source concern, not a construction-time
+        invariant. Construction must NOT consult the catalog (it is optional and
+        runtime-primed); an unknown model constructs cleanly and is rejected later
+        by the walker / composer prevalidation (check_config_value_sources).
+        """
+        config = OpenRouterConfig.from_dict(
+            {
+                "api_key": "sk-test-key",
+                "model": _OPENROUTER_INVALID_MODEL,
+                "prompt_template": "Analyze: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "required_input_fields": [],
+            }
+        )
+        assert config.model == _OPENROUTER_INVALID_MODEL
+
+    def test_config_allows_custom_base_url_without_catalog_membership(self) -> None:
+        """A custom base_url config with an arbitrary model constructs cleanly;
+        the walker's applies_when predicate skips the catalog for non-canonical
+        endpoints (catalog enforcement is no longer a construction concern).
+        """
+        config = OpenRouterConfig.from_dict(
+            {
+                "api_key": "sk-test-key",
+                "model": "totally/custom-model",
+                "prompt_template": "Analyze: {{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "required_input_fields": [],
+                "base_url": "https://custom.proxy.com/api/v1",
+            }
+        )
+
+        assert config.model == "totally/custom-model"
 
     def test_config_default_values(self) -> None:
         """Config has sensible defaults."""
         config = OpenRouterConfig.from_dict(
             {
                 "api_key": "sk-test-key",
-                "model": "anthropic/claude-3-opus",
+                "model": _OPENROUTER_MODEL,
                 "prompt_template": "Hello, {{ row.name }}!",
                 "schema": DYNAMIC_SCHEMA,
                 "required_input_fields": [],  # Explicit opt-out for this test
@@ -289,7 +326,7 @@ class TestLLMTransformOpenRouterInit:
             )
         )
 
-        assert transform._model == "anthropic/claude-3-opus"
+        assert transform._model == _OPENROUTER_MODEL
         assert isinstance(transform._config, OpenRouterConfig)
         assert transform._config.api_key == "sk-test-key"
         assert transform._config.base_url == "https://custom.example.com/api/v1"
@@ -1721,6 +1758,51 @@ class TestOpenRouterNanRejection:
             assert result.status == "error"
             assert result.reason is not None
             assert result.reason["reason"] == "llm_call_failed"
+        finally:
+            transform.close()
+
+    def test_response_missing_model_routes_error_not_fabricated(
+        self, mock_factory: Mock, collector: CollectorOutputPort, chaosllm_server
+    ) -> None:
+        """A response that omits 'model' must NOT be back-filled with the requested model.
+
+        Substituting the requested model fabricates a Tier-3 datum: the audit ``calls``
+        row, the ``{response_field}_model`` pipeline field, and the success metadata would
+        all assert a model the provider never reported, while the recorded raw_response
+        contains no model — two contradictory sources of truth. The provider must instead
+        record the malformed response and raise, routing the row to on_error (mirroring the
+        Azure provider's ``_validate_provider_response_model``).
+        """
+        no_model_body = (
+            '{"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], '
+            '"usage": {"prompt_tokens": 10, "completion_tokens": 25}}'
+        )
+        response = _create_mock_response(
+            chaosllm_server, raw_body=no_model_body, status_code=200, headers={"content-type": "application/json"}
+        )
+
+        transform = LLMTransform(_openrouter_config(model="openai/gpt-4", prompt_template="{{ row.text }}"))
+        init_ctx = make_context(landscape=mock_factory)
+        transform.on_start(init_ctx)
+        transform.connect_output(collector, max_pending=10)
+
+        token = make_token("row-1")
+        ctx = make_context(run_id="test", state_id="test-state", token=token, landscape=mock_factory)
+
+        try:
+            with mock_httpx_client(chaosllm_server, response=response):
+                transform.accept(make_pipeline_row({"text": "hello"}), ctx)
+                transform.flush_batch_processing(timeout=10.0)
+
+            assert len(collector.results) == 1
+            _, result, _ = collector.results[0]
+            assert isinstance(result, TransformResult)
+            assert result.status == "error"
+            assert result.reason is not None
+            assert result.reason["reason"] == "llm_call_failed"
+            assert "model" in result.reason["error"].lower()
+            # No fabricated model leaked into an output row.
+            assert result.row is None
         finally:
             transform.close()
 

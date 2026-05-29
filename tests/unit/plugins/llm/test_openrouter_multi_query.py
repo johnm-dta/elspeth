@@ -32,6 +32,12 @@ from elspeth.plugins.transforms.llm.transform import LLMTransform
 from elspeth.testing import make_pipeline_row
 from tests.fixtures.factories import make_context
 
+# A valid OpenRouter catalog model id. The litellm-derived catalog dropped the
+# retired ``anthropic/claude-3-opus``; OpenRouterConfig now rejects models not
+# in the catalog, so fixtures must name a live model. Mirrors test_openrouter.py
+# — centralised so the next catalog rotation is a one-line change.
+_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
+
 # Common schema config
 DYNAMIC_SCHEMA = {"mode": "observed"}
 
@@ -47,7 +53,7 @@ def make_config(**overrides: Any) -> dict[str, Any]:
     """
     config: dict[str, Any] = {
         "provider": "openrouter",
-        "model": "anthropic/claude-3-opus",
+        "model": _OPENROUTER_MODEL,
         "api_key": "test-key",
         "prompt_template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
         "system_prompt": "You are an assessment AI. Respond in JSON.",
@@ -91,7 +97,7 @@ def make_config(**overrides: Any) -> dict[str, Any]:
 def make_query_result(
     content: dict[str, Any] | str,
     *,
-    model: str = "anthropic/claude-3-opus",
+    model: str = _OPENROUTER_MODEL,
     usage: TokenUsage | None = None,
     finish_reason: FinishReason | None = FinishReason.STOP,
 ) -> LLMQueryResult:
@@ -176,7 +182,7 @@ class TestSingleQueryProcessing:
         """Config with a single query for isolated testing."""
         config: dict[str, Any] = {
             "provider": "openrouter",
-            "model": "anthropic/claude-3-opus",
+            "model": _OPENROUTER_MODEL,
             "api_key": "test-key",
             "prompt_template": "Input: {{ row.text_content }}\nCriterion: {{ row.criterion_name }}",
             "system_prompt": "You are an assessment AI. Respond in JSON.",
@@ -575,7 +581,7 @@ class TestRowProcessingWithPipelining:
         """Original source headers in input_fields resolve via PipelineRow contract."""
         config: dict[str, Any] = {
             "provider": "openrouter",
-            "model": "anthropic/claude-3-opus",
+            "model": _OPENROUTER_MODEL,
             "api_key": "test-key",
             "prompt_template": "Input: {{ row.text_content }}",
             "system_prompt": "You are an assessment AI. Respond in JSON.",
@@ -1128,7 +1134,7 @@ class TestNanInJsonParsing:
         """
         config: dict[str, Any] = {
             "provider": "openrouter",
-            "model": "anthropic/claude-3-opus",
+            "model": _OPENROUTER_MODEL,
             "api_key": "test-key",
             "prompt_template": "Input: {{ row.text_content }}",
             "schema": DYNAMIC_SCHEMA,
@@ -1160,7 +1166,7 @@ class TestNanInJsonParsing:
         """LLM response containing Infinity in JSON returns TransformResult.error."""
         config: dict[str, Any] = {
             "provider": "openrouter",
-            "model": "anthropic/claude-3-opus",
+            "model": _OPENROUTER_MODEL,
             "api_key": "test-key",
             "prompt_template": "Input: {{ row.text_content }}",
             "schema": DYNAMIC_SCHEMA,
@@ -1200,7 +1206,7 @@ class TestBug4_3_Tier3BoundaryTypeChecks:
         """Provider raises LLMClientError for non-string content."""
         config: dict[str, Any] = {
             "provider": "openrouter",
-            "model": "anthropic/claude-3-opus",
+            "model": _OPENROUTER_MODEL,
             "api_key": "test-key",
             "prompt_template": "Input: {{ row.text_content }}",
             "schema": DYNAMIC_SCHEMA,
@@ -1236,7 +1242,7 @@ class TestBug4_3_Tier3BoundaryTypeChecks:
         """
         config: dict[str, Any] = {
             "provider": "openrouter",
-            "model": "anthropic/claude-3-opus",
+            "model": _OPENROUTER_MODEL,
             "api_key": "test-key",
             "prompt_template": "Input: {{ row.text_content }}",
             "schema": DYNAMIC_SCHEMA,
@@ -1257,7 +1263,7 @@ class TestBug4_3_Tier3BoundaryTypeChecks:
         mock_provider.execute_query.return_value = LLMQueryResult(
             content='{"score": 5, "rationale": "good"}',
             usage=TokenUsage.unknown(),
-            model="anthropic/claude-3-opus",
+            model=_OPENROUTER_MODEL,
             finish_reason=FinishReason.STOP,
         )
 
@@ -1275,7 +1281,7 @@ class TestBug4_3_Tier3BoundaryTypeChecks:
         """Non-numeric completion_tokens handled by provider's TokenUsage parsing."""
         config: dict[str, Any] = {
             "provider": "openrouter",
-            "model": "anthropic/claude-3-opus",
+            "model": _OPENROUTER_MODEL,
             "api_key": "test-key",
             "prompt_template": "Input: {{ row.text_content }}",
             "schema": DYNAMIC_SCHEMA,
@@ -1296,7 +1302,7 @@ class TestBug4_3_Tier3BoundaryTypeChecks:
         mock_provider.execute_query.return_value = LLMQueryResult(
             content='{"score": 5, "rationale": "good"}',
             usage=TokenUsage.known(10, 0),  # completion_tokens normalized to 0
-            model="anthropic/claude-3-opus",
+            model=_OPENROUTER_MODEL,
             finish_reason=FinishReason.STOP,
         )
 

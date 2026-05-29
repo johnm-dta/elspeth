@@ -616,13 +616,19 @@ class TestRowLineage:
         assert lineage.source_data_hash == "required_hash_value"
 
     def test_row_lineage_requires_source_scoped_identity(self) -> None:
-        """RowLineage must expose persisted source-local and ingest identity."""
+        """RowLineage must expose persisted source-local and ingest identity.
+
+        source_row_index is a required `int` field; passing None (the legacy
+        "absent identity" shape) is rejected by the Tier-1 require_int guard.
+        """
         with pytest.raises(TypeError, match="source_row_index must be int"):
             RowLineage(
                 row_id="row-123",
                 run_id="run-456",
                 source_node_id="node-src",
                 row_index=0,
+                source_row_index=None,  # type: ignore[arg-type]
+                ingest_sequence=0,
                 source_data_hash="required_hash_value",
                 created_at=datetime.now(UTC),
                 source_data=None,
@@ -2138,6 +2144,8 @@ class TestRequireIntValidation:
                 run_id="run-1",
                 source_node_id="node-1",
                 row_index=True,
+                source_row_index=0,
+                ingest_sequence=0,
                 source_data_hash="abc123",
                 created_at=datetime.now(UTC),
             )
@@ -2150,6 +2158,8 @@ class TestRequireIntValidation:
                 run_id="run-1",
                 source_node_id="node-1",
                 row_index="0",  # type: ignore[arg-type]
+                source_row_index=0,
+                ingest_sequence=0,
                 source_data_hash="abc123",
                 created_at=datetime.now(UTC),
             )
@@ -2162,6 +2172,8 @@ class TestRequireIntValidation:
                 run_id="run-1",
                 source_node_id="node-1",
                 row_index=-1,
+                source_row_index=0,
+                ingest_sequence=0,
                 source_data_hash="abc123",
                 created_at=datetime.now(UTC),
             )
@@ -2181,13 +2193,19 @@ class TestRequireIntValidation:
         assert row.row_index == 0
 
     def test_row_requires_source_scoped_identity(self) -> None:
-        """Row identity must not be fabricated from legacy row_index."""
+        """Row identity must not be fabricated from legacy row_index.
+
+        source_row_index is a required `int` field; passing None (the legacy
+        "absent identity" shape) is rejected by the Tier-1 require_int guard.
+        """
         with pytest.raises(TypeError, match="source_row_index must be int"):
             Row(
                 row_id="row-1",
                 run_id="run-1",
                 source_node_id="node-1",
                 row_index=0,
+                source_row_index=None,  # type: ignore[arg-type]
+                ingest_sequence=0,
                 source_data_hash="abc123",
                 created_at=datetime.now(UTC),
             )

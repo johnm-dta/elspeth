@@ -169,9 +169,14 @@ class Row:
     row_index: int
     source_data_hash: str
     created_at: datetime
-    source_data_ref: str | None = None
-    source_row_index: int | None = None
-    ingest_sequence: int | None = None
+    # Mandatory source-scoped identity (G22 fabrication ban): the rows table
+    # declares both NOT NULL and they anchor the (run_id, source_node_id,
+    # source_row_index) / (run_id, ingest_sequence) unique constraints. Typed
+    # `int` (not `int | None`) to match the require_int guard and NOT NULL column;
+    # ordered before the genuinely-optional source_data_ref.
+    source_row_index: int
+    ingest_sequence: int
+    source_data_ref: str | None = None  # None when payload stored inline
 
     def __post_init__(self) -> None:
         """Validate int fields - Tier 1 crash on invalid types."""
@@ -559,8 +564,13 @@ class RowLineage:
     # Resolved payload (from PayloadStore)
     source_data: Mapping[str, object] | None  # None if purged
     payload_available: bool
-    source_row_index: int | None = None
-    ingest_sequence: int | None = None
+    # Mandatory source-scoped identity (G22 fabrication ban): the rows table
+    # declares both NOT NULL and they anchor the (run_id, source_node_id,
+    # source_row_index) / (run_id, ingest_sequence) unique constraints, so they
+    # are never None on a DB read. Typed `int` (not `int | None`) so the type
+    # matches the require_int guard below and the NOT NULL column.
+    source_row_index: int
+    ingest_sequence: int
 
     def __post_init__(self) -> None:
         require_int(self.row_index, "row_index", min_value=0)

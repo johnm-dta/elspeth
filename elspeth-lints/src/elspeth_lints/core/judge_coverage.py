@@ -23,12 +23,22 @@ to mutate their judge metadata under that grandfathering identity.
 
 **Rotation policy (operator-confirmed 2026-05-23):** rotation
 grandfathers. The discriminator is ``(file_path, rule_id,
-symbol_part, owner, reason)`` — the fingerprint ``fp=<hex>`` segment
-is stripped because it is the AST-position artefact rotation
+symbol_part, owner, reason, expires)`` — the fingerprint ``fp=<hex>``
+segment is stripped because it is the AST-position artefact rotation
 mutates. ``owner`` and ``reason`` discriminate between two distinct
 entries that happen to share the parsed-key triple (an unusual but
-legal shape that the triple alone cannot disambiguate).
-``reaudit`` remains the surface for periodic re-judging. A judged entry whose
+legal shape that the triple alone cannot disambiguate). ``expires`` is
+part of the identity (as it already is for ``per_file_rules``): renewing
+a suppression by editing only the expiry date is a fresh decision that
+must re-acquire judge metadata, not silently grandfather.
+
+**Count-limited grandfathering:** because ``fp=`` is stripped, an
+*additional* unjudged entry sharing an existing discriminator (e.g. a
+second ``.get()`` in the same method) would otherwise grandfather for
+free. Pre-judge grandfathering is therefore limited to the number of
+pre-judge baseline entries per discriminator — a rotation (count
+unchanged) passes, but the excess is a new suppression that must carry
+judge metadata. ``reaudit`` remains the surface for periodic re-judging. A judged entry whose
 source binding changed because the operator re-ran ``justify`` after
 source/fingerprint drift is not a grandfathered metadata mutation: it is
 counted as a fresh judged record, provided the HEAD entry carries the complete
@@ -199,16 +209,32 @@ def check_one_directory(
         repo_root=repo_root,
     )
 
-    baseline_by_discriminator: dict[tuple[str, str, str, str, str], list[AllowlistEntry]] = {}
+    baseline_by_discriminator: dict[tuple[str, str, str, str, str, date | None], list[AllowlistEntry]] = {}
     for entry in baseline_entries:
         baseline_by_discriminator.setdefault(_discriminator(entry), []).append(entry)
     baseline_per_file_discriminators = {_per_file_rule_discriminator(entry) for entry in baseline_per_file_rules}
+
+    # Pre-judge grandfathering is COUNT-LIMITED per discriminator. The fp=<hex>
+    # suffix is stripped from the discriminator for rotation stability, so a
+    # second unjudged suppression at the same (file, rule, symbol, owner, reason,
+    # expires) — e.g. a second ``.get()`` in the same method — collides with the
+    # baseline discriminator. Without a budget, both grandfather and the new
+    # suppression lands with no judge run. We grandfather only as many pre-judge
+    # HEAD entries per discriminator as there were pre-judge baseline entries: a
+    # rotation (count unchanged) passes, but the EXCESS is a new suppression that
+    # must carry judge metadata. Judged entries are matched by exact payload
+    # (below) and are not budget-limited.
+    baseline_pre_judge_remaining: dict[tuple[str, str, str, str, str, date | None], int] = {
+        discriminator: sum(1 for entry in entries if _judge_metadata_payload(entry) is None)
+        for discriminator, entries in baseline_by_discriminator.items()
+    }
 
     violations: list[JudgeCoverageViolation] = list(shape_violations)
     new_count = 0
     grandfathered_count = 0
     for entry in head_entries:
-        baseline_matches = baseline_by_discriminator.get(_discriminator(entry))
+        discriminator = _discriminator(entry)
+        baseline_matches = baseline_by_discriminator.get(discriminator)
         if baseline_matches is not None:
             if not _judge_metadata_matches_any_baseline(entry, baseline_matches):
                 if _is_fresh_judge_record_after_binding_drift(entry, baseline_matches):
@@ -222,6 +248,24 @@ def check_one_directory(
                     )
                 )
                 continue
+            head_is_pre_judge = _judge_metadata_payload(entry) is None
+            if head_is_pre_judge and baseline_pre_judge_remaining.get(discriminator, 0) <= 0:
+                # Excess unjudged entry beyond the rotation-stable baseline count:
+                # a genuinely new suppression masquerading as a rotation. Require
+                # judge metadata.
+                new_count += 1
+                missing = _missing_judge_fields(entry)
+                if missing:
+                    violations.append(
+                        JudgeCoverageViolation(
+                            entry_key=entry.key,
+                            source_file=entry.source_file,
+                            missing_fields=missing,
+                        )
+                    )
+                continue
+            if head_is_pre_judge:
+                baseline_pre_judge_remaining[discriminator] -= 1
             grandfathered_count += 1
             continue
         new_count += 1
@@ -260,10 +304,11 @@ def check_one_directory(
 # =========================================================================
 
 
-def _discriminator(entry: AllowlistEntry) -> tuple[str, str, str, str, str]:
+def _discriminator(entry: AllowlistEntry) -> tuple[str, str, str, str, str, date | None]:
     """Return the rotation-stable identity tuple for ``entry``.
 
-    Format: ``(file_path, rule_id, symbol_part, owner_norm, reason_norm)``.
+    Format:
+    ``(file_path, rule_id, symbol_part, owner_norm, reason_norm, expires)``.
     The ``fp=<hex>`` segment of the YAML key is stripped — that is the
     fingerprint, the AST-position artefact rotation mutates. Two
     entries that match on this tuple are considered the same audit
@@ -273,6 +318,12 @@ def _discriminator(entry: AllowlistEntry) -> tuple[str, str, str, str, str]:
     tweaks (line-wrap changes, trailing spaces) do not look like new
     entries. Normalisation collapses every run of whitespace
     (including newlines) to one space.
+
+    ``expires`` is part of the identity (matching the ``per_file_rules``
+    discriminator, which already includes it). A suppression renewed by
+    editing only the expiry date is a fresh suppression decision and must
+    re-acquire judge metadata, not silently grandfather — otherwise the
+    bounded-expiry forcing function is defeatable with a one-character diff.
     """
     parts = entry.key.split(":")
     if parts and parts[-1].startswith("fp="):
@@ -293,6 +344,7 @@ def _discriminator(entry: AllowlistEntry) -> tuple[str, str, str, str, str]:
         symbol_part,
         owner_norm,
         reason_norm,
+        entry.expires,
     )
 
 

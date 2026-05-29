@@ -80,6 +80,7 @@ def _make_entry(
     key: str,
     owner: str = "alice",
     reason: str = "permitted boundary",
+    expires=None,
     judge_verdict=None,
     judge_recorded_at=None,
     judge_model=None,
@@ -96,7 +97,7 @@ def _make_entry(
         owner=owner,
         reason=reason,
         safety="contained",
-        expires=None,
+        expires=expires,
         file_fingerprint=None,
         ast_path=None,
         pattern=None,
@@ -160,6 +161,22 @@ def test_discriminator_normalises_whitespace_in_reason() -> None:
         reason="multi line reason",
     )
     assert _discriminator(a) == _discriminator(b)
+
+
+def test_discriminator_distinguishes_different_expires() -> None:
+    """Renewing only the expiry date is a fresh suppression decision, not the same entry.
+
+    ``expires`` is part of the ``per_file_rules`` identity but was historically
+    excluded from the ``allow_hits`` discriminator — letting an agent renew a
+    suppression by editing only the date, with NO fresh judge review (the C1
+    date-renewal bypass). Folding ``expires`` in makes a renewal look like a new
+    entry that must carry judge metadata.
+    """
+    from datetime import date
+
+    a = _make_entry(key="web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa", expires=date(2026, 8, 1))
+    b = _make_entry(key="web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa", expires=date(2026, 11, 1))
+    assert _discriminator(a) != _discriminator(b)
 
 
 @pytest.mark.parametrize(
@@ -356,6 +373,104 @@ def test_e2e_new_pre_judge_entry_added_in_pr_is_flagged(tmp_path: Path) -> None:
     assert len(report.violations) == 1
     assert report.violations[0].entry_key.endswith("freshly_added:fp=cccccccccccccccc")
     assert "judge_verdict" in report.violations[0].missing_fields
+    assert not report.passes
+
+
+def test_e2e_unjudged_entry_colliding_with_baseline_discriminator_is_flagged(tmp_path: Path) -> None:
+    """A NEW unjudged entry sharing an existing (file,rule,symbol,owner,reason) is NOT grandfathered.
+
+    The fp= suffix is stripped from the discriminator for rotation stability, so a
+    second unjudged suppression at the same symbol (different fp — e.g. a second
+    ``.get()`` in the same method) collides with the baseline discriminator. Without
+    count-limiting, both grandfather and the new suppression lands with NO judge run
+    (C1 collision-add bypass). Grandfathering must be limited to the number of
+    pre-judge baseline entries per discriminator; the excess is a new entry that must
+    carry judge metadata.
+    """
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: legitimate boundary
+          safety: contained
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: one pre-judge entry")
+
+    # Agent adds a SECOND unjudged entry at the SAME discriminator (same
+    # file/rule/symbol/owner/reason), different fp — masquerading as a rotation.
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: legitimate boundary
+          safety: contained
+        - key: web/x.py:R1:fn:fp=cccccccccccccccc
+          owner: alice
+          reason: legitimate boundary
+          safety: contained
+    """)
+    )
+    _commit(tmp_path, "PR: add second unjudged entry at same discriminator")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+    assert report.head_entry_count == 2
+    assert report.grandfathered_count == 1
+    assert report.new_entry_count == 1
+    assert len(report.violations) == 1
+    assert "judge_verdict" in report.violations[0].missing_fields
+    assert not report.passes
+
+
+def test_e2e_renewal_by_expires_edit_requires_judge(tmp_path: Path) -> None:
+    """Renewing a suppression by editing only ``expires`` requires fresh judge metadata.
+
+    ``expires`` is part of the discriminator, so a date-only renewal looks like a new
+    entry and must carry judge metadata rather than being grandfathered (the C1
+    date-renewal bypass).
+    """
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: legitimate boundary
+          safety: contained
+          expires: 2026-08-01
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: bounded pre-judge entry")
+
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: legitimate boundary
+          safety: contained
+          expires: 2026-11-01
+    """)
+    )
+    _commit(tmp_path, "PR: renew by editing only the expiry date")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert len(report.violations) == 1
     assert not report.passes
 
 

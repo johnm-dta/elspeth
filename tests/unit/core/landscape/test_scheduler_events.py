@@ -779,8 +779,8 @@ def test_blocked_barrier_restore_and_terminalization_record_transition_events() 
 
 
 def test_blocked_barrier_pending_sink_handoff_records_state_and_event() -> None:
-    from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkStatus
-    from elspeth.core.landscape.scheduler_repository import BlockedPendingSinkHandoff, TokenSchedulerRepository
+    from elspeth.contracts.scheduler import BlockedPendingSinkHandoff, SchedulerEventType, TokenWorkStatus
+    from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
     engine = _make_scheduler_engine()
     repo = TokenSchedulerRepository(engine)

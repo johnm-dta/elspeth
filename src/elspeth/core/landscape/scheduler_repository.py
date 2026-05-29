@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
@@ -20,7 +19,12 @@ from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from elspeth.contracts.errors import AuditIntegrityError, SchedulerLeaseLostError
-from elspeth.contracts.scheduler import SchedulerEventType, TokenWorkItem, TokenWorkStatus
+from elspeth.contracts.scheduler import (
+    BlockedPendingSinkHandoff,
+    SchedulerEventType,
+    TokenWorkItem,
+    TokenWorkStatus,
+)
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape.database import Tier1Engine
@@ -33,18 +37,6 @@ from elspeth.core.landscape.schema import (
     token_work_items_table,
     tokens_table,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class BlockedPendingSinkHandoff:
-    """Sink handoff metadata for a BLOCKED scheduler row released by a barrier."""
-
-    row_payload_json: str
-    sink_name: str
-    outcome: str
-    path: str
-    error_hash: str | None
-    error_message: str | None
 
 
 class TokenSchedulerRepository:

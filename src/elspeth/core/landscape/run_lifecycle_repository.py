@@ -26,7 +26,7 @@ from elspeth.contracts import (
     SecretResolutionInput,
 )
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.core.canonical import canonical_json, stable_hash
 from elspeth.core.dependency_config import PreflightResult
@@ -77,6 +77,14 @@ class RunSourceFieldResolutionRecord:
     source_node_id: str
     source_name: str
     resolution_mapping: Mapping[str, str] | None
+
+    def __post_init__(self) -> None:
+        # Frozen-dataclass deep-freeze contract (CLAUDE.md): resolution_mapping
+        # is a container field, so frozen=True alone leaves its contents mutable
+        # through the attribute reference. Gate on `is not None` — the field is
+        # nullable (sources that resolved no headers record None).
+        if self.resolution_mapping is not None:
+            freeze_fields(self, "resolution_mapping")
 
 
 # Phase 2.2 (elspeth-0de989c56d): COMPLETED_WITH_FAILURES and EMPTY join the

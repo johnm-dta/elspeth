@@ -37,3 +37,12 @@ per_file_rules:
   reason: isinstance type guards validate checkpoint data structure at Tier 1 boundary (crash on wrong type)
   expires: null
   max_hits: 3
+- pattern: contracts/checkpoint.py
+  rules:
+  - FG2
+  reason: ResumedRow.__post_init__ isinstance(self.row_data, Mapping) is a Tier-1
+    type-validation guard that raises TypeError on wrong type (offensive programming),
+    then calls freeze_fields() on the validated value on the next line — not a
+    conditional freeze bypass
+  expires: null
+  max_hits: 1

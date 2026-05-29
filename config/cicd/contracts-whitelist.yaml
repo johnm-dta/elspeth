@@ -603,11 +603,6 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/state.py:CompositionState.to_dict:return"
   - "src/elspeth/web/composer/yaml_generator.py:_source_entry:source"
   - "src/elspeth/web/composer/yaml_generator.py:_source_entry:return"
-  # Proof diagnostics return rows for composer-side preview display. Pre-existing
-  # function brushed by G4 (ADR-025) migration neighbouring lines; deferred to
-  # composer-refactor track (elspeth-7d26116032 cluster) when the composer state
-  # model migrates off the singular shim.
-  - "src/elspeth/web/composer/tools.py:_compute_proof_diagnostics_for_source:return (list)"
   # Web execution path-rewrite helper operates on raw YAML-parsed config dicts.
   # Pre-existing helper brushed by G4 (ADR-025) migration neighbouring lines;
   # the rewrite shape will become typed when CompositionStateRecord migrates

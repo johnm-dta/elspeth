@@ -117,7 +117,7 @@ class FieldMapper(BaseTransform):
     name = "field_mapper"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e3ae346ffc76d394"
+    source_file_hash: str | None = "sha256:c4a41915a91e7945"
     config_model = FieldMapperConfig
 
     @classmethod

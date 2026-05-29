@@ -22,3 +22,12 @@ per_file_rules:
     are passed through the context. Documented at the field in tool_batch.py.
   expires: null
   max_hits: 1
+- pattern: web/composer/state.py
+  rules:
+  - FG3
+  reason: CompositionState uses @dataclass(init=False) with a custom __init__ that
+    calls freeze_fields(self, "sources") directly — Python never generates a default
+    __init__ so __post_init__ is never invoked; the FG3 "no __post_init__" heuristic
+    cannot see the freeze performed in the custom __init__
+  expires: null
+  max_hits: 1

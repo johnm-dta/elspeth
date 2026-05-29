@@ -726,6 +726,7 @@ class AuditIntegrityError(Exception):
 # Distinct from ``AuditIntegrityError`` because it represents legitimate
 # coordination under multi-worker N>1 (alive-but-slow worker reaped by peer),
 # not framework corruption. See filigree elspeth-ddde8144b6.
+# TIER-2: Legitimate multi-worker coordination — a peer reaped/reassigned the lease; the drain loop manages it cleanly, not audit corruption.
 class SchedulerLeaseLostError(Exception):
     """Raised when a heartbeat or transition discovers the lease was reaped.
 
@@ -842,12 +843,12 @@ class EmptyResumeStateError(OrchestrationInvariantError):
         )
 
 
-# TIER-2: Operator-interpretable refuse signal — persisted rows can be
-# replayed, but the audit trail proves at least one source was interrupted
-# before it reached a source-complete lifecycle_state (loaded/exhausted). The
-# current resume architecture replays persisted row payloads through NullSource;
-# it cannot prove that unread source rows do not exist. Refuse rather than
-# fabricating completion.
+# Operator-interpretable refuse signal — persisted rows can be replayed, but the
+# audit trail proves at least one source was interrupted before it reached a
+# source-complete lifecycle_state (loaded/exhausted). The current resume
+# architecture replays persisted row payloads through NullSource; it cannot prove
+# that unread source rows do not exist. Refuse rather than fabricating completion.
+# TIER-2: Operator-interpretable refuse signal, not audit corruption — resume can't prove source exhaustion, so it refuses.
 class IncompleteSourceResumeError(Exception):
     """Raised when resume would falsely complete an interrupted source.
 

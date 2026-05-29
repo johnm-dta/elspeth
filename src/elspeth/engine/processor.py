@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypeIs, cast
 
 from elspeth.contracts import RouteDestination, RowResult, SourceRow, TokenInfo, TransformResult
 from elspeth.contracts.audit import TokenRef
@@ -73,12 +73,12 @@ from elspeth.contracts.errors import (
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import FailureInfo
 from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
-from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
+from elspeth.contracts.scheduler import BlockedPendingSinkHandoff, TokenWorkItem, TokenWorkStatus
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.scheduler_repository import BlockedPendingSinkHandoff, TokenSchedulerRepository
+from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.executors import (
     AggregationExecutor,
@@ -279,6 +279,18 @@ def make_step_resolver(
         raise OrchestrationInvariantError(f"Node ID '{node_id}' missing from traversal step map")
 
     return resolve
+
+
+def _is_result_tuple(result: RowResult | tuple[RowResult, ...]) -> TypeIs[tuple[RowResult, ...]]:
+    """Narrow a scheduler result to the buffered-tuple shape.
+
+    A ``TypeIs`` guard (PEP 742) so mypy narrows BOTH branches: callers that
+    fall through (or take the ``else`` of a ternary) get ``RowResult``, not the
+    union. ``type(result) is tuple`` rather than ``isinstance`` because the
+    discrimination is between a frozen ``RowResult`` dataclass and a concrete
+    aggregation-buffer ``tuple`` — an exact-type test, not a subtype check.
+    """
+    return type(result) is tuple
 
 
 class RowProcessor:
@@ -3175,7 +3187,7 @@ class RowProcessor:
 
     def _barrier_key_for_buffered_scheduler_result(self, result: RowResult | tuple[RowResult, ...]) -> str:
         """Resolve the aggregation barrier that owns a BUFFERED scheduler result."""
-        buffered_results = result if type(result) is tuple else (result,)
+        buffered_results = result if _is_result_tuple(result) else (result,)
         if not buffered_results:
             raise AuditIntegrityError("Buffered scheduler result tuple is empty; cannot persist a durable release barrier.")
 
@@ -3213,7 +3225,7 @@ class RowProcessor:
         """Return whether a scheduler result is an active aggregation buffer."""
         if result is None:
             return False
-        if type(result) is tuple:
+        if _is_result_tuple(result):
             return bool(result) and all(item.outcome is None and item.path is TerminalPath.BUFFERED for item in result)
         return result.outcome is None and result.path is TerminalPath.BUFFERED
 
@@ -3222,7 +3234,7 @@ class RowProcessor:
         """Return whether the claimed scheduler token itself reached FAILURE."""
         if result is None:
             return False
-        result_items = result if type(result) is tuple else (result,)
+        result_items = result if _is_result_tuple(result) else (result,)
         return any(item.token.token_id == claimed_token_id and item.outcome is TerminalOutcome.FAILURE for item in result_items)
 
     @staticmethod
@@ -3243,7 +3255,7 @@ class RowProcessor:
         """Return the claimed token's sink-bound result, if any."""
         if result is None:
             return None
-        result_items = result if type(result) is tuple else (result,)
+        result_items = result if _is_result_tuple(result) else (result,)
         for item in result_items:
             if item.token.token_id != claimed_token_id:
                 continue

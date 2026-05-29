@@ -28,6 +28,18 @@ with deadline_limited=True).
 
 Pre-covered arms verified in ``test_compose_loop_audit_wiring.py`` and
 ``test_compose_loop_interpretation_review_dispatch.py``:
+  #3  — non-dict, canonicalization fails (top-level non-finite float) → ARG_ERROR /
+        ``error_class == "ValueError"`` — asserted at
+        ``inv.status == ComposerToolStatus.ARG_ERROR`` with ``error_class == "ValueError"``
+        by ``test_compose_loop_records_arg_error_for_non_finite_non_object_arguments``.
+        This is the ``canonicalization_failed is not None`` branch inside the non-dict
+        block at service.py ~line 2467 (``float("inf")`` as top-level non-object).
+  #6  — dict arguments, canonicalization fails (non-finite inside object) → ARG_ERROR /
+        ``error_class == "ValueError"`` — asserted at
+        ``inv.status == ComposerToolStatus.ARG_ERROR`` with ``error_class == "ValueError"``
+        by ``test_compose_loop_records_arg_error_for_non_finite_object_arguments``.
+        This is the ``canonicalization_failed is not None`` branch at service.py ~line 2512,
+        which fires after the required-paths gate and before the cache-check.
   #11 — session-aware (request_interpretation_review) — asserted at
         ``invocation.status.value == "success"/"arg_error"`` by
         ``test_compose_loop_dispatches_request_interpretation_review`` (SUCCESS)
@@ -53,10 +65,11 @@ Pre-covered arms verified in ``test_compose_loop_audit_wiring.py`` and
         ``TestDiscoveryToolAuditPayload.test_cache_miss_audit_preserves_pydantic_payload``.
 
 Arms characterised here:
-  #1  — JSON-decode failure (service.py ARG_ERROR pre-dispatch site 1/3)
-  #2  — non-dict arguments, valid JSON (service.py ARG_ERROR pre-dispatch site 2/3)
+  #1  — JSON-decode failure (service.py ARG_ERROR pre-dispatch site 1/3, ~line 2407)
+  #2  — non-dict arguments, valid JSON, canonicalization succeeds → TypeError
+        (service.py ARG_ERROR pre-dispatch site 2/3, ~line 2451)
   #4  — discovery cache-hit (service.py ~line 2548; second identical cacheable call)
-  #5  — required-paths missing (service.py ARG_ERROR pre-dispatch site 3/3)
+  #5  — required-paths missing (service.py ARG_ERROR pre-dispatch site 3/3, ~line 2617)
   #7  — advisor disabled (service.py ~line 2790; defense-in-depth arm)
   #8  — advisor budget exhausted (service.py ~line 2822)
   #9  — advisor arg-error (service.py ~line 2872; _validate_advisor_arguments rejects)
@@ -551,7 +564,7 @@ async def test_arm_advisor_arg_error_records_arg_error_with_type_error_class(
     assert any(ec == "TypeError" for ec in error_classes), (
         f"No outcome has error_class='TypeError'; got {error_classes!r}. "
         "_validate_advisor_arguments returns error_class='TypeError' for non-list "
-        "attempted_actions — inspect service.py (tools/sessions.py ~line 4416)."
+        "attempted_actions — inspect service.py:~4416."
     )
 
 

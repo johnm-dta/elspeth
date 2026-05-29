@@ -133,32 +133,55 @@ def _check_node_chain_in_order(state: Any, chain: list[str]) -> str | None:
     return None
 
 
-def _source_schema(state: Any) -> dict[str, Any] | None:
-    """Return the source-options schema dict, or None if absent."""
+def _source_schemas(state: Any) -> list[dict[str, Any]]:
+    """Return every named source's options-schema dict.
+
+    Multi-source composer states (ADR-025) key sources under ``sources`` by
+    name; each value carries ``options.schema``. Sources without a schema dict
+    are skipped. Returns an empty list when no source declares a schema. (State
+    shape is LLM-produced and variable, so the type guards here are boundary
+    validation, not defensive suppression of our own bugs.)
+    """
+    if not isinstance(state, dict):
+        return []
+    sources = state.get("sources")
+    if not isinstance(sources, dict):
+        return []
+    schemas: list[dict[str, Any]] = []
+    for source in sources.values():
+        if not isinstance(source, dict):
+            continue
+        options = source.get("options")
+        if not isinstance(options, dict):
+            continue
+        schema = options.get("schema")
+        if isinstance(schema, dict):
+            schemas.append(schema)
+    return schemas
+
+
+def _sole_source(state: Any) -> Any:
+    """Return the single named source dict, or None unless there is exactly one.
+
+    The per-source option-key checks (hint-uptake scenarios) target "the
+    source" and only run against single-source scenarios; with multiple named
+    sources the target is ambiguous, so return None and let the check report.
+    """
     if not isinstance(state, dict):
         return None
-    source = state.get("source")
-    if not isinstance(source, dict):
+    sources = state.get("sources")
+    if not isinstance(sources, dict) or len(sources) != 1:
         return None
-    options = source.get("options")
-    if not isinstance(options, dict):
-        return None
-    schema = options.get("schema")
-    if not isinstance(schema, dict):
-        return None
-    return schema
+    return next(iter(sources.values()))
 
 
-def _check_observed_columns(state: Any, columns: list[str]) -> str | None:
-    """AMBER if source schema is fixed mode AND any expected column is missing.
+def _schema_covers_columns(schema: dict[str, Any], columns: list[str]) -> str | None:
+    """None if this single schema covers the columns; else an AMBER reason.
 
     observed/flexible modes always pass — they accept extra columns by design.
     fixed mode must list every column in `fields` (case-insensitive name match
     on the bit before any ': type' suffix in the field grammar).
     """
-    schema = _source_schema(state)
-    if schema is None:
-        return f"source schema missing; cannot verify observed columns {columns}"
     mode = (schema.get("mode") or "").lower()
     if mode in {"observed", "flexible"}:
         return None
@@ -179,6 +202,22 @@ def _check_observed_columns(state: Any, columns: list[str]) -> str | None:
     return None
 
 
+def _check_observed_columns(state: Any, columns: list[str]) -> str | None:
+    """AMBER unless some named source's schema covers the expected columns.
+
+    With multiple named sources (ADR-025) the columns are satisfied if ANY
+    source covers them; a single-source scenario reduces to checking that one
+    source. AMBER reasons from the non-covering sources are surfaced (deduped).
+    """
+    schemas = _source_schemas(state)
+    if not schemas:
+        return f"source schema missing; cannot verify observed columns {columns}"
+    reasons = [_schema_covers_columns(schema, columns) for schema in schemas]
+    if any(reason is None for reason in reasons):
+        return None
+    return "; ".join(dict.fromkeys(r for r in reasons if r is not None))
+
+
 def _check_numeric_handling(state: Any, field: str) -> str | None:
     """AMBER if `field` is used by a numeric op without prior type_coerce or numeric-typed schema.
 
@@ -186,8 +225,7 @@ def _check_numeric_handling(state: Any, field: str) -> str | None:
       1. Source schema (fixed/flexible) declares `field` as int or float.
       2. A type_coerce node has a conversion targeting `field` -> int/float.
     """
-    schema = _source_schema(state)
-    if isinstance(schema, dict):
+    for schema in _source_schemas(state):
         fields = schema.get("fields") or []
         if isinstance(fields, list):
             for entry in fields:
@@ -603,7 +641,7 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
         source_keys_forb = green.get("must_not_have_options_keys_for_source") or []
         if source_keys_req or source_keys_forb:
             r = _check_options_keys(
-                state.get("source"),
+                _sole_source(state),
                 list(source_keys_req),
                 list(source_keys_forb),
                 container_label="source",

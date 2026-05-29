@@ -46,10 +46,16 @@ def _scenario(**overrides: Any) -> dict[str, Any]:
 
 
 def _state_valid(**extras: Any) -> dict[str, Any]:
-    """Minimal valid state — is_valid=True, one node, one output."""
+    """Minimal valid state — is_valid=True, one node, one output.
+
+    Sources use the multi-source shape (ADR-025): a ``sources`` map keyed by
+    name. The ``source=`` convenience kwarg sets the default "primary" named
+    source so per-test fixtures stay terse.
+    """
+    source = extras.pop("source", {"plugin": "csv", "options": {"schema": {"mode": "observed"}}})
     base: dict[str, Any] = {
         "is_valid": True,
-        "source": {"plugin": "csv", "options": {"schema": {"mode": "observed"}}},
+        "sources": {"primary": source},
         "nodes": [{"id": "noop", "node_type": "transform", "plugin": "passthrough"}],
         "outputs": [{"name": "out", "plugin": "json"}],
     }
@@ -489,7 +495,7 @@ class TestSourceOptionKeyAsserters:
 
     def test_green_when_required_source_keys_present(self) -> None:
         state = _state_valid()
-        state["source"] = {"plugin": "csv", "options": {"columns": ["a", "b"], "schema": {"mode": "observed"}}}
+        state["sources"] = {"primary": {"plugin": "csv", "options": {"columns": ["a", "b"], "schema": {"mode": "observed"}}}}
         result = score(
             scenario=_scenario(green={"must_have_options_keys_for_source": ["columns"]}),
             messages=[_msg("assistant", "done")],
@@ -509,7 +515,7 @@ class TestSourceOptionKeyAsserters:
 
     def test_amber_when_forbidden_source_key_present(self) -> None:
         state = _state_valid()
-        state["source"] = {"plugin": "csv", "options": {"schema": {"fields": ["id: int"], "mode": "fixed"}}}
+        state["sources"] = {"primary": {"plugin": "csv", "options": {"schema": {"fields": ["id: int"], "mode": "fixed"}}}}
         result = score(
             scenario=_scenario(green={"must_not_have_options_keys_for_source": ["schema.fields"]}),
             messages=[_msg("assistant", "done")],

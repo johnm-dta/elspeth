@@ -1069,3 +1069,49 @@ def test_load_without_source_root_skips_recompute_but_still_requires_binding(tmp
     path.write_text(yaml)
     with pytest.raises(ValueError, match=r"binding fields are missing"):
         load_allowlist(path, valid_rule_ids=set())  # source_root defaults to None
+
+
+def test_shape_only_downgrade_emits_warning_on_source_root_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A source-root load in shape-only mode with the key absent warns loudly.
+
+    Silently degrading the HMAC verification control violates the no-silent-
+    failures doctrine: a reviewer must never mistake a green shape-only run for a
+    cryptographically verified one. The warning fires once per load, at the load
+    boundary, regardless of how many entries are present.
+    """
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE", "shape-only-when-key-missing")
+    monkeypatch.delenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", raising=False)
+    enforce_dir = tmp_path / "enforce_tier_model"
+    enforce_dir.mkdir()
+    (enforce_dir / "web.yaml").write_text("allow_hits: []\n")
+    source_root = tmp_path / "src"
+    source_root.mkdir()
+
+    load_allowlist(enforce_dir, valid_rule_ids={"R1", "R5"}, source_root=source_root)
+
+    err = capsys.readouterr().err
+    assert "DOWNGRADED to shape-only" in err
+    assert "CANNOT detect forged or tampered judge metadata" in err
+
+
+def test_required_mode_source_root_load_is_silent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """In the default ``required`` mode (key present) there is no downgrade warning."""
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE", "required")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", "x" * 32)
+    enforce_dir = tmp_path / "enforce_tier_model"
+    enforce_dir.mkdir()
+    (enforce_dir / "web.yaml").write_text("allow_hits: []\n")
+    source_root = tmp_path / "src"
+    source_root.mkdir()
+
+    load_allowlist(enforce_dir, valid_rule_ids={"R1", "R5"}, source_root=source_root)
+
+    assert "DOWNGRADED" not in capsys.readouterr().err

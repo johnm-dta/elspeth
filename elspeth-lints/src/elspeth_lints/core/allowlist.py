@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -302,6 +303,22 @@ def load_allowlist(
     ``source_root`` so both the source binding and metadata-tamper gate
     are live.
     """
+    # No-silent-failures: a source-root load that is in shape-only mode with the
+    # HMAC key absent will skip the cryptographic recompute for every judged
+    # entry (validating signature *shape* only). That is the intended fork-PR
+    # degradation, but degrading a security control silently is itself a defect.
+    # Emit one prominent warning per load so the downgrade is visible in the CI
+    # log and a reviewer never mistakes a green shape-only run for a verified one.
+    if source_root is not None and _can_skip_judge_metadata_hmac_recompute_for_missing_key():
+        sys.stderr.write(
+            "WARNING: tier_model allowlist loaded with judge-metadata HMAC verification "
+            f"DOWNGRADED to shape-only ({_JUDGE_METADATA_SIGNATURE_VERIFY_MODE_ENV_VAR}="
+            f"{_JUDGE_METADATA_SIGNATURE_VERIFY_SHAPE_ONLY_WHEN_KEY_MISSING}, "
+            f"{_JUDGE_METADATA_SIGNATURE_ENV_VAR} absent). Judge-metadata signatures are "
+            "shape-checked only; this load CANNOT detect forged or tampered judge metadata. "
+            "This mode is intended for untrusted fork-PR CI only — a trusted context (key "
+            "present, verify mode 'required') must re-verify before any merge is authoritative.\n"
+        )
     if path.is_dir():
         defaults = _load_defaults(path / "_defaults.yaml")
         entries: list[AllowlistEntry] = []

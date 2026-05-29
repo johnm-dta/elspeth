@@ -54,7 +54,6 @@ from elspeth.contracts import (
     SchemaContract,
     SecretResolutionInput,
     SinkProtocol,
-    SourceProtocol,
     SourceRow,
     TokenInfo,
     TransformProtocol,
@@ -125,6 +124,10 @@ from elspeth.engine.orchestrator.export import (
     export_landscape,
     reconstruct_schema_from_json,
 )
+from elspeth.engine.orchestrator.graph_wiring import (
+    assign_plugin_node_ids,
+    build_dag_traversal_context,
+)
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
     flush_coalesce_pending,
@@ -145,7 +148,6 @@ from elspeth.engine.orchestrator.types import (
     PipelineConfig,
     ResumeState,
     RouteValidationError,
-    RowPlugin,
     RowProcessorHandle,
     RunContext,
     RunResult,
@@ -157,7 +159,7 @@ from elspeth.engine.orchestrator.validation import (
     validate_source_quarantine_destination,
     validate_transform_error_sinks,
 )
-from elspeth.engine.processor import DAGTraversalContext, RowProcessor, make_step_resolver
+from elspeth.engine.processor import RowProcessor, make_step_resolver
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
 
@@ -165,7 +167,7 @@ if TYPE_CHECKING:
     from elspeth.contracts import ResumePoint
     from elspeth.contracts.config.runtime import RuntimeCheckpointConfig, RuntimeConcurrencyConfig
     from elspeth.core.checkpoint import CheckpointManager
-    from elspeth.core.config import ElspethSettings, GateSettings
+    from elspeth.core.config import ElspethSettings
     from elspeth.core.dependency_config import PreflightResult
     from elspeth.core.rate_limit import RateLimitRegistry
     from elspeth.engine.clock import Clock
@@ -933,94 +935,6 @@ class Orchestrator:
                 raise RuntimeError(f"Plugin cleanup failed: {error_summary}") from pending_exc
             raise RuntimeError(f"Plugin cleanup failed: {error_summary}")
 
-    def _assign_plugin_node_ids(
-        self,
-        source: SourceProtocol,
-        transforms: Sequence[RowPlugin],
-        sinks: Mapping[str, SinkProtocol],
-        source_id: NodeID,
-        transform_id_map: Mapping[int, NodeID],
-        sink_id_map: Mapping[SinkName, NodeID],
-    ) -> None:
-        """Explicitly assign node_id to all plugins with validation.
-
-        This is part of the plugin protocol contract - all plugins define
-        node_id: str | None and the orchestrator populates it.
-
-        Args:
-            source: Source plugin instance
-            transforms: List of transform plugins
-            sinks: Dict of sink_name -> sink plugin
-            source_id: Node ID for source
-            transform_id_map: Maps transform sequence -> node_id
-            sink_id_map: Maps sink_name -> node_id
-
-        Raises:
-            ValueError: If transform/sink not in ID map
-        """
-        # Set node_id on source
-        source.node_id = source_id
-
-        # Set node_id on transforms
-        # Note: Aggregation transforms already have node_id set by CLI (mapped from
-        # aggregation_id_map), so only assign for transforms without node_id.
-        for seq, transform in enumerate(transforms):
-            if transform.node_id is not None:
-                # Already has node_id (e.g., aggregation transform) - skip
-                continue
-            if seq not in transform_id_map:
-                raise OrchestrationInvariantError(
-                    f"Transform at sequence {seq} not found in graph. Graph has mappings for sequences: {list(transform_id_map.keys())}"
-                )
-            transform.node_id = transform_id_map[seq]
-
-        # Set node_id on sinks
-        # Note: Sinks not in graph are skipped (e.g., export sinks used post-run)
-        for sink_name, sink in sinks.items():
-            sink_name_typed = SinkName(sink_name)
-            if sink_name_typed not in sink_id_map:
-                # Sink not in execution graph - skip silently
-                # This happens for post-run sinks (e.g., landscape.export.sink)
-                continue
-            sink.node_id = sink_id_map[sink_name_typed]
-
-    def _build_dag_traversal_context(
-        self,
-        graph: ExecutionGraph,
-        config: PipelineConfig,
-        config_gate_id_map: dict[GateName, NodeID],
-    ) -> DAGTraversalContext:
-        """Build traversal context for RowProcessor from graph + pipeline config."""
-        node_step_map = graph.build_step_map()
-        node_to_plugin: dict[NodeID, RowPlugin | GateSettings] = {}
-
-        for transform in config.transforms:
-            node_id_raw = transform.node_id
-            if node_id_raw is None:
-                raise OrchestrationInvariantError(f"Transform '{transform.name}' missing node_id for traversal context")
-            node_to_plugin[NodeID(node_id_raw)] = transform
-
-        for gate in config.gates:
-            gate_node_id = config_gate_id_map[GateName(gate.name)]
-            node_to_plugin[gate_node_id] = gate
-
-        node_to_next: dict[NodeID, NodeID | None] = {}
-        source_id = graph.get_source()
-        node_to_next[source_id] = graph.get_next_node(source_id)
-        for node_id in graph.get_pipeline_node_sequence():
-            node_to_next[node_id] = graph.get_next_node(node_id)
-        for coalesce_node_id in graph.get_coalesce_id_map().values():
-            node_to_next[coalesce_node_id] = graph.get_next_node(coalesce_node_id)
-
-        return DAGTraversalContext(
-            node_step_map=node_step_map,
-            node_to_plugin=node_to_plugin,
-            first_transform_node_id=graph.get_first_transform_node(),
-            node_to_next=node_to_next,
-            coalesce_node_map=graph.get_coalesce_id_map(),
-            branch_first_node=graph.get_branch_first_nodes(),
-        )
-
     def _build_processor(
         self,
         *,
@@ -1062,7 +976,7 @@ class Orchestrator:
 
         # Build traversal context BEFORE CoalesceExecutor/TokenManager so that
         # node_step_map is available for the step_resolver closure they require.
-        traversal = self._build_dag_traversal_context(graph, config, config_gate_id_map)
+        traversal = build_dag_traversal_context(graph, config, config_gate_id_map)
 
         # Build step_resolver from shared factory (single source of truth).
         # Same factory is used by RowProcessor internally for its executors.
@@ -1893,7 +1807,7 @@ class Orchestrator:
         route_resolution_map = graph.get_route_resolution_map()
 
         # Assign node_ids to all plugins
-        self._assign_plugin_node_ids(
+        assign_plugin_node_ids(
             source=config.source,
             transforms=config.transforms,
             sinks=config.sinks,

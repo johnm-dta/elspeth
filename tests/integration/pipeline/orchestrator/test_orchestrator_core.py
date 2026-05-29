@@ -356,7 +356,11 @@ class TestOrchestrator:
         """Traversal context must preserve graph step order for non-terminal coalesce nodes."""
         from elspeth.contracts.types import CoalesceName, GateName
         from elspeth.core.config import CoalesceSettings, GateSettings
-        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.engine.orchestrator import PipelineConfig
+        from elspeth.engine.orchestrator.graph_wiring import (
+            assign_plugin_node_ids,
+            build_dag_traversal_context,
+        )
 
         source = ListSource([{"value": 1}], on_success="source_sink")
         transform = PassTransform()
@@ -398,8 +402,7 @@ class TestOrchestrator:
         source_id = graph.get_source()
         assert source_id is not None
 
-        orchestrator = Orchestrator(landscape_db)
-        orchestrator._assign_plugin_node_ids(
+        assign_plugin_node_ids(
             source=config.source,
             transforms=config.transforms,
             sinks=config.sinks,
@@ -413,7 +416,7 @@ class TestOrchestrator:
         downstream_gate_node_id = graph.get_config_gate_id_map()[GateName("terminal_gate")]
         assert graph_step_map[coalesce_node_id] < graph_step_map[downstream_gate_node_id]
 
-        traversal = orchestrator._build_dag_traversal_context(
+        traversal = build_dag_traversal_context(
             graph=graph,
             config=config,
             config_gate_id_map=graph.get_config_gate_id_map(),

@@ -41,6 +41,20 @@ from elspeth.plugins.infrastructure.url_validation import validate_credential_sa
 
 logger = structlog.get_logger(__name__)
 
+# HTTP status codes that make a single row's PATCH per-row-attributable: the
+# row's payload or alternate key is bad and a retry will not help. These are
+# diverted to on_write_failure (the row is routed away) while the rest of the
+# batch continues. All other DataverseClientError cases — authn/authz (401/403),
+# rate limit (429), any retryable error, 5xx server errors, and any error whose
+# status_code is None (unattributable) — RAISE so the engine retries or aborts.
+#
+# CLOSED LIST — extend only with a status code that is (a) non-retryable and
+# (b) attributable to the individual row's request, not the batch or the
+# connection. 422 is included even though the client classifies it as
+# "Unexpected HTTP status" rather than an explicit client error, because an
+# Unprocessable-Entity response is about this row's payload.
+_DIVERTABLE_STATUS_CODES: frozenset[int] = frozenset({400, 404, 409, 412, 422})
+
 
 class LookupConfig(BaseModel):
     """Configuration for a lookup field binding."""
@@ -223,7 +237,7 @@ class DataverseSink(BaseSink):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a1d072d6e3df1651"
+    source_file_hash: str | None = "sha256:888311bdb3156f92"
     determinism = Determinism.EXTERNAL_CALL
     config_model = DataverseSinkConfig
     idempotent = True  # PATCH upsert is idempotent — safe for retries and crash recovery (engine does not yet read this flag)
@@ -241,7 +255,8 @@ class DataverseSink(BaseSink):
                     "field_mapping maps pipeline field names to Dataverse column names and must not produce duplicate targets.",
                     "lookups map pipeline fields to navigation-property bindings; avoid collisions with field_mapping targets.",
                     "environment_url must be HTTPS and within the allowed Dataverse domain patterns.",
-                    "Required alternate-key values must be strings at write time; invalid rows are diverted instead of coerced.",
+                    "Alternate-key values must be non-empty strings at write time; an empty or non-string key crashes the run (it cannot form a valid OData URL).",
+                    "Per-row HTTP failures route via on_write_failure: a non-retryable 4xx about the row (400/404/409/412/422) diverts that row and the batch continues; auth/authz (401/403), rate limit (429), retryable, and 5xx errors raise so the engine retries or aborts. Set on_write_failure to a quarantine sink so single-row 4xx don't abort the batch.",
                 ),
             )
         return None
@@ -429,8 +444,11 @@ class DataverseSink(BaseSink):
         # key validation fails on row N, we must not have already written rows
         # 1..N-1 — that would leave audit states as FAILED while Dataverse data
         # was actually modified (partial success = audit inconsistency).
-        prepared: list[tuple[str, dict[str, Any]]] = []
-        for row in rows:
+        # Each entry carries the original row and its index into the input batch
+        # so a per-row write failure can be diverted with correct row_data and
+        # row_index (the executor correlates the diversion back to the row token).
+        prepared: list[tuple[str, dict[str, Any], dict[str, Any], int]] = []
+        for i, row in enumerate(rows):
             # Tier 2: field_mapping guarantees the field exists. Direct access
             # — KeyError if absent is an upstream bug.
             key_value = row[self._alternate_key_pipeline_field]
@@ -447,18 +465,16 @@ class DataverseSink(BaseSink):
 
             url = self._build_upsert_url(key_value)
             payload = self._map_row(row)
-            prepared.append((url, payload))
+            prepared.append((url, payload, row, i))
 
-        # Compute content hash from the mapped payloads (what we actually send
-        # to Dataverse), not the full pipeline rows. This allows an auditor to
-        # independently verify the hash against the Dataverse-side data.
-        mapped_payloads = [payload for _, payload in prepared]
-        canonical_payload = canonical_json(mapped_payloads).encode("utf-8")
-        content_hash = hashlib.sha256(canonical_payload).hexdigest()
-        total_size = len(canonical_payload)
+        # Payloads actually written to Dataverse (excludes per-row diversions).
+        # The content hash and row_count must describe only what we wrote, so an
+        # auditor can independently verify the hash against the Dataverse-side
+        # data — a diverted row was never written and must not appear here.
+        written_payloads: list[dict[str, Any]] = []
 
         # All pre-processing succeeded — safe to make HTTP calls
-        for url, payload in prepared:
+        for url, payload, original_row, row_index in prepared:
             # Execute upsert with audit recording + telemetry
             start_time = time.perf_counter()
             try:
@@ -495,6 +511,7 @@ class DataverseSink(BaseSink):
                     request_data=request_data,
                     response_data=response_data,
                 )
+                written_payloads.append(payload)
             except DataverseClientError as e:
                 latency_ms = (time.perf_counter() - start_time) * 1000
 
@@ -527,10 +544,46 @@ class DataverseSink(BaseSink):
                 if e.status_code == 401 and e.retryable:
                     assert self._client is not None
                     self._client.reconstruct_credential(self._auth_config)
+
+                # Classify the failure by HTTP semantics:
+                #
+                #   DIVERT — per-row-attributable: this row's payload or
+                #     alternate key is bad and a retry will not help. These are
+                #     the non-retryable client errors about the request itself:
+                #     400 (bad request), 404 (alternate-key target not found),
+                #     409 (conflict), 412 (precondition failed), 422
+                #     (unprocessable entity). The row is routed to
+                #     on_write_failure and the batch continues. Per-row diversion
+                #     is correct even though earlier rows in this batch were
+                #     already PATCHed — each row's outcome is recorded
+                #     independently and the executor handles routing.
+                #
+                #   RAISE — batch-integrity: the failure affects all rows or is
+                #     transient. Authn/authz (401/403), rate limit (429), any
+                #     retryable error (the engine retries the whole batch), and
+                #     5xx server errors. Diverting these would silently drop a
+                #     row a retry could have written.
+                #
+                # Fail safe: a missing/None status_code cannot be attributed to a
+                # single row, so it falls through to RAISE (not in DIVERTABLE).
+                if not e.retryable and e.status_code in _DIVERTABLE_STATUS_CODES:
+                    self._divert_row(
+                        original_row,
+                        row_index=row_index,
+                        reason=(f"Dataverse PATCH failed with non-retryable HTTP {e.status_code}: {e}"),
+                    )
+                    continue
+
                 # Re-raise original error — engine sink executor records
                 # exception_type for audit diagnostics, and DataverseClientError
                 # preserves the retryable/status_code metadata in the chain.
                 raise
+
+        # Compute the content hash over only the payloads we actually wrote to
+        # Dataverse, so the hash verifies against the Dataverse-side data.
+        canonical_payload = canonical_json(written_payloads).encode("utf-8")
+        content_hash = hashlib.sha256(canonical_payload).hexdigest()
+        total_size = len(canonical_payload)
 
         return SinkWriteResult(
             artifact=ArtifactDescriptor(
@@ -540,12 +593,13 @@ class DataverseSink(BaseSink):
                 size_bytes=total_size,
                 metadata=MappingProxyType(
                     {
-                        "row_count": len(rows),
+                        "row_count": len(written_payloads),
                         "entity": self._entity,
                         "mode": self._mode,
                     }
                 ),
-            )
+            ),
+            diversions=self._get_diversions(),
         )
 
     def flush(self) -> None:

@@ -2767,7 +2767,7 @@ class Orchestrator:
         # Divergence accounting: _process_resumed_rows vs _execute_run
         #
         # Source on_start():       Skipped (include_source_on_start=False)
-        # Graph registration:     Loads from DB (_setup_resume_context)
+        # Graph registration:     Loads from DB (setup_resume_context)
         # Quarantine routing:     Not applicable (rows already validated)
         # Field resolution:       Skipped (loaded from DB in original run)
         # Schema contract:        Skipped (passed via parameter)

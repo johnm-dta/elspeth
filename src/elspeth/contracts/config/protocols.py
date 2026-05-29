@@ -67,51 +67,121 @@ class RetrySettingsProtocol(Protocol):
 
 
 class ServiceRateLimitSettingsProtocol(Protocol):
-    """Settings-side shape for one service rate-limit override."""
+    """Settings-side shape for one service rate-limit override.
 
-    requests_per_minute: int
+    Read-only ``@property`` members (like the other ``*SettingsProtocol``
+    classes here) so the frozen Pydantic settings models satisfy them.
+    """
+
+    @property
+    def requests_per_minute(self) -> int:
+        """Service-specific requests-per-minute limit."""
+        ...
 
 
 class RateLimitSettingsProtocol(Protocol):
     """Settings-side shape needed to build RuntimeRateLimitConfig."""
 
-    enabled: bool
-    default_requests_per_minute: int
-    persistence_path: str | None
-    services: Mapping[str, ServiceRateLimitSettingsProtocol]
+    @property
+    def enabled(self) -> bool:
+        """Whether rate limiting is active."""
+        ...
+
+    @property
+    def default_requests_per_minute(self) -> int:
+        """Default requests per minute for unconfigured services."""
+        ...
+
+    @property
+    def persistence_path(self) -> str | None:
+        """Optional SQLite path for cross-process persistence."""
+        ...
+
+    @property
+    def services(self) -> Mapping[str, ServiceRateLimitSettingsProtocol]:
+        """Per-service rate-limit overrides keyed by service name."""
+        ...
 
 
 class ConcurrencySettingsProtocol(Protocol):
     """Settings-side shape needed to build RuntimeConcurrencyConfig."""
 
-    max_workers: int
+    @property
+    def max_workers(self) -> int:
+        """Maximum number of parallel workers."""
+        ...
 
 
 class CheckpointSettingsProtocol(Protocol):
     """Settings-side shape needed to build RuntimeCheckpointConfig."""
 
-    enabled: bool
-    frequency: str
-    checkpoint_interval: int | None
-    aggregation_boundaries: bool
+    @property
+    def enabled(self) -> bool:
+        """Whether checkpointing is active."""
+        ...
+
+    @property
+    def frequency(self) -> str:
+        """Checkpoint frequency token (e.g. 'every_row', 'every_n')."""
+        ...
+
+    @property
+    def checkpoint_interval(self) -> int | None:
+        """Row interval for frequency='every_n'; None otherwise."""
+        ...
+
+    @property
+    def aggregation_boundaries(self) -> bool:
+        """Whether to checkpoint at aggregation flush boundaries."""
+        ...
 
 
 class TelemetryExporterSettingsProtocol(Protocol):
     """Settings-side shape for one telemetry exporter config."""
 
-    name: str
-    options: Mapping[str, Any]
+    @property
+    def name(self) -> str:
+        """Exporter name (e.g. 'console', 'otlp')."""
+        ...
+
+    @property
+    def options(self) -> Mapping[str, Any]:
+        """Exporter-specific options."""
+        ...
 
 
 class TelemetrySettingsProtocol(Protocol):
     """Settings-side shape needed to build RuntimeTelemetryConfig."""
 
-    enabled: bool
-    granularity: str
-    backpressure_mode: str
-    fail_on_total_exporter_failure: bool
-    max_consecutive_failures: int
-    exporters: Sequence[TelemetryExporterSettingsProtocol]
+    @property
+    def enabled(self) -> bool:
+        """Whether telemetry is active."""
+        ...
+
+    @property
+    def granularity(self) -> str:
+        """Granularity token (parsed to TelemetryGranularity)."""
+        ...
+
+    @property
+    def backpressure_mode(self) -> str:
+        """Backpressure-mode token (parsed to BackpressureMode)."""
+        ...
+
+    @property
+    def fail_on_total_exporter_failure(self) -> bool:
+        """Whether to fail the run if all exporters fail."""
+        ...
+
+    @property
+    def max_consecutive_failures(self) -> int:
+        """Consecutive total failures before disabling or raising."""
+        ...
+
+    @property
+    def exporters(self) -> Sequence[TelemetryExporterSettingsProtocol]:
+        """Configured telemetry exporters."""
+        ...
 
 
 @runtime_checkable

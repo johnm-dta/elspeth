@@ -154,3 +154,37 @@ None when denom 0; recompute the pinned test numbers. Deferred to operator, NOT 
 silently.
 
 **Sink per-row routing redesign (#4-7, #9):** in progress — separate commit.
+
+---
+
+## Final verification (2026-05-29) — all 10 findings committed, zero regressions
+
+All 10 audit findings fixed + committed on RC5.2 (8 commits + 1 hash-refresh):
+6c7613247 (#1/#2/#3/#8) · 76ccc645b (#7 json_sink) · a7f0f0510 (#9 azure_blob_sink) ·
+2bdbe5b97 (#10 metrics) · 233393b30 (plugin source_file_hash refresh) ·
+c2fa4a8bf (#4 dataverse) · ca1e65214 (#5 database_sink) · 79c58ede6 (#6 csv_sink).
+
+Sink track: json/azure_blob/dataverse/database/csv all divert per-row-attributable
+faults and keep batch-integrity raises; chroma was already compliant. dataverse uses
+an HTTP-status CLOSED LIST {400,404,409,412,422}; database uses outer-txn + nested
+SAVEPOINT per-row isolation (exactly-once write-or-divert).
+
+Test sweep (`.venv` pytest): 918 plugin-unit + 3,555 integration/engine/property +
+4,725 web — all green EXCEPT 8 failures that PRE-EXIST on RC5.2 (verified by running
+them at a5d9e5414 AND the session-start HEAD 1d5e5ac53 via baseline worktrees). My
+work introduced ZERO new regressions and FIXED the previously-red plugin_hashes gate.
+
+### Pre-existing RC5.2 failures (NOT mine — flagged for separate triage)
+1. integration/cli `test_hallucinated_openrouter_model_is_rejected_at_instantiation`
+   — config-level catalog validation (OpenRouter backport, 40193c02e) now rejects the
+   bogus model at construction, pre-empting the walker the test patches. Stale test.
+2. integration/pipeline `test_validate_returns_structured_error_for_missing_inline_blob`
+   — composer validate() no longer emits error_code "missing_inline_blob_content".
+3. integration/web `test_post_call_hints_envelope_populated_for_hinted_plugins[transform-llm-...]`
+   — LLMTransform.get_post_call_hints unreachable from real catalog dispatch.
+4-5. web/composer test_adequacy_guard.py (per_entry_shape_walk, redaction_policy_snapshot).
+6-8. web/composer test_advisor_tool.py (3 skill-prompt-content assertions — per project
+   memory feedback_no_tests_for_skill_prompts these are "theatre"; verify by re-running LLM).
+
+These are composer/catalog/skill-subsystem issues, distinct from the tier audit. Not fixed
+here (separate scope + design questions); surfaced to the operator.

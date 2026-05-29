@@ -1691,6 +1691,14 @@ allow_hits:
   safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
     review instead of adding permanent debt
   expires: '2026-08-24'
+- key: web/composer/tools/generation.py:R5:_csv_source_field_mapping:fp=176985867214e183
+  owner: trust-tier-maintenance
+  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
+    rotation; review whether this is new debt that needs a source fix or a more specific
+    justification
+  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
+    review instead of adding permanent debt
+  expires: '2026-08-24'
 - key: web/composer/service.py:R5:_request_interpretation_review_kind_from_arguments:fp=ee9dfe639c1746a6
   owner: web-composer
   pattern: tier3-boundary-validator
@@ -1960,54 +1968,6 @@ allow_hits:
   safety: Absent path/file means no sink-side path-allowlist check needed for that
     key; the other key is still checked in the same iteration. No data loss or fabrication.
   expires: null
-- key: web/sessions/routes/sessions.py:R5:_copied_blob_for_inline_marker:fp=361f453445f65a4f
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/sessions.py:R5:_copied_blob_for_inline_marker:fp=850ecbae2b04f4e3
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/sessions.py:R5:_rewrite_inline_content_blob_refs:fp=295179d16e76d11a
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/sessions.py:R1:_rewrite_inline_content_blob_refs:fp=78848f02eaeb5cc3
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/sessions.py:R5:_rewrite_inline_content_blob_refs:fp=fd0fdc763984785e
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/sessions/routes/sessions.py:R5:_rewrite_inline_content_blob_refs:fp=413166a7e7723531
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
 - key: web/sessions/routes/sessions.py:R6:register_session_routes:fork_from_message:fp=7db495b3c8fcc96a
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads,
@@ -2319,22 +2279,6 @@ allow_hits:
   safety: Tier-3 LLM tool-argument boundary or in-scope dict/isinstance check; semantics
     unchanged post-refactor
   expires: null
-- key: web/composer/tools/generation.py:R1:_csv_source_field_mapping:fp=3dd0d533b3510ff0
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
-- key: web/composer/tools/generation.py:R5:_csv_source_field_mapping:fp=176985867214e183
-  owner: trust-tier-maintenance
-  reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
-    rotation; review whether this is new debt that needs a source fix or a more specific
-    justification
-  safety: Exact-fingerprint allowlist entry only; bounded expiry forces follow-up
-    review instead of adding permanent debt
-  expires: '2026-08-24'
 - key: web/composer/tools/generation.py:R1:_schema_required_fields:fp=170da3b1e8b91a7c
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint
@@ -2725,18 +2669,6 @@ allow_hits:
     gate ImportFroms.
   safety: Returns None; validation handles absence
   expires: null
-- key: web/execution/service.py:R9:ExecutionServiceImpl:_execute_locked:fp=e52d7f64d67fd540
-  owner: web-execution
-  reason: Idempotent cleanup of self._shutdown_events on the BaseException path of
-    _execute_locked when run setup fails before thread-pool submission. The key may
-    or may not have been inserted depending on which preceding step raised (audit-record
-    creation, run-row insert, executor.submit). pop(..., None) is the canonical 'remove
-    if present, no-op if absent' construct; raising KeyError here would mask the actual
-    setup failure being re-raised by the surrounding handler.
-  safety: Absent key means setup raised before insertion; nothing to clean up. Mutation
-    runs under self._shutdown_events_lock. The outer raise propagates the original
-    exception unchanged.
-  expires: '2026-08-23'
 - key: web/execution/service.py:R6:ExecutionServiceImpl:_execute_locked:fp=b4fdef35d6621b71
   owner: web-execution
   reason: Best-effort run status cleanup on setup failure — must not mask original
@@ -3017,18 +2949,6 @@ allow_hits:
     the source and destination paths, and 'Manual cleanup required'. The raise on
     L1689 propagates the original DB-layer failure.
   expires: '2026-08-23'
-- key: web/sessions/service.py:R6:SessionServiceImpl:archive_session:_sync:fp=0284c0786543e06b
-  owner: web-sessions
-  reason: Post-commit quarantine purge in archive_session::_sync. The session-row
-    delete has already committed and from the caller's perspective the archive succeeded;
-    this is best-effort filesystem cleanup of the staged blob dir. If shutil.rmtree
-    raises OSError (file lock, permission, partial filesystem state), we intentionally
-    early-return so the directory remains in quarantine for manual cleanup rather
-    than raising a misleading 'archive failed' error after the DB rows are gone.
-  safety: Narrowed to OSError only. Inline comment L1691-1694 documents the quarantine-on-cleanup-failure
-    invariant. Subsequent quarantine_root rmdir is gated by this early return so we
-    never attempt parent removal when the child cleanup failed.
-  expires: '2026-08-23'
 - key: web/sessions/service.py:R7:SessionServiceImpl:archive_session:_sync:fp=8aadfa2550cfc8c9
   owner: web-sessions
   reason: Best-effort rmdir of the parent quarantine_root once the session-scoped
@@ -3085,14 +3005,6 @@ per_file_rules:
     composer prevalidation boundary. See the R1 entry for the per_file_rule rationale.
   expires: null
   max_hits: 8
-- pattern: web/composer/tools/_common.py
-  rules:
-  - R9
-  reason: dict.pop(key, None) when stripping authoring, secret-ref, and blob-inline
-    markers from a COPIED options dict before validation; the keys are known-optional
-    markers, not silent missing-key suppression. See the R1 entry for rationale.
-  expires: null
-  max_hits: 3
 - pattern: web/composer/guided/chat_solver.py
   rules:
   - R5

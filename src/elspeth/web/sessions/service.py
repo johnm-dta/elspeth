@@ -2246,13 +2246,11 @@ class SessionServiceImpl:
 
             # After commit, the delete succeeded from the caller's perspective.
             # If the final purge fails, keep the staged directory in quarantine
-            # for manual cleanup rather than raising a false "delete failed"
-            # error after the session rows are already gone.
+            # for manual cleanup and raise so the operator sees the cleanup
+            # failure. The session rows may already be gone, but silently
+            # returning here would hide the orphaned quarantine state.
             if staged_blob_dir is not None and staged_blob_dir.exists():
-                try:
-                    shutil.rmtree(staged_blob_dir)
-                except OSError:
-                    return
+                shutil.rmtree(staged_blob_dir)
 
                 quarantine_root = staged_blob_dir.parent
                 with contextlib.suppress(OSError):
@@ -2763,11 +2761,7 @@ class SessionServiceImpl:
                             node["options"],
                             message=f"create_pending_interpretation_event: node {affected_node_id!r} options is not a mapping",
                         )
-                        prompt_template = options["prompt_template"]
-                        if not isinstance(prompt_template, str):
-                            raise ValueError(
-                                f"create_pending_interpretation_event: node {affected_node_id!r} options.prompt_template is not a string"
-                            )
+                        prompt_template = cast(str, options["prompt_template"])
                         if llm_draft != prompt_template:
                             raise ValueError(
                                 "create_pending_interpretation_event: llm_prompt_template event draft must match current options.prompt_template"
@@ -4598,12 +4592,16 @@ class SessionServiceImpl:
                     ).fetchall()
                 }
                 lineage_protected: set[str] = set()
-                seeds = keep_ids | run_referenced | message_referenced
+                seeds = (keep_ids | run_referenced | message_referenced) & set(derived_from_map)
                 for seed_id in seeds:
-                    parent = derived_from_map.get(seed_id)
+                    parent = derived_from_map[seed_id]
                     while parent is not None and parent not in lineage_protected:
+                        if parent not in derived_from_map:
+                            raise AuditIntegrityError(
+                                f"composition state {seed_id} in session {sid} has dangling derived_from_state_id {parent}"
+                            )
                         lineage_protected.add(parent)
-                        parent = derived_from_map.get(parent)
+                        parent = derived_from_map[parent]
 
                 # Candidates for deletion: not kept, not referenced, not in lineage
                 protected = keep_ids | run_referenced | message_referenced | lineage_protected

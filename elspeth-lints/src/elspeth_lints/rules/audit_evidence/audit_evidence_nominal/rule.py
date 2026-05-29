@@ -6,7 +6,12 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 
-from elspeth_lints.core.ast_walker import ParsedPythonFile, PythonSyntaxError, parse_python_file
+from elspeth_lints.core.ast_walker import (
+    ParsedPythonFile,
+    PythonFileReadError,
+    PythonSyntaxError,
+    parse_python_file,
+)
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.audit_evidence.audit_evidence_nominal.metadata import (
     LEGACY_RULE_ID,
@@ -43,6 +48,11 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
         parsed = parse_python_file(path)
         if isinstance(parsed, PythonSyntaxError):
             raise SyntaxError(f"{parsed.path}:{parsed.line}:{parsed.column}: {parsed.message}")
+        if isinstance(parsed, PythonFileReadError):
+            # Mirror the syntax-error policy above: this scanner already
+            # filtered candidates, so a read error indicates a race
+            # between enumeration and parse — be loud, don't paper over.
+            raise OSError(f"{parsed.path}: {parsed.message}")
         findings.extend(_scan_parsed(parsed, root))
     return [finding for finding in findings if allowlist.match_key(finding.fingerprint) is None]
 

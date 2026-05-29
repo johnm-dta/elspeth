@@ -152,9 +152,22 @@ jobs:
 
       - name: Run trust-tier elspeth-lints rule
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        env:
+          ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
+          ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'shape-only-when-key-missing' || 'required' }}
         run: |
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
             --rules trust_tier.tier_model \
+            --root src/elspeth
+
+      - name: Run trust-boundary honesty-gate elspeth-lints rules
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        env:
+          ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
+          ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'shape-only-when-key-missing' || 'required' }}
+        run: |
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+            --rules trust_boundary.tests,trust_boundary.scope,trust_boundary.tier \
             --root src/elspeth
 
       - name: Forbid new bespoke CI enforcers
@@ -265,6 +278,9 @@ jobs:
       - name: Emit elspeth-lints trust-tier SARIF artifact
         if: always()
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        env:
+          ELSPETH_JUDGE_METADATA_HMAC_KEY: ${{ secrets.ELSPETH_JUDGE_METADATA_HMAC_KEY }}
+          ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'shape-only-when-key-missing' || 'required' }}
         run: |
           set +e
           PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
@@ -314,6 +330,10 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
+        # Coverage runs on Python 3.13 only because 3.13 is the release
+        # interpreter for this branch. The Python 3.12 lane remains
+        # dependency-compatibility signal and intentionally skips coverage so
+        # one XML/threshold report is authoritative.
         include:
           - python-version: "3.12"
             coverage: false
@@ -392,7 +412,7 @@ jobs:
     container:
       image: python:3.13-bookworm
     needs: [test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/RC'))
     env:
       CI_CHECKOUT_PATH: ci-${{ github.run_id }}-${{ github.run_attempt }}-integration
     steps:

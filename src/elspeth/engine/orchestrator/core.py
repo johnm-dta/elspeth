@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.core.events import EventBusProtocol
-    from elspeth.telemetry import TelemetryManager
+    from elspeth.engine.orchestrator.types import TelemetryManagerProtocol
 
 import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
 from elspeth.contracts import (
@@ -341,7 +341,7 @@ class Orchestrator:
         clock: Clock | None = None,
         rate_limit_registry: RateLimitRegistry | None = None,
         concurrency_config: RuntimeConcurrencyConfig | None = None,
-        telemetry_manager: TelemetryManager | None = None,
+        telemetry_manager: TelemetryManagerProtocol | None = None,
         coalesce_completed_keys_limit: int = 10000,
     ) -> None:
         from elspeth.core.events import NullEventBus

@@ -201,17 +201,18 @@ class TestSessionCRUD:
             await service_with_dir.get_session(session.id)
 
     @pytest.mark.asyncio
-    async def test_archive_session_quarantines_blob_dir_when_post_commit_purge_fails(
+    async def test_archive_session_preserves_quarantine_and_raises_when_post_commit_purge_fails(
         self,
         engine,
         tmp_path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Post-commit blob purge failure must not surface as a false delete failure.
+        """Post-commit blob purge failure must stay visible to the operator.
 
         The session delete has already committed by the time the filesystem purge
-        runs. The service must preserve a recoverable quarantine path instead of
-        raising after the session is already gone.
+        runs. If purge fails, the staged directory remains a recoverable
+        quarantine path and the OSError propagates instead of being silently
+        swallowed.
         """
         data_dir = tmp_path / "data"
         data_dir.mkdir()
@@ -237,7 +238,8 @@ class TestSessionCRUD:
 
         monkeypatch.setattr("elspeth.web.sessions.service.shutil.rmtree", fail_rmtree)
 
-        await service_with_dir.archive_session(session.id)
+        with pytest.raises(OSError, match="permission denied removing staged blob directory"):
+            await service_with_dir.archive_session(session.id)
 
         with pytest.raises(ValueError):
             await service_with_dir.get_session(session.id)

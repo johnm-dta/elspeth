@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from elspeth_lints.core.allowlist import Allowlist, FindingKey, load_allowlist
-from elspeth_lints.core.ast_walker import PythonSyntaxError, walk_python_files
+from elspeth_lints.core.ast_walker import PythonFileReadError, PythonSyntaxError, walk_python_files
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.plugin_contract.component_type.metadata import LEGACY_RULE_ID, RULE_ID, RULE_METADATA, SUGGESTION
 
@@ -60,7 +60,7 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
     allowlist = load_allowlist(allowlist_dir, valid_rule_ids=_ALL_RULE_IDS)
     all_classes: list[ClassInfo] = []
     for parsed in walk_python_files(root):
-        if isinstance(parsed, PythonSyntaxError):
+        if isinstance(parsed, (PythonSyntaxError, PythonFileReadError)):
             continue
         source_lines = parsed.source.splitlines()
         all_classes.extend(scan_tree_classes(parsed.tree, display_path(parsed.path, root), source_lines))

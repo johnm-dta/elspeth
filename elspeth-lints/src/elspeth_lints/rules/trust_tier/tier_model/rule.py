@@ -27,7 +27,7 @@ import hashlib
 import json
 import sys
 from calendar import monthrange
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -38,13 +38,26 @@ from elspeth_lints.core.allowlist import (
     AllowlistBudgetViolation as AllowlistBudgetViolation,
 )
 from elspeth_lints.core.allowlist import AllowlistEntry as AllowlistEntry
-from elspeth_lints.core.allowlist import FindingKey, load_allowlist
+from elspeth_lints.core.allowlist import (
+    FindingKey,
+    load_allowlist,
+    verify_entry_binding_against_finding,
+)
 from elspeth_lints.core.allowlist import PerFileRule as PerFileRule
+from elspeth_lints.core.ast_walker import iter_own_scope
 from elspeth_lints.core.protocols import (
     Finding as LintFinding,
 )
 from elspeth_lints.core.protocols import RuleContext, RuleMetadata, RuleScope, Severity
 from elspeth_lints.rules.trust_tier.tier_model.metadata import RULE_ID, RULE_METADATA
+from elspeth_lints.rules.trust_tier.tier_model.trust_boundary_suppress import (
+    BoundaryFinding,
+    BoundaryMetadata,
+    DerivedNameState,
+    assignment_target_names,
+    extract_boundary_metadata,
+    subject_is_rooted,
+)
 
 # =============================================================================
 # Data Structures
@@ -62,7 +75,19 @@ def _add_months(today: date, months: int) -> date:
 
 @dataclass(frozen=True)
 class Finding:
-    """A detected violation of the no-bug-hiding policy."""
+    """A detected violation of the no-bug-hiding policy.
+
+    ``ast_path`` is the AST field/index path from the module root to the
+    finding's subject node, joined with ``"/"`` (e.g.
+    ``"body[3]/body[1]/value/args[0]"``). It is the AST-level address the
+    fingerprint already encodes; surfacing it explicitly is what closes
+    the C8-3 quartet-transplant attack — the loader/matcher pair (in
+    ``elspeth_lints.core.allowlist``) verifies that an allowlist entry
+    carrying judge metadata still points at the same AST node it was
+    judged against. For layer-import findings (which have no AST subject)
+    we synthesise a stable address of the form ``import:<module>`` so
+    every Finding instance carries a non-empty ast_path.
+    """
 
     rule_id: str
     file_path: str
@@ -72,6 +97,7 @@ class Finding:
     fingerprint: str
     code_snippet: str
     message: str
+    ast_path: str = ""
 
     @property
     def canonical_key(self) -> str:
@@ -97,6 +123,7 @@ class CheckResult:
 
     allowlist_path: Path
     violations: list[Finding]
+    suppressed_boundary_findings: list[Finding]
     stale_entries: list[AllowlistEntry]
     expired_entries: list[AllowlistEntry]
     expired_file_rules: list[PerFileRule]
@@ -179,6 +206,56 @@ RULES: dict[str, dict[str, Any]] = {
         "name": "upward-import",
         "description": "Import from a higher layer violates the dependency hierarchy (contracts→core→engine→plugins)",
         "remediation": "Move code down, extract primitives, or restructure caller (see CLAUDE.md Layer Dependency Rules)",
+    },
+    # =========================================================================
+    # @trust_boundary decorator hygiene
+    # =========================================================================
+    # These findings fire on the decorator itself, not on suppressed
+    # patterns. They guarantee that a malformed ``@trust_boundary`` cannot
+    # silently disable suppression analysis: if the analyzer cannot read the
+    # decorator's metadata, the author hears about it AND the decorator is
+    # treated as inert (so any rule violations inside the function remain
+    # visible). Severity matches the rest of tier_model — ERROR — because a
+    # malformed decorator defeats the suppression argument and must not be
+    # merged.
+    "R_TB_NONLITERAL": {
+        "name": "trust-boundary-non-literal-arg",
+        "description": (
+            "@trust_boundary kwargs must be static literals; references to "
+            "names, calls, or comprehensions defeat the static suppression analysis."
+        ),
+        "remediation": (
+            "Inline the literal value(s) in the decorator call. Constants "
+            "imported from another module are still literals at the call site "
+            "because the decorator is keyword-only; replace any computed values."
+        ),
+    },
+    "R_TB_MALFORMED": {
+        "name": "trust-boundary-malformed-metadata",
+        "description": ("@trust_boundary metadata is the wrong shape (e.g. 'suppresses' is not a tuple, 'source_param' is not a string)."),
+        "remediation": (
+            "Compare the call to the documented signature in "
+            "src/elspeth/contracts/trust_boundary.py. 'suppresses' must be "
+            "tuple[str, ...]; 'source_param' must be a non-empty string."
+        ),
+    },
+    "R_TB_STACKED": {
+        "name": "trust-boundary-stacked-decorator",
+        "description": ("Multiple @trust_boundary decorators on one function make the boundary metadata ambiguous."),
+        "remediation": (
+            "Keep exactly one @trust_boundary decorator per function. Merge the "
+            "intended source_param, suppresses, invariant, and test_ref into a "
+            "single decorator or split the boundary into separate functions."
+        ),
+    },
+    "R_TB_UNKNOWN_KWARG": {
+        "name": "trust-boundary-unknown-kwarg",
+        "description": ("@trust_boundary contains a kwarg outside the runtime decorator signature."),
+        "remediation": (
+            "Remove the unknown kwarg or correct its spelling. The analyzer "
+            "treats the decorator as inert until its metadata matches "
+            "src/elspeth/contracts/trust_boundary.py."
+        ),
     },
 }
 
@@ -401,6 +478,7 @@ class TierModelVisitor(ast.NodeVisitor):
         self.file_path = file_path
         self.source_lines = source_lines
         self.findings: list[Finding] = []
+        self.suppressed_findings: list[Finding] = []
         self.symbol_stack: list[str] = []
         self.class_stack: list[ast.ClassDef] = []
         self.function_stack: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
@@ -408,6 +486,12 @@ class TierModelVisitor(ast.NodeVisitor):
         self.node_stack: list[ast.AST] = []
         self._decorator_lines: set[int] = set()  # Track lines that are decorators
         self._import_aliases: dict[str, str] = {}
+        # Stack of (metadata, derived-name state) pairs — one entry per nested
+        # function. ``None`` means the function has no ``@trust_boundary``
+        # decorator. We push on entry to every function so popping is symmetric
+        # and we can look at "the innermost enclosing decorated function" via
+        # a reverse walk of the stack.
+        self._boundary_stack: list[tuple[BoundaryMetadata, DerivedNameState] | None] = []
 
     def visit(self, node: ast.AST) -> Any:
         """Visit a node while retaining ancestor context for receiver-shape checks."""
@@ -442,8 +526,84 @@ class TierModelVisitor(ast.NodeVisitor):
         payload = f"{rule_id}|{ast_path}|{node_dump}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
+    def _current_boundary(self) -> tuple[BoundaryMetadata, DerivedNameState] | None:
+        """Return the active ``@trust_boundary`` context, if any.
+
+        Suppression is intentionally limited to the decorated function's own
+        lexical body. Nested functions, lambdas, and class bodies do not
+        inherit an outer function's boundary metadata; if they need boundary
+        suppression, they must carry their own ``@trust_boundary``.
+
+        Returns ``None`` if no enclosing function carries a ``@trust_boundary``.
+        """
+        if not self._boundary_stack:
+            return None
+        return self._boundary_stack[-1]
+
+    def _current_derived_state(self) -> DerivedNameState | None:
+        boundary = self._current_boundary()
+        if boundary is None:
+            return None
+        return boundary[1]
+
+    def _finding_subject_node(self, rule_id: str, node: ast.AST) -> ast.AST | None:
+        """Return the AST node whose rootedness determines suppression.
+
+        Only R1 and R5 are listed as suppressible by the documented
+        ``BoundaryRule`` Literal in ``elspeth.contracts.trust_boundary``;
+        the helper still returns sensible subject nodes for the other
+        dict/attr defensive-pattern rules so that adding them to
+        ``BoundaryRule`` later is a one-line decorator-side change.
+
+        Rules that cannot meaningfully be "rooted at a value" (exception
+        handlers, contextlib.suppress, broad except) return ``None``:
+        suppression of those rules via the decorator is never honoured
+        because the trust-boundary doctrine sanctions defensive *value
+        access* on external data, not blanket exception swallowing.
+        """
+        if rule_id in {"R1", "R8", "R9"} and isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            # ``x.get(...)`` / ``x.setdefault(...)`` / ``x.pop(...)`` —
+            # rooted at the receiver ``func.value``.
+            return node.func.value
+        if rule_id == "R5" and isinstance(node, ast.Call) and node.args:
+            # ``isinstance(target, ...)`` — rooted at the first arg.
+            return node.args[0]
+        if rule_id == "R2" and isinstance(node, ast.Call) and node.args:
+            # ``getattr(obj, name, default)`` — rooted at the first arg (obj).
+            return node.args[0]
+        return None
+
+    def _is_suppressed_by_boundary(self, rule_id: str, node: ast.AST) -> bool:
+        """Return True if a ``@trust_boundary`` covers this finding.
+
+        See module docstring of :mod:`trust_boundary_suppress` for the
+        auditability rationale: there is no telemetry surface for the
+        suppression event; the decorator's existence (visible in code
+        review) is the audit signal.
+        """
+        return self._boundary_suppression_for(rule_id, node) is not None
+
+    def _boundary_suppression_for(self, rule_id: str, node: ast.AST) -> BoundaryMetadata | None:
+        """Return active boundary metadata if it suppresses this finding."""
+        boundary = self._current_boundary()
+        if boundary is None:
+            return None
+        metadata, derived_state = boundary
+        if rule_id not in metadata.suppresses:
+            return None
+        subject = self._finding_subject_node(rule_id, node)
+        if subject is None:
+            return None
+        if not subject_is_rooted(subject, derived_state.snapshot()):
+            return None
+        return metadata
+
     def _add_finding(self, rule_id: str, node: ast.expr | ast.stmt | ast.ExceptHandler, message: str) -> None:
-        """Record a finding."""
+        """Record a finding, unless an enclosing ``@trust_boundary`` covers it."""
+        suppressed_by = self._boundary_suppression_for(rule_id, node)
+        if suppressed_by is not None:
+            self._add_suppressed_boundary_observation(rule_id, node, suppressed_by)
+            return
         self.findings.append(
             Finding(
                 rule_id=rule_id,
@@ -454,6 +614,55 @@ class TierModelVisitor(ast.NodeVisitor):
                 fingerprint=self._fingerprint_node(rule_id, node),
                 code_snippet=self._get_code_snippet(node.lineno),
                 message=message,
+                ast_path="/".join(self.path_stack) or "<module-root>",
+            )
+        )
+
+    def _add_suppressed_boundary_observation(
+        self,
+        original_rule_id: str,
+        node: ast.expr | ast.stmt | ast.ExceptHandler,
+        metadata: BoundaryMetadata,
+    ) -> None:
+        """Record a non-failing observation for a trust-boundary suppression."""
+        suppresses = tuple(sorted(metadata.suppresses))
+        self.suppressed_findings.append(
+            Finding(
+                rule_id="R_TB_SUPPRESSED",
+                file_path=self.file_path,
+                line=node.lineno,
+                col=node.col_offset,
+                symbol_context=tuple(self.symbol_stack),
+                fingerprint=self._fingerprint_node(f"R_TB_SUPPRESSED:{original_rule_id}", node),
+                code_snippet=self._get_code_snippet(node.lineno),
+                message=(
+                    f"@trust_boundary suppressed {original_rule_id} under "
+                    f"source_param={metadata.source_param!r}; source={metadata.source!r}; "
+                    f"test_ref={metadata.test_ref!r}; suppresses={suppresses!r}"
+                ),
+                ast_path="/".join(self.path_stack) or "<module-root>",
+            )
+        )
+
+    def _add_boundary_diagnostic(self, diagnostic: BoundaryFinding) -> None:
+        """Surface a malformed-decorator diagnostic as an ordinary finding.
+
+        These diagnostics target the decorator call site itself (not the
+        function body), so they bypass the suppression check — a malformed
+        decorator cannot suppress its own error.
+        """
+        node = diagnostic.node
+        self.findings.append(
+            Finding(
+                rule_id=diagnostic.rule_id,
+                file_path=self.file_path,
+                line=node.lineno,
+                col=node.col_offset,
+                symbol_context=tuple(self.symbol_stack),
+                fingerprint=self._fingerprint_node(diagnostic.rule_id, node),
+                code_snippet=self._get_code_snippet(node.lineno),
+                message=diagnostic.message,
+                ast_path="/".join(self.path_stack) or "<module-root>",
             )
         )
 
@@ -474,33 +683,116 @@ class TierModelVisitor(ast.NodeVisitor):
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         """Track class context."""
+        outer_state = self._current_derived_state()
+        if outer_state is not None:
+            outer_state.assign_target_names((node.name,), is_derived=False)
         self.symbol_stack.append(node.name)
         self.class_stack.append(node)
-        self.generic_visit(node)
-        self.class_stack.pop()
-        self.symbol_stack.pop()
+        self._boundary_stack.append(None)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._boundary_stack.pop()
+            self.class_stack.pop()
+            self.symbol_stack.pop()
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        """Visit lambda bodies without inheriting enclosing boundary suppression."""
+        self._boundary_stack.append(None)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._boundary_stack.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         """Track function context."""
         # Collect decorator lines — .get() calls here are not dict access
         for decorator in node.decorator_list:
             self._decorator_lines.add(decorator.lineno)
+        outer_state = self._current_derived_state()
+        if outer_state is not None:
+            outer_state.assign_target_names((node.name,), is_derived=False)
         self.symbol_stack.append(node.name)
         self.function_stack.append(node)
-        self.generic_visit(node)
-        self.function_stack.pop()
-        self.symbol_stack.pop()
+        self._enter_boundary_context(node)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._boundary_stack.pop()
+            self.function_stack.pop()
+            self.symbol_stack.pop()
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         """Track async function context."""
         # Collect decorator lines — .get() calls here are not dict access
         for decorator in node.decorator_list:
             self._decorator_lines.add(decorator.lineno)
+        outer_state = self._current_derived_state()
+        if outer_state is not None:
+            outer_state.assign_target_names((node.name,), is_derived=False)
         self.symbol_stack.append(node.name)
         self.function_stack.append(node)
-        self.generic_visit(node)
-        self.function_stack.pop()
-        self.symbol_stack.pop()
+        self._enter_boundary_context(node)
+        try:
+            self.generic_visit(node)
+        finally:
+            self._boundary_stack.pop()
+            self.function_stack.pop()
+            self.symbol_stack.pop()
+
+    def _enter_boundary_context(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """Parse ``@trust_boundary`` (if present) and push the suppression context.
+
+        Always pushes onto ``_boundary_stack`` so the pop in the visit
+        wrappers is unconditional. A ``None`` entry means "no decorator on
+        this function" (the common case). Malformed decorators push
+        ``None`` AND emit a finding so the suppression is rejected loudly.
+
+        ``source_param`` is validated against the function signature here
+        (rather than relying on the runtime decorator's check) so the rule
+        can flag the decorator at lint time even if the function is never
+        imported. A mismatch is reported as R_TB_MALFORMED.
+        """
+        metadata, diagnostics = extract_boundary_metadata(node, import_aliases=self._import_aliases)
+        for diagnostic in diagnostics:
+            self._add_boundary_diagnostic(diagnostic)
+
+        if metadata is None:
+            self._boundary_stack.append(None)
+            return
+
+        # Confirm source_param actually names a parameter of the function.
+        # ``args.args`` covers positional + keyword-or-positional;
+        # ``kwonlyargs`` covers keyword-only; ``posonlyargs`` covers
+        # positional-only. ``vararg`` / ``kwarg`` cover ``*args`` / ``**kwargs``.
+        # If a decorator nominates ``**kwargs`` as the source_param, that is
+        # legitimate — the function body subscripts ``kwargs`` like a dict —
+        # so we include vararg/kwarg in the parameter set.
+        param_names: set[str] = set()
+        param_names.update(arg.arg for arg in node.args.posonlyargs)
+        param_names.update(arg.arg for arg in node.args.args)
+        param_names.update(arg.arg for arg in node.args.kwonlyargs)
+        if node.args.vararg is not None:
+            param_names.add(node.args.vararg.arg)
+        if node.args.kwarg is not None:
+            param_names.add(node.args.kwarg.arg)
+
+        if metadata.source_param not in param_names:
+            self._add_boundary_diagnostic(
+                BoundaryFinding(
+                    rule_id="R_TB_MALFORMED",
+                    message=(
+                        f"@trust_boundary(source_param={metadata.source_param!r}) does not "
+                        f"name a parameter of {node.name!r}; "
+                        f"signature parameters are {sorted(param_names)!r}."
+                    ),
+                    node=metadata.decorator_node,
+                )
+            )
+            self._boundary_stack.append(None)
+            return
+
+        self._boundary_stack.append((metadata, DerivedNameState.from_source_param(metadata.source_param)))
 
     def _is_default_return_value(self, value: ast.expr | None) -> bool:
         """True if return value is a silent default (None, empty container, empty string, zero)."""
@@ -516,11 +808,12 @@ class TierModelVisitor(ast.NodeVisitor):
 
     def _handler_is_silent(self, node: ast.ExceptHandler) -> bool:
         """Return True if the except handler swallows errors without re-raise or explicit return."""
-        has_raise = any(isinstance(child, ast.Raise) for child in ast.walk(node))
+        own_scope_nodes = [child for statement in node.body for child in iter_own_scope(statement)]
+        has_raise = any(isinstance(child, ast.Raise) for child in own_scope_nodes)
         if has_raise:
             return False
 
-        returns: list[ast.Return] = [child for child in ast.walk(node) if isinstance(child, ast.Return)]
+        returns: list[ast.Return] = [child for child in own_scope_nodes if isinstance(child, ast.Return)]
         if returns:
             # If all returns are silent defaults, treat as swallow.
             return all(self._is_default_return_value(ret.value) for ret in returns)
@@ -770,6 +1063,174 @@ class TierModelVisitor(ast.NodeVisitor):
             and grandparent.func is parent
         )
 
+    def _visit_ast_child(self, field_name: str, node: ast.AST | None) -> None:
+        if node is None:
+            return
+        self.path_stack.append(field_name)
+        try:
+            self.visit(node)
+        finally:
+            self.path_stack.pop()
+
+    def _visit_ast_list_item(self, field_name: str, index: int, node: ast.AST) -> None:
+        self.path_stack.append(f"{field_name}[{index}]")
+        try:
+            self.visit(node)
+        finally:
+            self.path_stack.pop()
+
+    def _value_depends_on_boundary(self, value: ast.AST, snapshot: frozenset[str]) -> bool:
+        state = self._current_derived_state()
+        if state is None:
+            return False
+        return state.expression_depends_on_current_names(value, snapshot=snapshot)
+
+    def _assign_targets_from_value(self, targets: Iterable[ast.expr], value: ast.AST, snapshot: frozenset[str]) -> None:
+        state = self._current_derived_state()
+        if state is None:
+            return
+        state.assign_targets(targets, is_derived=self._value_depends_on_boundary(value, snapshot))
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        state = self._current_derived_state()
+        snapshot = frozenset() if state is None else state.snapshot()
+
+        self._visit_ast_child("value", node.value)
+        for index, target in enumerate(node.targets):
+            self._visit_ast_list_item("targets", index, target)
+
+        self._assign_targets_from_value(node.targets, node.value, snapshot)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        state = self._current_derived_state()
+        snapshot = frozenset() if state is None else state.snapshot()
+
+        if node.value is not None:
+            self._visit_ast_child("value", node.value)
+        self._visit_ast_child("target", node.target)
+        self._visit_ast_child("annotation", node.annotation)
+
+        if node.value is not None:
+            self._assign_targets_from_value((node.target,), node.value, snapshot)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        state = self._current_derived_state()
+        snapshot = frozenset() if state is None else state.snapshot()
+        is_derived = subject_is_rooted(node.target, snapshot) or self._value_depends_on_boundary(node.value, snapshot)
+
+        self._visit_ast_child("target", node.target)
+        self._visit_ast_child("value", node.value)
+
+        if state is not None:
+            state.assign_target(node.target, is_derived=is_derived)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        state = self._current_derived_state()
+        snapshot = frozenset() if state is None else state.snapshot()
+        is_derived = self._value_depends_on_boundary(node.value, snapshot)
+
+        self._visit_ast_child("value", node.value)
+        self._visit_ast_child("target", node.target)
+
+        if state is not None:
+            state.assign_target(node.target, is_derived=is_derived)
+
+    def _visit_for_like(self, node: ast.For | ast.AsyncFor) -> None:
+        state = self._current_derived_state()
+        snapshot = frozenset() if state is None else state.snapshot()
+        target_is_derived = subject_is_rooted(node.iter, snapshot)
+
+        self._visit_ast_child("iter", node.iter)
+        if state is not None:
+            state.assign_target(node.target, is_derived=target_is_derived)
+        self._visit_ast_child("target", node.target)
+        for index, statement in enumerate(node.body):
+            self._visit_ast_list_item("body", index, statement)
+        for index, statement in enumerate(node.orelse):
+            self._visit_ast_list_item("orelse", index, statement)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_for_like(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_for_like(node)
+
+    def _visit_with_like(self, node: ast.With | ast.AsyncWith) -> None:
+        state = self._current_derived_state()
+        for index, item in enumerate(node.items):
+            self.path_stack.append(f"items[{index}]")
+            try:
+                snapshot = frozenset() if state is None else state.snapshot()
+                optional_vars_is_derived = subject_is_rooted(item.context_expr, snapshot)
+                self._visit_ast_child("context_expr", item.context_expr)
+                if item.optional_vars is not None:
+                    if state is not None:
+                        state.assign_target(item.optional_vars, is_derived=optional_vars_is_derived)
+                    self._visit_ast_child("optional_vars", item.optional_vars)
+            finally:
+                self.path_stack.pop()
+        for index, statement in enumerate(node.body):
+            self._visit_ast_list_item("body", index, statement)
+
+    def _restore_comprehension_targets(self, original_names: set[str], target_names: set[str]) -> None:
+        state = self._current_derived_state()
+        if state is None:
+            return
+        for name in target_names:
+            if name in original_names:
+                state.names.add(name)
+            else:
+                state.names.discard(name)
+
+    def _visit_comprehension_generators(self, generators: list[ast.comprehension]) -> tuple[set[str], set[str]]:
+        state = self._current_derived_state()
+        original_names = set() if state is None else set(state.names)
+        target_names: set[str] = set()
+        for index, generator in enumerate(generators):
+            self.path_stack.append(f"generators[{index}]")
+            try:
+                snapshot = frozenset() if state is None else state.snapshot()
+                target_is_derived = subject_is_rooted(generator.iter, snapshot)
+                self._visit_ast_child("iter", generator.iter)
+                if state is not None:
+                    state.assign_target(generator.target, is_derived=target_is_derived)
+                target_names.update(assignment_target_names(generator.target))
+                self._visit_ast_child("target", generator.target)
+                for if_index, if_node in enumerate(generator.ifs):
+                    self._visit_ast_list_item("ifs", if_index, if_node)
+            finally:
+                self.path_stack.pop()
+        return original_names, target_names
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        original_names, target_names = self._visit_comprehension_generators(node.generators)
+        try:
+            self._visit_ast_child("elt", node.elt)
+        finally:
+            self._restore_comprehension_targets(original_names, target_names)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        original_names, target_names = self._visit_comprehension_generators(node.generators)
+        try:
+            self._visit_ast_child("elt", node.elt)
+        finally:
+            self._restore_comprehension_targets(original_names, target_names)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        original_names, target_names = self._visit_comprehension_generators(node.generators)
+        try:
+            self._visit_ast_child("key", node.key)
+            self._visit_ast_child("value", node.value)
+        finally:
+            self._restore_comprehension_targets(original_names, target_names)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        original_names, target_names = self._visit_comprehension_generators(node.generators)
+        try:
+            self._visit_ast_child("elt", node.elt)
+        finally:
+            self._restore_comprehension_targets(original_names, target_names)
+
     def visit_Call(self, node: ast.Call) -> None:
         """Detect R1 (dict.get), R2 (getattr), R3 (hasattr), R5 (isinstance), R8/R9 defaults."""
         # R1: dict.get() - Call(func=Attribute(attr="get"))
@@ -839,7 +1300,7 @@ class TierModelVisitor(ast.NodeVisitor):
                         node,
                         f"contextlib.suppress() used: {self._get_code_snippet(node.lineno)}",
                     )
-        self.generic_visit(node)
+        self._visit_with_like(node)
 
     def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
         """Detect R7: contextlib.suppress usage in async context managers."""
@@ -853,7 +1314,7 @@ class TierModelVisitor(ast.NodeVisitor):
                         node,
                         f"contextlib.suppress() used: {self._get_code_snippet(node.lineno)}",
                     )
-        self.generic_visit(node)
+        self._visit_with_like(node)
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         """Detect R4: broad exception suppression."""
@@ -924,24 +1385,30 @@ class TierModelVisitor(ast.NodeVisitor):
 
 def scan_file(file_path: Path, root: Path) -> list[Finding]:
     """Scan a single Python file for bug-hiding patterns."""
+    findings, _suppressed_findings = scan_file_with_observations(file_path, root)
+    return findings
+
+
+def scan_file_with_observations(file_path: Path, root: Path) -> tuple[list[Finding], list[Finding]]:
+    """Scan a single Python file and return violations plus suppression observations."""
     try:
         source = file_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
-        return []
+        return [], []
 
     try:
         tree = ast.parse(source, filename=str(file_path))
     except SyntaxError as e:
         print(f"Warning: Syntax error in {file_path}: {e}", file=sys.stderr)
-        return []
+        return [], []
 
     source_lines = source.splitlines()
     relative_path = str(file_path.relative_to(root))
 
     visitor = TierModelVisitor(relative_path, source_lines)
     visitor.visit(tree)
-    return visitor.findings
+    return visitor.findings, visitor.suppressed_findings
 
 
 def scan_directory(
@@ -949,8 +1416,18 @@ def scan_directory(
     exclude_patterns: list[str] | None = None,
 ) -> list[Finding]:
     """Scan all Python files in a directory tree."""
+    findings, _suppressed_findings = scan_directory_with_observations(root, exclude_patterns)
+    return findings
+
+
+def scan_directory_with_observations(
+    root: Path,
+    exclude_patterns: list[str] | None = None,
+) -> tuple[list[Finding], list[Finding]]:
+    """Scan all Python files and return violations plus suppression observations."""
     exclude_patterns = exclude_patterns or []
     findings: list[Finding] = []
+    suppressed_findings: list[Finding] = []
 
     for py_file in root.rglob("*.py"):
         relative = py_file.relative_to(root)
@@ -966,9 +1443,11 @@ def scan_directory(
         if skip:
             continue
 
-        findings.extend(scan_file(py_file, root))
+        file_findings, file_suppressed_findings = scan_file_with_observations(py_file, root)
+        findings.extend(file_findings)
+        suppressed_findings.extend(file_suppressed_findings)
 
-    return findings
+    return findings, suppressed_findings
 
 
 # =============================================================================
@@ -1026,6 +1505,11 @@ def scan_layer_imports_file(
             from_name = LAYER_NAMES[file_layer]
             to_name = LAYER_NAMES[target_layer]
 
+            # Layer-import findings have no AST subject; the import target
+            # module IS the address. Synthesise a stable ast_path of the
+            # form ``import:<module>`` so binding verification works the
+            # same way as AST-rooted findings.
+            import_ast_path = f"import:{module_name}"
             if line in tc_lines:
                 tc_payload = f"TC|{relative_path}|{module_name}"
                 tc_fp = hashlib.sha256(tc_payload.encode()).hexdigest()[:16]
@@ -1039,6 +1523,7 @@ def scan_layer_imports_file(
                         fingerprint=tc_fp,
                         code_snippet=snippet,
                         message=f"TYPE_CHECKING import: {from_name} annotates with {to_name} ({module_name})",
+                        ast_path=import_ast_path,
                     )
                 )
             else:
@@ -1056,6 +1541,7 @@ def scan_layer_imports_file(
                         fingerprint=fp,
                         code_snippet=snippet,
                         message=f"Upward import: {from_name} imports from {to_name} ({module_name})",
+                        ast_path=import_ast_path,
                     )
                 )
 
@@ -1651,6 +2137,24 @@ def _validate_allowlist_governance(allowlist: Allowlist) -> None:
         # ``valid_rule_ids=_ALL_RULE_IDS`` is passed to ``load_allowlist``.
 
 
+def _finding_key_for(finding: Finding) -> FindingKey:
+    """Convert a tier_model ``Finding`` to the shared allowlist key shape."""
+    return FindingKey(
+        file_path=finding.file_path,
+        rule_id=finding.rule_id,
+        symbol_context=finding.symbol_context,
+        fingerprint=finding.fingerprint,
+    )
+
+
+def _match_per_file_rule(rules: list[PerFileRule], finding_key: FindingKey) -> PerFileRule | None:
+    """Return the first per-file rule matching ``finding_key``."""
+    for rule in rules:
+        if rule.matches(finding_key):
+            return rule
+    return None
+
+
 def _match_finding(allowlist: Allowlist, finding: Finding) -> AllowlistEntry | PerFileRule | None:
     """Match a tier_model ``Finding`` against ``allowlist``.
 
@@ -1662,36 +2166,46 @@ def _match_finding(allowlist: Allowlist, finding: Finding) -> AllowlistEntry | P
     rule. We keep the historical order to preserve the production
     ``contracts.yaml`` semantics across this consolidation.
     """
-    finding_key = FindingKey(
-        file_path=finding.file_path,
-        rule_id=finding.rule_id,
-        symbol_context=finding.symbol_context,
-        fingerprint=finding.fingerprint,
-    )
-    for rule in allowlist.per_file_rules:
-        if rule.matches(finding_key):
-            rule.matched_count += 1
-            return rule
+    finding_key = _finding_key_for(finding)
+    matched_rule = _match_per_file_rule(allowlist.per_file_rules, finding_key)
+    if matched_rule is not None:
+        matched_rule.matched_count += 1
+        return matched_rule
     for entry in allowlist.entries:
         if entry.matches(finding_key):
+            # C8-3 in-file transplant defence: a quartet copied onto a
+            # different AST node within the same file still matches the
+            # canonical key (the key carries fingerprint, which is
+            # path-derived, so the keys differ — but a hand-edited
+            # transplant could rebind the key and copy the quartet). The
+            # persisted ast_path is the AST-level address the judge
+            # actually inspected; it must equal the live finding's
+            # ast_path. Mismatch ⇒ tampering or unannounced refactor.
+            verify_entry_binding_against_finding(
+                entry,
+                file_path=finding.file_path,
+                ast_path=finding.ast_path,
+            )
             entry.matched = True
             return entry
     return None
 
 
-def _load_tier_model_allowlist(path: Path) -> Allowlist:
+def _load_tier_model_allowlist(path: Path, *, source_root: Path | None = None) -> Allowlist:
     """Load the tier-model allowlist via core's loader, then apply local governance.
 
-    Core's ``load_allowlist`` treats a missing file path as an empty mapping
-    (returning an empty ``Allowlist``); we additionally short-circuit for paths
-    that resolve to neither a file nor a directory so we don't attempt to read
-    a ghost path. Governance (banned rules, pattern-tag vocabulary,
-    bugfix-owner discipline, registry coherence on ``allow_hits[].key``) is
-    applied after the generic load.
+    Missing allowlist files are configuration errors, not empty allowlists:
+    the allowlist YAML is Tier-1 audit data and a ghost path must fail closed.
+    Governance (banned rules, pattern-tag vocabulary, bugfix-owner discipline,
+    registry coherence on ``allow_hits[].key``) is applied after the generic load.
+
+    ``source_root`` is passed through to the core loader so judge-gated
+    entries can have their ``file_fingerprint`` verified against the
+    current bytes of the source file at the path encoded in their key.
+    Cross-file quartet transplants fail at load time; in-file transplants
+    are caught at match time in :func:`_match_finding`.
     """
-    if not path.exists():
-        return Allowlist(entries=[])
-    allowlist = load_allowlist(path, valid_rule_ids=_ALL_RULE_IDS)
+    allowlist = load_allowlist(path, valid_rule_ids=_ALL_RULE_IDS, source_root=source_root)
     _validate_allowlist_governance(allowlist)
     return allowlist
 
@@ -1755,6 +2269,7 @@ def report_json(
     violations: list[Finding],
     stale_entries: list[AllowlistEntry],
     expired_entries: list[AllowlistEntry],
+    suppressed_boundary_findings: list[Finding] | None = None,
     expired_file_rules: list[PerFileRule] | None = None,
     unused_file_rules: list[PerFileRule] | None = None,
     layer_warnings: list[Finding] | None = None,
@@ -1783,6 +2298,21 @@ def report_json(
     if expired_file_rules:
         result["expired_file_rules"] = [
             {"pattern": r.pattern, "rules": r.rules, "reason": r.reason, "expires": str(r.expires)} for r in expired_file_rules
+        ]
+    if suppressed_boundary_findings:
+        result["suppressed_trust_boundary_findings"] = [
+            {
+                "rule_id": f.rule_id,
+                "file": f.file_path,
+                "line": f.line,
+                "col": f.col,
+                "context": list(f.symbol_context),
+                "fingerprint": f.fingerprint,
+                "code": f.code_snippet,
+                "message": f.message,
+                "key": f.canonical_key,
+            }
+            for f in suppressed_boundary_findings
         ]
     if unused_file_rules:
         result["unused_file_rules"] = [{"pattern": r.pattern, "rules": r.rules, "reason": r.reason} for r in unused_file_rules]
@@ -1822,11 +2352,12 @@ def collect_check_result(
         raise ValueError(f"{resolved_root} is not a directory")
 
     resolved_allowlist_path = allowlist_path if allowlist_path is not None else _default_allowlist_path(resolved_root)
-    allowlist = _load_tier_model_allowlist(resolved_allowlist_path)
+    allowlist = _load_tier_model_allowlist(resolved_allowlist_path, source_root=resolved_root)
     exclude_patterns = exclude_patterns or []
     files = files or []
 
     all_tc_findings: list[Finding] = []
+    suppressed_boundary_findings: list[Finding] = []
     if files:
         all_findings: list[Finding] = []
         for file_path in files:
@@ -1835,12 +2366,14 @@ def collect_check_result(
                 resolved.relative_to(resolved_root)
             except ValueError:
                 continue
-            all_findings.extend(scan_file(resolved, resolved_root))
+            file_findings, file_suppressed = scan_file_with_observations(resolved, resolved_root)
+            all_findings.extend(file_findings)
+            suppressed_boundary_findings.extend(file_suppressed)
             layer_v, layer_tc = scan_layer_imports_file(resolved, resolved_root)
             all_findings.extend(layer_v)
             all_tc_findings.extend(layer_tc)
     else:
-        all_findings = scan_directory(resolved_root, exclude_patterns)
+        all_findings, suppressed_boundary_findings = scan_directory_with_observations(resolved_root, exclude_patterns)
         layer_v, layer_tc = scan_layer_imports_directory(resolved_root, exclude_patterns)
         all_findings.extend(layer_v)
         all_tc_findings.extend(layer_tc)
@@ -1871,6 +2404,7 @@ def collect_check_result(
     return CheckResult(
         allowlist_path=resolved_allowlist_path,
         violations=violations,
+        suppressed_boundary_findings=suppressed_boundary_findings,
         stale_entries=stale_entries,
         expired_entries=expired_entries,
         expired_file_rules=expired_file_rules,
@@ -1925,7 +2459,7 @@ def _legacy_finding_to_lint(finding: Finding) -> LintFinding:
         column=finding.col,
         message=finding.message,
         fingerprint=finding.fingerprint,
-        severity=RULE_METADATA.severity,
+        severity=Severity.NOTE if finding.rule_id == "R_TB_SUPPRESSED" else RULE_METADATA.severity,
         suggestion=rule.get("remediation"),
     )
 
@@ -2036,10 +2570,12 @@ class TierModelRule:
         if isinstance(tree, ast.Module) and tree.body and file_path.suffix == ".py":
             visitor = TierModelVisitor(_display_rule_file_path(file_path, context.root), _source_lines_for_rule(file_path))
             visitor.visit(tree)
-            return [_legacy_finding_to_lint(finding) for finding in visitor.findings]
+            return [_legacy_finding_to_lint(finding) for finding in [*visitor.findings, *visitor.suppressed_findings]]
 
         result = collect_check_result(context.root, allowlist_path=context.allowlist_dir_override)
-        return [_legacy_finding_to_lint(finding) for finding in result.violations] + _allowlist_diagnostics_to_lints(result)
+        return [
+            _legacy_finding_to_lint(finding) for finding in [*result.violations, *result.suppressed_boundary_findings]
+        ] + _allowlist_diagnostics_to_lints(result)
 
 
 # =============================================================================
@@ -2239,6 +2775,7 @@ def run_check(args: argparse.Namespace) -> int:
                 result.violations,
                 result.stale_entries,
                 result.expired_entries,
+                result.suppressed_boundary_findings,
                 result.expired_file_rules,
                 result.unused_file_rules,
                 result.layer_warnings,
@@ -2264,6 +2801,15 @@ def run_check(args: argparse.Namespace) -> int:
                 print(f"  {w.file_path}:{w.line} — {w.message}")
                 print(f"    Code: {w.code_snippet}")
                 print(f"    Allowlist key: {w.canonical_key}")
+
+        if result.suppressed_boundary_findings:
+            print(f"\n{'=' * 60}")
+            print(f"TRUST BOUNDARY SUPPRESSIONS (observations): {len(result.suppressed_boundary_findings)}")
+            print("(Non-failing audit records for R1/R5 findings suppressed by @trust_boundary)")
+            print("=" * 60)
+            for finding in result.suppressed_boundary_findings:
+                print(f"  {finding.file_path}:{finding.line} — {finding.message}")
+                print(f"    Code: {finding.code_snippet}")
 
         if result.stale_entries:
             print(f"\n{'=' * 60}")

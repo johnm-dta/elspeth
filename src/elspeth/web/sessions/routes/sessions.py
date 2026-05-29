@@ -46,9 +46,9 @@ def _copied_blob_for_inline_marker(
     new_session_id: UUID,
     field_path: str,
 ) -> BlobRecord:
-    old_ref = marker["blob_ref"] if "blob_ref" in marker else None
-    if not isinstance(old_ref, str):
-        raise AuditIntegrityError(
+    old_ref = marker["blob_ref"]
+    if type(old_ref) is not str:
+        raise TypeError(
             f"Tier 1 audit anomaly: composition_state {composition_state_id} "
             f"has inline_content blob_ref type {type(old_ref).__name__} at "
             f"{field_path} (expected UUID string). Fork aborted to prevent "
@@ -70,9 +70,9 @@ def _copied_blob_for_inline_marker(
             f"the source blob was not copied into forked session {new_session_id}."
         )
     copied_blob = blob_map[old_uuid]
-    marker_hash = marker["sha256"] if "sha256" in marker else None
-    if not isinstance(marker_hash, str):
-        raise AuditIntegrityError(
+    marker_hash = marker["sha256"]
+    if type(marker_hash) is not str:
+        raise TypeError(
             f"Tier 1 audit anomaly: composition_state {composition_state_id} "
             f"has inline_content marker at {field_path} without string sha256."
         )
@@ -93,8 +93,9 @@ def _rewrite_inline_content_blob_refs(
     new_session_id: UUID,
     field_path: str,
 ) -> bool:
-    if isinstance(value, dict):
-        if value.get("mode") == "inline_content" and "blob_ref" in value:
+    if type(value) is dict:
+        mode = value["mode"] if "mode" in value else None
+        if mode == "inline_content" and "blob_ref" in value:
             copied_blob = _copied_blob_for_inline_marker(
                 value,
                 blob_map,
@@ -107,7 +108,7 @@ def _rewrite_inline_content_blob_refs(
 
         rewritten = False
         for key, child in value.items():
-            if isinstance(key, str):
+            if type(key) is str:
                 rewritten = (
                     _rewrite_inline_content_blob_refs(
                         child,
@@ -120,7 +121,7 @@ def _rewrite_inline_content_blob_refs(
                 )
         return rewritten
 
-    if isinstance(value, list):
+    if type(value) is list:
         rewritten = False
         for index, child in enumerate(value):
             rewritten = (

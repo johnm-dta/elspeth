@@ -659,7 +659,12 @@ class ExecutionServiceImpl:
             )
         except BaseException as exc:
             with self._shutdown_events_lock:
-                self._shutdown_events.pop(str(run_id), None)
+                # Idempotent cleanup of an internal bookkeeping key. Access it
+                # directly (R9 remediation); the membership guard preserves the
+                # silent no-op when cleanup races or runs twice.
+                run_key = str(run_id)
+                if run_key in self._shutdown_events:
+                    del self._shutdown_events[run_key]
             # Transition run out of pending so the one-active-run constraint
             # doesn't permanently block this session.
             #

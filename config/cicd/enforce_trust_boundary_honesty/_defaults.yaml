@@ -1,0 +1,6 @@
+defaults:
+  fail_on_stale: true
+  fail_on_expired: true
+  allowlist_budget:
+    max_per_file_rules: 0
+    max_permanent_total_entries: 0

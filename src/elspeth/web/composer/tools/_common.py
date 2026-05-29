@@ -952,7 +952,11 @@ def _apply_merge_patch(
     result = dict(target)
     for key, value in patch.items():
         if value is None:
-            result.pop(key, None)
+            # Delete-if-present: a None patch value removes the key. Access the
+            # key directly (R9 remediation) rather than pop-with-default; the
+            # membership guard preserves the silent no-op on an absent key.
+            if key in result:
+                del result[key]
         else:
             result[key] = value
     return result
@@ -1357,9 +1361,10 @@ def _source_options_for_prevalidation(options: Mapping[str, Any]) -> dict[str, A
     """Strip source blob-binding metadata before plugin config validation."""
     filtered = strip_authoring_options(options)
     for key in _WEB_ONLY_SOURCE_KEYS:
-        filtered.pop(key, None)
-    if options.get("blob_ref") is not None and options.get("mode") == "bind_source":
-        filtered.pop("mode", None)
+        if key in filtered:
+            del filtered[key]
+    if options.get("blob_ref") is not None and options.get("mode") == "bind_source" and "mode" in filtered:
+        del filtered["mode"]
     return filtered
 
 

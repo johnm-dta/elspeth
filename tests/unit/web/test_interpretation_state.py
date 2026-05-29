@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -20,6 +21,7 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
     pipeline_decision_artifact_hash,
+    prompt_shield_recommendation_warning_pairs,
     prompt_structure_hash_from_options,
     strip_authoring_options,
     vague_term_wiring_count,
@@ -124,6 +126,84 @@ def _state_with_web_scrape_cleanup_node(options: dict[str, object]) -> Compositi
         metadata=PipelineMetadata(),
         version=1,
     )
+
+
+def _state_with_web_scrape_gate_to_llm() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="rows",
+                on_success="scraped_rows",
+                on_error="stop",
+                options={"url_field": "url", "content_field": "content"},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="interesting_pages",
+                node_type="gate",
+                plugin=None,
+                input="scraped_rows",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="row['interesting'] == true",
+                routes={"true": "llm_input", "false": "discard"},
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+            NodeSpec(
+                id="summarise_pages",
+                node_type="transform",
+                plugin="llm",
+                input="llm_input",
+                on_success="summaries",
+                on_error="stop",
+                options={"prompt_template": "Summarise {{ row.content }}."},
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _state_with_web_scrape_gate_shield_to_llm() -> CompositionState:
+    state = _state_with_web_scrape_gate_to_llm()
+    shield = NodeSpec(
+        id="shield_pages",
+        node_type="transform",
+        plugin="azure_prompt_shield",
+        input="llm_input",
+        on_success="shielded_rows",
+        on_error="stop",
+        options={},
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+    llm = replace(state.nodes[2], input="shielded_rows")
+    return replace(state, nodes=(state.nodes[0], state.nodes[1], shield, llm))
 
 
 def _pipeline_decision_options(*, status: str = "pending", artifact_hash: str | None = None) -> dict[str, object]:
@@ -385,6 +465,33 @@ def test_unreviewed_field_mapper_drop_of_web_scrape_raw_fields_blocks_execution(
     assert result.sites[0].component_type == "transform"
     assert result.sites[0].user_term == "drop_raw_html_fields"
     assert result.sites[0].kind is InterpretationKind.PIPELINE_DECISION
+
+
+def test_gate_routed_web_scrape_into_llm_warns_without_prompt_shield() -> None:
+    # The gate topology routes web_scrape output into the LLM via gate routes,
+    # exercising the enhanced _producer_by_output_stream (routes/fork_to). The
+    # prompt-shield recommendation is advisory, not blocking (elspeth-abb2cb0931):
+    # an unshielded LLM-over-scrape surfaces a warning and still composes.
+    state = _state_with_web_scrape_gate_to_llm()
+
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
+    result = materialize_state_for_execution(state)
+
+    assert warning_pairs
+    assert any(component == "node:summarise_pages" for component, _message in warning_pairs)
+    assert any("prompt-injection shield" in message for _component, message in warning_pairs)
+    # Advisory, not blocking: the LLM node still triggers a prompt-template
+    # review, but the prompt-shield recommendation is NOT a blocking review site.
+    assert isinstance(result, InterpretationReviewPending)
+    assert all(site.user_term != PROMPT_SHIELD_USER_TERM for site in result.sites)
+
+
+def test_gate_routed_web_scrape_through_prompt_shield_emits_no_warning() -> None:
+    state = _state_with_web_scrape_gate_shield_to_llm()
+
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
+
+    assert warning_pairs == ()
 
 
 def test_field_mapper_projection_without_web_scrape_raw_fields_does_not_create_cleanup_review_site() -> None:

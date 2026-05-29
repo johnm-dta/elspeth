@@ -51,6 +51,7 @@ _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS: Final[frozenset[str]] = frozenset({"
 # Content-moderation (azure_content_safety) is deliberately NOT in this set:
 # content moderation and prompt-injection shielding are different controls.
 _AUTHORIZED_PROMPT_SHIELD_PLUGINS: Final[frozenset[str]] = frozenset({"azure_prompt_shield"})
+_NON_PRODUCED_ROUTE_TARGETS: Final[frozenset[str]] = frozenset({"discard", "fork"})
 
 AUTHORING_METADATA_OPTION_KEYS: frozenset[str] = frozenset(
     {
@@ -200,6 +201,21 @@ def raw_html_cleanup_review_contract_error(state: CompositionState) -> str | Non
     return None
 
 
+def composition_review_contract_error(state: CompositionState) -> str | None:
+    """Return the first state-level interpretation-review *contract* error.
+
+    Only blocking contracts are aggregated here. The prompt-injection-shield
+    recommendation is advisory, not blocking (see
+    :func:`prompt_shield_recommendation_warning_pairs` and filigree
+    elspeth-abb2cb0931): shield availability is not yet testable, so an
+    unshielded LLM-over-untrusted-content composition surfaces a warning rather
+    than failing the contract. Composition is therefore gated solely on the
+    raw-HTML-cleanup review contract here.
+    """
+
+    return raw_html_cleanup_review_contract_error(state)
+
+
 def prompt_shield_recommendation_warning_pairs(state: CompositionState) -> tuple[tuple[str, str], ...]:
     """Return advisory warnings for unshielded untrusted content entering an LLM."""
 
@@ -228,9 +244,26 @@ def prompt_shield_recommendation_warning_pairs(state: CompositionState) -> tuple
 def _producer_by_output_stream(nodes: Sequence[NodeSpec]) -> dict[str, NodeSpec]:
     producers: dict[str, NodeSpec] = {}
     for node in nodes:
-        if isinstance(node.on_success, str) and node.on_success:
-            producers[node.on_success] = node
+        _register_output_stream_producer(producers, stream=node.on_success, producer=node)
+        _register_output_stream_producer(producers, stream=node.on_error, producer=node)
+        if node.routes is not None:
+            for route_target in node.routes.values():
+                _register_output_stream_producer(producers, stream=route_target, producer=node)
+        if node.fork_to is not None:
+            for fork_target in node.fork_to:
+                _register_output_stream_producer(producers, stream=fork_target, producer=node)
     return producers
+
+
+def _register_output_stream_producer(
+    producers: dict[str, NodeSpec],
+    *,
+    stream: str | None,
+    producer: NodeSpec,
+) -> None:
+    if stream is None or stream == "" or stream in _NON_PRODUCED_ROUTE_TARGETS:
+        return
+    producers[stream] = producer
 
 
 def _llm_consumes_untrusted_remote_content(
@@ -243,11 +276,11 @@ def _llm_consumes_untrusted_remote_content(
         return False
     stream = node.input
     visited: set[str] = set()
-    while isinstance(stream, str) and stream and stream not in visited:
+    while stream and stream not in visited:
         visited.add(stream)
-        producer = producer_by_output_stream.get(stream)
-        if producer is None:
+        if stream not in producer_by_output_stream:
             return False
+        producer = producer_by_output_stream[stream]
         if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
             return False
         if producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:

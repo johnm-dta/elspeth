@@ -186,6 +186,22 @@ env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli dump
 # Also supports --format mermaid (inline diagrams) and --format dot (Graphviz).
 # Full reference: engine-patterns-reference skill, "Layer Architecture & Dependency Analysis" section.
 
+# Allowlist fingerprint rotation (post-refactor; mechanical, no judgement)
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli rotate --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --dry-run --auto-pair-symmetric
+# Drop --dry-run to apply. Surfaces rotations, ambiguous N:M groups, stale entries,
+# and TODO-stub debt that needs judge review. Slice 1 of the cicd-judge-cli prototype.
+
+# Judge-gated allowlist entry creation (audit metadata write path)
+env ELSPETH_JUDGE_METADATA_HMAC_KEY=<32-plus-byte-secret> PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli justify --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --file-path plugins/example.py --symbol MyClass._method --rationale "why this suppression is honest" --owner "$USER"
+# Writes judge_verdict, judge_rationale, source binding fields, and the HMAC
+# signature. Do not hand-edit judge metadata; production loads verify it.
+
+# Reaudit existing judged entries during allowlist renewal / decay sweeps
+env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli reaudit --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --format markdown --output /tmp/reaudit.md
+# If interrupted, resume with --resume <run_id> or inspect an incomplete report
+# with --render-incomplete <run_id>. When C3 override-rate fails, reaudit the
+# override-heavy directories before considering an ADR to change the threshold.
+
 # CLI
 elspeth run --settings pipeline.yaml --execute        # Execute pipeline
 elspeth resume <run_id>                               # Resume interrupted run
@@ -275,6 +291,31 @@ Resolution options in priority order:
 **STRICT REQUIREMENT:** Legacy code, backwards compatibility, and compatibility shims are strictly forbidden. WE HAVE NO USERS YET — deferring breaking changes is the opposite of what we want.
 
 **When something is removed or changed, DELETE THE OLD CODE COMPLETELY.** No version checks, feature flags for old behaviour, adapter/wrapper/proxy shims, `@deprecated` retentions, commented-out "for reference" blocks, or "both old and new" branches. Don't rename unused variables to `_var` — delete them. Don't keep old code in comments — git history exists. Change all call sites in the same commit.
+
+## CICD Judge Gate: HMAC Key Custody
+
+The cicd-judge allowlist gate signs judge metadata with a **symmetric** HMAC key
+(`ELSPETH_JUDGE_METADATA_HMAC_KEY`). Symmetric means **every key holder can forge
+a valid signature** — so the gate's entire security reduces to one custody rule:
+
+**The signing key is operator-only. It MUST NOT be present in any autonomous
+agent's environment** (`.env` files an agent can read, agent CI contexts, dev
+shells an agent drives).
+
+An agent that holds the key can bypass the judge entirely: hand-write
+`judge_verdict: ACCEPTED` with a fabricated rationale and a correct
+(publicly-computable) `file_fingerprint`/`ast_path`, compute a valid signature,
+and pass **every** automated gate — putting a forged-but-validly-signed verdict
+into the audit trail, indistinguishable from a real one. The HMAC stops a
+*keyless* agent and makes tampering of signed entries detectable; it does nothing
+against a key-holding agent.
+
+Therefore: an agent may *propose* an `elspeth-lints justify` invocation; only an
+operator-held environment runs it and signs. CI verifies signatures with the key
+as a GitHub Actions secret (withheld from fork PRs by design — see the
+`shape-only-when-key-missing` verify mode and its load-time warning). A future
+asymmetric scheme (agents can verify, not sign) would remove this surface
+structurally.
 
 ## Git Safety
 

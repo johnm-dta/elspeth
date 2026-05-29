@@ -6,7 +6,7 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 
-from elspeth_lints.core.ast_walker import PythonSyntaxError, parse_python_file
+from elspeth_lints.core.ast_walker import PythonFileReadError, PythonSyntaxError, parse_python_file
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.audit_evidence.shared import (
     allowlist_path_for_root,
@@ -54,6 +54,14 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
         parsed = parse_python_file(path)
         if isinstance(parsed, PythonSyntaxError):
             raise SyntaxError(f"{parsed.path}:{parsed.line}:{parsed.column}: {parsed.message}")
+        if isinstance(parsed, PythonFileReadError):
+            # This scanner enumerates candidates via :func:`_scan_candidates`
+            # (which already walked the filesystem to find them), so a
+            # read error here means the file became unreadable between
+            # enumeration and parse — a race that should be loud rather
+            # than silently skipped, matching the existing syntax-error
+            # behaviour above.
+            raise OSError(f"{parsed.path}: {parsed.message}")
         display = repo_relative_display_path(path, root) if path.name == "errors.py" else display_path(path, root)
         findings.extend(scan_tree(parsed.tree, display, parsed.source.splitlines()))
     return [finding for finding in findings if finding.rule_id != RULE_TDE1 or allowlist.match_key(finding.fingerprint) is None]

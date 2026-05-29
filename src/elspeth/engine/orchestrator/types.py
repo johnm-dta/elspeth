@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from elspeth.contracts import PendingOutcome, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+    from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.schema_contract import SchemaContract
     from elspeth.contracts.types import CoalesceName, GateName, NodeID, SinkName
@@ -88,6 +89,18 @@ class RowProcessorHandle(Protocol):
 
     def resolve_sink_step(self) -> int:
         raise NotImplementedError
+
+
+class TelemetryManagerProtocol(Protocol):
+    """Engine-facing telemetry sink surface."""
+
+    def handle_event(self, event: TelemetryEvent) -> None:
+        """Handle one telemetry event emitted by the engine."""
+        ...
+
+    def flush(self) -> None:
+        """Flush queued telemetry to exporters before returning control."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

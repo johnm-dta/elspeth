@@ -330,21 +330,21 @@ allow_hits:
   safety: TypeError raised immediately with diagnostic message; subsequent issubclass
     check on the same value naming the required base class follows
   expires: null
-- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=f01f2689fdd1623e
+- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=8f7477d482ca1864
   owner: composer-audit
   reason: Tier 3 boundary - response_snapshot.get('usage') reads optional usage metadata
     from an external LLM response snapshot.
   safety: Missing usage preserves None; TokenUsage.from_dict validates present mappings
     before telemetry emission.
   expires: null
-- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=07e4c311accb2dde
+- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=b105d00f0725cd72
   owner: composer-audit
   reason: Telemetry transport failures must not corrupt the primary Landscape call
     recording after it has already succeeded.
   safety: Only OSError, ConnectionError, and TimeoutError are caught; the warning
     carries class metadata and call recording still returns.
   expires: null
-- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=4cbabe02b68966d2
+- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=5e7b2d9d784b791f
   owner: composer-audit
   reason: Tier 3 boundary - stable_hash can reject non-canonical external row data
     such as NaN or non-serializable values.

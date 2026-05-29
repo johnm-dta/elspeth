@@ -35,8 +35,7 @@ if TYPE_CHECKING:
     from elspeth.engine.clock import Clock
     from elspeth.engine.coalesce_executor import CoalesceExecutor
     from elspeth.engine.executors import GateOutcome
-    from elspeth.engine.orchestrator.types import RowPlugin
-    from elspeth.telemetry import TelemetryManager
+    from elspeth.engine.orchestrator.types import RowPlugin, TelemetryManagerProtocol
 
 from elspeth.contracts import BatchTransformProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.declaration_contracts import (
@@ -328,7 +327,7 @@ class RowProcessor:
         payload_store: PayloadStore | None = None,
         clock: Clock | None = None,
         max_workers: int | None = None,
-        telemetry_manager: TelemetryManager | None = None,
+        telemetry_manager: TelemetryManagerProtocol | None = None,
     ) -> None:
         """Initialize processor.
 

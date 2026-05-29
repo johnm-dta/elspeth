@@ -6,6 +6,19 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["pyyaml>=6.0,<7"]
 
+[project.optional-dependencies]
+# The 'judge' extra pulls in the OpenAI SDK used by the `justify`
+# subcommand. The lint tool itself must remain installable without a
+# network LLM SDK (it runs in CI lanes that don't carry an API key),
+# so this is intentionally optional. The SDK is pointed at OpenRouter
+# (https://openrouter.ai/api/v1) rather than OpenAI; the project-wide
+# standard is to route LLM calls through OpenRouter so model identity
+# and vendor are policy decisions, not hard-wired imports. Install
+# with:
+#     uv pip install -e ".[judge]"  (from the elspeth-lints/ directory)
+# or include the extra in the root project's dev install.
+judge = ["openai>=1.0,<2"]
+
 [project.scripts]
 elspeth-lints = "elspeth_lints.core.cli:main"
 

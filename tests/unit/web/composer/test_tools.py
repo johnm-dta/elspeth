@@ -43,7 +43,12 @@ from elspeth.web.composer.tools import (
     get_tool_definitions,
 )
 from elspeth.web.execution.schemas import ValidationCheck, ValidationError, ValidationReadiness, ValidationResult
-from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
+from elspeth.web.interpretation_state import (
+    INTERPRETATION_REQUIREMENTS_KEY,
+    PROMPT_SHIELD_USER_TERM,
+    PROMPT_TEMPLATE_PARTS_KEY,
+    SOURCE_AUTHORING_KEY,
+)
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
@@ -661,6 +666,71 @@ class TestUpsertNode:
         assert result.success is True
         assert len(result.updated_state.nodes) == 1
         assert "t1" in result.affected_nodes
+
+    def test_allows_llm_consuming_web_scrape_without_prompt_shield_as_advisory(self) -> None:
+        state = CompositionState(
+            source=None,
+            nodes=(
+                NodeSpec(
+                    id="fetch_pages",
+                    node_type="transform",
+                    plugin="web_scrape",
+                    input="rows",
+                    on_success="scraped_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "url_field": "url",
+                        "content_field": "content",
+                        "http": {
+                            "abuse_contact": "ops@example.com",
+                            "scraping_reason": "technical evaluation",
+                            "allowed_hosts": ["example.com"],
+                        },
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "summarise_pages",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "scraped_rows",
+                "on_success": "summaries",
+                "on_error": "discard",
+                "options": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                    "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                    "prompt_template": "Summarise {{ row.content }}.",
+                    "schema": {"mode": "observed"},
+                },
+            },
+            state,
+            catalog,
+        )
+
+        # Advisory, not blocking (elspeth-abb2cb0931): the node is accepted because
+        # shield availability is not yet testable. The missing prompt-shield surfaces
+        # as a non-blocking validation warning rather than rejecting the upsert.
+        assert result.success is True
+        warning_text = " ".join(w.message for w in result.updated_state.validate().warnings)
+        assert PROMPT_SHIELD_USER_TERM in warning_text
+        assert "continuing without it is allowed" in warning_text
 
     def test_replaces_existing_node(self) -> None:
         state = _empty_state()
@@ -5128,6 +5198,14 @@ class TestMergePatch:
 
     def test_merge_patch_deletes_null(self) -> None:
         result = _apply_merge_patch({"a": 1, "b": 2}, {"b": None})
+        assert result == {"a": 1}
+        assert "b" not in result
+
+    def test_merge_patch_null_for_absent_key_is_noop(self) -> None:
+        # Delete-if-present semantics: setting an absent key to None must be a
+        # silent no-op, never a KeyError. This pins the edge case that
+        # distinguishes the delete-if-present idiom from an unguarded ``del``.
+        result = _apply_merge_patch({"a": 1}, {"b": None})
         assert result == {"a": 1}
         assert "b" not in result
 

@@ -22,6 +22,8 @@ from textwrap import dedent
 
 import pytest
 
+from elspeth_lints.core.allowlist import JudgeVerdict
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.rules.trust_tier.tier_model.rule import (
     Allowlist,
     AllowlistBudgetViolation,
@@ -624,6 +626,43 @@ class TestR4BroadExcept:
 
 
 # =============================================================================
+# R6: Silent specific exception handling
+# =============================================================================
+
+
+class TestR6SilentExcept:
+    """Specific exception handlers must be judged in their own lexical scope."""
+
+    def test_nested_raise_does_not_make_handler_non_silent(self) -> None:
+        source = dedent("""
+            try:
+                int("not a number")
+            except ValueError:
+                def helper():
+                    raise RuntimeError("not the handler")
+                helper
+        """)
+        findings = parse_and_visit(source)
+
+        r6_findings = [f for f in findings if f.rule_id == "R6"]
+        assert len(r6_findings) == 1
+
+    def test_nested_non_default_return_does_not_make_handler_non_silent(self) -> None:
+        source = dedent("""
+            try:
+                int("not a number")
+            except ValueError:
+                def helper():
+                    return {"handled": True}
+                helper
+        """)
+        findings = parse_and_visit(source)
+
+        r6_findings = [f for f in findings if f.rule_id == "R6"]
+        assert len(r6_findings) == 1
+
+
+# =============================================================================
 # R8: setdefault() detection
 # =============================================================================
 
@@ -1106,11 +1145,11 @@ allow_hits:
         assert allowlist.fail_on_expired is False
 
     def test_load_nonexistent_file(self, temp_dir: Path) -> None:
-        """Missing allowlist file should produce empty allowlist."""
+        """Missing allowlist file is Tier-1 audit-data loss."""
         allowlist_path = temp_dir / "missing.yaml"
 
-        allowlist = load_allowlist(allowlist_path)
-        assert len(allowlist.entries) == 0
+        with pytest.raises(FileNotFoundError, match="allowlist YAML file is required"):
+            load_allowlist(allowlist_path)
 
 
 # =============================================================================
@@ -1598,6 +1637,25 @@ class TestPerFileRuleMaxHits:
 
 class TestDirectoryLoadingSuggestModuleFile:
     """Tests for _suggest_module_file and related directory loading."""
+
+    def test_load_missing_single_allowlist_file_crashes(self, temp_dir: Path) -> None:
+        """A missing Tier-1 allowlist file is corruption, not an empty allowlist."""
+        missing = temp_dir / "missing.yaml"
+
+        with pytest.raises(FileNotFoundError, match="allowlist YAML file is required"):
+            load_allowlist(missing)
+
+    def test_load_yaml_file_rejects_oversized_input(self, temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The YAML loader checks file size before calling yaml.safe_load."""
+        allowlist_path = temp_dir / "oversized.yaml"
+        allowlist_path.write_text("allow_hits: []\n")
+        monkeypatch.setattr(
+            "elspeth_lints.core.allowlist._MAX_ALLOWLIST_YAML_BYTES",
+            len("allow_hits: []\n") - 1,
+        )
+
+        with pytest.raises(ValueError, match="exceeds maximum allowlist YAML size"):
+            load_allowlist(allowlist_path)
 
     def test_suggest_module_file_single_file(self, temp_dir: Path) -> None:
         """Single file path should return the file path as-is."""
@@ -2291,3 +2349,122 @@ class TestCoreAllowlistConsolidation:
         assert matched is rule
         assert rule.matched_count == 1
         assert entry.matched is False
+
+
+# =============================================================================
+# C8-3: matcher-side binding verification — in-file transplant defence.
+#
+# Cross-file transplant is caught at load time (test in
+# test_allowlist_judge_metadata_integrity.py). In-file transplant — the same
+# file's bytes pass the load-time file_fingerprint check, but the persisted
+# ast_path points at a different AST node than the live finding does — is
+# caught here at match time, in the rule's ``_match_finding``.
+# =============================================================================
+
+
+class TestC83InFileTransplantDefence:
+    """The matcher refuses to honor a judge verdict whose ast_path no longer matches."""
+
+    def test_matcher_rejects_judge_gated_entry_with_mismatched_ast_path(self) -> None:
+        """An entry whose persisted ast_path differs from the live finding's fails the match.
+
+        Construction: build a synthetic Finding and a synthetic
+        AllowlistEntry whose canonical_key matches the finding (so
+        ``entry.matches(finding_key)`` returns True), and whose
+        judge_verdict is set (so binding verification arms). The
+        entry's persisted ast_path deliberately differs from the
+        finding's live ast_path — that is the in-file transplant
+        shape. ``_match_finding`` must raise.
+        """
+        finding = Finding(
+            rule_id="R1",
+            file_path="plugins/widget.py",
+            line=10,
+            col=4,
+            symbol_context=("Widget", "lookup"),
+            fingerprint="livefp00",
+            code_snippet="payload.get(...)",
+            message="dict.get on Tier-2 data",
+            ast_path="body[0]/body[1]/body[2]/value",  # the LIVE address
+        )
+        entry = AllowlistEntry(
+            key=finding.canonical_key,  # canonical key MATCHES the finding
+            owner="historic-agent",
+            reason="r",
+            safety="s",
+            expires=None,
+            file_fingerprint="0" * 64,
+            ast_path="body[0]/body[1]/body[99]/value",  # transplanted: DIFFERENT
+            judge_verdict=JudgeVerdict.ACCEPTED,
+            judge_recorded_at=datetime(2026, 5, 1, tzinfo=UTC),
+            judge_model=DEFAULT_JUDGE_MODEL,
+            judge_policy_hash=JUDGE_POLICY_HASH,
+            judge_rationale="judge accepted at a different node entirely",
+        )
+        al = Allowlist(entries=[entry], per_file_rules=[])
+        with pytest.raises(ValueError, match=r"ast_path mismatch.*plugins/widget\.py"):
+            _match_finding(al, finding)
+
+    def test_matcher_accepts_judge_gated_entry_with_matching_ast_path(self) -> None:
+        """Happy path: entry's persisted ast_path equals the live finding's, match succeeds."""
+        finding = Finding(
+            rule_id="R1",
+            file_path="plugins/widget.py",
+            line=10,
+            col=4,
+            symbol_context=("Widget", "lookup"),
+            fingerprint="livefp00",
+            code_snippet="payload.get(...)",
+            message="dict.get on Tier-2 data",
+            ast_path="body[0]/body[1]/body[2]/value",
+        )
+        entry = AllowlistEntry(
+            key=finding.canonical_key,
+            owner="historic-agent",
+            reason="r",
+            safety="s",
+            expires=None,
+            file_fingerprint="0" * 64,
+            ast_path=finding.ast_path,  # matches
+            judge_verdict=JudgeVerdict.ACCEPTED,
+            judge_recorded_at=datetime(2026, 5, 1, tzinfo=UTC),
+            judge_model=DEFAULT_JUDGE_MODEL,
+            judge_policy_hash=JUDGE_POLICY_HASH,
+            judge_rationale="judge accepted at this exact AST node",
+        )
+        al = Allowlist(entries=[entry], per_file_rules=[])
+        matched = _match_finding(al, finding)
+        assert matched is entry
+        assert entry.matched is True
+
+    def test_matcher_skips_binding_check_for_pre_judge_entry(self) -> None:
+        """Pre-judge entries (no judge_verdict) carry no binding fields; matcher must skip the check.
+
+        Pre-judge era entries predate the C8-3 binding wiring. They
+        match purely on canonical key (as before); the binding gate
+        only arms when ``judge_verdict`` is set. This test pins that
+        backward-compatible behaviour so existing allowlists (the
+        whole ~700-entry historical corpus) keep matching cleanly.
+        """
+        finding = Finding(
+            rule_id="R1",
+            file_path="plugins/widget.py",
+            line=10,
+            col=4,
+            symbol_context=("Widget", "lookup"),
+            fingerprint="livefp00",
+            code_snippet="payload.get(...)",
+            message="dict.get on Tier-2 data",
+            ast_path="body[0]/body[1]/body[2]/value",
+        )
+        entry = AllowlistEntry(
+            key=finding.canonical_key,
+            owner="historic-agent",
+            reason="r",
+            safety="s",
+            expires=None,
+            # No judge_verdict, no binding fields — the pre-C8-3 shape.
+        )
+        al = Allowlist(entries=[entry], per_file_rules=[])
+        matched = _match_finding(al, finding)
+        assert matched is entry

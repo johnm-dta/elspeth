@@ -42,11 +42,8 @@ if TYPE_CHECKING:
 
 import elspeth.contracts.errors as contract_errors
 import elspeth.engine.executors.declaration_contract_bootstrap  # noqa: F401
-from elspeth import __version__ as ENGINE_VERSION
 from elspeth.contracts import (
-    Determinism,
     ExportStatus,
-    NodeType,
     PendingOutcome,
     RouteDestination,
     RunStatus,
@@ -126,6 +123,10 @@ from elspeth.engine.orchestrator.export import (
 from elspeth.engine.orchestrator.graph_wiring import (
     assign_plugin_node_ids,
     build_dag_traversal_context,
+)
+from elspeth.engine.orchestrator.landscape_registration import (
+    record_schema_contract,
+    register_nodes_with_landscape,
 )
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
@@ -1516,94 +1517,6 @@ class Orchestrator:
         finally:
             self._safe_flush_telemetry()
 
-    def _register_nodes_with_landscape(
-        self,
-        factory: RecorderFactory,
-        run_id: str,
-        config: PipelineConfig,
-        graph: ExecutionGraph,
-        execution_order: list[str],
-        node_to_plugin: dict[NodeID, Any],
-        source_id: NodeID,
-        config_gate_node_ids: set[NodeID],
-        coalesce_node_ids: set[NodeID],
-    ) -> None:
-        """Register each node in the execution graph with Landscape.
-
-        Iterates the topological execution order, resolves plugin metadata
-        (version, determinism), schema config, and output contract for each node,
-        then calls factory.data_flow.register_node().
-
-        Args:
-            factory: RecorderFactory for audit trail.
-            run_id: Run identifier.
-            config: Pipeline configuration (for source contract).
-            graph: Execution graph (for node info lookup).
-            execution_order: Topological ordering of node IDs.
-            node_to_plugin: Mapping from node ID to plugin instance.
-            source_id: Source node ID (for output contract).
-            config_gate_node_ids: Set of config gate node IDs (structural, no plugin).
-            coalesce_node_ids: Set of coalesce node IDs (structural, no plugin).
-        """
-
-        for node_id in execution_order:
-            node_info = graph.get_node_info(node_id)
-
-            # Config gates and coalesce nodes are structural (no plugin instances)
-            # Aggregations have plugin instances in node_to_plugin (transforms with metadata)
-            if node_id in config_gate_node_ids:
-                # Config gates are deterministic (expression evaluation is deterministic)
-                # Use engine version to track which version of ExpressionParser was used
-                plugin_version = f"engine:{ENGINE_VERSION}"
-                determinism = Determinism.DETERMINISTIC
-                source_file_hash = None  # Engine-internal nodes have no source file
-            elif node_id in coalesce_node_ids:
-                # Coalesce nodes merge tokens from parallel paths - deterministic operation
-                # Use engine version to track which version of the coalesce logic was used
-                plugin_version = f"engine:{ENGINE_VERSION}"
-                determinism = Determinism.DETERMINISTIC
-                source_file_hash = None  # Engine-internal nodes have no source file
-            else:
-                # Direct access - if node_id is in execution_order (from graph.topological_order()),
-                # it MUST be in node_to_plugin (built from the same graph's source, transforms, sinks).
-                # A KeyError here indicates a bug in graph construction or node_to_plugin building.
-                plugin = node_to_plugin[NodeID(node_id)]
-
-                # Extract plugin metadata - all protocols define these attributes,
-                # all base classes provide defaults. Direct access is safe.
-                plugin_version = plugin.plugin_version
-                determinism = plugin.determinism
-                source_file_hash = plugin.source_file_hash
-
-            # Schema config is always available via output_schema_config —
-            # populated at construction time for all node types.
-            schema_config = node_info.output_schema_config
-            if schema_config is None:
-                raise FrameworkBugError(
-                    f"Node '{node_id}' has no output_schema_config. "
-                    "All nodes in execution order must have schema config "
-                    "populated by the builder."
-                )
-
-            # Get output_contract for source nodes
-            # Sources have get_schema_contract() method that returns their output contract
-            output_contract = None
-            if node_id == source_id:
-                output_contract = config.source.get_schema_contract()
-
-            factory.data_flow.register_node(
-                run_id=run_id,
-                node_id=node_id,
-                plugin_name=node_info.plugin_name,
-                node_type=NodeType(node_info.node_type),  # Already lowercase
-                plugin_version=plugin_version,
-                config=node_info.config,
-                determinism=determinism,
-                schema_config=schema_config,
-                output_contract=output_contract,
-                source_file_hash=source_file_hash,
-            )
-
     def _register_graph_nodes_and_edges(
         self,
         factory: RecorderFactory,
@@ -1677,7 +1590,7 @@ class Orchestrator:
             )
 
             # Register nodes with Landscape using graph's node IDs and actual plugin metadata
-            self._register_nodes_with_landscape(
+            register_nodes_with_landscape(
                 factory,
                 run_id,
                 config,
@@ -2177,35 +2090,6 @@ class Orchestrator:
         )
         return True
 
-    def _record_schema_contract(
-        self,
-        factory: RecorderFactory,
-        run_id: str,
-        source_id: NodeID,
-        config: PipelineConfig,
-        ctx: PluginContext,
-    ) -> bool:
-        """Record source schema contract if available.
-
-        Called once per run — on the first VALID row (quarantined rows don't
-        trigger contract population) or post-loop for runs with no valid rows
-        (empty input or all-quarantined).
-
-        Returns:
-            True if schema contract was recorded, False otherwise.
-        """
-        schema_contract = config.source.get_schema_contract()
-        if schema_contract is None:
-            return False
-
-        # Update run-level contract
-        factory.run_lifecycle.update_run_contract(run_id, schema_contract)
-        # Update source node's output_contract (was NULL at registration)
-        factory.data_flow.update_node_output_contract(run_id, source_id, schema_contract)
-        # Make contract available to transforms via context
-        ctx.contract = schema_contract
-        return True
-
     def _restore_source_iteration_context(
         self,
         ctx: PluginContext,
@@ -2367,7 +2251,7 @@ class Orchestrator:
         # In-loop recording happens on first VALID row. For all-invalid
         # or empty inputs, that branch never executes.
         if not schema_contract_recorded:
-            self._record_schema_contract(factory, run_id, source_id, config, ctx)
+            record_schema_contract(factory, run_id, source_id, config, ctx)
 
     def _load_source_with_events(
         self,
@@ -2518,7 +2402,7 @@ class Orchestrator:
                         continue
 
                     # Record schema contract on first VALID row (quarantined rows don't populate contract)
-                    if not schema_contract_recorded and self._record_schema_contract(factory, run_id, source_id, config, ctx):
+                    if not schema_contract_recorded and record_schema_contract(factory, run_id, source_id, config, ctx):
                         schema_contract_recorded = True
 
                     # Clear operation_id — source item is fetched, transforms set their own state_id

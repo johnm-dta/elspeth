@@ -115,6 +115,7 @@ from elspeth.contracts import Determinism
 from elspeth.contracts.audit import Run
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.secrets import (
     SecretInventoryItem,
     SecretUnavailabilityReason,
@@ -150,6 +151,7 @@ from elspeth.web.execution.accounting import load_run_accounting_from_db
 from elspeth.web.execution.schemas import CompletedData
 from elspeth.web.execution.service import ExecutionServiceImpl
 from elspeth.web.execution.validation import validate_pipeline
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.fixtures.base_classes import _TestSchema, as_sink, as_source, as_transform
 from tests.fixtures.landscape import make_factory
@@ -3084,6 +3086,26 @@ class TestComposerRuntimeBlobInlineAgreement:
                         },
                         "required_input_fields": [],
                         "schema": {"mode": "observed"},
+                        # Pre-resolved model-choice review so the
+                        # interpretation gate doesn't short-circuit the
+                        # validator before the blob-inline check runs. The
+                        # auto-stager normally creates a pending requirement
+                        # at mutation time; tests that bypass the composer
+                        # (constructing NodeSpec directly) must stage the
+                        # resolved form themselves.
+                        INTERPRETATION_REQUIREMENTS_KEY: [
+                            {
+                                "id": "model_choice_review:classify",
+                                "kind": "llm_model_choice",
+                                "user_term": "llm_model_choice:classify",
+                                "status": "resolved",
+                                "draft": "openai/gpt-4o",
+                                "event_id": "model-choice-accepted",
+                                "accepted_value": "openai/gpt-4o",
+                                "accepted_artifact_hash": None,
+                                "resolved_prompt_template_hash": stable_hash("openai/gpt-4o"),
+                            }
+                        ],
                     },
                     condition=None,
                     routes=None,

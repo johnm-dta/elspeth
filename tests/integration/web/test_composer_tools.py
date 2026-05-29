@@ -52,11 +52,15 @@ HINTED_PLUGIN_CASES: tuple[tuple[str, str, str, Mapping[str, object], str], ...]
         "schema.mode: 'fixed'",
     ),
     (
+        # The subjective-term prompt hint was moved out of get_post_call_hints
+        # into the interpretation-review flow (commit 33ae4f52b). The live LLM
+        # post-call hint now flags manually-declared token-usage/model-ID fields
+        # that the engine appends automatically.
         "transform",
         "llm",
         "upsert_node",
-        {"prompt_template": "rate how cool each page is"},
-        "subjective term",
+        {"response_field": "rating", "output_schema": {"fields": ["rating_usage:int"]}},
+        "appended automatically",
     ),
     (
         "transform",

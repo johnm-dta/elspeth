@@ -19,11 +19,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import signal
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import chain
@@ -142,6 +141,7 @@ from elspeth.engine.orchestrator.run_status import (
     cli_completion_for,
     derive_resume_terminal_status_from_audit,
 )
+from elspeth.engine.orchestrator.shutdown import shutdown_handler_context
 from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
     ExecutionCounters,
@@ -1087,46 +1087,6 @@ class Orchestrator:
 
         return processor, coalesce_node_map, coalesce_executor
 
-    @contextmanager
-    def _shutdown_handler_context(self) -> Iterator[threading.Event]:
-        """Install SIGINT/SIGTERM handlers that set a shutdown event.
-
-        On first signal: sets the event, restores default SIGINT handler
-        (so second Ctrl-C force-kills via KeyboardInterrupt).
-
-        When called from a non-main thread (e.g., programmatic/embedded usage),
-        signal registration is skipped — Python raises ValueError if
-        signal.signal() is called outside the main thread.  The returned
-        Event still works; it just won't be triggered by OS signals.
-
-        Yields the Event for the processing loop to check.
-        Restores original handlers in finally block (main thread only).
-        """
-        shutdown_event = threading.Event()
-
-        # signal.signal() can only be called from the main thread.
-        # In embedded/programmatic usage the orchestrator may run on a
-        # worker thread — fall back to a plain event without handlers.
-        if threading.current_thread() is not threading.main_thread():
-            yield shutdown_event
-            return
-
-        original_sigint = signal.getsignal(signal.SIGINT)
-        original_sigterm = signal.getsignal(signal.SIGTERM)
-
-        def _handler(signum: int, frame: Any) -> None:
-            shutdown_event.set()
-            # Restore default SIGINT so second Ctrl-C force-kills
-            signal.signal(signal.SIGINT, signal.default_int_handler)
-
-        signal.signal(signal.SIGINT, _handler)
-        signal.signal(signal.SIGTERM, _handler)
-        try:
-            yield shutdown_event
-        finally:
-            signal.signal(signal.SIGINT, original_sigint)
-            signal.signal(signal.SIGTERM, original_sigterm)
-
     def _initialize_database_phase(
         self,
         config: PipelineConfig,
@@ -1363,7 +1323,7 @@ class Orchestrator:
         try:
             # When shutdown_event is provided (testing), skip signal handler
             # installation and use the caller's event directly.
-            shutdown_ctx = nullcontext(shutdown_event) if shutdown_event is not None else self._shutdown_handler_context()
+            shutdown_ctx = nullcontext(shutdown_event) if shutdown_event is not None else shutdown_handler_context()
             with self._span_factory.run_span(run.run_id), shutdown_ctx as active_event:
                 result = self._execute_run(
                     factory,
@@ -2768,7 +2728,7 @@ class Orchestrator:
 
         # When shutdown_event is provided (testing), skip signal handler
         # installation and use the caller's event directly.
-        shutdown_ctx = nullcontext(shutdown_event) if shutdown_event is not None else self._shutdown_handler_context()
+        shutdown_ctx = nullcontext(shutdown_event) if shutdown_event is not None else shutdown_handler_context()
 
         try:
             if not unprocessed_rows and not restored_state and restored_coalesce_state is None:

@@ -89,81 +89,61 @@ class TestRunStatusInterrupted:
 
 
 class TestShutdownHandlerContext:
-    """Tests for _shutdown_handler_context() signal handler management."""
+    """Tests for shutdown_handler_context() signal handler management.
+
+    The context manager is a standalone module function (no orchestrator
+    state) — tests exercise it directly, which is also the production call
+    path (``core.py`` invokes ``shutdown_handler_context()`` directly).
+    """
 
     def test_handler_restores_original_signals(self) -> None:
         """After context exits, signal handlers are restored."""
-        from elspeth.engine.orchestrator import Orchestrator
-        from tests.fixtures.landscape import make_landscape_db
+        from elspeth.engine.orchestrator.shutdown import shutdown_handler_context
 
-        db = make_landscape_db()
-        try:
-            orchestrator = Orchestrator(db=db)
+        original_sigint = signal.getsignal(signal.SIGINT)
+        original_sigterm = signal.getsignal(signal.SIGTERM)
 
-            original_sigint = signal.getsignal(signal.SIGINT)
-            original_sigterm = signal.getsignal(signal.SIGTERM)
+        with shutdown_handler_context() as event:
+            # Inside: handlers should be different from original
+            current_sigint = signal.getsignal(signal.SIGINT)
+            assert current_sigint != original_sigint
+            assert not event.is_set()
 
-            with orchestrator._shutdown_handler_context() as event:
-                # Inside: handlers should be different from original
-                current_sigint = signal.getsignal(signal.SIGINT)
-                assert current_sigint != original_sigint
-                assert not event.is_set()
-
-            # After: handlers should be restored
-            assert signal.getsignal(signal.SIGINT) == original_sigint
-            assert signal.getsignal(signal.SIGTERM) == original_sigterm
-        finally:
-            db.close()
+        # After: handlers should be restored
+        assert signal.getsignal(signal.SIGINT) == original_sigint
+        assert signal.getsignal(signal.SIGTERM) == original_sigterm
 
     def test_context_yields_unset_event(self) -> None:
         """Context manager yields a threading.Event that starts unset."""
-        from elspeth.engine.orchestrator import Orchestrator
-        from tests.fixtures.landscape import make_landscape_db
+        from elspeth.engine.orchestrator.shutdown import shutdown_handler_context
 
-        db = make_landscape_db()
-        try:
-            orchestrator = Orchestrator(db=db)
-            with orchestrator._shutdown_handler_context() as event:
-                assert isinstance(event, threading.Event)
-                assert not event.is_set()
-        finally:
-            db.close()
+        with shutdown_handler_context() as event:
+            assert isinstance(event, threading.Event)
+            assert not event.is_set()
 
     def test_handler_sets_event_on_signal(self) -> None:
         """Signal handler sets the event when invoked."""
-        from elspeth.engine.orchestrator import Orchestrator
-        from tests.fixtures.landscape import make_landscape_db
+        from elspeth.engine.orchestrator.shutdown import shutdown_handler_context
 
-        db = make_landscape_db()
-        try:
-            orchestrator = Orchestrator(db=db)
-            with orchestrator._shutdown_handler_context() as event:
-                assert not event.is_set()
-                # Simulate signal by calling the handler directly
-                handler = signal.getsignal(signal.SIGINT)
-                assert callable(handler)
-                handler(signal.SIGINT, None)
-                assert event.is_set()
-        finally:
-            db.close()
+        with shutdown_handler_context() as event:
+            assert not event.is_set()
+            # Simulate signal by calling the handler directly
+            handler = signal.getsignal(signal.SIGINT)
+            assert callable(handler)
+            handler(signal.SIGINT, None)
+            assert event.is_set()
 
     def test_second_signal_restores_default_handler(self) -> None:
         """After first signal, SIGINT handler is restored to default (force-kill)."""
-        from elspeth.engine.orchestrator import Orchestrator
-        from tests.fixtures.landscape import make_landscape_db
+        from elspeth.engine.orchestrator.shutdown import shutdown_handler_context
 
-        db = make_landscape_db()
-        try:
-            orchestrator = Orchestrator(db=db)
-            with orchestrator._shutdown_handler_context():
-                handler = signal.getsignal(signal.SIGINT)
-                assert callable(handler)
-                handler(signal.SIGINT, None)
+        with shutdown_handler_context():
+            handler = signal.getsignal(signal.SIGINT)
+            assert callable(handler)
+            handler(signal.SIGINT, None)
 
-                # After first signal, SIGINT should now be default_int_handler
-                assert signal.getsignal(signal.SIGINT) == signal.default_int_handler
-        finally:
-            db.close()
+            # After first signal, SIGINT should now be default_int_handler
+            assert signal.getsignal(signal.SIGINT) == signal.default_int_handler
 
 
 class TestCheckpointInterruptedProgress:

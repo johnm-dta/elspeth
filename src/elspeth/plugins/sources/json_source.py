@@ -638,8 +638,7 @@ class JSONSource(BaseSource):
                     "Same schema-mode rules as csv: default to 'observed' unless the user asked to project to a smaller schema.",
                     "JSONL is resumable, line-by-line; JSON-array is loaded into memory in one pass — pick JSONL for large inputs.",
                     "If you have been asked to generate JSON rows yourself (the invented_source path): emit a top-level JSON array of objects (or JSONL with one object per line). Every object must carry the same keys you intend downstream nodes to consume.",
-                    "When generating JSON rows yourself, declare those keys in `schema.fields` or `schema.guaranteed_fields`.",
-                    'When generating JSON rows yourself, do not wrap generated content in `{"results": [...]}` or any other envelope — emit the bare array so `data_key` is unnecessary.',
+                    'Declare generated JSON keys in `schema.fields` or `schema.guaranteed_fields`. Do not wrap generated content in `{"results": [...]}` or any other envelope — emit the bare array so `data_key` is unnecessary.',
                 ),
             )
         return None

@@ -215,8 +215,8 @@ class TextSource(BaseSource):
                     "Use strip_whitespace=False when leading or trailing whitespace is meaningful data.",
                     "Set on_validation_failure to a quarantine sink unless deliberate discard is acceptable.",
                     "If you have been asked to generate text rows yourself (the invented_source path): emit one record per line with no blank padding between rows, and choose a `column` value that names what each line contains (e.g. `url`, `prompt`, `line_text`).",
-                    "When generating text rows yourself, the chosen `column` must be a valid Python identifier and must not be a Python keyword. Declare that column in `schema.fields` or `schema.guaranteed_fields` so downstream nodes can resolve it by name.",
-                    "When generating text rows yourself, do not insert a header line — `text` source treats every non-blank line as a data row.",
+                    "The chosen `column` must be a valid Python identifier and must not be a Python keyword. Declare that column in `schema.fields` or `schema.guaranteed_fields` so downstream nodes can resolve it by name.",
+                    "Do not insert a header line — `text` source treats every non-blank line as a data row.",
                 ),
             )
         return None

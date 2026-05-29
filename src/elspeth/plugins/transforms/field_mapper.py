@@ -366,7 +366,7 @@ class FieldMapper(BaseTransform):
                     "For final cleanup routing, set the upstream LLM or scraper on_success to the cleanup mapper, and set the cleanup mapper on_success to the sink.",
                     "If an LLM routes directly to a JSON sink whose name sounds like cleanup, cleanup is still missing; the LLM passes through raw scrape fields until this field_mapper whitelists them.",
                     "If a final cleanup field_mapper points to an intermediate stream with no downstream node, route the mapper directly to the existing sink by setting on_success to the sink name or by using an on_success edge.",
-                    "When a final cleanup field_mapper points to an intermediate stream with no downstream node, do not remove the cleanup mapper or output to clear the validation error.",
+                    "Do not remove the cleanup mapper or output to clear the validation error.",
                     "A field_mapper before web_scrape or before raw scraped fields exist cannot satisfy scraped-content cleanup; source-shaping mappers are separate from final cleanup.",
                     "Final cleanup should preserve requested enrichment, extraction, scoring, or LLM response fields unless the user explicitly asked to drop them.",
                     "If the user already asked to remove, drop, exclude, or avoid saving raw scrape fields, that request is the authorization and requirement to add the cleanup field_mapper; do not ask whether to add cleanup later.",

@@ -67,7 +67,7 @@ class NullSource(BaseSource):
                     "Use null only for resume/internal workflows where rows come from stored payloads.",
                     "Downstream schemas are restored from the original audit trail, not from NullSource output.",
                     "If you have been asked to generate source rows yourself, do not pick `null` — this source emits zero rows and is reserved for resume operations that read from the payload store.",
-                    "When asked to generate source rows yourself, choose `csv`, `json`, or `text` instead and bind a generated blob via `create_blob` plus `set_source_from_blob`.",
+                    "Choose `csv`, `json`, or `text` instead and bind a generated blob via `create_blob` plus `set_source_from_blob`.",
                 ),
             )
         return None

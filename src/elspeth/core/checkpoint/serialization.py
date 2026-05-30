@@ -317,7 +317,18 @@ def _restore_types(obj: Any) -> Any:
                 return dt
 
             if envelope_type == "decimal" and isinstance(envelope_value, str):
-                return Decimal(envelope_value)
+                restored = Decimal(envelope_value)
+                # Re-validate finiteness on restore — symmetric with the write-side
+                # reject at line 115. Decimal("NaN")/Decimal("Infinity") construct
+                # successfully, so without this guard a corrupted or tampered
+                # checkpoint round-trips a live non-finite Decimal back into the
+                # Tier-1 audit trail. Mirrors the datetime arm's tz-awareness check.
+                if not restored.is_finite():
+                    raise AuditIntegrityError(
+                        f"Corrupted checkpoint: decimal envelope contains non-finite value "
+                        f"{envelope_value!r} — NaN/Infinity are not valid audit values"
+                    )
+                return restored
 
             if envelope_type == "date" and isinstance(envelope_value, str):
                 return date.fromisoformat(envelope_value)
@@ -364,6 +375,22 @@ def _restore_types(obj: Any) -> Any:
     return obj
 
 
+def _reject_json_constant(constant: str) -> Any:
+    """Reject the non-finite float literals ``json.loads`` accepts by default.
+
+    Python's ``json.loads`` extends strict JSON by parsing the bare tokens
+    ``NaN``, ``Infinity``, and ``-Infinity`` into ``float`` values. ``parse_constant``
+    is invoked with exactly one of those three strings. Raising here makes the read
+    side symmetric with the write side's ``json.dumps(allow_nan=False)``: a corrupted
+    or tampered Tier-1 checkpoint carrying a bare non-finite float must crash, not
+    silently restore a live ``float('nan')`` into the audit trail.
+
+    (Decimal non-finites travel through the envelope arm instead, where
+    ``_restore_types`` applies the matching ``is_finite()`` guard.)
+    """
+    raise AuditIntegrityError(f"Corrupted checkpoint: non-finite JSON constant {constant!r} — NaN/Infinity are not valid audit values")
+
+
 def checkpoint_loads(s: str) -> Any:
     """Deserialize JSON string with type restoration.
 
@@ -371,6 +398,9 @@ def checkpoint_loads(s: str) -> Any:
     (datetime, decimal, date, time, bytes, uuid), plus escaped dicts and tuples.
     The legacy ``__datetime__`` shape tag is intentionally NOT restored (No Legacy
     Code Policy — see ``_restore_types``).
+
+    Non-finite values are rejected on restore (Tier-1 audit integrity): bare float
+    literals via ``parse_constant`` below, Decimal envelopes via ``_restore_types``.
 
     Args:
         s: JSON string (from checkpoint_dumps)
@@ -380,6 +410,7 @@ def checkpoint_loads(s: str) -> Any:
 
     Raises:
         json.JSONDecodeError: If string is not valid JSON
+        AuditIntegrityError: If the payload carries a non-finite NaN/Infinity value
     """
-    data = json.loads(s)
+    data = json.loads(s, parse_constant=_reject_json_constant)
     return _restore_types(data)

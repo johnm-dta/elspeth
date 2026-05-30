@@ -380,6 +380,44 @@ def test_checkpoint_corrupted_decimal_envelope_wrong_value_type_raises() -> None
         checkpoint_loads(corrupted)
 
 
+# ── Read-side non-finite guards ─────────────────────────────────────────────
+# The write side rejects non-finite values twice (``_reject_nan_infinity`` then
+# ``json.dumps(allow_nan=False)``). The read side must be symmetric: a corrupted
+# or tampered Tier-1 checkpoint must NOT silently restore a live NaN/Infinity.
+# Two distinct paths reach ``checkpoint_loads``:
+#   1. Decimal surfaces through an envelope arm — Decimal("NaN") constructs fine.
+#   2. float surfaces as a bare JSON literal — json.loads accepts NaN/Infinity
+#      by default (a Python extension to strict JSON).
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "sNaN"])
+def test_non_finite_decimal_in_envelope_raises(bad: str) -> None:
+    """A non-finite decimal envelope value must crash — Tier 1 corruption guard.
+
+    The value is a valid Decimal string (so it survives construction) but violates
+    the same audit-integrity invariant the write side enforces at line 115. Mirrors
+    ``test_naive_datetime_in_envelope_raises`` — a valid-shape envelope whose
+    restored value breaks a semantic invariant.
+    """
+    import json
+
+    corrupted = json.dumps({"d": {"__elspeth_type__": "decimal", "__elspeth_value__": bad}})
+    with pytest.raises(AuditIntegrityError, match="non-finite"):
+        checkpoint_loads(corrupted)
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_float_literal_in_checkpoint_raises(literal: str) -> None:
+    """A bare non-finite float literal must crash — symmetric with allow_nan=False on write.
+
+    ``json.loads`` accepts NaN/Infinity/-Infinity float literals by default; without a
+    read-side guard a tampered checkpoint round-trips a live float('nan') into Tier 1.
+    """
+    corrupted = '{"x": ' + literal + "}"
+    with pytest.raises(AuditIntegrityError, match="non-finite"):
+        checkpoint_loads(corrupted)
+
+
 def test_checkpoint_numpy_scalar_normalizes_to_primitive() -> None:
     """numpy scalars serialize to and restore as Python primitives (mirror canonical_json)."""
     np = pytest.importorskip("numpy")

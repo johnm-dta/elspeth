@@ -36,12 +36,25 @@ _RECORDED_AT = datetime(2026, 5, 29, 12, 0, 0, tzinfo=UTC)
 
 @dataclass(frozen=True, slots=True)
 class _FakeQuery:
-    """Minimal stand-in for ``RecorderFactory.query`` returning canned outcomes."""
+    """Minimal stand-in for ``RecorderFactory.query`` returning canned outcomes.
+
+    These tests exercise the per-case ``routed_destinations`` tally and the
+    Tier-1 ``sink_name`` guard, NOT ``rows_processed`` — the canned
+    ``TokenOutcome`` records carry no ``row_id`` (the real distinct-``row_id``
+    count is computed by ``QueryRepository`` via a JOIN to the tokens table).
+    ``count_distinct_source_rows_with_terminal_outcome`` therefore returns the
+    count of distinct ``token_id`` among completed canned outcomes — sufficient
+    to satisfy the helper's call and keep the RunResult biconditional happy
+    without these unit tests asserting against ``rows_processed``.
+    """
 
     outcomes: list[TokenOutcome]
 
     def get_all_token_outcomes_for_run(self, run_id: str) -> list[TokenOutcome]:
         return self.outcomes
+
+    def count_distinct_source_rows_with_terminal_outcome(self, run_id: str) -> int:
+        return len({o.token_id for o in self.outcomes if o.completed})
 
 
 @dataclass(frozen=True, slots=True)

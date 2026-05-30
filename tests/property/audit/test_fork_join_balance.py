@@ -3121,58 +3121,48 @@ class TestForkRecoveryInvariant:
     # ─────────────────────────────────────────────────────────────────────
 
     def test_resume_counters_reconcile_with_uninterrupted_run(self) -> None:
-        """After (run1 + resume), rows_processed equals a single uninterrupted run.
+        """After (run1 + resume), EVERY RunResult counter equals a single
+        uninterrupted run — field-for-field reconciliation (F1/F2).
 
         WHAT THIS TEST GUARDS:
 
-        rows_processed semantics — NORMAL PATH vs RESUME PATH
-        -------------------------------------------------------
-        Both the normal processing loop (core.py ``_run_main_processing_loop``,
-        line ``counters.rows_processed += 1`` inside ``for row_index, source_item
-        in enumerate(source_iterator)``) and the resume loop (resume.py
-        ``run_resume_processing_loop``, line ``counters.rows_processed += 1``
-        inside ``for row_id, _row_index, row_data in unprocessed_rows``) increment
-        ``rows_processed`` ONCE PER SOURCE ROW — not per leaf token, not per
-        fork branch.  For a 1-source-row pipeline this means both runs produce
-        ``rows_processed == 1``.  That is the key counter-field agreement that
-        this test asserts.
+        Full counter-field reconciliation — RESUME PATH == UNINTERRUPTED
+        ----------------------------------------------------------------
+        A resumed run (run1 interrupted mid-fork + resume re-drives the
+        incomplete branch) must produce a RunResult whose counter fields are
+        identical to an uninterrupted run of the same pipeline.  This exercises
+        the "with-unprocessed-rows" (fork-re-drive) branch of ``resume()``.
 
-        F2 diagnosis — rows_processed is NOT the divergence
-        -------------------------------------------------------
-        Task 11 hypothesised that the resume path might increment
-        ``rows_processed`` per leaf (once per ``IncompleteTokenSpec`` in
-        ``fork_expand_coalesce_specs``).  Empirically this is FALSE: the
-        ``rows_processed += 1`` statement is outside the inner spec-dispatch
-        loop, so even a row with 10 incomplete specs increments
-        ``rows_processed`` by exactly 1.  No F2 divergence exists for
-        ``rows_processed``.
+        F2 fix (resume-fork-reemit) — UNIFY both resume branches on audit
+        ------------------------------------------------------------------
+        Pre-F2 the with-unprocessed-rows branch returned *resume-only* counters
+        (only what THIS resume call reprocessed), while the no-unprocessed-rows
+        branch reconstructed *cumulative* counters from ``token_outcomes`` via
+        ``derive_resume_terminal_status_from_audit``.  A single RunResult type
+        whose counter semantics depended on an invisible branch was a latent
+        correctness trap: a resumed 1-source-row 2-branch fork reported
+        ``rows_succeeded=1, rows_forked=0`` (only the re-driven sink_a leaf)
+        instead of the cumulative ``2, 1``.  F2 made BOTH branches finalize the
+        SAME audit-derived cumulative ``(status, counters)`` — the audit trail
+        is the source of truth.
 
-        INTENTIONAL DESIGN ASYMMETRY IN OTHER COUNTERS (NEEDS_CONTEXT)
-        ---------------------------------------------------------------
-        The resume path returns *resume-only* counters (only what was
-        re-driven in this resume call).  The uninterrupted run returns
-        *cumulative* counters (the entire run).  For a 1-source-row 2-branch
-        fork the empirical delta is:
-
-          rows_succeeded:  A=2 (both branches completed),
-                           B=1 (only the incomplete sink_a branch was re-driven)
-          rows_forked:     A=1 (fork parent processed from source),
-                           B=0 (fork dispatch not re-run; only child completed)
-
-        The "no-unprocessed-rows" branch of ``resume()`` (core.py line ~2626)
-        reconstructs CUMULATIVE counters from audit via
-        ``derive_resume_terminal_status_from_audit``.  The "with-unprocessed-rows"
-        branch (which this test exercises) returns resume-only counters.  The
-        two branches are behaviourally inconsistent — but that is a pre-existing
-        design question, not a regression introduced by the F1 fix, and is NOT
-        asserted here.  A design decision is required before asserting
-        B.rows_succeeded == A.rows_succeeded or B.rows_forked == A.rows_forked.
-        Track as a follow-up: the "with-unprocessed-rows" branch should either
-        (a) add back cumulative counters from audit, or (b) the inconsistency
-        should be documented and accepted by ADR.
+        rows_processed reconstruction — per SOURCE ROW, not per token
+        --------------------------------------------------------------
+        ``rows_processed`` is reconstructed as the count of DISTINCT source
+        ``row_id`` reaching a terminal outcome (see
+        ``QueryRepository.count_distinct_source_rows_with_terminal_outcome``),
+        NOT a per-terminal-token tally.  This matches the live loops, which
+        increment ``rows_processed`` once per source row regardless of fork
+        fan-out, aggregation fan-in, or expand fan-out.  For this 1-source-row
+        fork, both A and B report ``rows_processed == 1``.
 
         WHAT IS ASSERTED:
-        - rows_processed == 1 for both A and B (per-source-row, both paths)
+        - EVERY RunResult counter field (rows_processed, rows_succeeded,
+          rows_failed, rows_routed_success, rows_routed_failure,
+          rows_quarantined, rows_forked, rows_coalesced, rows_coalesce_failed,
+          rows_expanded, rows_buffered, rows_diverted) is equal between the
+          uninterrupted run A and the resumed run B — no field left resume-scoped
+        - routed_destinations dict reconciles
         - Terminal-outcome multiset is conserved (regression guard, re-verified)
         - Resume result is COMPLETED (run is healthy)
         """
@@ -3368,33 +3358,54 @@ class TestForkRecoveryInvariant:
             f"Every (row_id, sink_name) must have exactly 1 completed outcome after resume; got {b_outcomes}"
         )
 
-        # KNOWN ASYMMETRY (design question, not asserted):
-        # run_b_resume.rows_succeeded == 1 (resume-only: only 1 leaf re-driven)
-        # run_a.rows_succeeded == 2 (cumulative: both fork branches processed)
-        # run_b_resume.rows_forked == 0 (resume-only: fork dispatch not re-run)
-        # run_a.rows_forked == 1 (cumulative: fork parent processed from source)
-        # These differ because the "with-unprocessed-rows" resume branch returns
-        # resume-only counters while the "no-unprocessed-rows" branch (core.py ~2626)
-        # reconstructs cumulative counters from audit.  Asserting equality here would
-        # pin the current (inconsistent) behaviour; the design decision is deferred.
-        # See: NEEDS_CONTEXT note in Task 11 report.
-        _known_rows_succeeded_a = run_a.rows_succeeded  # 2 (both fork branches)
-        _known_rows_succeeded_b = run_b_resume.rows_succeeded  # 1 (resume-only: 1 branch)
-        _known_rows_forked_a = run_a.rows_forked  # 1
-        _known_rows_forked_b = run_b_resume.rows_forked  # 0
-        # Regression pins for current documented behaviour — fail if behaviour changes
-        # unexpectedly without a deliberate design update.
-        assert _known_rows_succeeded_a == 2, (
-            f"Uninterrupted 1-row 2-branch fork: rows_succeeded must be 2 (one per branch); got {_known_rows_succeeded_a}"
+        # F2 (resume-fork-reemit) — FULL COUNTER-FIELD RECONCILIATION.
+        #
+        # Both resume branches now finalize cumulative (status, counters) from
+        # the audit trail via derive_resume_terminal_status_from_audit, so a
+        # resumed run's RunResult matches an uninterrupted run FIELD-FOR-FIELD.
+        # Before F2 this branch returned resume-only counters: a resumed 1-row
+        # 2-branch fork reported rows_succeeded=1, rows_forked=0 (only the
+        # re-driven sink_a leaf) instead of the cumulative 2, 1.  That divergence
+        # is now eliminated — the audit trail is the source of truth, and a
+        # single RunResult type no longer carries branch-dependent counter
+        # semantics.
+        #
+        # Sanity-pin the cumulative truth for this 1-source-row 2-branch fork
+        # (one success leaf per branch, one structural fork parent):
+        assert run_a.rows_succeeded == 2, f"Uninterrupted 1-row 2-branch fork: rows_succeeded must be 2; got {run_a.rows_succeeded}"
+        assert run_a.rows_forked == 1, f"Uninterrupted 1-row fork: rows_forked must be 1; got {run_a.rows_forked}"
+
+        # Field-by-field equality across EVERY RunResult counter — no field is
+        # left resume-scoped (derive reconstructs all of them faithfully:
+        # rows_processed via distinct source row_id, the rest via per-terminal
+        # tally over token_outcomes).
+        counter_fields = (
+            "rows_processed",
+            "rows_succeeded",
+            "rows_failed",
+            "rows_routed_success",
+            "rows_routed_failure",
+            "rows_quarantined",
+            "rows_forked",
+            "rows_coalesced",
+            "rows_coalesce_failed",
+            "rows_expanded",
+            "rows_buffered",
+            "rows_diverted",
         )
-        assert _known_rows_succeeded_b == 1, (
-            f"Resume (1 re-driven branch): rows_succeeded must be 1 (resume-only); "
-            f"got {_known_rows_succeeded_b}. If this changed, verify whether the resume path "
-            f"was updated to cumulative semantics (correct change) or regressed (bug)."
-        )
-        assert _known_rows_forked_a == 1, f"Uninterrupted 1-row fork: rows_forked must be 1; got {_known_rows_forked_a}"
-        assert _known_rows_forked_b == 0, (
-            f"Resume (child re-drive only): rows_forked must be 0 (fork parent not re-processed); "
-            f"got {_known_rows_forked_b}. If this changed, verify whether the resume path "
-            f"was updated to cumulative semantics (correct change) or regressed (bug)."
+        for field in counter_fields:
+            a_val = getattr(run_a, field)
+            b_val = getattr(run_b_resume, field)
+            assert b_val == a_val, (
+                f"F2 reconciliation failure on '{field}': resumed run (run1 + resume) must equal "
+                f"the uninterrupted run field-for-field. uninterrupted={a_val}, resumed={b_val}. "
+                f"Both resume branches finalize cumulative counters from the audit trail; a divergence "
+                f"means either the with-rows branch regressed to resume-only counters or "
+                f"derive_resume_terminal_status_from_audit miscounts this field."
+            )
+
+        # routed_destinations (the per-sink dict) must also reconcile.
+        assert dict(run_b_resume.routed_destinations) == dict(run_a.routed_destinations), (
+            f"F2 reconciliation failure on routed_destinations: "
+            f"uninterrupted={dict(run_a.routed_destinations)}, resumed={dict(run_b_resume.routed_destinations)}"
         )

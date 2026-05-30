@@ -2684,20 +2684,26 @@ class Orchestrator:
             # Fix: elspeth-rapid-sg0q — previously this was after the finally block,
             # meaning RunFinished was emitted after telemetry flush (never exported).
             #
-            # Phase 2.2 (elspeth-0de989c56d): pick the new four-value terminal
-            # status from the row-count shape returned by the resume's row
-            # processing.
-            terminal_status = derive_terminal_run_status(
-                rows_processed=result.rows_processed,
-                rows_succeeded=result.rows_succeeded,
-                rows_failed=result.rows_failed,
-                rows_routed_success=result.rows_routed_success,
-                rows_routed_failure=result.rows_routed_failure,
-                rows_quarantined=result.rows_quarantined,
-                rows_coalesce_failed=result.rows_coalesce_failed,
-            )
+            # F2 (resume-fork-reemit) — UNIFY both resume branches on the audit
+            # trail.  This with-unprocessed-rows branch previously derived its
+            # terminal status + counters from the resume loop's *local* counters
+            # (only what THIS resume call reprocessed), so a resumed run's
+            # RunResult disagreed field-for-field with an uninterrupted run
+            # (e.g. a resumed 1-row 2-branch fork reported rows_succeeded=1,
+            # rows_forked=0 instead of the cumulative 2, 1) — while the
+            # no-unprocessed-rows branch already reconstructed cumulative
+            # counters from token_outcomes.  Both branches now finalize from the
+            # SAME audit-derived cumulative (status, counters).
+            #
+            # ORDERING: this runs AFTER _process_resumed_rows returned, i.e.
+            # after run_resume_processing_loop's end-of-source aggregation /
+            # coalesce flushes, after _flush_and_write_sinks recorded sink
+            # diversions, and after sweep_deferred_invariants_or_crash — so every
+            # outcome this resume wrote is committed and visible to the derive
+            # query.  Deriving before those flushes commit would undercount.
+            terminal_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
             factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
-            result = replace(result, status=terminal_status)
+            result = audit_counters.to_run_result(run_id, terminal_status)
 
             # 7. Emit RunFinished telemetry
             resume_duration_ms = (time.perf_counter() - resume_start_time) * 1000

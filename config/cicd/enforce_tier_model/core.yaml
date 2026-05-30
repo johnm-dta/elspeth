@@ -127,7 +127,7 @@ allow_hits:
     purge or duplicate call)
   safety: Returns False on missing file — caller informed, no silent data loss
   expires: null
-- key: core/landscape/query_repository.py:R6:QueryRepository:explain_row:fp=5b5158345e746330
+- key: core/landscape/query_repository.py:R6:QueryRepository:explain_row:fp=b81f5371dd48636a
   owner: architecture
   reason: PayloadNotFoundError from PayloadStore when payload purged by retention
     policy — expected, not corruption

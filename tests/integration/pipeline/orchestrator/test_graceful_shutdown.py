@@ -1290,7 +1290,13 @@ class TestInterruptAndResume:
         )
 
         remaining_rows = total_rows - processed_count
-        assert result.rows_processed == remaining_rows
+        # F2 (resume-fork-reemit): the resume RunResult now reports CUMULATIVE
+        # rows_processed reconstructed from the audit trail (distinct source rows
+        # reaching a terminal outcome) — the whole run (total_rows), matching an
+        # uninterrupted run. Pre-F2 it reported the resume-only `remaining_rows`.
+        # The resume sink still only collects the rows THIS resume wrote, so its
+        # result count remains `remaining_rows`.
+        assert result.rows_processed == total_rows
         assert result.status == RunStatus.COMPLETED
         assert len(resume_sink.results) == remaining_rows
 

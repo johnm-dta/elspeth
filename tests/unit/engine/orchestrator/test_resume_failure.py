@@ -211,6 +211,15 @@ class TestResumeFinalizesAsFailed:
         mock_factory = MagicMock(spec=RecorderFactory)
         mock_factory.data_flow.sweep_deferred_invariants_or_crash = MagicMock()
         mock_factory.run_lifecycle.finalize_run = MagicMock()
+        # F2 (resume-fork-reemit): rows_processed is now sourced from a dedicated
+        # distinct-source-row query, not a per-leaf tally over the outcome list.
+        # This synthetic scenario represents 3 source rows reaching a terminal
+        # outcome (the success / coalesced / sink-discarded predicate rows); the
+        # buffered/batch-consumed/fork-parent/expand-parent records are structural
+        # and do not add new source rows.  Mock the query to return that count —
+        # the real QueryRepository computes it via COUNT(DISTINCT row_id) over a
+        # tokens-table JOIN, which a pure-outcome-list mock cannot reproduce.
+        mock_factory.query.count_distinct_source_rows_with_terminal_outcome.return_value = 3
         mock_factory.query.get_all_token_outcomes_for_run.return_value = [
             _make_token_outcome(
                 run_id=run_id,

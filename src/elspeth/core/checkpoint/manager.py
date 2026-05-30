@@ -14,7 +14,7 @@ from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariant
 from elspeth.core.canonical import compute_full_topology_hash, stable_hash
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.schema import checkpoints_table, tokens_table
+from elspeth.core.landscape.schema import checkpoints_table, node_states_table, tokens_table
 
 logger = logging.getLogger(__name__)
 
@@ -313,14 +313,41 @@ class CheckpointManager:
 
         Called after successful run completion to clean up.
 
+        Checkpoints referenced by node_states.resume_checkpoint_id are PRESERVED
+        as audit evidence: they are the provenance anchor for resumed node writes
+        (used by explain() to distinguish resume re-drives from run-1 retries via
+        `resume_checkpoint_id IS NOT NULL`). Deleting them would violate the FK
+        constraint and destroy the audit lineage they represent. Only progress
+        checkpoints not referenced by any node_state are deleted.
+
         Args:
             run_id: The run to clean up
 
         Returns:
             Number of checkpoints deleted
         """
+        # Subquery: checkpoint_ids from THIS run that are referenced as resume provenance
+        # anchors. Scoped to run_id to avoid a full-table scan on node_states as the audit
+        # DB grows. These must not be deleted — they are part of the audit trail (FK from
+        # node_states.resume_checkpoint_id). Deleting them would (a) violate the FK
+        # constraint and (b) destroy the query-separation property that explain() relies
+        # on to identify resumed node writes (`resume_checkpoint_id IS NOT NULL`).
+        referenced_ids = (
+            select(node_states_table.c.resume_checkpoint_id)
+            .where(
+                node_states_table.c.run_id == run_id,
+                node_states_table.c.resume_checkpoint_id.is_not(None),
+            )
+            .distinct()
+        ).scalar_subquery()
+
         with self._db.engine.begin() as conn:
-            result = conn.execute(delete(checkpoints_table).where(checkpoints_table.c.run_id == run_id))
+            result = conn.execute(
+                delete(checkpoints_table).where(
+                    checkpoints_table.c.run_id == run_id,
+                    ~checkpoints_table.c.checkpoint_id.in_(referenced_ids),
+                )
+            )
             # begin() auto-commits on clean exit, auto-rollbacks on exception
             return result.rowcount
 

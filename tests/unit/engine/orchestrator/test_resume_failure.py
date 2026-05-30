@@ -178,6 +178,8 @@ class TestResumeFinalizesAsFailed:
             restored_coalesce_state=empty_coalesce_state,
             unprocessed_rows=(),
             schema_contract=MagicMock(spec=object),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(),
         )
 
         with (
@@ -288,6 +290,8 @@ class TestResumeFinalizesAsFailed:
             restored_coalesce_state=None,
             unprocessed_rows=(),
             schema_contract=MagicMock(),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(),
         )
 
         with (

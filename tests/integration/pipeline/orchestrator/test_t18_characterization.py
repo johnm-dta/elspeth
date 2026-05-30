@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -491,6 +491,9 @@ class TestT18CharacterizationResumePath:
             restored_coalesce_state=None,
             payload_store=payload_store,
             schema_contract=resume_contract,
+            incomplete_by_row={},
+            recovery_manager=MagicMock(),
+            resume_checkpoint_id="t18-test-checkpoint",
         )
 
         # The transform must have seen the contract during process()
@@ -602,6 +605,9 @@ class TestT18CharacterizationResumePath:
                 restored_coalesce_state=None,
                 payload_store=payload_store,
                 schema_contract=schema_contract,
+                incomplete_by_row={},
+                recovery_manager=MagicMock(),
+                resume_checkpoint_id="t18-test-checkpoint",
             )
 
         # _process_resumed_rows also returns RUNNING (same as _execute_run)

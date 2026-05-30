@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
     from elspeth.core.events import EventBusProtocol
     from elspeth.engine.orchestrator.types import TelemetryManagerProtocol
 
@@ -2534,6 +2535,11 @@ class Orchestrator:
 
         unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store, source_schema_class=source_schema_class)
 
+        # F1 fix: pre-compute incomplete child tokens so the resume loop can dispatch
+        # partial-fork/expand/coalesce rows via mid-DAG continuation rather than
+        # whole-row restart (which would re-emit already-completed branches).
+        incomplete_by_row = recovery.get_incomplete_tokens_by_row(run_id)
+
         return ResumeState(
             factory=factory,
             run_id=run_id,
@@ -2541,6 +2547,8 @@ class Orchestrator:
             restored_coalesce_state=restored_coalesce_state,
             unprocessed_rows=unprocessed_rows,
             schema_contract=schema_contract,
+            incomplete_by_row=incomplete_by_row,
+            recovery_manager=recovery,
         )
 
     def resume(
@@ -2592,6 +2600,10 @@ class Orchestrator:
             restored_coalesce_state = None
         schema_contract = state.schema_contract
         unprocessed_rows = state.unprocessed_rows
+        # F1 fix: pre-computed by _reconstruct_resume_state; forwarded to the loop.
+        incomplete_by_row = state.incomplete_by_row
+        recovery_manager = state.recovery_manager
+        resume_checkpoint_id = resume_point.checkpoint.checkpoint_id
         resume_start_time = time.perf_counter()
 
         # 5. Process unprocessed rows (with graceful shutdown support)
@@ -2660,6 +2672,9 @@ class Orchestrator:
                     settings=settings,
                     payload_store=payload_store,
                     schema_contract=schema_contract,
+                    incomplete_by_row=incomplete_by_row,
+                    recovery_manager=recovery_manager,
+                    resume_checkpoint_id=resume_checkpoint_id,
                     shutdown_event=active_event,
                 )
 
@@ -2755,6 +2770,9 @@ class Orchestrator:
         *,
         payload_store: PayloadStore,
         schema_contract: SchemaContract,
+        incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]],
+        recovery_manager: RecoveryManager,
+        resume_checkpoint_id: str,
         shutdown_event: threading.Event | None = None,
     ) -> RunResult:
         """Process unprocessed rows during resume.
@@ -2817,6 +2835,11 @@ class Orchestrator:
                 loop_ctx,
                 unprocessed_rows,
                 schema_contract,
+                incomplete_by_row=incomplete_by_row,
+                recovery_manager=recovery_manager,
+                payload_store=payload_store,
+                run_id=run_id,
+                resume_checkpoint_id=resume_checkpoint_id,
                 shutdown_event=shutdown_event,
             )
 

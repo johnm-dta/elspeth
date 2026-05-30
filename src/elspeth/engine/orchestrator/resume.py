@@ -20,7 +20,7 @@ These functions were extracted from ``Orchestrator`` (where they lived as
 from __future__ import annotations
 
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +46,8 @@ from elspeth.engine.orchestrator.validation import (
 
 if TYPE_CHECKING:
     from elspeth.contracts import SchemaContract
+    from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.orchestrator.types import LoopContext, PipelineConfig
@@ -132,6 +134,11 @@ def run_resume_processing_loop(
     unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]],
     schema_contract: SchemaContract,
     *,
+    incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]],
+    recovery_manager: RecoveryManager,
+    payload_store: PayloadStore,
+    run_id: str,
+    resume_checkpoint_id: str,
     shutdown_event: threading.Event | None = None,
 ) -> bool:
     """Run the resume processing loop: iterate unprocessed rows, transform, flush, accumulate.
@@ -146,6 +153,14 @@ def run_resume_processing_loop(
     - No schema contract recording (passed via parameter)
     - No operation_id lifecycle (no source track_operation)
     - No progress emission (known gap — see design doc)
+
+    Per-row dispatch (F1 fix):
+    - If the row has incomplete child tokens (partial fork/expand/coalesce):
+      drive ONLY the incomplete children via resume_incomplete_token.
+      Restarting from source (process_existing_row) would re-fork to ALL branches
+      and re-emit the completed ones (the F1 double-emission defect).
+    - Otherwise (never started, or fully linear): whole-row restart from source
+      via process_existing_row is correct.
 
     Returns:
         True if interrupted by shutdown, False otherwise.
@@ -166,8 +181,9 @@ def run_resume_processing_loop(
     # checkpointed again instead of being flushed to sinks.
     interrupted_by_shutdown = shutdown_event is not None and shutdown_event.is_set()
 
-    # Process each unprocessed row using process_existing_row
-    # (rows already exist in DB, only tokens need to be created)
+    # Process each unprocessed row. Rows already exist in DB; only tokens need to
+    # be created. Dispatch: partial-fork/expand/coalesce rows use mid-DAG continuation;
+    # never-started and fully-linear rows use whole-row restart (process_existing_row).
     for row_id, _row_index, row_data in unprocessed_rows:
         if interrupted_by_shutdown:
             break
@@ -191,12 +207,54 @@ def run_resume_processing_loop(
         # Row data from resume is a plain dict, but process_existing_row expects PipelineRow
         pipeline_row = PipelineRow(data=row_data, contract=schema_contract)
 
-        results = processor.process_existing_row(
-            row_id=row_id,
-            row_data=pipeline_row,
-            transforms=config.transforms,
-            ctx=ctx,
+        # F1 fix: dispatch on whether this row has incomplete fork/expand/coalesce child tokens.
+        #
+        # incomplete_by_row ⊆ unprocessed_rows by construction (both queries share
+        # _DELEGATION_PATHS and "incomplete non-delegation token" is Case 2 of
+        # get_unprocessed_rows), so every partial-fork/expand/coalesce row IS visited
+        # by this loop and its specs are found here.
+        #
+        # Lineage-field filter: get_incomplete_tokens_by_row returns ALL incomplete
+        # non-delegation tokens — including linear-pipeline tokens that were interrupted
+        # mid-transform (branch_name=None, fork_group_id=None, expand_group_id=None,
+        # join_group_id=None). Those linear tokens are correctly handled by
+        # process_existing_row (whole-row restart mints a fresh token); routing them to
+        # resume_incomplete_token raises OrchestrationInvariantError (F1 regression).
+        # Only dispatch specs that are provably fork/expand/coalesce children (at least
+        # one lineage field set).
+        # Direct key check (not .get()) — incomplete_by_row is our pre-built index
+        # (Tier-1 audit data), not an external boundary. A missing key is the normal
+        # "no incomplete children for this row" case.
+        fork_expand_coalesce_specs = (
+            [
+                s
+                for s in incomplete_by_row[row_id]
+                if s.branch_name is not None or s.fork_group_id is not None or s.expand_group_id is not None or s.join_group_id is not None
+            ]
+            if row_id in incomplete_by_row
+            else []
         )
+
+        if fork_expand_coalesce_specs:
+            # Partial fork/expand/coalesce completion: drive ONLY the incomplete
+            # children to completion under the original parent. Restarting from
+            # source (process_existing_row) would re-fork to ALL branches and
+            # re-emit the completed ones (F1 double-emission defect).
+            results = []
+            for spec in fork_expand_coalesce_specs:
+                token_row = recovery_manager.reconstruct_token_row(spec, run_id, source_row=pipeline_row, payload_store=payload_store)
+                results.extend(processor.resume_incomplete_token(spec, token_row, ctx, resume_checkpoint_id=resume_checkpoint_id))
+        else:
+            # No incomplete fork/expand/coalesce tokens for this row (never started,
+            # fully linear, or interrupted linear token): whole-row restart from source
+            # is correct. process_existing_row mints a fresh token and re-traverses.
+            results = processor.process_existing_row(
+                row_id=row_id,
+                row_data=pipeline_row,
+                transforms=config.transforms,
+                ctx=ctx,
+            )
+
         if results:
             loop_ctx.last_token_id = results[-1].token.token_id
 

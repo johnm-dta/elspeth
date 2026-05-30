@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.schema_contract import SchemaContract
     from elspeth.contracts.types import CoalesceName, GateName, NodeID, SinkName
+    from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
     from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.coalesce_executor import CoalesceExecutor
@@ -85,6 +86,9 @@ class RowProcessorHandle(Protocol):
         raise NotImplementedError
 
     def get_coalesce_checkpoint_state(self) -> CoalesceCheckpointState | None:
+        raise NotImplementedError
+
+    def resume_incomplete_token(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 
     def resolve_sink_step(self) -> int:
@@ -506,6 +510,12 @@ class ResumeState:
     restored_coalesce_state: CoalesceCheckpointState | None
     unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]]
     schema_contract: SchemaContract
+    # F1 fix: incomplete child tokens grouped by row_id — used by the resume loop
+    # to dispatch partial-fork/expand/coalesce rows via mid-DAG continuation
+    # instead of whole-row restart (which re-emits completed branches).
+    incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]]
+    # RecoveryManager needed by resume loop for reconstruct_token_row.
+    recovery_manager: RecoveryManager
 
     def __post_init__(self) -> None:
         freeze_fields(self, "restored_aggregation_state")

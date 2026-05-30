@@ -3379,6 +3379,18 @@ class TestForkRecoveryInvariant:
         # left resume-scoped (derive reconstructs all of them faithfully:
         # rows_processed via distinct source row_id, the rest via per-terminal
         # tally over token_outcomes).
+        #
+        # SCOPE CAVEAT — rows_coalesce_failed (F2 review item A/D): this fixture
+        # has rows_coalesce_failed == 0 on BOTH sides, so that field reconciles
+        # vacuously here. The audit trail does NOT record a queryable signal for
+        # coalesce-operation failures (telemetry-only roll-up), so derive() can
+        # only ever return 0 for it; the with-rows branch grafts the live
+        # re-drive counter back over that 0 (see resume() in core.py). The
+        # reconciliation loop's rows_coalesce_failed assertion is therefore only
+        # meaningful for coalesce failures that occur DURING THIS RESUME's
+        # re-drive — run-1 (pre-interrupt) coalesce failures were live-counter-
+        # only, are never re-driven, and are OUT of reconciliation scope (operator
+        # follow-up: make rows_coalesce_failed a queryable terminal audit signal).
         counter_fields = (
             "rows_processed",
             "rows_succeeded",

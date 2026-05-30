@@ -2701,7 +2701,79 @@ class Orchestrator:
             # diversions, and after sweep_deferred_invariants_or_crash — so every
             # outcome this resume wrote is committed and visible to the derive
             # query.  Deriving before those flushes commit would undercount.
-            terminal_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
+            # The status returned here is computed from the audit-only counters
+            # (rows_coalesce_failed == 0, see graft below); it is intentionally
+            # discarded and RECOMPUTED post-graft so terminal_status stays a pure
+            # function of the FINAL reconciled counters — the same set the
+            # uninterrupted path derives from. This is correctness-by-symmetry,
+            # NOT crash-prevention: a coalesce failure always co-increments
+            # rows_failed (outcomes.py flush_coalesce_pending does both, and the
+            # consumed branches land in audit as UNROUTED), so derive's audit-only
+            # rows_failed is already > 0 → failure_indicator already True → the
+            # pre-graft status is already COMPLETED_WITH_FAILURES, never COMPLETED.
+            # So grafting rows_coalesce_failed does not flip the status in any
+            # real flow and the RunResult biconditional's COMPLETED+failure arm
+            # cannot fire here. Recomputing is still the honest, future-proof
+            # construction (status derived from the same final counters as the
+            # uninterrupted path) and guards against a future counter whose graft
+            # WOULD be status-bearing.
+            _audit_only_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
+
+            # F2 — per-field "best available source" graft.
+            #
+            # Each counter field is taken from its best available source. For
+            # the 11 fields the audit trail records per-token, that source is
+            # derive_resume_terminal_status_from_audit (cumulative, queryable
+            # from token_outcomes). rows_coalesce_failed is the LONE field the
+            # audit trail does NOT record: a failed coalesce records per-branch
+            # FAILURE/UNROUTED outcomes (so rows_failed reconstructs) but the
+            # coalesce-operation roll-up is emitted to TELEMETRY ONLY
+            # (outcomes.py flush_coalesce_pending → _emit_failed_coalesce_telemetry;
+            # there is no queryable token_outcomes signal for it). derive()
+            # therefore has no match arm for it and returns 0. For the with-rows
+            # branch its best source is the live re-drive counter captured by
+            # flush_coalesce_pending into the resume loop's `result`, so graft it
+            # back over the audit-derived 0.
+            #
+            # NOTE (scope + reachability): this recovers only coalesce failures
+            # that occurred DURING THIS RESUME's re-drive. Coalesce failures from
+            # run-1 (before the interrupt) were live-counter-only — never
+            # persisted as a queryable signal — and are unrecoverable here.
+            # Making rows_coalesce_failed reconstructable cumulatively (incl.
+            # run-1) is a schema/epoch change tracked as an operator follow-up;
+            # the no-rows branch already ships the 0 for the same structural
+            # reason.
+            #
+            # During-re-drive reachability is asymmetric across the two trigger
+            # sites in outcomes.py:
+            #   * flush_pending (end-of-source, "incomplete_branches"): the
+            #     during-re-drive failure was proven NON-CONSTRUCTIBLE in
+            #     deterministic flows — lost branches fail immediately via
+            #     notify_branch_lost (without incrementing rows_coalesce_failed),
+            #     buffered branches are restored-to-completion on resume
+            #     (CoalesceExecutor.restore_from_checkpoint re-includes arrived
+            #     branches), and a coalesce branch no gate produces is DAG-rejected.
+            #   * check_timeouts (wall-clock, "quorum_not_met_at_timeout"): a real
+            #     runtime trigger if a re-drive coalesce times out; reachability
+            #     of this on the resume path is unexplored. The graft is therefore
+            #     LIVE code (not dead) guarding this timeout path; in the
+            #     deterministic flush-path it copies 0-over-0 and is a no-op.
+            audit_counters.rows_coalesce_failed = result.rows_coalesce_failed
+
+            # Recompute terminal_status from the final reconciled counters (now
+            # carrying the grafted rows_coalesce_failed) via the pure L0 function
+            # — NOT by re-calling derive_resume_terminal_status_from_audit, which
+            # would re-query token_outcomes and silently re-zero the graft.
+            terminal_status = derive_terminal_run_status(
+                rows_processed=audit_counters.rows_processed,
+                rows_succeeded=audit_counters.rows_succeeded,
+                rows_failed=audit_counters.rows_failed,
+                rows_routed_success=audit_counters.rows_routed_success,
+                rows_routed_failure=audit_counters.rows_routed_failure,
+                rows_quarantined=audit_counters.rows_quarantined,
+                rows_coalesce_failed=audit_counters.rows_coalesce_failed,
+            )
+
             factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
             result = audit_counters.to_run_result(run_id, terminal_status)
 

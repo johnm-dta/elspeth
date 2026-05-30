@@ -2472,8 +2472,23 @@ class TestForkRecoveryInvariant:
             f"Merged token payload is not a {{data, contract}} envelope; "
             f"got keys={sorted(env.keys()) if isinstance(env, dict) else type(env).__name__!r}"
         )
-        # The union-merge of path_a({'value':1}) and path_b({'value':1}) produces
-        # {'value': 1} (union, last_wins, identical fields → one 'value' key).
+        # Content round-trip (not just shape): the union-merge of
+        # path_a({'value': 1}) and path_b({'value': 1}) — both PassTransform
+        # identity-mapped over the single source row {'value': 1} — produces
+        # exactly {'value': 1} (union over identical-keyed branches → one 'value'
+        # key, no extras). Empirically confirmed against the real merged token's
+        # token_data_ref envelope. Asserting the FULL dict (not "value in data")
+        # catches an empty/garbage/extra-keyed payload that a membership check
+        # would silently pass.
         data = env["data"]
-        assert "value" in data, f"token_data_ref envelope must contain the merged row data; got {data!r}"
-        assert data["value"] == 1, f"Merged payload 'value' must be 1 (source value); got {data['value']!r}"
+        assert data == {"value": 1}, f"merged payload round-trip mismatch: expected {{'value': 1}}, got {data!r}"
+
+        # Contract round-trip: SchemaContract.from_checkpoint validates the
+        # version_hash (Tier-1 integrity) and must restore without raising.
+        from elspeth.contracts.schema_contract import SchemaContract
+
+        restored_contract = SchemaContract.from_checkpoint(env["contract"])
+        assert {fc.normalized_name for fc in restored_contract.fields} == {"value"}, (
+            f"restored merged contract fields mismatch: expected {{'value'}}, "
+            f"got {{{', '.join(repr(fc.normalized_name) for fc in restored_contract.fields)}}}"
+        )

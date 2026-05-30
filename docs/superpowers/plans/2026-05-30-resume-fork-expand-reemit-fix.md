@@ -765,7 +765,13 @@ The expanded per-child payloads live in `tokens.py` (`expanded_rows`) and are cr
                 # best-effort. NULL token_data_ref is reserved for fork children.
                 token_data_ref: str | None = None
                 if self._payload_store is not None:
-                    payload_bytes = canonical_json(payload).encode("utf-8")
+                    # TYPE FIDELITY (Tier-1): use the type-tagged checkpoint
+                    # serializer, NOT canonical_json. canonical_json stringifies
+                    # datetime/Decimal; the legal record must round-trip the exact
+                    # Python types run 1 had. checkpoint_dumps/_loads is the
+                    # schema-free type-faithful mechanism ELSPETH already uses for
+                    # resumable pipeline data (core/checkpoint/serialization.py).
+                    payload_bytes = checkpoint_dumps(payload).encode("utf-8")
                     token_data_ref = self._payload_store.store(payload_bytes)
                 result = conn.execute(
                     tokens_table.insert().values(
@@ -794,7 +800,7 @@ The expanded per-child payloads live in `tokens.py` (`expanded_rows`) and are cr
         return children, expand_group_id
 ```
 
-  Add `token_data_ref: str | None = None` to the `Token` model (`rg -n "class Token\b" src/elspeth/core/landscape/`). Confirm `canonical_json`, `Sequence`, `Mapping` are imported (canonical_json is — used at create_row:439).
+  Add `token_data_ref: str | None = None` to the `Token` model (`rg -n "class Token\b" src/elspeth/core/landscape/`). Add `from elspeth.core.checkpoint.serialization import checkpoint_dumps` and confirm `Sequence`, `Mapping` are imported. (`core/checkpoint` and `core/landscape` are both L1 — the import is layer-legal; verify no cycle: `rg -n "import" src/elspeth/core/checkpoint/serialization.py | rg landscape`.)
 
 - [ ] **Step 4: Update the caller** (`tokens.py:366-374`). `expand_token` now needs the payload dicts. The caller has `expanded_rows` (the deaggregated rows). Pass them:
 
@@ -810,7 +816,7 @@ The expanded per-child payloads live in `tokens.py` (`expanded_rows`) and are cr
 
   Keep the existing `child_infos` construction (tokens.py:383-393) — it wraps each `expanded_rows` element in a deepcopy'd `PipelineRow` with `output_contract`. The persisted bytes must equal what `child_infos` carries, so persist `expanded_rows[i]` (pre-deepcopy is fine; deepcopy only guards in-memory sharing). Confirm `zip(db_children, expanded_rows, strict=True)` still aligns (same order, same count).
 
-- [ ] **Step 5: Update all other `expand_token` call sites.** Find them: `rg -n "expand_token\(" src/elspeth tests`. The batch-aggregation path may also call it — change `count=` to `child_payloads=`. (No legacy shim — change every call site in this commit per the No-Legacy policy.)
+- [ ] **Step 5: Update the recorder call site.** The *recorder*-level `data_flow_repository.expand_token` has exactly ONE caller: `tokens.py:368` (`TokenManager.expand_token`). Both processor paths — batch aggregation (`processor.py:1217`, `record_parent_outcome=False`) and deaggregation (`processor.py:2369`) — go through `TokenManager.expand_token`, which already receives `expanded_rows: list[dict]` from both (verified: batch passes `[row.to_dict() for row in output_rows]`). So the per-child payloads are available on both paths; no fabricated/placeholder children. Confirm no other recorder caller: `rg -n "_data_flow\.expand_token\(|data_flow.*expand_token\(" src/elspeth tests`. (No legacy shim — change the call site in this commit per the No-Legacy policy.)
 
 - [ ] **Step 6: Run the round-trip test + the deaggregation suite**
 
@@ -844,6 +850,17 @@ git commit -m "feat(audit): expand_token persists per-child payload to token_dat
         # outcome, checkpoint, mark failed, resume.
         # Assert full conservation law: after == baseline, zero orphan, one terminal
         # per expanded child, expanded-child count unchanged, status COMPLETED.
+        #
+        # TYPE-FIDELITY ASSERTION (the conservation-law oracle counts outcomes, NOT
+        # data values — it is blind to stringified types). The expanded payload MUST
+        # carry a datetime AND a Decimal field. After resume, read the resumed child's
+        # data back (from the sink's collected rows or token_data_ref via
+        # checkpoint_loads) and assert the values are still datetime/Decimal instances,
+        # NOT str — proving checkpoint_dumps/_loads preserved Tier-1 type fidelity and
+        # the expand child did not bypass type restoration the way naive json.loads would.
+        #   import datetime, decimal
+        #   assert isinstance(resumed_child_row["ts"], datetime.datetime)
+        #   assert isinstance(resumed_child_row["amount"], decimal.Decimal)
 ```
 
   Use the existing deaggregation fixtures (`rg -n "deagg|Deaggregat|expand" tests/fixtures/`).
@@ -862,13 +879,15 @@ git commit -m "feat(audit): expand_token persists per-child payload to token_dat
                 f"(Pre-epoch-11 data, or a recorder bug.)"
             )
         child_bytes = payload_store.retrieve(spec.token_data_ref)
-        child_data = json.loads(child_bytes.decode("utf-8"))
+        # checkpoint_loads (NOT json.loads) restores datetime/Decimal type fidelity
+        # from the type-tagged envelopes expand_token wrote with checkpoint_dumps.
+        child_data = checkpoint_loads(child_bytes.decode("utf-8"))
         child_contract = recovery_manager.get_expand_child_contract(run_id, spec)  # see Step 4
         child_row = PipelineRow(data=child_data, contract=child_contract)
         results = processor.resume_incomplete_token(spec, child_row, ctx)
 ```
 
-  Pass `child_row` instead of the source `pipeline_row` for expand children. (Fork children keep using `pipeline_row` from the source payload.)
+  Pass `child_row` instead of the source `pipeline_row` for expand children. (Fork children keep using `pipeline_row` from the source payload.) Add `from elspeth.core.checkpoint.serialization import checkpoint_loads` to `resume.py` imports.
 
 - [ ] **Step 4: Add `get_expand_child_contract`** to `RecoveryManager` (recovery.py) — reuse the existing `output_contract_json` read path (`ContractAuditRecord.from_json`, data_flow_repository.py:1350-1351):
 

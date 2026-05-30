@@ -285,6 +285,8 @@ git commit -m "feat(schema): token_data_ref + node_states.resume_checkpoint_id +
 
 ## Phase 3 — Payload persistence (`expand_token` + `coalesce_tokens`)
 
+> **REVISED by spec ADDENDUM 3.** The persisted bytes are an ENVELOPE `{"data": <row dict>, "contract": SchemaContract.to_checkpoint_format()}` (not a bare data dict), so a reconstructed expand/coalesce token carries its faithful contract without any nodes-table lookup. `expand_token`/`coalesce_tokens` additionally receive the contract (expand: the single locked `output_contract`; coalesce: `merged_data.contract`).
+
 `token_data_ref` has three writers: `expand_token` (per child) and `coalesce_tokens` (merged) set it; fork children leave it NULL. Both persist with the type-faithful `checkpoint_dumps` (Tier-1 — `canonical_json` would stringify `datetime`/`Decimal`). The payload dicts must flow **into** these recorders so the ref is written atomically with the token INSERT.
 
 ### Task 3: Persist per-token payloads + add `Token.token_data_ref`
@@ -519,6 +521,8 @@ class IncompleteTokenSpec:
             )
         return by_row
 ```
+
+> **SUPERSEDED by spec ADDENDUM 3.** The `_resolve_token_contract` nodes-table lookup below is DEAD in production (`nodes.sequence_in_pipeline` and non-source `nodes.output_contract_json` are both NULL). The contract is instead persisted *with* the payload as an envelope `{"data": …, "contract": SchemaContract.to_checkpoint_format()}` (Task 3) and restored by `reconstruct_token_row` via `SchemaContract.from_checkpoint(env["contract"])`; `_resolve_token_contract` is deleted. See ADDENDUM 3 for the full design. The `reconstruct_token_row` fork-child branch (`token_data_ref is None → source_row`) is unchanged.
 
 - [ ] **Step 5: Add the generic reconstruction method** `reconstruct_token_row` after the selection:
 

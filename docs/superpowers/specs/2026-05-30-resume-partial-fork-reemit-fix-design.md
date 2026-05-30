@@ -437,3 +437,52 @@ add-then-remove query filters; persistence is a prerequisite consumed by the res
    this fix also reconcile that, or keep it separate?
 5. Concurrency/determinism: ordering of reconstructed incomplete tokens across a
    multi-branch partial fork — any divergence risk vs the original run?
+
+## ADDENDUM 3 (2026-05-30, mid-implementation) — contract reconstruction is via the payload envelope, NOT the nodes table (AUTHORITATIVE)
+
+**Defect found during Task 4 code review (production-population check).** The plan's
+`_resolve_token_contract` recovered an expand/coalesce token's output contract from
+`nodes.output_contract_json` keyed by `nodes.sequence_in_pipeline == step_in_pipeline`.
+Both are NULL in production:
+
+- The live `register_node` call (`engine/orchestrator/landscape_registration.py`) passes
+  **no `sequence=`** → `nodes.sequence_in_pipeline` is NULL for every prod node (only the
+  synthesised/tutorial write path and test code populate it).
+- `output_contract` is passed **only for the source node** (`if node_id == source_id`) →
+  `nodes.output_contract_json` is NULL for every transform/aggregation/coalesce node.
+
+So the resolver would raise `AuditIntegrityError` on *every* expand/coalesce resume. It was
+latent only because no caller is wired until Task 7. The fork→sink core (original RED) is
+unaffected (`current_node_id=None`; fork-child reconstruct returns `source_row` untouched).
+There is **no prod-populated column** carrying a non-source node's output contract, so the
+nodes-table approach is unsalvageable.
+
+**Resolution (Option A — self-contained payload envelope):** `row.contract` is genuinely
+consumed on re-drive (`executors/transform.py` sets `ctx.contract = token.row_data.contract`;
+`executors/sink.py` merges `tokens[...].row_data.contract`), so a reconstructed token needs a
+faithful contract. `SchemaContract.to_checkpoint_format()` / `.from_checkpoint()` already
+exist with Tier-1 hash-integrity validation. Therefore:
+
+- **`tokens.token_data_ref` stores an envelope**, not a bare data dict:
+  `checkpoint_dumps({"data": <row data dict>, "contract": <SchemaContract.to_checkpoint_format()>})`.
+  (Note: `PipelineRow.to_checkpoint_format()` stores only a contract *version reference*, not the
+  full contract — it is NOT usable here; build the envelope from the full
+  `SchemaContract.to_checkpoint_format()`.)
+- The contract is available at both writer call sites: expand has a single locked
+  `output_contract` (from `TransformResult.contract`, shared by all children); coalesce has
+  `merged_data.contract` (a `PipelineRow`). `expand_token`/`coalesce_tokens` receive it and
+  serialise the envelope.
+- **`reconstruct_token_row`** restores both: `data = env["data"]`,
+  `contract = SchemaContract.from_checkpoint(env["contract"])`, `PipelineRow(data, contract)`.
+  Fork children (`token_data_ref is None`) still return `source_row` unchanged.
+- **`_resolve_token_contract` is DELETED**, along with the `nodes_table` import if otherwise
+  unused. `PayloadNotFoundError` from `payload_store.retrieve` is wrapped to a contextful
+  `ValueError` (token_id, run_id, ref) mirroring `get_unprocessed_row_data`.
+
+`step_in_pipeline` itself is sound (prod-populated via `graph.resolve_step`, aligned with
+`_node_step_map`), so Task 6's `_resolve_step_node` is unaffected.
+
+**Systemic lesson (applies to Tasks 6/7/9/10):** for every `tokens.*` / `nodes.*` column the
+dispatch reads, verify it is *written in production*, not merely that the column/method exists.
+The "symbol exists" spec check passed the broken resolver; the "is it populated in prod" check
+caught it.

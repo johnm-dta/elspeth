@@ -1,7 +1,17 @@
 """Type-preserving JSON serialization for checkpoint aggregation state.
 
 This module provides serialization that preserves type fidelity for types allowed
-in SchemaContract (int, str, float, bool, NoneType, datetime, object).
+in SchemaContract (int, str, float, bool, NoneType, datetime, object) plus the
+non-JSON-native types that flow through `object`-typed contract fields and
+FLEXIBLE/OBSERVED-mode rows: Decimal, date, time, bytes, and UUID. numpy scalars
+are normalized to Python primitives (mirroring canonical_json's numpy handling)
+rather than tagged.
+
+This serializer runs on the happy path, not only on resume: the F1 token_data_ref
+envelope (expand/coalesce payload persistence) calls checkpoint_dumps on row
+payloads during normal execution. It must therefore preserve every type a row
+payload can legitimately carry, and raise a clear audit-fidelity error — never a
+cryptic stdlib TypeError — on a genuinely unserializable value.
 
 The problem: Standard json.dumps() cannot serialize datetime objects.
 The solution: Use collision-safe type envelopes with ``__elspeth_type__`` and
@@ -27,12 +37,23 @@ Per CLAUDE.md:
 
 from __future__ import annotations
 
+import base64
 import json
 import math
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
+
+import numpy as np
 
 from elspeth.contracts.errors import AuditIntegrityError
+
+# numpy is a guaranteed dependency (pandas requires it; canonical.py hard-imports
+# it in the same layer). numpy scalars are converted to Python primitives —
+# mirroring canonical_json's normalization (np.integer→int, np.floating→float,
+# np.bool_→bool). numpy-ness is not semantic data: the value, not its container
+# type, is what the audit trail records.
 
 # Reserved key used for type envelopes. User dicts containing this key
 # are escaped via _escape_reserved_keys() before encoding.
@@ -41,11 +62,24 @@ _ENVELOPE_VALUE_KEY = "__elspeth_value__"
 
 
 class CheckpointEncoder(json.JSONEncoder):
-    """JSON encoder that preserves datetime with collision-safe type envelopes.
+    """JSON encoder that preserves rich types with collision-safe type envelopes.
 
-    Encodes datetime as {"__elspeth_type__": "datetime", "__elspeth_value__": "iso_string"}.
-    This allows deserialization to restore the original datetime type without
+    Encodes each preserved type as
+    {"__elspeth_type__": <tag>, "__elspeth_value__": <json-native value>}.
+    This allows deserialization to restore the original Python type without
     colliding with user dicts that happen to contain similar keys.
+
+    Preserved types (round-trip exactly via the envelope):
+    - datetime → ISO 8601 string (timezone-normalized to UTC if naive)
+    - Decimal  → decimal string (str(obj); rejects non-finite NaN/Infinity)
+    - date     → ISO 8601 date string
+    - time     → ISO 8601 time string
+    - bytes    → base64-ascii string
+    - UUID     → canonical UUID string
+
+    numpy scalars are NOT envelope-tagged: they are converted to Python primitives
+    (int/float/bool), mirroring canonical_json's normalization. numpy-ness is not
+    semantic data.
 
     NaN and Infinity are rejected per CLAUDE.md audit integrity requirements.
     """
@@ -61,8 +95,10 @@ class CheckpointEncoder(json.JSONEncoder):
 
         Raises:
             TypeError: If object cannot be serialized
-            ValueError: If float is NaN or Infinity
+            ValueError: If a float/Decimal is NaN or Infinity
         """
+        # datetime MUST be checked before date — datetime is a subclass of date,
+        # so isinstance(dt, date) is True for datetimes. Order is load-bearing.
         if isinstance(obj, datetime):
             # Ensure timezone-aware (audit requirement)
             if obj.tzinfo is None:
@@ -72,11 +108,75 @@ class CheckpointEncoder(json.JSONEncoder):
                 _ENVELOPE_VALUE_KEY: obj.isoformat(),
             }
 
+        if isinstance(obj, Decimal):
+            # Reject non-finite Decimals — same audit-integrity invariant as float.
+            # _reject_nan_infinity only inspects Python float; Decimal('NaN') would
+            # otherwise round-trip a NaN back into the Tier-1 audit trail.
+            if not obj.is_finite():
+                raise ValueError(f"Cannot serialize non-finite Decimal: {obj}. Use None for missing values, not NaN/Infinity.")
+            return {
+                _ENVELOPE_TYPE_KEY: "decimal",
+                _ENVELOPE_VALUE_KEY: str(obj),
+            }
+
+        if isinstance(obj, date):
+            return {
+                _ENVELOPE_TYPE_KEY: "date",
+                _ENVELOPE_VALUE_KEY: obj.isoformat(),
+            }
+
+        if isinstance(obj, time):
+            return {
+                _ENVELOPE_TYPE_KEY: "time",
+                _ENVELOPE_VALUE_KEY: obj.isoformat(),
+            }
+
+        if isinstance(obj, bytes):
+            return {
+                _ENVELOPE_TYPE_KEY: "bytes",
+                _ENVELOPE_VALUE_KEY: base64.b64encode(obj).decode("ascii"),
+            }
+
+        if isinstance(obj, UUID):
+            return {
+                _ENVELOPE_TYPE_KEY: "uuid",
+                _ENVELOPE_VALUE_KEY: str(obj),
+            }
+
+        # numpy scalars → Python primitive (mirror canonical_json normalization).
+        # numpy-ness carries no semantic meaning; the value is what the audit records.
+        # No envelope tag: these become real int/float/bool and round-trip natively.
+        if isinstance(obj, np.floating):
+            # Use numpy-native finiteness — math.isnan downcasts np.longdouble,
+            # overflowing the IEEE-754 double range (matches canonical_json).
+            if not np.isfinite(obj):
+                raise ValueError(f"Cannot serialize non-finite float: {obj}. Use None for missing values, not NaN/Infinity.")
+            return float(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+
         # Tuples are handled in _escape_reserved_keys() pre-processing,
         # not here — json.dumps converts tuples to arrays before calling default().
 
-        # Let default encoder handle or raise TypeError
-        return super().default(obj)
+        # Offensive-programming boundary: the SchemaContract `object` type is an
+        # unbounded catch-all, so the serializer cannot be made total. Replace the
+        # cryptic stdlib "Object of type X is not JSON serializable" with a clear
+        # audit-fidelity error that NAMES the type and the offending value. Tier-1
+        # checkpoints (token_data_ref envelopes, aggregation state) must contain
+        # only JSON-native values or one of the envelope-tagged types.
+        value_repr = repr(obj)
+        if len(value_repr) > 200:
+            value_repr = value_repr[:200] + "…"
+        raise TypeError(
+            f"Cannot serialize value of type {type(obj).__name__!r} into a checkpoint payload "
+            f"(value={value_repr}). Checkpoint payloads are a Tier-1 audit-fidelity boundary: "
+            f"every value must be JSON-native (int, float, str, bool, None, list, dict) or one of "
+            f"the type-preserving envelopes (datetime, Decimal, date, time, bytes, UUID, tuple). "
+            f"numpy scalars are accepted and normalized to Python primitives. To record this value, "
+            f"convert it to a supported type upstream, or record None for absence."
+        )
 
 
 def _reject_nan_infinity(obj: Any) -> Any:
@@ -201,6 +301,21 @@ def _restore_types(obj: Any) -> Any:
                     )
                 return dt
 
+            if envelope_type == "decimal" and isinstance(envelope_value, str):
+                return Decimal(envelope_value)
+
+            if envelope_type == "date" and isinstance(envelope_value, str):
+                return date.fromisoformat(envelope_value)
+
+            if envelope_type == "time" and isinstance(envelope_value, str):
+                return time.fromisoformat(envelope_value)
+
+            if envelope_type == "bytes" and isinstance(envelope_value, str):
+                return base64.b64decode(envelope_value)
+
+            if envelope_type == "uuid" and isinstance(envelope_value, str):
+                return UUID(envelope_value)
+
             if envelope_type == "escaped_dict" and isinstance(envelope_value, dict):
                 # Unwrap the escaped dict and recurse into its values
                 return {k: _restore_types(v) for k, v in envelope_value.items()}
@@ -209,7 +324,16 @@ def _restore_types(obj: Any) -> Any:
                 return tuple(_restore_types(v) for v in envelope_value)
 
             # Envelope shape detected — all known types handled above.
-            _KNOWN_ENVELOPE_TYPES = {"datetime", "escaped_dict", "tuple"}
+            _KNOWN_ENVELOPE_TYPES = {
+                "datetime",
+                "decimal",
+                "date",
+                "time",
+                "bytes",
+                "uuid",
+                "escaped_dict",
+                "tuple",
+            }
             if envelope_type in _KNOWN_ENVELOPE_TYPES:
                 # Known type but value failed isinstance check above — wrong Python type
                 raise AuditIntegrityError(

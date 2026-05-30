@@ -49,9 +49,10 @@ per_file_rules:
 - pattern: core/checkpoint/serialization.py
   rules:
   - R5
-  reason: Type envelope detection, NaN rejection, and reserved key escaping
+  reason: Type envelope encode/decode dispatch (datetime/Decimal/date/time/bytes/UUID/tuple),
+    numpy scalar normalization, NaN/non-finite rejection, and reserved key escaping
   expires: null
-  max_hits: 13
+  max_hits: 26
 - pattern: core/dag/builder.py
   rules:
   - R5

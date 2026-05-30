@@ -2520,19 +2520,21 @@ class TestForkRecoveryInvariant:
         is the ITEM VALUE from the exploded array (output_field='ts'), giving each
         child a different token_data_ref envelope payload.
 
-        VALUE FIDELITY: dt0=datetime(2021,1,1) for child0, dt1=datetime(2022,2,2)
-        for child1.  After interrupting child1 and resuming, retrieve child1's
-        token_data_ref envelope and assert it carries ts=dt1 as a datetime.datetime
-        INSTANCE (not str), proving checkpoint_dumps/_loads type fidelity AND that
-        child1 carries ITS OWN value (not the sibling's dt0).
+        VALUE FIDELITY: each child's exploded item is a dict carrying its OWN
+        distinct datetime and Decimal — child0 {ts: dt0, amount: Decimal('1.5')},
+        child1 {ts: dt1, amount: Decimal('99.25')}.  After interrupting child1 and
+        resuming, retrieve child1's token_data_ref envelope and assert its item
+        carries ts=dt1 as a datetime.datetime INSTANCE (not str) AND amount=Decimal
+        ('99.25') as a decimal.Decimal INSTANCE (not str, not float, not the sibling's
+        1.5).  This proves checkpoint_dumps/_loads round-trips BOTH non-JSON-native
+        types through the token_data_ref envelope with full fidelity, and that child1
+        carries ITS OWN values (not child0's).
 
-        Decimal was considered as a second type-fidelity witness but is not
-        supported by checkpoint_dumps (serializer handles int/str/float/bool/
-        datetime/tuple/None — not decimal.Decimal).  The task's "datetime + Decimal"
-        framing is explicit about adapting to what the fixture emits.  datetime
-        suffices: it is the only non-JSON-native type checkpoint_dumps preserves, and
-        distinct per-child values are achievable by embedding the datetimes directly
-        in the exploded array.
+        Decimal is the F1-regression witness: checkpoint_dumps previously crashed on
+        Decimal (canonical_json accepted it lossily), so the F1 envelope-persistence
+        path regressed Decimal-bearing rows from lossy-but-works to a happy-path
+        crash.  Asserting Decimal fidelity here proves that regression is fixed and a
+        Decimal genuinely survives the expand-child token_data_ref round-trip.
 
         RED (dispatch disabled, fork_expand_coalesce_specs branch commented):
         process_existing_row re-runs the entire source row from the beginning,
@@ -2543,6 +2545,7 @@ class TestForkRecoveryInvariant:
         minted): expected 2 expand children, got 4.'
         """
         import datetime
+        from decimal import Decimal
 
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.contracts.enums import RunStatus
@@ -2557,11 +2560,14 @@ class TestForkRecoveryInvariant:
 
         dt0 = datetime.datetime(2021, 1, 1, tzinfo=datetime.UTC)
         dt1 = datetime.datetime(2022, 2, 2, tzinfo=datetime.UTC)
+        amount0 = Decimal("1.5")
+        amount1 = Decimal("99.25")
 
-        # Source: one row whose 'items' contains the two distinct datetime values.
-        # JSONExplode explodes this into child0 (ts=dt0, item_index=0) and
-        # child1 (ts=dt1, item_index=1).  Each child's 'ts' IS the exploded item
-        # value — distinct per child — proving value<->token alignment.
+        # Source: one row whose 'items' contains two distinct dicts, each carrying
+        # its OWN datetime AND Decimal.  JSONExplode explodes this into child0
+        # (item={ts: dt0, amount: 1.5}, item_index=0) and child1 (item={ts: dt1,
+        # amount: 99.25}, item_index=1).  Each child's 'item' IS the exploded dict —
+        # distinct per child — proving value<->token alignment for BOTH types.
         #
         # TOPOLOGY: source → JSONExplode → PassTransform → sink
         # The PassTransform after JSONExplode is required for resume: the expand child's
@@ -2570,13 +2576,16 @@ class TestForkRecoveryInvariant:
         # `after` would be None, which process_token rejects (no sink context for branchless
         # tokens).  The PassTransform is the re-drive target — the child continues from there
         # rather than from the expand node itself.
-        source = ListSource([{"score": 1, "items": [dt0, dt1]}], on_success="explode_in")
+        source = ListSource(
+            [{"score": 1, "items": [{"ts": dt0, "amount": amount0}, {"ts": dt1, "amount": amount1}]}],
+            on_success="explode_in",
+        )
         sink = CollectSink("output")
 
         explode = JSONExplode(
             {
                 "array_field": "items",
-                "output_field": "ts",  # each child gets its own datetime as 'ts'
+                "output_field": "item",  # each child gets its own {ts, amount} dict as 'item'
                 "include_index": True,  # item_index 0/1 identifies which child
                 "schema": {"mode": "observed"},
             }
@@ -2745,12 +2754,15 @@ class TestForkRecoveryInvariant:
         orphans = orphan_leaf_token_ids(db, run_id)
         assert not orphans, f"Resume left {len(orphans)} orphan leaf token(s): {orphans}"
 
-        # ── VALUE FIDELITY: child1's envelope carries ts=dt1 as datetime ──────
+        # ── VALUE FIDELITY: child1's envelope carries dt1 + Decimal('99.25') ──
         # Retrieve child1's token_data_ref envelope (run-1 artifact, unmodified by resume).
         # This is the payload the resume path's reconstruct_token_row() consumed to
         # re-drive child1.  Asserting type+value here proves:
         #   (a) checkpoint_dumps preserved the datetime type (not stringified it),
-        #   (b) child1's envelope carries ITS OWN dt1, not the sibling's dt0.
+        #   (b) checkpoint_dumps preserved the Decimal type (the F1-regression witness:
+        #       Decimal previously crashed the serializer on the happy path),
+        #   (c) child1's envelope carries ITS OWN values (dt1/99.25), not the sibling's
+        #       (dt0/1.5).
         raw = payload_store.retrieve(child1_token_data_ref)
         env = checkpoint_loads(raw.decode("utf-8"))
 
@@ -2759,18 +2771,31 @@ class TestForkRecoveryInvariant:
             f"got keys={sorted(env.keys()) if isinstance(env, dict) else type(env).__name__!r}"
         )
         child1_data = env["data"]
+        child1_item = child1_data["item"]
 
-        # Type fidelity: 'ts' field must come back as datetime.datetime, not str.
-        assert isinstance(child1_data["ts"], datetime.datetime), (
-            f"Type fidelity failure: 'ts' field came back as {type(child1_data['ts']).__name__!r}, "
+        # Type fidelity: 'ts' must come back as datetime.datetime, not str.
+        assert isinstance(child1_item["ts"], datetime.datetime), (
+            f"Type fidelity failure: 'ts' came back as {type(child1_item['ts']).__name__!r}, "
             f"not datetime — checkpoint_dumps was not used (canonical_json stringifies datetime)"
         )
-        assert child1_data["ts"].tzinfo is not None, "Restored datetime must be timezone-aware"
+        assert child1_item["ts"].tzinfo is not None, "Restored datetime must be timezone-aware"
 
-        # Value alignment: child1's 'ts' must be dt1 (NOT dt0 — the sibling's value).
-        assert child1_data["ts"] == dt1, (
-            f"Value alignment failure: child1 carries ts={child1_data['ts']!r}, "
+        # Type fidelity: 'amount' must come back as decimal.Decimal, not str or float.
+        # This is the F1-regression assertion — checkpoint_dumps previously crashed here.
+        assert isinstance(child1_item["amount"], Decimal), (
+            f"Type fidelity failure: 'amount' came back as {type(child1_item['amount']).__name__!r}, "
+            f"not Decimal — checkpoint_dumps/_loads must round-trip Decimal through the "
+            f"token_data_ref envelope (F1 envelope-fidelity regression guard)"
+        )
+
+        # Value alignment: child1 carries ITS OWN values (dt1/99.25), not the sibling's.
+        assert child1_item["ts"] == dt1, (
+            f"Value alignment failure: child1 carries ts={child1_item['ts']!r}, "
             f"expected dt1={dt1!r}. Got dt0={dt0!r} would mean zip(strict=True) alignment is broken."
+        )
+        assert child1_item["amount"] == amount1, (
+            f"Value alignment failure: child1 carries amount={child1_item['amount']!r}, "
+            f"expected amount1={amount1!r}. Got amount0={amount0!r} would mean alignment is broken."
         )
         # item_index alignment: child1 must have item_index=1.
         assert child1_data["item_index"] == 1, f"item_index alignment: expected 1 for child1, got {child1_data['item_index']!r}"

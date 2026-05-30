@@ -243,6 +243,68 @@ toward the Approach-2 shape).
    `payload_store`; a stale DB (pre-epoch-11) is rejected at open with migration guidance
    (SQLite epoch gate) and `_REQUIRED_COLUMNS` rejects a Postgres DB missing the column.
 
+## ADDENDUM (2026-05-30, plan-grounding) — node_states attempt collision on re-drive (AUTHORITATIVE)
+
+Grounding the plan against primary source surfaced a load-bearing gap the REVISED
+DESIGN was silent on. It does **not** change the approved approach (Approach 1,
+mid-DAG continuation under the original parent); it adds a required mechanism
+*within* it. Verified facts:
+
+- `node_states` carries two relevant unique constraints (`schema.py:312-313`):
+  `UniqueConstraint("token_id","node_id","attempt")` and
+  `UniqueConstraint("token_id","step_index","attempt")`.
+- `attempt` is computed **in memory per traversal** (tenacity counts from 0;
+  `retry.py:122-141`), **not** derived from the DB. A resume re-drive of a
+  reconstructed token therefore restarts at `attempt=0`.
+- The sink executor's `begin_node_state` (`sink.py:453`, and failsink `:838`)
+  passes **no** `attempt` — it defaults to 0. Coalesce (`coalesce_executor.py:500,563`)
+  likewise. Only the transform path threads `attempt` (`state_guard.py:105`).
+- Consequence: re-driving an incomplete fork→sink child whose run-1 sink
+  `node_state` already exists at `attempt=0` (the **exact** state the RED test
+  produces — it deletes only the terminal *outcome*, not the `node_state`)
+  collides on `(token_id, node_id, attempt)` and crashes. So correct attempt
+  handling is **required to turn the RED test green** — not hypothetical.
+
+### Why re-run from branch start (not mid-branch)
+A fork→coalesce child's post-transform `row_data` is created in memory only and is
+**not persisted per token** (the same root cause as expand's missing payload). So
+we cannot resume from the crash point; we re-run the branch from `branch_first_node`
+using the parent/source payload (which *is* persisted), via the existing fork-origin
+routing in `DAGNavigator.create_continuation_work_item` (`dag_navigator.py:284-306`).
+For fork→sink, the child re-drives straight to the sink (`current_node_id=None`).
+
+### Why attempt-bump (not deletion, not new persistence)
+Tier-1 audit is append-only — deleting the stale `node_state` is evidence tampering
+(forbidden). Persisting every node's per-token output to enable true mid-branch
+resume is a far larger change than the approved scope. The lawful, contained option
+is to record the resume re-drive's `node_states` at an **elevated attempt** so they
+coexist with run-1's records. All `node_states` written during one token's resume
+re-drive share a single elevated `attempt` = a coherent "resume generation" marker.
+
+### Mechanism
+1. Add `resume_attempt_offset: int = 0` to the frozen `WorkItem`
+   (`dag_navigator.py:35`). Default 0 preserves all existing (non-resume) behavior.
+2. When reconstructing an incomplete token for re-drive, compute
+   `offset = max(existing attempt over that token's node_states) + 1` (0 if the
+   token has no node_states). This is a single Tier-1 read; missing/garbage → raise.
+3. Every `begin_node_state` call on the re-drive path **adds the work item's
+   `resume_attempt_offset` to its attempt**: transform (via `state_guard` `attempt`),
+   sink (`:453` primary, `:838` failsink), coalesce (`:500`, `:563`). The two
+   source-state calls (`processor.py:1696`, `core.py:1804`) are **not** on the
+   reconstructed-token path and are left unchanged.
+4. Within the re-drive, tenacity retries still increment from the offset
+   (`base + (attempt_number - 1)`), so a node that retries during resume stays
+   collision-free.
+
+### Bounded non-goal (pre-existing resume semantics, not introduced here)
+An incomplete append-mode sink branch that physically wrote in run-1 but crashed
+before recording its outcome will be **physically written again** on re-drive. This
+is the inherent at-least-once property of `configure_for_resume()` append mode and
+already applies to the linear whole-row-restart resume path; this fix neither
+introduces nor is obligated to solve it. The fix's contract is narrower and exact:
+**stop re-emitting *completed* branches.** The conservation-law oracle asserts the
+completed-branch invariant; it does not assert at-most-once for the in-flight branch.
+
 ## Open questions for reviewers
 
 1. Is mid-DAG continuation under the original parent (Approach 1) the right audit

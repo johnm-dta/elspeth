@@ -3115,3 +3115,286 @@ class TestForkRecoveryInvariant:
             calls_by_state.setdefault(c.state_id, []).append(c.call_id)
         assert run1_state_id in calls_by_state, "Run-1 state must have a call"
         assert redrive_ns.state_id in calls_by_state, "Re-drive state must have a call"
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Task 11: F1/F2 counter-field reconciliation guard
+    # ─────────────────────────────────────────────────────────────────────
+
+    def test_resume_counters_reconcile_with_uninterrupted_run(self) -> None:
+        """After (run1 + resume), rows_processed equals a single uninterrupted run.
+
+        WHAT THIS TEST GUARDS:
+
+        rows_processed semantics — NORMAL PATH vs RESUME PATH
+        -------------------------------------------------------
+        Both the normal processing loop (core.py ``_run_main_processing_loop``,
+        line ``counters.rows_processed += 1`` inside ``for row_index, source_item
+        in enumerate(source_iterator)``) and the resume loop (resume.py
+        ``run_resume_processing_loop``, line ``counters.rows_processed += 1``
+        inside ``for row_id, _row_index, row_data in unprocessed_rows``) increment
+        ``rows_processed`` ONCE PER SOURCE ROW — not per leaf token, not per
+        fork branch.  For a 1-source-row pipeline this means both runs produce
+        ``rows_processed == 1``.  That is the key counter-field agreement that
+        this test asserts.
+
+        F2 diagnosis — rows_processed is NOT the divergence
+        -------------------------------------------------------
+        Task 11 hypothesised that the resume path might increment
+        ``rows_processed`` per leaf (once per ``IncompleteTokenSpec`` in
+        ``fork_expand_coalesce_specs``).  Empirically this is FALSE: the
+        ``rows_processed += 1`` statement is outside the inner spec-dispatch
+        loop, so even a row with 10 incomplete specs increments
+        ``rows_processed`` by exactly 1.  No F2 divergence exists for
+        ``rows_processed``.
+
+        INTENTIONAL DESIGN ASYMMETRY IN OTHER COUNTERS (NEEDS_CONTEXT)
+        ---------------------------------------------------------------
+        The resume path returns *resume-only* counters (only what was
+        re-driven in this resume call).  The uninterrupted run returns
+        *cumulative* counters (the entire run).  For a 1-source-row 2-branch
+        fork the empirical delta is:
+
+          rows_succeeded:  A=2 (both branches completed),
+                           B=1 (only the incomplete sink_a branch was re-driven)
+          rows_forked:     A=1 (fork parent processed from source),
+                           B=0 (fork dispatch not re-run; only child completed)
+
+        The "no-unprocessed-rows" branch of ``resume()`` (core.py line ~2626)
+        reconstructs CUMULATIVE counters from audit via
+        ``derive_resume_terminal_status_from_audit``.  The "with-unprocessed-rows"
+        branch (which this test exercises) returns resume-only counters.  The
+        two branches are behaviourally inconsistent — but that is a pre-existing
+        design question, not a regression introduced by the F1 fix, and is NOT
+        asserted here.  A design decision is required before asserting
+        B.rows_succeeded == A.rows_succeeded or B.rows_forked == A.rows_forked.
+        Track as a follow-up: the "with-unprocessed-rows" branch should either
+        (a) add back cumulative counters from audit, or (b) the inconsistency
+        should be documented and accepted by ADR.
+
+        WHAT IS ASSERTED:
+        - rows_processed == 1 for both A and B (per-source-row, both paths)
+        - Terminal-outcome multiset is conserved (regression guard, re-verified)
+        - Resume result is COMPLETED (run is healthy)
+        """
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import CheckpointSettings, ElspethSettings
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        # ── Run A (uninterrupted) ─────────────────────────────────────────
+        db_a = make_landscape_db()
+        payload_store_a = MockPayloadStore()
+
+        source_a = ListSource([{"value": 1}], on_success="sink_a")
+        sink_a_a = CollectSink("sink_a")
+        sink_b_a = CollectSink("sink_b")
+        gate = GateSettings(
+            name="fork_gate",
+            input="gate_in",
+            condition="True",
+            routes={"true": "fork", "false": "sink_a"},
+            fork_to=["sink_a", "sink_b"],
+        )
+        config_a = PipelineConfig(
+            source=as_source(source_a),
+            transforms=[],
+            sinks={"sink_a": as_sink(sink_a_a), "sink_b": as_sink(sink_b_a)},
+            gates=[gate],
+        )
+        graph_a = ExecutionGraph.from_plugin_instances(
+            source=as_source(source_a),
+            source_settings=SourceSettings(plugin=source_a.name, on_success="gate_in", options={}),
+            transforms=[],
+            sinks={"sink_a": as_sink(sink_a_a), "sink_b": as_sink(sink_b_a)},
+            gates=[gate],
+            aggregations={},
+            coalesce_settings=[],
+        )
+        settings_a = ElspethSettings(
+            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sinks={
+                "sink_a": {"plugin": "test", "on_write_failure": "discard"},
+                "sink_b": {"plugin": "test", "on_write_failure": "discard"},
+            },
+            gates=[gate],
+        )
+
+        orch_a = Orchestrator(db_a)
+        run_a = orch_a.run(config_a, graph=graph_a, settings=settings_a, payload_store=payload_store_a)
+
+        # Sanity: uninterrupted fork of 1 source row → rows_processed = 1
+        assert run_a.rows_processed == 1, (
+            f"Run A (uninterrupted, 1-row fork): expected rows_processed=1 (per source row), got {run_a.rows_processed}"
+        )
+        assert run_a.status == RunStatus.COMPLETED, run_a.status
+
+        # ── Run B: run-1 then interrupt one fork branch, then resume ──────
+        db_b = make_landscape_db()
+        payload_store_b = MockPayloadStore()
+
+        source_b = ListSource([{"value": 1}], on_success="sink_a")
+        sink_a_b = CollectSink("sink_a")
+        sink_b_b = CollectSink("sink_b")
+        config_b = PipelineConfig(
+            source=as_source(source_b),
+            transforms=[],
+            sinks={"sink_a": as_sink(sink_a_b), "sink_b": as_sink(sink_b_b)},
+            gates=[gate],
+        )
+        graph_b = ExecutionGraph.from_plugin_instances(
+            source=as_source(source_b),
+            source_settings=SourceSettings(plugin=source_b.name, on_success="gate_in", options={}),
+            transforms=[],
+            sinks={"sink_a": as_sink(sink_a_b), "sink_b": as_sink(sink_b_b)},
+            gates=[gate],
+            aggregations={},
+            coalesce_settings=[],
+        )
+        settings_b = ElspethSettings(
+            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sinks={
+                "sink_a": {"plugin": "test", "on_write_failure": "discard"},
+                "sink_b": {"plugin": "test", "on_write_failure": "discard"},
+            },
+            gates=[gate],
+        )
+
+        orch_b = Orchestrator(db_b)
+        run_b1 = orch_b.run(config_b, graph=graph_b, settings=settings_b, payload_store=payload_store_b)
+        run_id = run_b1.run_id
+
+        # Interrupt: delete sink_a branch terminal outcome only (leaving node_states).
+        with db_b.engine.connect() as conn:
+            sink_a_outcomes = conn.execute(
+                text("""
+                    SELECT o.outcome_id AS outcome_id
+                    FROM token_outcomes o
+                    JOIN tokens t ON t.token_id = o.token_id
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id AND o.sink_name = 'sink_a'
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+            assert sink_a_outcomes, "expected a sink_a outcome to delete (setup precondition)"
+            for outcome in sink_a_outcomes:
+                conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
+            conn.commit()
+
+        # Create checkpoint + mark run failed (resume preconditions).
+        checkpoint_mgr = CheckpointManager(db_b)
+        sink_node_ids = graph_b.get_sinks()
+        with db_b.engine.connect() as conn:
+            actual_token = conn.execute(
+                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
+                {"run_id": run_id},
+            ).fetchone()
+        assert actual_token is not None
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=actual_token.token_id,
+            node_id=sink_node_ids[0],
+            sequence_number=1,
+            graph=graph_b,
+        )
+        with db_b.engine.connect() as conn:
+            conn.execute(
+                text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            conn.commit()
+
+        recovery_mgr = RecoveryManager(db_b, checkpoint_mgr)
+        check = recovery_mgr.can_resume(run_id, graph_b)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph_b)
+        assert resume_point is not None
+
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orch = Orchestrator(db_b, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        run_b_resume = resume_orch.resume(resume_point, config_b, graph_b, payload_store=payload_store_b, settings=settings_b)
+
+        # ── COUNTER-FIELD ASSERTIONS ──────────────────────────────────────
+
+        # rows_processed: BOTH paths count per source row.
+        # This is the primary F2 guard: the resume loop's ``rows_processed += 1``
+        # is outside the per-spec dispatch loop, so even multi-spec rows
+        # increment by exactly 1.  Uninterrupted A and resume B agree.
+        assert run_b_resume.rows_processed == run_a.rows_processed, (
+            f"rows_processed must equal uninterrupted run (both per source row): "
+            f"A={run_a.rows_processed}, B={run_b_resume.rows_processed}. "
+            f"If this fails, the resume loop is incrementing rows_processed per leaf "
+            f"(per IncompleteTokenSpec) instead of per source row — an F2 regression."
+        )
+
+        # rows_processed must be 1 for our 1-source-row test pipeline (regression pin).
+        assert run_b_resume.rows_processed == 1, (
+            f"1 source row → rows_processed must be 1 (per-source-row invariant); got {run_b_resume.rows_processed}"
+        )
+
+        # Resume result must be COMPLETED (the fork row was fully resolved).
+        assert run_b_resume.status == RunStatus.COMPLETED, (
+            f"Resume of a 1-row fork pipeline must reach COMPLETED; got {run_b_resume.status}"
+        )
+
+        # Terminal-outcome multiset is conserved (conservation law, re-verified here
+        # alongside counter assertions).
+        def _outcome_counts(db: LandscapeDB, run_id: str) -> dict[tuple[str, str], int]:
+            with db.engine.connect() as conn:
+                result = conn.execute(
+                    text("""
+                        SELECT t.row_id AS row_id, o.sink_name AS sink_name, COUNT(*) AS n
+                        FROM token_outcomes o
+                        JOIN tokens t ON t.token_id = o.token_id
+                        JOIN rows r ON r.row_id = t.row_id
+                        WHERE r.run_id = :run_id
+                          AND o.completed = 1
+                          AND o.sink_name IS NOT NULL
+                        GROUP BY t.row_id, o.sink_name
+                    """),
+                    {"run_id": run_id},
+                ).fetchall()
+            return {(row.row_id, row.sink_name): row.n for row in result}
+
+        a_outcomes = _outcome_counts(db_a, run_a.run_id)
+        b_outcomes = _outcome_counts(db_b, run_id)
+        # outcome multisets agree per-sink-count (ignoring different row_id UUIDs)
+        a_sink_counts = sorted(v for v in a_outcomes.values())
+        b_sink_counts = sorted(v for v in b_outcomes.values())
+        assert a_sink_counts == b_sink_counts, (
+            f"Terminal-outcome count per (row_id, sink_name) must match uninterrupted run. A={a_outcomes}, B={b_outcomes}"
+        )
+        assert all(n == 1 for n in b_outcomes.values()), (
+            f"Every (row_id, sink_name) must have exactly 1 completed outcome after resume; got {b_outcomes}"
+        )
+
+        # KNOWN ASYMMETRY (design question, not asserted):
+        # run_b_resume.rows_succeeded == 1 (resume-only: only 1 leaf re-driven)
+        # run_a.rows_succeeded == 2 (cumulative: both fork branches processed)
+        # run_b_resume.rows_forked == 0 (resume-only: fork dispatch not re-run)
+        # run_a.rows_forked == 1 (cumulative: fork parent processed from source)
+        # These differ because the "with-unprocessed-rows" resume branch returns
+        # resume-only counters while the "no-unprocessed-rows" branch (core.py ~2626)
+        # reconstructs cumulative counters from audit.  Asserting equality here would
+        # pin the current (inconsistent) behaviour; the design decision is deferred.
+        # See: NEEDS_CONTEXT note in Task 11 report.
+        _known_rows_succeeded_a = run_a.rows_succeeded  # 2 (both fork branches)
+        _known_rows_succeeded_b = run_b_resume.rows_succeeded  # 1 (resume-only: 1 branch)
+        _known_rows_forked_a = run_a.rows_forked  # 1
+        _known_rows_forked_b = run_b_resume.rows_forked  # 0
+        # Regression pins for current documented behaviour — fail if behaviour changes
+        # unexpectedly without a deliberate design update.
+        assert _known_rows_succeeded_a == 2, (
+            f"Uninterrupted 1-row 2-branch fork: rows_succeeded must be 2 (one per branch); got {_known_rows_succeeded_a}"
+        )
+        assert _known_rows_succeeded_b == 1, (
+            f"Resume (1 re-driven branch): rows_succeeded must be 1 (resume-only); "
+            f"got {_known_rows_succeeded_b}. If this changed, verify whether the resume path "
+            f"was updated to cumulative semantics (correct change) or regressed (bug)."
+        )
+        assert _known_rows_forked_a == 1, f"Uninterrupted 1-row fork: rows_forked must be 1; got {_known_rows_forked_a}"
+        assert _known_rows_forked_b == 0, (
+            f"Resume (child re-drive only): rows_forked must be 0 (fork parent not re-processed); "
+            f"got {_known_rows_forked_b}. If this changed, verify whether the resume path "
+            f"was updated to cumulative semantics (correct change) or regressed (bug)."
+        )

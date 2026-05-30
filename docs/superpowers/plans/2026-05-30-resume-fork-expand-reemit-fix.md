@@ -38,7 +38,7 @@ Provenance (a `node_states` column written by the *first* re-drive) forces **sch
 - Modify `src/elspeth/engine/executors/sink.py`, `transform.py` (via `state_guard`), `coalesce_executor.py` — add offset + provenance to `begin_node_state` calls (Phase 4).
 - Modify `src/elspeth/engine/orchestrator/resume.py` + `core.py` — dispatch: no-tokens → `process_existing_row`; incomplete-tokens → reconstruct + `resume_incomplete_token` (Phase 4).
 - Modify `tests/property/audit/test_fork_join_balance.py` — oracle + matrix (Phases 1, 4, 5).
-- Create `tests/unit/landscape/test_schema_epoch_and_required_columns.py` (Phase 2).
+- Create `tests/unit/core/landscape/test_schema_epoch_and_required_columns.py` (Phase 2).
 - Migrate test call sites of `expand_token` / `coalesce_tokens` (Phase 3) — enumerated in Task 4.
 
 ---
@@ -164,7 +164,7 @@ git commit -m "test: harden resume fork re-emit oracle to full conservation law 
 - Modify: `src/elspeth/core/landscape/schema.py` (`tokens_table`, `node_states_table`, `SQLITE_SCHEMA_EPOCH`)
 - Modify: `src/elspeth/core/landscape/database.py` (`_REQUIRED_COLUMNS`)
 - Modify: `src/elspeth/core/landscape/execution_repository.py` (`begin_node_state`)
-- Test: `tests/unit/landscape/test_schema_epoch_and_required_columns.py` (new)
+- Test: `tests/unit/core/landscape/test_schema_epoch_and_required_columns.py` (new)
 
 - [ ] **Step 1: Write the failing test** (new file):
 
@@ -204,7 +204,7 @@ def test_required_columns_include_new_columns_and_openrouter() -> None:
 
 - [ ] **Step 2: Run — fails** (epoch is 10; columns/required entries missing).
 
-Run: `.venv/bin/python -m pytest tests/unit/landscape/test_schema_epoch_and_required_columns.py -v`
+Run: `.venv/bin/python -m pytest tests/unit/core/landscape/test_schema_epoch_and_required_columns.py -v`
 
 - [ ] **Step 3: Add `tokens.token_data_ref`** (in `tokens_table`, after `branch_name`):
 
@@ -271,13 +271,13 @@ SQLITE_SCHEMA_EPOCH = 11
 
 - [ ] **Step 8: Run the new test + the landscape DB suite**
 
-Run: `.venv/bin/python -m pytest tests/unit/landscape/test_schema_epoch_and_required_columns.py tests/unit/landscape tests/integration -k "schema or epoch or database or resume or node_state" -q`
+Run: `.venv/bin/python -m pytest tests/unit/core/landscape/test_schema_epoch_and_required_columns.py tests/unit/core/landscape tests/integration -k "schema or epoch or database or resume or node_state" -q`
 Expected: PASS. Any test hardcoding epoch 10 is a pinning test of the constant — update to 11. Find them: `rg -rn "SQLITE_SCHEMA_EPOCH|epoch.{0,4}10|== 10" tests/ | rg -i epoch`.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/elspeth/core/landscape/schema.py src/elspeth/core/landscape/database.py src/elspeth/core/landscape/execution_repository.py tests/unit/landscape/test_schema_epoch_and_required_columns.py
+git add src/elspeth/core/landscape/schema.py src/elspeth/core/landscape/database.py src/elspeth/core/landscape/execution_repository.py tests/unit/core/landscape/test_schema_epoch_and_required_columns.py
 git commit -m "feat(schema): token_data_ref + node_states.resume_checkpoint_id + epoch 11 + F3 (_REQUIRED_COLUMNS)"
 ```
 
@@ -1018,7 +1018,7 @@ git commit -m "test: complete risk-ordered resume fork/expand/coalesce matrix (F
 - [ ] **Step 1: Targeted then full suite** (plain `pytest tests/` is the CI-equivalent selection — do NOT pass `-o addopts=""`, per memory):
 
 ```bash
-.venv/bin/python -m pytest tests/property/audit/test_fork_join_balance.py tests/e2e/recovery tests/unit/landscape tests/unit/core/landscape -q
+.venv/bin/python -m pytest tests/property/audit/test_fork_join_balance.py tests/e2e/recovery tests/unit/core/landscape tests/unit/core/landscape -q
 .venv/bin/python -m pytest tests/ -q
 ```
 Expected: PASS (no new failures vs. the known pre-existing RC5.2 failures — memory `project_rc52_preexisting_test_failures_2026-05-29`).

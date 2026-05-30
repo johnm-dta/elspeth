@@ -121,8 +121,33 @@ def derive_resume_terminal_status_from_audit(factory: RecorderFactory, run_id: s
             ):
                 counters.rows_succeeded += 1
             case (TerminalOutcome.SUCCESS, TerminalPath.COALESCED):
-                counters.rows_coalesced += 1
-                counters.rows_succeeded += 1
+                # A coalesce produces TWO kinds of (SUCCESS, COALESCED) record:
+                #   1. the MERGED/output token, recorded with sink_name SET when
+                #      it reaches its terminal sink (live: outcomes.py
+                #      accumulate_row_outcomes → _route_to_sink). This is the row
+                #      that "coalesced", and the LIVE accumulator counts it once.
+                #   2. each CONSUMED branch input, recorded by CoalesceExecutor
+                #      with sink_name HARD-CODED to None (coalesce_executor.py
+                #      ~1016-1022) — these are absorbed INTO the merged token.
+                # The live path never routes the consumed inputs through
+                # accumulate_row_outcomes, so it counts ONLY the merged output.
+                # derive() must mirror that: the consumed inputs DELEGATE their
+                # success/coalesce predicate to the merged token (exactly as
+                # BATCH_CONSUMED delegates to the aggregate result and fork
+                # children are counted at their own sinks). Counting every
+                # COALESCED record here double-counts — derive reported
+                # rows_coalesced/rows_succeeded == 3 for a 2-branch coalesce-success
+                # where the live RunResult reports 1 (resume-independent bug; the
+                # over-count went into the audit-derived RunResult of every resumed
+                # coalesce-success run). The sink_name discriminator is an
+                # invariant, not a topology coincidence: a consumed input ALWAYS
+                # has sink_name=None and the merged output ALWAYS carries its sink
+                # name (this also keeps nested coalesces correct — an inner merged
+                # token absorbed by an outer coalesce is recorded as a consumed
+                # input with sink_name=None and so is not counted at the inner level).
+                if outcome_record.sink_name is not None:
+                    counters.rows_coalesced += 1
+                    counters.rows_succeeded += 1
             case (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED):
                 counters.rows_routed_success += 1
                 counters.rows_succeeded += 1

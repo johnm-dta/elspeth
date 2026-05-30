@@ -1923,6 +1923,7 @@ class TestForkRecoveryInvariant:
         ExecutionGraph,
         ElspethSettings,
         str,  # run_id
+        RunResult,  # the completed run-1 RunResult (live counters)
     ]:
         """Shared setup: build and run a fork→PassTransform→coalesce→sink pipeline.
 
@@ -1939,9 +1940,16 @@ class TestForkRecoveryInvariant:
         (resolve_next_node(coalesce_node_id) is None in the traversal map —
         the sink is reached via resolve_coalesce_sink, not the next-node map).
 
-        Returns (db, payload_store, config, graph, settings_obj, run_id) for
-        the completed run.  The same payload_store MUST be used for both
-        the initial run and the resume (merged token_data_ref lives there).
+        Returns (db, payload_store, config, graph, settings_obj, run_id, run)
+        for the completed run.  ``run`` is the live RunResult of the
+        uninterrupted run-1 (its counters come from the LIVE accumulator, a
+        different code path from derive_resume_terminal_status_from_audit) —
+        callers that need a same-topology uninterrupted oracle for
+        field-for-field reconciliation against a RESUMED run should build a
+        SEPARATE _setup_coalesce_pipeline() instance for run A and use this
+        ``run`` as that oracle (do NOT interrupt run A).  The same
+        payload_store MUST be used for both the initial run and the resume
+        (merged token_data_ref lives there).
         """
         from elspeth.core.config import ElspethSettings
 
@@ -2003,7 +2011,7 @@ class TestForkRecoveryInvariant:
         orchestrator = Orchestrator(db)
         run = orchestrator.run(config, graph=graph, settings=settings_obj, payload_store=payload_store)
         run_id = run.run_id
-        return db, payload_store, config, graph, settings_obj, run_id
+        return db, payload_store, config, graph, settings_obj, run_id, run
 
     def test_resume_fork_to_coalesce_before_barrier(self) -> None:
         """Re-driving branch tokens interrupted BEFORE the coalesce barrier must not
@@ -2052,7 +2060,7 @@ class TestForkRecoveryInvariant:
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape.schema import token_outcomes_table, token_parents_table, tokens_table
 
-        db, payload_store, config, graph, settings_obj, run_id = self._setup_coalesce_pipeline()
+        db, payload_store, config, graph, settings_obj, run_id, _run1 = self._setup_coalesce_pipeline()
 
         # ── Baseline (run-1 completed) ──────────────────────────────────────────
         def _outcome_counts() -> dict[tuple[str, str], int]:
@@ -2290,7 +2298,7 @@ class TestForkRecoveryInvariant:
         from elspeth.core.landscape.schema import token_outcomes_table, token_parents_table, tokens_table
         from elspeth.engine.coalesce_executor import COALESCE_CHECKPOINT_VERSION
 
-        db, payload_store, config, graph, settings_obj, run_id = self._setup_coalesce_pipeline()
+        db, payload_store, config, graph, settings_obj, run_id, _run1 = self._setup_coalesce_pipeline()
 
         # ── Baseline (run-1 completed) ──────────────────────────────────────────
         def _outcome_counts() -> dict[tuple[str, str], int]:
@@ -2543,7 +2551,7 @@ class TestForkRecoveryInvariant:
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape.schema import token_outcomes_table
 
-        db, payload_store, config, graph, settings_obj, run_id = self._setup_coalesce_pipeline()
+        db, payload_store, config, graph, settings_obj, run_id, _run1 = self._setup_coalesce_pipeline()
 
         # ── Baseline ──────────────────────────────────────────────────────────────
         def _outcome_counts() -> dict[tuple[str, str], int]:
@@ -3685,6 +3693,491 @@ class TestForkRecoveryInvariant:
             )
 
         # routed_destinations (the per-sink dict) must also reconcile.
+        assert dict(run_b_resume.routed_destinations) == dict(run_a.routed_destinations), (
+            f"F2 reconciliation failure on routed_destinations: "
+            f"uninterrupted={dict(run_a.routed_destinations)}, resumed={dict(run_b_resume.routed_destinations)}"
+        )
+
+    def test_resume_coalesced_counter_reconciles_with_uninterrupted_run(self) -> None:
+        """A resumed coalesce-SUCCESS run reconciles EVERY counter field —
+        including rows_coalesced > 0 (non-vacuous) — with an uninterrupted run.
+
+        WHY THIS CELL EXISTS (regression-detection gap closed):
+
+        ``test_resume_counters_reconcile_with_uninterrupted_run`` reconciles all
+        12 RunResult counter fields, but on a fork→sink topology where
+        ``rows_coalesced == 0`` on BOTH sides — so that field reconciled only
+        VACUOUSLY (0 == 0).  The integration-level
+        ``tests/integration/test_adr_019_resume_counter_parity.py`` snapshot
+        tests use non-coalesce topologies, so ``rows_coalesced`` was likewise
+        0 == 0 everywhere.  Concrete uncovered regression: deleting
+        ``counters.rows_coalesced += 1`` from the ``(SUCCESS, COALESCED)`` arm in
+        ``src/elspeth/engine/orchestrator/run_status.py`` failed NO test — the
+        co-incremented ``rows_succeeded`` keeps the run COMPLETED and nothing
+        asserted ``rows_coalesced`` non-zero on a RESUMED run.  This cell closes
+        that gap: it reconciles all 12 fields on a coalesce-SUCCESS topology
+        where ``rows_coalesced >= 1``.
+
+        TOPOLOGY (shared ``_setup_coalesce_pipeline``):
+            source(1 row) → gate(fork) → [path_a: PassTransform,
+                                          path_b: PassTransform]
+                   → coalesce('merge', require_all, on_success='output')
+                   → sink 'output'
+        The coalesce SUCCEEDS (require_all quorum met by both branches) → its
+        merged token reaches a ``(SUCCESS, COALESCED)`` terminal outcome, so
+        ``rows_coalesced == 1`` (non-vacuous).
+
+        RUN A (uninterrupted oracle): a SEPARATE ``_setup_coalesce_pipeline``
+        instance, NOT interrupted.  Its counters come from the LIVE accumulator
+        (a different code path from ``derive_resume_terminal_status_from_audit``).
+
+        RUN B (run-1 + interrupt-before-barrier + resume): the SAME topology;
+        run-1 completes, then the barrier is undone (merged token + branch
+        COALESCED outcomes + coalesce node_states deleted — verbatim the
+        before-barrier interrupt from ``test_resume_fork_to_coalesce_before_barrier``),
+        leaving both branch children incomplete.  Resume exercises the
+        WITH-UNPROCESSED-ROWS (fork-re-drive) branch: it re-drives both branch
+        specs to the barrier, the barrier re-fires exactly once, a merged token
+        is re-created with a ``(SUCCESS, COALESCED)`` outcome, and
+        ``derive_resume_terminal_status_from_audit`` reconstructs the cumulative
+        counters from the audit trail.
+
+        ``rows_coalesced`` is reconstructed purely by ``derive`` (line 124 of
+        run_status.py — it is NOT grafted from the live re-drive counter; only
+        ``rows_coalesce_failed`` is grafted, see ``resume()`` in core.py).  So
+        the line-124 lever bites the RESUMED run B (derive-reconstructed) while
+        run A's value comes from the live accumulator.
+
+        OBSERVED RED (lever: delete the ``counters.rows_coalesced += 1`` line
+        from the ``(SUCCESS, COALESCED)`` arm in run_status.py, leaving the
+        co-incremented ``counters.rows_succeeded += 1`` so status stays
+        COMPLETED and the signal is isolated to rows_coalesced; run
+        ``-k test_resume_coalesced_counter_reconciles_with_uninterrupted_run``):
+            AssertionError: Resumed coalesce-success run must record at least one
+            COALESCED terminal outcome (non-vacuous); got rows_coalesced=0.
+            If 0, the barrier did not re-fire on resume or derive miscounts
+            COALESCED.  assert 0 >= 1
+        Run A (live accumulator) reports rows_coalesced=1; run B
+        (derive-reconstructed, lever removed) reports 0 — a 1-vs-0 mismatch, not
+        a both-zero vacuity (the non-vacuity guard fires first; the field-loop
+        ``uninterrupted=1, resumed=0`` mismatch is the same signal).  Reverting
+        the lever restores GREEN.
+
+        NOTE (derive fix co-landed): GREEN-first on this cell uncovered a
+        resume-independent bug in ``derive_resume_terminal_status_from_audit``:
+        its ``(SUCCESS, COALESCED)`` arm counted EVERY COALESCED record
+        (the merged output token AND each consumed branch input), reporting
+        rows_coalesced == 3 AND rows_succeeded == 3 for this 2-branch
+        coalesce-success while the LIVE RunResult reports 1 each.  The fix
+        (same commit) makes derive count only the merged output token
+        (``sink_name`` set), mirroring the live accumulator which never routes
+        consumed inputs through ``accumulate_row_outcomes``.  See the inline
+        comment on the COALESCED arm in run_status.py.
+
+        SCOPE CAVEAT — rows_coalesce_failed: a coalesce-SUCCESS topology keeps
+        ``rows_coalesce_failed == 0`` on both sides (reconciled vacuously here,
+        which is correct — that field's non-vacuous resume coverage lives in
+        ``test_adr_019_resume_counter_parity.py::
+        test_resume_grafts_rows_coalesce_failed_from_timeout_redrive``).
+        """
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import CheckpointSettings
+        from elspeth.core.landscape.schema import token_outcomes_table, token_parents_table, tokens_table
+
+        # ── Run A (uninterrupted oracle) ──────────────────────────────────────
+        _db_a, _ps_a, _config_a, _graph_a, _settings_a, _run_id_a, run_a = self._setup_coalesce_pipeline()
+        assert run_a.status == RunStatus.COMPLETED, run_a.status
+        # Non-vacuity precondition: the coalesce SUCCEEDED → rows_coalesced >= 1.
+        assert run_a.rows_coalesced >= 1, (
+            f"Run A (uninterrupted coalesce-success) must record at least one "
+            f"COALESCED terminal outcome (non-vacuous precondition); got "
+            f"rows_coalesced={run_a.rows_coalesced}"
+        )
+
+        # ── Run B (run-1 + interrupt-before-barrier + resume) ─────────────────
+        db, payload_store, config, graph, settings_obj, run_id, _run_b1 = self._setup_coalesce_pipeline()
+
+        # Find the merged token (join_group_id set, branch_name NULL).
+        with db.engine.connect() as conn:
+            merged_rows = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id, t.join_group_id AS join_group_id
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id
+                      AND t.join_group_id IS NOT NULL
+                      AND t.branch_name IS NULL
+                      AND t.fork_group_id IS NULL
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+        assert len(merged_rows) == 1, f"Expected exactly one merged token (join_group_id set, branch/fork NULL); got {len(merged_rows)}"
+        merged_token_id = merged_rows[0].token_id
+        join_group_id = merged_rows[0].join_group_id
+
+        # ── Interrupt: undo the barrier entirely (pre-barrier crash state) ────
+        # Verbatim from test_resume_fork_to_coalesce_before_barrier: reverse
+        # everything the barrier wrote so both branch children become incomplete
+        # leaves with no completed coalesce node_state.  Resume then re-drives
+        # both branches (the with-unprocessed-rows fork-re-drive branch).
+        coalesce_node_id_for_deletion = graph.get_coalesce_id_map()[CoalesceName("merge")]
+
+        with db.engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            # 1. merged token outcomes (COMPLETED at sink)
+            conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
+            # 2. merged token node_states
+            conn.execute(
+                text("DELETE FROM node_states WHERE token_id = :tid"),
+                {"tid": merged_token_id},
+            )
+            # 3. token_parents for merged token
+            conn.execute(token_parents_table.delete().where(token_parents_table.c.token_id == merged_token_id))
+            # 4. merged token row
+            conn.execute(tokens_table.delete().where(tokens_table.c.token_id == merged_token_id))
+            # 5. branch COALESCED outcomes (recorded by the barrier, path='coalesced')
+            conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.join_group_id == join_group_id))
+            # 6. branch tokens' COMPLETED node_states at the coalesce node
+            conn.execute(
+                text("DELETE FROM node_states WHERE node_id = :nid AND run_id = :rid"),
+                {"nid": str(coalesce_node_id_for_deletion), "rid": run_id},
+            )
+            conn.commit()
+            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+
+        # ── Resume ────────────────────────────────────────────────────────────
+        checkpoint_mgr = CheckpointManager(db)
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        sink_node_ids = graph.get_sinks()
+        with db.engine.connect() as conn:
+            actual_token = conn.execute(
+                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
+                {"run_id": run_id},
+            ).fetchone()
+        assert actual_token is not None
+
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=actual_token.token_id,
+            node_id=sink_node_ids[0],
+            sequence_number=1,
+            graph=graph,
+        )
+        with db.engine.connect() as conn:
+            conn.execute(
+                text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            conn.commit()
+
+        check = recovery_mgr.can_resume(run_id, graph)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        run_b_resume = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+
+        # ── Reconciliation: EVERY counter field, non-vacuous on rows_coalesced ─
+        assert run_b_resume.status == RunStatus.COMPLETED, (
+            f"Resume of the coalesce pipeline must reach COMPLETED; got {run_b_resume.status}"
+        )
+
+        # Non-vacuity: the RESUMED run must also record the COALESCED outcome.
+        assert run_b_resume.rows_coalesced >= 1, (
+            f"Resumed coalesce-success run must record at least one COALESCED "
+            f"terminal outcome (non-vacuous); got rows_coalesced={run_b_resume.rows_coalesced}. "
+            f"If 0, the barrier did not re-fire on resume or derive miscounts COALESCED."
+        )
+        assert run_b_resume.rows_coalesced == run_a.rows_coalesced, (
+            f"rows_coalesced must equal the uninterrupted run: A={run_a.rows_coalesced}, "
+            f"B={run_b_resume.rows_coalesced}. derive reconstructs this purely from the "
+            f"(SUCCESS, COALESCED) arm in run_status.py (not grafted); a divergence means "
+            f"that arm regressed or the barrier failed to re-fire on resume."
+        )
+
+        counter_fields = (
+            "rows_processed",
+            "rows_succeeded",
+            "rows_failed",
+            "rows_routed_success",
+            "rows_routed_failure",
+            "rows_quarantined",
+            "rows_forked",
+            "rows_coalesced",
+            "rows_coalesce_failed",
+            "rows_expanded",
+            "rows_buffered",
+            "rows_diverted",
+        )
+        for field in counter_fields:
+            a_val = getattr(run_a, field)
+            b_val = getattr(run_b_resume, field)
+            assert b_val == a_val, (
+                f"F2 reconciliation failure on '{field}': resumed run (run1 + resume) must equal "
+                f"the uninterrupted run field-for-field. uninterrupted={a_val}, resumed={b_val}. "
+                f"Both resume branches finalize cumulative counters from the audit trail; a divergence "
+                f"means either the with-rows branch regressed to resume-only counters or "
+                f"derive_resume_terminal_status_from_audit miscounts this field."
+            )
+
+        assert dict(run_b_resume.routed_destinations) == dict(run_a.routed_destinations), (
+            f"F2 reconciliation failure on routed_destinations: "
+            f"uninterrupted={dict(run_a.routed_destinations)}, resumed={dict(run_b_resume.routed_destinations)}"
+        )
+
+    @staticmethod
+    def _build_end_of_source_flush_aggregation(
+        n_source_rows: int,
+    ) -> tuple[LandscapeDB, PipelineConfig, ExecutionGraph, ElspethSettings]:
+        """Build a fresh source(N rows) → batch aggregation(count > N) → sink
+        pipeline whose aggregation NEVER triggers mid-stream — all N input rows
+        are BUFFERED and flushed together at end-of-source.
+
+        WHY count > N (NOT count == N): a count==N trigger FIRES on the Nth row
+        mid-stream, and the live accumulator and derive() then DISAGREE on
+        rows_buffered (live counts N-1, derive counts N from the persisted
+        BATCH_CONSUMED→BUFFERED records — a separate, documented divergence,
+        out of scope for this reconciliation cell).  The end-of-source-flush
+        path (count > N) is the CANONICAL buffered path on which live == derive
+        == N for every field, so it is the honest topology for a field-for-field
+        live-vs-derive reconciliation cell.  (Mirrors
+        tests/property/audit/test_terminal_states.py's count=9999 construction.)
+
+        Returns (db, config, graph, settings) — caller runs / resumes it.
+        """
+        from elspeth.contracts.enums import Determinism, OutputMode
+        from elspeth.contracts.schema_contract import PipelineRow
+        from elspeth.core.config import AggregationSettings, SourceSettings, TriggerConfig
+        from elspeth.plugins.infrastructure.base import BaseTransform
+        from elspeth.plugins.infrastructure.results import TransformResult
+        from tests.fixtures.base_classes import _TestSchema, as_sink, as_source, as_transform
+        from tests.fixtures.plugins import CollectSink, ListSource
+
+        class _SumAggregator(BaseTransform):
+            name = "sum-aggregator"
+            determinism = Determinism.DETERMINISTIC
+            plugin_version = "1.0.0"
+            source_file_hash = None
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            passes_through_input = False
+            on_success = "output"
+            on_error = "discard"
+
+            def __init__(self) -> None:
+                super().__init__({"schema": {"mode": "observed"}})
+
+            def process(self, rows: list[PipelineRow], ctx: object) -> TransformResult:  # type: ignore[override]
+                if not rows:
+                    # Unreachable in practice (a batch flush always carries rows);
+                    # "invalid_input" is a valid TransformResult.error reason literal.
+                    return TransformResult.error({"reason": "invalid_input"}, retryable=False)
+                total = sum(r.to_dict().get("value", 0) for r in rows)
+                return TransformResult.success(PipelineRow({"sum": total}, rows[0].contract), success_reason={"action": "sum"})
+
+        db = make_landscape_db()
+        src = ListSource([{"value": i + 1} for i in range(n_source_rows)], name="list_source", on_success="agg_in")
+        out = CollectSink("output")
+        agg = _SumAggregator()
+        agg_settings = AggregationSettings(
+            name="sum_agg",
+            plugin=agg.name,
+            input="agg_in",
+            on_success="output",
+            on_error="discard",
+            # count > N → never fires mid-stream → all N rows buffer to end-of-source.
+            trigger=TriggerConfig(count=n_source_rows + 1, timeout_seconds=3600),
+            output_mode=OutputMode.TRANSFORM,
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            source=as_source(src),
+            source_settings=SourceSettings(plugin=src.name, on_success="agg_in", options={}),
+            transforms=[],
+            sinks={"output": as_sink(out)},
+            aggregations={"sum_agg": (as_transform(agg), agg_settings)},
+            gates=[],
+        )
+        agg_id_map = graph.get_aggregation_id_map()
+        agg_node_id = agg_id_map[next(iter(agg_id_map))]
+        agg.node_id = agg_node_id
+        config = PipelineConfig(
+            source=as_source(src),
+            transforms=[as_transform(agg)],
+            sinks={"output": as_sink(out)},
+            aggregation_settings={agg_node_id: agg_settings},
+        )
+        settings = ElspethSettings(
+            source={"plugin": src.name, "on_success": "agg_in", "options": {}},
+            sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
+        )
+        return db, config, graph, settings
+
+    def test_resume_buffered_counter_reconciles_with_uninterrupted_run(self) -> None:
+        """A resumed aggregation run reconciles EVERY counter field — including
+        rows_buffered > 0 (non-vacuous) — with an uninterrupted run.
+
+        WHY THIS CELL EXISTS (regression-detection gap closed):
+
+        ``test_resume_counters_reconcile_with_uninterrupted_run`` (fork→sink) and
+        the ``test_adr_019_resume_counter_parity.py`` snapshot tests all use
+        topologies with ``rows_buffered == 0`` on both sides — so that field
+        reconciled only VACUOUSLY (0 == 0).  ``rows_buffered`` is NOT always 0 at
+        a COMPLETED run: a batch aggregation leaves one non-completed
+        ``(None, BUFFERED)`` audit record per input row that derive() counts
+        (run_status.py line ~113), so an N-row aggregation completes with
+        ``rows_buffered == N`` (cf. test_terminal_states.py and
+        test_t18_characterization.py, which both assert ``rows_buffered == N``
+        on COMPLETED aggregation runs).  This cell reconciles all 12 fields on
+        such a topology where ``rows_buffered >= 1`` (non-vacuous).
+
+        TOPOLOGY (``_build_end_of_source_flush_aggregation``, N=3):
+            source(3 rows) → batch aggregation(count=4 → NEVER fires mid-stream;
+                              all 3 rows BUFFERED, flushed together at
+                              end-of-source) → sink 'output'
+        The 3 input rows each get a persisted ``(None, BUFFERED)`` audit record
+        (TerminalPath.BUFFERED, non-completed) → ``rows_buffered == 3``
+        (non-vacuous).  count > N is deliberate: see the helper docstring — a
+        count==N mid-stream trigger makes the live accumulator and derive()
+        DISAGREE on rows_buffered (a separate finding, out of scope here).
+
+        RUN A (uninterrupted oracle): a SEPARATE
+        ``_build_end_of_source_flush_aggregation`` instance, NOT interrupted.
+        Its counters come from the LIVE accumulator.
+
+        RUN B (run-1 + interrupt + resume): the SAME topology; run-1 completes
+        with all 3 BUFFERED records + the aggregate result + sink write persisted
+        intact.  The interrupt creates a checkpoint and marks the run failed but
+        deletes NO token_outcomes — so on resume ``get_unprocessed_rows`` finds
+        nothing to re-drive and resume takes the ALL-ROWS-ALREADY-PROCESSED
+        branch (the branch Phase-2.2 introduced
+        ``derive_resume_terminal_status_from_audit`` for).  derive() reconstructs
+        the cumulative counters — including ``rows_buffered`` from the 3 intact
+        BUFFERED records — and the run finalizes COMPLETED.
+
+        ``rows_buffered`` is reconstructed purely by derive's ``(None, BUFFERED)``
+        arm (line ~113 of run_status.py — NOT grafted; only ``rows_coalesce_failed``
+        is grafted).  So the line-113 lever bites the RESUMED run B
+        (derive-reconstructed) while run A's value comes from the live accumulator.
+
+        OBSERVED RED (lever: delete ``counters.rows_buffered += 1`` from the
+        ``(None, BUFFERED)`` arm in run_status.py — the non-completed branch near
+        line 113, leaving the ``continue``; run
+        ``-k test_resume_buffered_counter_reconciles_with_uninterrupted_run``):
+            AssertionError: Resumed aggregation run must record at least one
+            BUFFERED record (non-vacuous); got rows_buffered=0. ...
+            assert 0 >= 1
+        Run A (live accumulator) reports rows_buffered=3; run B
+        (derive-reconstructed, lever removed) reports 0 — a 3-vs-0 mismatch, not
+        a both-zero vacuity (the non-vacuity guard fires first; the field-loop
+        ``uninterrupted=3, resumed=0`` mismatch is the same signal).  Reverting
+        the lever restores GREEN.
+        """
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import CheckpointSettings
+
+        n = 3
+
+        # ── Run A (uninterrupted oracle) ──────────────────────────────────────
+        db_a, config_a, graph_a, settings_a = self._build_end_of_source_flush_aggregation(n)
+        run_a = Orchestrator(db_a).run(config_a, graph=graph_a, settings=settings_a, payload_store=MockPayloadStore())
+        assert run_a.status == RunStatus.COMPLETED, run_a.status
+        # Non-vacuity precondition: all N rows buffered → rows_buffered == N >= 1.
+        assert run_a.rows_buffered == n, (
+            f"Run A (uninterrupted end-of-source-flush aggregation of {n} rows) must record "
+            f"rows_buffered={n} (one BUFFERED record per input row); got {run_a.rows_buffered}"
+        )
+        assert run_a.rows_buffered >= 1, "non-vacuity precondition"
+
+        # ── Run B (run-1 + interrupt + resume via the all-terminal branch) ────
+        db, config, graph, settings_obj = self._build_end_of_source_flush_aggregation(n)
+        payload_store = MockPayloadStore()
+        run_b1 = Orchestrator(db).run(config, graph=graph, settings=settings_obj, payload_store=payload_store)
+        run_id = run_b1.run_id
+        assert run_b1.rows_buffered == n, run_b1.rows_buffered
+
+        # Interrupt: checkpoint + mark failed, deleting NO outcomes.  Every token
+        # already has its terminal (or non-completed BUFFERED) record, so resume's
+        # get_unprocessed_rows is empty → the all-rows-already-processed branch
+        # reconstructs the cumulative counters from the intact audit trail.
+        checkpoint_mgr = CheckpointManager(db)
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        sink_node_ids = graph.get_sinks()
+        with db.engine.connect() as conn:
+            actual_token = conn.execute(
+                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
+                {"run_id": run_id},
+            ).fetchone()
+        assert actual_token is not None
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=actual_token.token_id,
+            node_id=sink_node_ids[0],
+            sequence_number=1,
+            graph=graph,
+        )
+        with db.engine.connect() as conn:
+            conn.execute(
+                text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            conn.commit()
+
+        check = recovery_mgr.can_resume(run_id, graph)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        run_b_resume = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+
+        # ── Reconciliation: EVERY counter field, non-vacuous on rows_buffered ─
+        assert run_b_resume.status == RunStatus.COMPLETED, (
+            f"Resume of the aggregation pipeline must reach COMPLETED; got {run_b_resume.status}"
+        )
+        assert run_b_resume.rows_buffered >= 1, (
+            f"Resumed aggregation run must record at least one BUFFERED record (non-vacuous); "
+            f"got rows_buffered={run_b_resume.rows_buffered}. If 0, derive's (None, BUFFERED) arm "
+            f"miscounts the persisted BUFFERED records."
+        )
+        assert run_b_resume.rows_buffered == run_a.rows_buffered, (
+            f"rows_buffered must equal the uninterrupted run: A={run_a.rows_buffered}, "
+            f"B={run_b_resume.rows_buffered}. derive reconstructs this purely from the "
+            f"(None, BUFFERED) arm in run_status.py (not grafted); a divergence means that "
+            f"arm regressed or the BUFFERED records were not preserved across resume."
+        )
+
+        counter_fields = (
+            "rows_processed",
+            "rows_succeeded",
+            "rows_failed",
+            "rows_routed_success",
+            "rows_routed_failure",
+            "rows_quarantined",
+            "rows_forked",
+            "rows_coalesced",
+            "rows_coalesce_failed",
+            "rows_expanded",
+            "rows_buffered",
+            "rows_diverted",
+        )
+        for field in counter_fields:
+            a_val = getattr(run_a, field)
+            b_val = getattr(run_b_resume, field)
+            assert b_val == a_val, (
+                f"F2 reconciliation failure on '{field}': resumed run (run1 + resume) must equal "
+                f"the uninterrupted run field-for-field. uninterrupted={a_val}, resumed={b_val}. "
+                f"derive_resume_terminal_status_from_audit must reconstruct this field from the "
+                f"audit trail to match the live accumulator."
+            )
+
         assert dict(run_b_resume.routed_destinations) == dict(run_a.routed_destinations), (
             f"F2 reconciliation failure on routed_destinations: "
             f"uninterrupted={dict(run_a.routed_destinations)}, resumed={dict(run_b_resume.routed_destinations)}"

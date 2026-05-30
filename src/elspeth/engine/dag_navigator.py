@@ -323,3 +323,25 @@ class DAGNavigator:
             current_node_id=self.resolve_next_node(current_node_id),
             on_success_sink=on_success_sink,
         )
+
+    def resolve_branch_first_node(self, branch_name: str) -> NodeID:
+        """First processing node for a fork branch routed to a coalesce.
+
+        _branch_first_node covers all coalesce-bound branches (built by
+        ExecutionGraph.get_branch_first_nodes). Callers must only invoke this for
+        branches that are in _branch_to_coalesce; calling it for a fork→sink branch
+        will raise because those branches are not in the map.
+
+        Raises:
+            OrchestrationInvariantError: If branch_name is not in the branch_first_node
+                map. This indicates a logic error in the caller: only coalesce-bound
+                branches are registered, not fork→sink branches.
+        """
+        try:
+            return self._branch_first_node[branch_name]
+        except KeyError as exc:
+            raise OrchestrationInvariantError(
+                f"Unknown branch name '{branch_name}' — not in branch_first_node map. "
+                f"Only coalesce-bound branches are registered here; fork→sink branches "
+                f"are not. Known: {sorted(self._branch_first_node.keys())}"
+            ) from exc

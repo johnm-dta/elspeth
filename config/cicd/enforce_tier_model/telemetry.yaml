@@ -42,25 +42,72 @@ per_file_rules:
 allow_hits:
 - key: telemetry/manager.py:R1:TelemetryManager:_export_loop:fp=30047980e068a453
   owner: architecture
-  reason: Queue.get() is stdlib API, not dict access
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-08-15'
+  reason: |-
+    Queue.get() is stdlib API, not dict access
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:31:45.117166+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.95
+  judge_rationale: |-
+    The flagged `.get()` is `queue.Queue.get()`, a blocking stdlib method on a `queue.Queue` instance constructed at line 149, not a dict-style defensive `.get(key, default)` on external data. R1 targets silent defensive dict access; this call has different semantics (blocking dequeue) and no default value. The rationale correctly identifies the false positive and is site-specific.
+  file_fingerprint: 81c5a5b3595704279d03ecfaec9e0aa10ba62af64b6ebdc40f4d2b32730d8af1
+  ast_path: 'body[16]/body[3]/body[2]/body[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:d414bc3c9f84f39d3679d27b26bde1b5f6f30e4d243c0c48205b0ebec5819a5b'
 - key: telemetry/manager.py:R6:TelemetryManager:_export_loop:fp=05590f539280dce7
   owner: architecture
-  reason: TelemetryExporterError stored for re-raise on flush() — not silently swallowed
-  safety: Stored exception re-raised on main thread via flush()/close()
-  expires: '2026-08-15'
+  reason: |-
+    TelemetryExporterError stored for re-raise on flush() — not silently swallowed
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:32:05.456585+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.8
+  judge_rationale: |-
+    The except block catches TelemetryExporterError but does not silently swallow it — the exception is stored in self._stored_exception for re-raise on flush()/close(), which is the documented pattern for background-thread errors that cannot be raised to the main thread directly. The logger.error is supplementary; the audit/re-raise path is preserved. This is a legitimate cross-thread error-propagation boundary, not defensive suppression. The decorator nudge does not apply (not Tier-3 external data, rule is R6 not R1/R5).
+  file_fingerprint: 81c5a5b3595704279d03ecfaec9e0aa10ba62af64b6ebdc40f4d2b32730d8af1
+  ast_path: 'body[16]/body[3]/body[2]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:7ca16d41229a01614232b7bfaaa0b2ea4882b50669186591b5f8b5dcf5acbff6'
 - key: telemetry/manager.py:R4:TelemetryManager:_export_loop:fp=eef48cd4ffa15e30
   owner: architecture
-  reason: Inverted transport-error pattern — only transport errors swallowed, all
-    others re-raise
-  safety: Non-transport exceptions stored and re-raised on main thread
-  expires: '2026-08-15'
+  reason: |-
+    Inverted transport-error pattern — only transport errors swallowed, all others re-raise
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:31:51.413158+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    The code shows an inverted transport-error pattern: the broad `except Exception` does NOT silently swallow — it stores non-transport exceptions in `_stored_exception` for re-raise on flush()/close() and breaks the loop. Only known transport errors (TELEMETRY_TRANSPORT_ERRORS) are logged-and-continued, which is appropriate isolation for a background telemetry thread that cannot propagate exceptions to the main thread directly. This matches the Telemetry primacy rule (best-effort, async) while preserving programming-error visibility via stored re-raise. The suppression is at a legitimate trust/thread boundary and the rationale accurately describes the structural pattern.
+  file_fingerprint: 81c5a5b3595704279d03ecfaec9e0aa10ba62af64b6ebdc40f4d2b32730d8af1
+  ast_path: 'body[16]/body[3]/body[2]/body[1]/handlers[1]'
+  judge_metadata_signature: 'hmac-sha256:v1:0df628433b3ce0363b458f9dcae52c47e7ef443eff0543a5acdb98501bedc972'
 - key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=0a1bb9f3fb968fdf
   owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-08-15'
+  reason: |-
+    Silent recovery with explicit error handling path
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:32:30.750433+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    This is R6 (exception handling) at line 363 inside TelemetryManager.handle_event, catching queue.Full in DROP backpressure mode. The except branch is not silent recovery — it dispatches to _drop_oldest_and_enqueue_newest which explicitly handles overflow per the configured DROP policy, with dropped-event accounting maintained downstream. This is the documented backpressure contract, not error swallowing: queue.Full is an expected control-flow signal in a bounded queue under DROP mode, and the handler implements the policy's required behavior. Telemetry is also explicitly best-effort per the primacy order (audit first, telemetry second), so this is the correct layer for bounded-queue overflow handling.
+  file_fingerprint: 81c5a5b3595704279d03ecfaec9e0aa10ba62af64b6ebdc40f4d2b32730d8af1
+  ast_path: 'body[16]/body[5]/body[7]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:6fda61f841f09c459b528407594aec6674746ad771896aa5246f9d92f4de1350'
 - key: telemetry/manager.py:R6:TelemetryManager:handle_event:fp=64535719a1fd4215
   owner: architecture
   reason: Silent recovery with explicit error handling path
@@ -80,10 +127,21 @@ allow_hits:
   expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:_drop_oldest_and_enqueue_newest:fp=7b8c10be497703d4
   owner: architecture
-  reason: Queue overflow handling at telemetry backpressure boundary
-  safety: Queue.Empty indicates race during overflow handling; safe fallback keeps
-    newest event path explicit
-  expires: '2026-08-15'
+  reason: |-
+    Queue overflow handling at telemetry backpressure boundary
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:31:58.106112+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The finding is at a genuine telemetry backpressure boundary: the except queue.Full handler catches a documented race where the bounded queue refilled between get_nowait and put_nowait. Per policy, telemetry is best-effort and must never propagate exceptions to pipeline code; the handler increments the drop counter and records the event via the audit/drop-tracking path rather than silently swallowing. This is offensive handling of a known concurrency race, not defensive coercion of typed data, and R6 (exception handling) is appropriately scoped here. The duplicate prior entries do not raise confidence, but the code excerpt independently supports the suppression.
+  file_fingerprint: 81c5a5b3595704279d03ecfaec9e0aa10ba62af64b6ebdc40f4d2b32730d8af1
+  ast_path: 'body[16]/body[6]/body[1]/body[1]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:05446aeb06b6ebf891e40303c499292a7b7cad81043f871ee4375612d72b37c2'
 - key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=9a2e20048626df2b
   owner: architecture
   reason: Sentinel reinsertion loop handles bounded queue contention
@@ -91,10 +149,21 @@ allow_hits:
   expires: '2026-08-15'
 - key: telemetry/manager.py:R6:TelemetryManager:_requeue_shutdown_sentinel_or_raise:fp=c7e62874628e94d1
   owner: architecture
-  reason: Sentinel reinsertion loop handles bounded queue contention
-  safety: Empty queue during contention is a race retry path only; loop continues
-    and fails loudly if unresolved
-  expires: '2026-08-15'
+  reason: |-
+    Sentinel reinsertion loop handles bounded queue contention
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:32:16.123906+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The flagged line is a `except queue.Empty: continue` inside a bounded retry loop that reinserts the shutdown sentinel under contention with in-flight producers. This is a legitimate concurrency control pattern, not defensive programming against bad data: the Empty exception is the expected signal that a racing producer drained the queue between the failed put_nowait and the compensating get_nowait, and the correct response is to retry within the bounded max_attempts budget (which raises RuntimeError on exhaustion — offensive failure). The suppression is not at a trust boundary, not on Tier-3 data, and not hiding a root-cause bug; it's the documented control flow of a known race. R1/R5 do not apply (not the decorator's scope), and the rationale, while terse, accurately names the mechanism visible in the excerpt.
+  file_fingerprint: 81c5a5b3595704279d03ecfaec9e0aa10ba62af64b6ebdc40f4d2b32730d8af1
+  ast_path: 'body[16]/body[7]/body[3]/body[0]/body[0]/handlers[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:514e53000031b31a7322852a9fbef06654fd7980b7327ada3b53c8d0fda04984'
 - key: telemetry/manager.py:R6:TelemetryManager:close:fp=79190bde3fa222f5
   owner: architecture
   reason: Silent recovery with explicit error handling path

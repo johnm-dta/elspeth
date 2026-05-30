@@ -15,30 +15,35 @@ per_file_rules:
 allow_hits:
 - key: composer_mcp/server.py:R6:create_server:call_tool:fp=bbe2757f46dc0db3
   owner: composer-audit
-  reason: Trust-boundary recovery — canonical_json/stable_hash on LLM-supplied arguments
-    can raise on Tier-3 input (non-finite floats, non-serializable types). The catch
-    builds a sentinel canonical and later synthesizes ARG_ERROR through the explicit
-    argument-error result path so the audit row still lands. Audit primacy demands a
-    row even on un-canonicalizable input. Updated 2026-05-06 (elspeth-281f259235) to
-    delegate sentinel construction to web.composer.audit.build_canonicalization_sentinel
-    so both audit surfaces share a single sentinel-shape policy.
-  safety: "Sentinel canonical _canonicalization_error key is written to the audit
-    row; the original exception class is preserved in the synthesized ValueError
-    message shape, returning a structured tool error to the LLM. Diagnostic upgrade
-    adds bounded, leak-safe metadata (top-level argument keys + rfc8785-allowlisted
-    detail) so auditors can fingerprint the failure shape from the sentinel alone."
-  expires: null
+  reason: |-
+    Trust-boundary recovery — canonical_json/stable_hash on LLM-supplied arguments can raise on Tier-3 input (non-finite floats, non-serializable types). The catch builds a sentinel canonical and later synthesizes ARG_ERROR through the explicit argument-error result path so the audit row still lands. Audit primacy demands a row even on un-canonicalizable input. Updated 2026-05-06 (elspeth-281f259235) to delegate sentinel construction to web.composer.audit.build_canonicalization_sentinel so both audit surfaces share a single sentinel-shape policy.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:18:48.881434+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    This is a legitimate Tier-3 boundary catch: canonical_json/stable_hash operate on LLM-supplied arguments (external, untrusted) and can raise ValueError/TypeError on non-finite floats or non-serializable types. The except clause does not silently swallow — it builds a forensic sentinel via a shared helper, preserves the exception in canonicalization_failed for the ARG_ERROR path, and audit primacy is honored by ensuring the row still lands. This is exactly the 'wrap at trust boundary' pattern the policy encourages, not defensive recovery on Tier-2 data. R6 (broad except) is not in the decorator's suppressible set {R1, R5}, so the decorator nudge does not apply.
+  file_fingerprint: 366826c44ccae25a3f6c7502b49429035d2cffe40b55833f641489124f9702eb
+  ast_path: 'body[52]/body[11]/body[5]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:b7ff68f14d532f4fa8428ac76d2e5e196fe8f0c52c7021de0f6ad9c3fb4fa17d'
 - key: composer_mcp/server.py:R6:create_server:call_tool:fp=98007a473ebfd71b
   owner: composer-audit
-  reason: Trust-boundary recovery — canonical_json/stable_hash on the success-path result_dict
-    runs in finally to compute the audit row. A non-finite float in our own dispatch output
-    would otherwise raise from finally and mask the success return entirely. Falling back
-    to a sentinel canonical preserves both the LLM's success response AND the audit row.
-    Updated 2026-05-06 (elspeth-281f259235) to delegate sentinel construction to
-    web.composer.audit.build_canonicalization_sentinel for diagnostic-shape symmetry.
-  safety: "Sentinel canonical _canonicalization_error key is written to the audit
-    row; the result_dict the LLM saw is unchanged. A future hardening would also flag
-    the underlying _dispatch_tool output as a Tier-1 invariant breach (it should not
-    have produced un-canonicalizable output), tracked separately. Diagnostic upgrade
-    captures top-level result_dict keys and rfc8785-allowlisted exception messages."
-  expires: null
+  reason: |-
+    Trust-boundary recovery — canonical_json/stable_hash on the success-path result_dict runs in finally to compute the audit row. A non-finite float in our own dispatch output would otherwise raise from finally and mask the success return entirely. Falling back to a sentinel canonical preserves both the LLM's success response AND the audit row. Updated 2026-05-06 (elspeth-281f259235) to delegate sentinel construction to web.composer.audit.build_canonicalization_sentinel for diagnostic-shape symmetry.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:18:42.142178+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    This is a legitimate audit-trail-preservation pattern, not defensive programming on Tier-2 data. The except runs inside a finally block whose sole job is to land the audit row; if canonical_json/stable_hash raise on a non-finite float, the exception would propagate out of finally and both mask the LLM's success return AND lose the audit record — directly violating the Auditability Standard ('every decision must be traceable'). The narrow except (ValueError, TypeError) delegates to a shared sentinel builder that records the canonicalization failure explicitly rather than fabricating a value, so the audit row truthfully says 'canonicalization failed' instead of silently dropping. The rationale is site-specific, names the exact failure mode, and points at the shared sentinel discipline; this is the audit-finally pattern the policy implicitly requires.
+  file_fingerprint: 366826c44ccae25a3f6c7502b49429035d2cffe40b55833f641489124f9702eb
+  ast_path: 'body[52]/body[11]/body[14]/finalbody[5]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:566819de0b2a0e8349c947bb4145a09be0a1cc10dae9139cf773d52775bd40bf'

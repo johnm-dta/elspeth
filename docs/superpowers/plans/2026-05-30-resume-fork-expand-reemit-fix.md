@@ -33,7 +33,7 @@ Provenance (a `node_states` column written by the *first* re-drive) forces **sch
 - Modify `src/elspeth/contracts/audit.py` — `Token.token_data_ref` field (Phase 3).
 - Modify `src/elspeth/engine/tokens.py` — pass per-child payloads into `expand_token`; pass merged payload into `coalesce_tokens` (Phase 3).
 - Modify `src/elspeth/core/checkpoint/recovery.py` — `IncompleteTokenSpec` + `get_incomplete_tokens_by_row()` + `reconstruct_token_row()` (Phase 4).
-- Modify `src/elspeth/engine/dag_navigator.py` — `WorkItem.resume_attempt_offset` + `WorkItem.resume_checkpoint_id`; `resolve_branch_first_node()`, `resolve_node_after()` accessors (Phase 4).
+- Modify `src/elspeth/engine/dag_navigator.py` — `WorkItem.resume_attempt_offset` + `WorkItem.resume_checkpoint_id`; `resolve_branch_first_node()` accessor (the "node after expand/coalesce" reuses the existing `resolve_next_node()`) (Phase 4).
 - Modify `src/elspeth/engine/processor.py` — `resume_incomplete_token()`; relax `process_token` `current_node_id` to `NodeID | None`; thread offset + provenance through `_process_single_token` → handlers (Phase 4).
 - Modify `src/elspeth/engine/executors/sink.py`, `transform.py` (via `state_guard`), `coalesce_executor.py` — add offset + provenance to `begin_node_state` calls (Phase 4).
 - Modify `src/elspeth/engine/orchestrator/resume.py` + `core.py` — dispatch: no-tokens → `process_existing_row`; incomplete-tokens → reconstruct + `resume_incomplete_token` (Phase 4).
@@ -371,7 +371,7 @@ git commit -m "feat(schema): token_data_ref + node_states.resume_checkpoint_id +
   Add `from elspeth.core.checkpoint.serialization import checkpoint_dumps` (both `core/checkpoint` and `core/landscape` are L1 — layer-legal; confirm no cycle: `rg -n "import" src/elspeth/core/checkpoint/serialization.py | rg landscape`). Confirm `Sequence`, `Mapping` imported.
 
 - [ ] **Step 6: Update the engine callers** (`tokens.py`):
-  - `TokenManager.expand_token` (`rg -n "def expand_token" src/elspeth/engine/tokens.py`) — pass `child_payloads=[dict(r) for r in expanded_rows]` (it already has `expanded_rows`). Keep the existing `child_infos` deepcopy construction; the persisted bytes equal what `child_infos` carries (deepcopy only guards in-memory sharing). Confirm `zip(db_children, expanded_rows, strict=True)` still aligns.
+  - `TokenManager.expand_token` (`rg -n "def expand_token" src/elspeth/engine/tokens.py`) — pass `child_payloads=[r.to_dict() for r in expanded_rows]` **if** `expanded_rows` elements are row-like (`PipelineRow`/row objects — CLAUDE.md mandates `row.to_dict()`, never `dict(row)`); if they are already plain `dict`s, pass them directly. Confirm the element type first (`rg -n "expanded_rows" src/elspeth/engine/tokens.py`). Keep the existing `child_infos` deepcopy construction; the persisted bytes equal what `child_infos` carries (deepcopy only guards in-memory sharing). Confirm `zip(db_children, expanded_rows, strict=True)` still aligns.
   - The coalesce caller (`rg -n "\.coalesce_tokens\(" src/elspeth/engine`) — pass the merged row dict it computes as `merged_payload=...`.
 
 - [ ] **Step 7: Migrate ALL test call sites (No-Legacy — same commit).** The signature changes break direct callers in the test suite. The recorder-level `expand_token` has exactly **one production caller** (`TokenManager.expand_token`), but **many test callers** that the original plan wrongly called "exactly one caller." Enumerate and migrate every `count=`→`child_payloads=` and every `coalesce_tokens(...)`→add `merged_payload=`:
@@ -549,15 +549,31 @@ class IncompleteTokenSpec:
     def _resolve_token_contract(self, run_id: str, spec: IncompleteTokenSpec) -> SchemaContract:
         """Output contract for the step that created an expand/coalesce token.
 
-        Reads nodes.output_contract_json for the node at spec.step_in_pipeline and
-        returns ContractAuditRecord.from_json(...).to_contract(). Reuses the existing
-        reader (rg -n "output_contract_json|ContractAuditRecord" src/elspeth/core/landscape/data_flow_repository.py).
+        The node that created the token is the one whose `nodes.sequence_in_pipeline`
+        equals the token's `step_in_pipeline` (the expand transform node for an expand
+        child; the coalesce node for a post-coalesce token). This is a pure-DB lookup —
+        recovery (L1) resolves step -> node via the `nodes` table directly, with NO
+        dependency on the processor's in-memory step map (which is L2). Its
+        output_contract_json is the contract under which the token's payload was produced.
         """
-        # Resolve the node for spec.step_in_pipeline / expand_group_id|join_group_id,
-        # load output_contract_json, return ContractAuditRecord.from_json(...).to_contract().
+        with self._db.engine.connect() as conn:
+            row = conn.execute(
+                select(nodes_table.c.output_contract_json)
+                .where(nodes_table.c.run_id == run_id)
+                .where(nodes_table.c.sequence_in_pipeline == spec.step_in_pipeline)
+            ).fetchone()
+        if row is None or row.output_contract_json is None:
+            raise AuditIntegrityError(
+                f"No node with output_contract_json at sequence_in_pipeline="
+                f"{spec.step_in_pipeline} for run {run_id} — cannot reconstruct the "
+                f"contract for token {spec.token_id}. Audit/DAG inconsistency."
+            )  # AuditIntegrityError matches recovery.py's existing Tier-1 corruption idiom
+        # to_schema_contract() — NOT to_contract() (that method does not exist). Mirrors
+        # the existing reader at data_flow_repository.py:1346-1351.
+        return ContractAuditRecord.from_json(row.output_contract_json).to_schema_contract()
 ```
 
-  Add imports: `from sqlalchemy import func` and add `node_states_table` to the existing `from elspeth.core.landscape.schema import ...` line (confirm: `rg -n "^from sqlalchemy|landscape.schema import" src/elspeth/core/checkpoint/recovery.py`). Add `PipelineRow`, `PayloadStore`, `SchemaContract` imports (all L0/L1 — confirm layer-legal). Verify the exact `ContractAuditRecord` reader and `to_contract` method name.
+  Add imports to `recovery.py`: `from sqlalchemy import func`; add `node_states_table` **and** `nodes_table` to the existing `from elspeth.core.landscape.schema import ...` line; add `ContractAuditRecord` (`from elspeth.contracts.contract_records import ContractAuditRecord` — L0, layer-legal); add `PipelineRow` (`contracts/schema_contract.py`, L0). `PayloadStore`, `SchemaContract`, and `AuditIntegrityError` are **already imported** (recovery.py:19-32). Confirm: `rg -n "^from sqlalchemy|landscape.schema import|contract_records|PipelineRow|PayloadStore|SchemaContract" src/elspeth/core/checkpoint/recovery.py`. (The conversion method is `to_schema_contract()`, NOT `to_contract()` — verified against the existing reader at data_flow_repository.py:1346-1351.)
 
 - [ ] **Step 6: Run the selection test — passes**
 
@@ -617,7 +633,7 @@ git commit -m "feat(engine): WorkItem.resume_attempt_offset + resume_checkpoint_
 
 **Files:**
 - Modify: `src/elspeth/engine/processor.py` (`process_token` signature + `resume_incomplete_token`)
-- Modify: `src/elspeth/engine/dag_navigator.py` (`resolve_branch_first_node`, `resolve_node_after`)
+- Modify: `src/elspeth/engine/dag_navigator.py` (`resolve_branch_first_node`; reuse existing `resolve_next_node`)
 
 - [ ] **Step 1: Relax `process_token`** (`rg -n "def process_token" src/elspeth/engine/processor.py`) — `current_node_id: NodeID` → `NodeID | None`; add `resume_attempt_offset: int = 0, resume_checkpoint_id: str | None = None` and pass into `create_work_item`. It already delegates to `_process_single_token`, which handles `None` + `_branch_to_sink`.
 
@@ -634,11 +650,11 @@ git commit -m "feat(engine): WorkItem.resume_attempt_offset + resume_checkpoint_
                 f"Known: {sorted(self._branch_first_node.keys())}"
             ) from exc
 
-    def resolve_node_after(self, node_id: NodeID) -> NodeID | None:
-        """The single downstream node after node_id on a linear continuation, or None if
-        it feeds a terminal sink. Raises on a fan-out (>1 successor) — a post-coalesce /
-        post-expand token has exactly one continuation path. Reuses the existing successor
-        lookup (rg -n "successors|_edges|resolve_next" src/elspeth/engine/dag_navigator.py)."""
+    # NOTE: DAGNavigator already exposes `resolve_next_node(node_id) -> NodeID | None`
+    # (dag_navigator.py:184, backed by the 1:1 `_node_to_next` map) — the single
+    # downstream node, or None if the node feeds a terminal sink. Use it directly for the
+    # "node after expand/coalesce" resolution; no new `resolve_node_after` accessor is
+    # needed. (The map is 1:1, so there is no fan-out case to guard.)
 ```
 
 - [ ] **Step 3: Add `resume_incomplete_token`** to `RowProcessor` (after `process_token`). The `row_data` is already reconstructed by the caller (Task 7); this method dispatches by token kind, mirroring `_handle_gate_fork`:
@@ -680,12 +696,12 @@ git commit -m "feat(engine): WorkItem.resume_attempt_offset + resume_checkpoint_
             )
         if spec.expand_group_id is not None:
             # expand child: re-drive from the node after the expand step.
-            after = self._nav.resolve_node_after(self._resolve_step_node(spec))
+            after = self._nav.resolve_next_node(self._resolve_step_node(spec))
             return self.process_token(token, ctx, current_node_id=after, **kw)
         if spec.join_group_id is not None and spec.fork_group_id is None:
             # post-coalesce merged token, crashed AFTER the barrier (review finding B1):
             # re-drive downstream of the coalesce node. None => fed straight to a sink.
-            after = self._nav.resolve_node_after(self._resolve_step_node(spec))
+            after = self._nav.resolve_next_node(self._resolve_step_node(spec))
             return self.process_token(token, ctx, current_node_id=after, **kw)
         raise OrchestrationInvariantError(
             f"Incomplete token {spec.token_id} has branch_name={branch!r}, "
@@ -695,7 +711,7 @@ git commit -m "feat(engine): WorkItem.resume_attempt_offset + resume_checkpoint_
         )
 ```
 
-  Add `_resolve_step_node(spec) -> NodeID` (maps `spec.step_in_pipeline` → node id via the recorder's step→node map; `rg -n "step_in_pipeline|step.*node|node.*step" src/elspeth/core/landscape/ src/elspeth/engine/dag_navigator.py`).
+  Add `_resolve_step_node(spec) -> NodeID` on the processor: invert the processor's `_node_step_map` (`Mapping[NodeID, int]`, `rg -n "_node_step_map|node_step_map" src/elspeth/engine/processor.py`). It is a **bijection** (`core/dag/graph.py::build_step_map` assigns a unique monotonic index via `enumerate(..., start=1)`), so the inverse `{step: node for node, step in self._node_step_map.items()}[spec.step_in_pipeline]` is well-defined; raise `OrchestrationInvariantError` on a missing step. (This is the L2 processor-side resolver for the dispatch's `current_node_id`; the L1 contract resolver in Task 4 uses the DB `nodes.sequence_in_pipeline` column instead, since recovery cannot reach the in-memory map.)
 
 - [ ] **Step 4: Add the import** `from elspeth.core.checkpoint.recovery import IncompleteTokenSpec` (L2→L1, layer-legal; the annotation can be a string to avoid any cycle, but a real import is preferred — confirm recovery does not import engine: `rg -n "import.*engine" src/elspeth/core/checkpoint/recovery.py`).
 

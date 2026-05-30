@@ -965,9 +965,12 @@ def _reaudit_one_entry(
     )
     surrounding_code = safe_excerpt.text
     symbol_for_request = ".".join(symbol_part) if symbol_part else "_module_"
+    from elspeth_lints.rules.trust_tier.tier_model.rule import describe_rule
+
     request = JudgeRequest(
         file_path=file_path,
         rule_id=rule_id,
+        rule_definition=describe_rule(rule_id),
         symbol=symbol_for_request,
         fingerprint=fingerprint,
         rationale=entry.reason,

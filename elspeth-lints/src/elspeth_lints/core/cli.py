@@ -1324,9 +1324,12 @@ def _run_justify(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         sys.stderr.write(f"allowlist similarity scan failed: {exc}\n")
         return 2
+    from elspeth_lints.rules.trust_tier.tier_model.rule import describe_rule
+
     request = JudgeRequest(
         file_path=finding.file_path,
         rule_id=finding.rule_id,
+        rule_definition=describe_rule(finding.rule_id),
         symbol=args.symbol,
         fingerprint=finding.fingerprint,
         rationale=args.rationale,

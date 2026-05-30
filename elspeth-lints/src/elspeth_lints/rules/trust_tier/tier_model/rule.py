@@ -260,6 +260,23 @@ RULES: dict[str, dict[str, Any]] = {
 }
 
 
+def describe_rule(rule_id: str) -> str:
+    """Render a one-line definition of ``rule_id`` for the cicd-judge prompt.
+
+    The judge is rule-agnostic: it never hardcodes rule semantics. Callers
+    pass the rule's own definition (sourced here from the authoritative
+    ``RULES`` table) into the per-finding ``JudgeRequest`` so the judge can
+    evaluate whether a rationale addresses the *specific* defensive pattern
+    the analyzer flagged — without baking rule knowledge into the static,
+    hashed policy block. Unknown ids degrade to a neutral label rather than
+    raising: the judge still has the rule_id, it just lacks an expansion.
+    """
+    rule = RULES.get(rule_id)
+    if rule is None:
+        return f"{rule_id}: (no definition available; evaluate on the doctrine and code alone)"
+    return f"{rule_id} ({rule['name']}): {rule['description']} Remediation: {rule['remediation']}"
+
+
 # =============================================================================
 # Layer Hierarchy (import direction enforcement)
 # =============================================================================

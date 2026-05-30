@@ -1399,6 +1399,11 @@ def test_justify_missing_api_key_emits_configuration_error(tmp_path: Path, capsy
         "test-agent",
     ]
     env_without_key = {k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"}
+    # Hermetic: keep the (dummy) HMAC signing key present so the justify
+    # fail-fast HMAC-key check passes and execution reaches the OpenRouter
+    # key check under test. Without this the test depends on the ambient
+    # ELSPETH_JUDGE_METADATA_HMAC_KEY and fails in a keyless local env.
+    env_without_key["ELSPETH_JUDGE_METADATA_HMAC_KEY"] = "test-judge-metadata-hmac-key-2026-05-24"
     with patch.dict(os.environ, env_without_key, clear=True):
         exit_code = main(argv)
 
@@ -1490,7 +1495,17 @@ def _run_justify_with_client(
         "test-agent",
     ]
     with (
-        patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),
+        patch.dict(
+            os.environ,
+            {
+                "OPENROUTER_API_KEY": "sk-or-test-key",
+                # Hermetic: the justify fail-fast checks for the HMAC signing key
+                # before the judge call. Provide a dummy so the test exercises the
+                # judge path regardless of the ambient environment.
+                "ELSPETH_JUDGE_METADATA_HMAC_KEY": "test-judge-metadata-hmac-key-2026-05-24",
+            },
+            clear=False,
+        ),
         patch("openai.OpenAI", return_value=fake_client),
     ):
         return main(argv)

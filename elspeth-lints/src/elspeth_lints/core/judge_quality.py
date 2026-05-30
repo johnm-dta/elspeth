@@ -78,9 +78,12 @@ class JudgeQualityCase:
             salt=f"judge-quality:{self.case_id}:{self.fingerprint}",
             path_hint=self.file_path,
         )
+        from elspeth_lints.rules.trust_tier.tier_model.rule import describe_rule
+
         return JudgeRequest(
             file_path=self.file_path,
             rule_id=self.rule_id,
+            rule_definition=describe_rule(self.rule_id),
             symbol=self.symbol,
             fingerprint=self.fingerprint,
             rationale=self.rationale,

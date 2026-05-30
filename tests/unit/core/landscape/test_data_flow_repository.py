@@ -66,13 +66,13 @@ def _make_repo(
     run_id: str = "run-1",
     payload_store: Any = None,
 ) -> tuple[LandscapeDB, DataFlowRepository, RecorderFactory]:
-    # Default to MockPayloadStore so expand_token / coalesce_tokens can persist payloads.
-    if payload_store is None:
-        payload_store = MockPayloadStore()
     """Create a DataFlowRepository with supporting infrastructure.
 
     Returns (db, repo, factory) — factory is for graph setup only.
     """
+    # Default to MockPayloadStore so expand_token / coalesce_tokens can persist payloads.
+    if payload_store is None:
+        payload_store = MockPayloadStore()
     db = make_landscape_db()
     ops = DatabaseOps(db)
     repo = DataFlowRepository(

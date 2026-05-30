@@ -844,7 +844,7 @@ class DataFlowRepository:
         child_data_refs = [self._payload_store.store(checkpoint_dumps(payload).encode("utf-8")) for payload in child_payloads]
 
         with self._db.connection() as conn:
-            for ordinal, (payload_ref, _payload) in enumerate(zip(child_data_refs, child_payloads, strict=True)):
+            for ordinal, payload_ref in enumerate(child_data_refs):
                 child_id = generate_id()
                 timestamp = now()
 

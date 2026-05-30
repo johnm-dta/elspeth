@@ -152,17 +152,15 @@ def get_fork_group_stats(db: LandscapeDB, run_id: str) -> dict[str, int]:
         }
 
 
-def count_nonterminal_leaf_tokens(db: LandscapeDB, run_id: str) -> int:
-    """Count non-delegation leaf tokens that lack a completed terminal outcome.
+def orphan_leaf_token_ids(db: LandscapeDB, run_id: str) -> list[str]:
+    """Return token_ids of non-delegation leaf tokens lacking a completed terminal outcome.
 
     A leaf token is any token whose own outcome is NOT a delegation marker
     (FORK_PARENT / EXPAND_PARENT). After a fully-resumed run, every such token
-    must carry exactly one completed=1 outcome — zero is an orphan (a different
-    audit-integrity violation than double-emit, and invisible to a count!=1 check
-    that only sees tokens which HAVE outcomes).
+    must carry exactly one completed=1 outcome — an empty list means no orphans.
+    Returning the ids (not just a count) keeps a future orphan-regression failure
+    diagnosable: the assertion can name the offending tokens.
     """
-    from elspeth.contracts.enums import TerminalPath
-
     delegation = (TerminalPath.FORK_PARENT.value, TerminalPath.EXPAND_PARENT.value)
     with db.connection() as conn:
         rows = conn.execute(
@@ -182,7 +180,7 @@ def count_nonterminal_leaf_tokens(db: LandscapeDB, run_id: str) -> int:
             """),
             {"run_id": run_id, "fp": delegation[0], "ep": delegation[1]},
         ).fetchall()
-    return len(rows)
+    return [row.token_id for row in rows]
 
 
 def count_fork_groups_with_unexpected_children(db: LandscapeDB, run_id: str, expected_children: int) -> int:
@@ -921,7 +919,8 @@ class TestForkRecoveryInvariant:
         #  (f) fork-group shape is unchanged (guards against the Approach-2 double-parent)
         after = _outcome_counts()
         assert after == baseline, f"Resume must conserve the terminal-outcome multiset. baseline={baseline} after={after}"
-        assert count_nonterminal_leaf_tokens(db, run_id) == 0, "Resume left a non-delegation leaf token with no terminal outcome (orphan)."
+        orphans = orphan_leaf_token_ids(db, run_id)
+        assert not orphans, f"Resume left {len(orphans)} non-delegation leaf token(s) with no terminal outcome (orphans): {orphans}"
         assert all(n == 1 for n in after.values()), after
         assert resume_result.status == RunStatus.COMPLETED, resume_result.status
         assert len(sink_b.results) == 1, (

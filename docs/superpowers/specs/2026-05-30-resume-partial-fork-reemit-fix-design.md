@@ -527,3 +527,28 @@ or batched?" (where does the state need to live to survive buffering) and "writt
 prod?" (is the column/field actually populated and carried by the live path). This is the third
 runtime-vs-plan gap (B1 crash → contract-NULL → sink batching); the reviews caught all three, but
 mapping the resume drive granularity up front is cheaper than rediscovering it.
+
+## ADDENDUM 5 (2026-05-30, operator decision) — resume_checkpoint_id is a marker-only id, NOT a FK (AUTHORITATIVE)
+
+**Fourth runtime-vs-plan gap, found during Task 7.** The Task-2 schema made
+`node_states.resume_checkpoint_id` a `ForeignKey("checkpoints.checkpoint_id")`. But
+`CheckpointManager.delete_checkpoints` (run on every successful run/resume completion to clean up
+progress checkpoints) would then crash `FOREIGN KEY constraint failed` whenever it deleted a
+checkpoint that a resumed node_state references. A FK leaves only audit-hostile escapes
+(ON DELETE CASCADE deletes audit node_states; SET NULL erases the provenance marker), so a FK
+forces permanent retention of any resume-anchor checkpoint.
+
+**Operator decision: drop the FK; `resume_checkpoint_id` is a marker-only `String(64)`.** No audit
+read path resolves the checkpoint row — `explain()` only tests the marker's NULL-ness
+(`resume_checkpoint_id IS NOT NULL`) to separate resume re-drives from run-1 retries. The marker id
+endures on `node_states` as a durable provenance fact **like a content hash survives payload
+deletion** (the project's existing Tier-1 doctrine): the checkpoint is deletable progress state;
+the id is the enduring fact. Consequences:
+- `node_states.resume_checkpoint_id` = `Column(String(64), nullable=True)` — no `ForeignKey`.
+- `delete_checkpoints` is the simple unconditional per-run delete (no referenced-id preservation).
+- Trade-off accepted: no referential integrity (the marker may name a checkpoint whose row was later
+  purged) — consistent with hash-survives-payload-deletion, not a defect.
+- Epoch stays 11 (epoch 11 is unreleased; dropping the FK is within the same bump).
+
+This was a genuine policy fork (referential integrity vs the deletion doctrine), not a
+single-correct-answer gap — so it went to the operator, who chose marker-only.

@@ -152,6 +152,39 @@ def get_fork_group_stats(db: LandscapeDB, run_id: str) -> dict[str, int]:
         }
 
 
+def count_nonterminal_leaf_tokens(db: LandscapeDB, run_id: str) -> int:
+    """Count non-delegation leaf tokens that lack a completed terminal outcome.
+
+    A leaf token is any token whose own outcome is NOT a delegation marker
+    (FORK_PARENT / EXPAND_PARENT). After a fully-resumed run, every such token
+    must carry exactly one completed=1 outcome — zero is an orphan (a different
+    audit-integrity violation than double-emit, and invisible to a count!=1 check
+    that only sees tokens which HAVE outcomes).
+    """
+    from elspeth.contracts.enums import TerminalPath
+
+    delegation = (TerminalPath.FORK_PARENT.value, TerminalPath.EXPAND_PARENT.value)
+    with db.connection() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT t.token_id AS token_id
+                FROM tokens t
+                WHERE t.run_id = :run_id
+                  AND t.token_id NOT IN (
+                      SELECT o.token_id FROM token_outcomes o
+                      WHERE o.run_id = :run_id AND o.path IN (:fp, :ep)
+                  )
+                  AND t.token_id NOT IN (
+                      SELECT o.token_id FROM token_outcomes o
+                      WHERE o.run_id = :run_id AND o.completed = 1
+                            AND o.path NOT IN (:fp, :ep)
+                  )
+            """),
+            {"run_id": run_id, "fp": delegation[0], "ep": delegation[1]},
+        ).fetchall()
+    return len(rows)
+
+
 def count_fork_groups_with_unexpected_children(db: LandscapeDB, run_id: str, expected_children: int) -> int:
     """Count fork groups that don't have the expected number of children."""
     with db.connection() as conn:
@@ -753,6 +786,7 @@ class TestForkRecoveryInvariant:
         the branch that completed before the interruption.
         """
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings, ElspethSettings
         from elspeth.core.landscape.schema import token_outcomes_table
@@ -822,6 +856,7 @@ class TestForkRecoveryInvariant:
             return {(row.row_id, row.sink_name): row.n for row in result}
 
         baseline = _outcome_counts()
+        baseline_fork_stats = get_fork_group_stats(db, run_id)
         assert sorted(k[1] for k in baseline) == ["sink_a", "sink_b"], baseline
         assert all(n == 1 for n in baseline.values()), baseline
 
@@ -875,15 +910,24 @@ class TestForkRecoveryInvariant:
 
         checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
         resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
-        resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+        resume_result = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
 
-        # INVARIANT: no (row_id, sink_name) may carry more than one terminal
-        # outcome. The defect re-emits sink_b (the branch that completed before
-        # the interruption), leaving it with two.
+        # CONSERVATION LAW (spec ADDENDUM 1 test oracle):
+        #  (a) multiset of completed (row_id, sink_name) outcomes == uninterrupted baseline
+        #  (b) zero orphan leaf tokens (never-zero)
+        #  (c) no (row_id, sink_name) carries two outcomes (never-two)
+        #  (d) the resume result reports COMPLETED
+        #  (e) the surviving branch's sink was physically written exactly once
+        #  (f) fork-group shape is unchanged (guards against the Approach-2 double-parent)
         after = _outcome_counts()
-        duplicated = {key: n for key, n in after.items() if n != 1}
-        assert not duplicated, (
-            f"Resume re-emitted an already-completed fork branch: {duplicated}. "
-            f"Each (row_id, sink_name) must carry exactly one terminal outcome after resume "
-            f"(the audit trail is the legal record and must not contain duplicate lineage)."
+        assert after == baseline, f"Resume must conserve the terminal-outcome multiset. baseline={baseline} after={after}"
+        assert count_nonterminal_leaf_tokens(db, run_id) == 0, "Resume left a non-delegation leaf token with no terminal outcome (orphan)."
+        assert all(n == 1 for n in after.values()), after
+        assert resume_result.status == RunStatus.COMPLETED, resume_result.status
+        assert len(sink_b.results) == 1, (
+            f"sink_b (completed before interruption) was physically written {len(sink_b.results)} times; resume must not re-write it."
+        )
+        post_resume_stats = get_fork_group_stats(db, run_id)
+        assert post_resume_stats["total_fork_groups"] == baseline_fork_stats["total_fork_groups"], (
+            f"Resume changed fork-group shape: {baseline_fork_stats} -> {post_resume_stats}"
         )

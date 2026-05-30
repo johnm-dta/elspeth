@@ -1587,6 +1587,8 @@ class RowProcessor:
         transform: Any,
         token: TokenInfo,
         ctx: PluginContext,
+        resume_attempt_offset: int = 0,
+        resume_checkpoint_id: str | None = None,
     ) -> tuple[TransformResult, TokenInfo, str | None]:
         """Execute transform with optional retry for transient failures.
 
@@ -1603,6 +1605,11 @@ class RowProcessor:
             transform: Transform to execute
             token: Current token
             ctx: Plugin context
+            resume_attempt_offset: Added to every attempt number so re-driven
+                node_states coexist with run-1 records under UniqueConstraint.
+                Defaults to 0 (no-op for all normal processing).
+            resume_checkpoint_id: Checkpoint ID stamped on re-driven node_states.
+                Defaults to None (no-op for all normal processing).
 
         Returns:
             Tuple of (TransformResult, updated TokenInfo, error_sink)
@@ -1617,6 +1624,8 @@ class RowProcessor:
                     token=token,
                     ctx=ctx,
                     attempt=0,
+                    resume_attempt_offset=resume_attempt_offset,
+                    resume_checkpoint_id=resume_checkpoint_id,
                 )
             except InterruptedError as e:
                 return self._convert_retryable_to_error_result(
@@ -1655,6 +1664,8 @@ class RowProcessor:
                 token=token,
                 ctx=ctx,
                 attempt=attempt,
+                resume_attempt_offset=resume_attempt_offset,
+                resume_checkpoint_id=resume_checkpoint_id,
             )
 
         def is_retryable(e: BaseException) -> bool:
@@ -2008,6 +2019,8 @@ class RowProcessor:
         coalesce_node_id: NodeID | None,
         coalesce_name: CoalesceName | None,
         child_items: list[WorkItem],
+        resume_attempt_offset: int = 0,
+        resume_checkpoint_id: str | None = None,
     ) -> tuple[bool, RowResult | None]:
         if (
             self._coalesce_executor is None
@@ -2021,6 +2034,8 @@ class RowProcessor:
         coalesce_outcome = self._coalesce_executor.accept(
             token=current_token,
             coalesce_name=coalesce_name,
+            resume_attempt_offset=resume_attempt_offset,
+            resume_checkpoint_id=resume_checkpoint_id,
         )
 
         if coalesce_outcome.held:
@@ -2220,6 +2235,8 @@ class RowProcessor:
                     coalesce_node_id=item.coalesce_node_id,
                     coalesce_name=item.coalesce_name,
                     on_success_sink=item.on_success_sink,
+                    resume_attempt_offset=item.resume_attempt_offset,
+                    resume_checkpoint_id=item.resume_checkpoint_id,
                 )
 
                 if result is not None:
@@ -2242,6 +2259,8 @@ class RowProcessor:
         coalesce_node_id: NodeID | None,
         coalesce_name: CoalesceName | None,
         current_on_success_sink: str,
+        resume_attempt_offset: int = 0,
+        resume_checkpoint_id: str | None = None,
     ) -> _TransformOutcome:
         """Handle a single transform node: execute with retry, route errors, handle multi-row.
 
@@ -2255,6 +2274,10 @@ class RowProcessor:
             coalesce_node_id: Coalesce barrier node for fork branches (or None).
             coalesce_name: Coalesce point name for fork branches (or None).
             current_on_success_sink: Current sink name, may be updated by transform.on_success.
+            resume_attempt_offset: Added to every attempt number for re-driven node_states
+                so they coexist with run-1 records. Defaults to 0 (no-op).
+            resume_checkpoint_id: Checkpoint ID stamped on re-driven node_states.
+                Defaults to None (no-op).
 
         Returns:
             _TransformContinue: Token should advance to next node (updated token + updated sink).
@@ -2266,6 +2289,8 @@ class RowProcessor:
                 transform=transform,
                 token=current_token,
                 ctx=ctx,
+                resume_attempt_offset=resume_attempt_offset,
+                resume_checkpoint_id=resume_checkpoint_id,
             )
             # Emit TransformCompleted telemetry AFTER Landscape recording succeeds
             # (Landscape recording happens inside _execute_transform_with_retry)
@@ -2377,6 +2402,8 @@ class RowProcessor:
             # Queue each child for continued processing.
             # Pass updated_sink so terminal children inherit the
             # expanding transform's sink instead of defaulting to source_on_success.
+            # Children born during a re-drive get fresh token_ids with no prior node_states,
+            # so they use the default resume_attempt_offset=0 / resume_checkpoint_id=None.
             for child_token in child_tokens:
                 child_coalesce_name = coalesce_name if coalesce_name is not None and child_token.branch_name is not None else None
                 child_items.append(
@@ -2680,6 +2707,8 @@ class RowProcessor:
                 cfg_coalesce_name = self._branch_to_coalesce[BranchName(cfg_branch_name)]
 
             # See config gate fork handler above for routing logic.
+            # Children born during a re-drive get fresh token_ids with no prior node_states,
+            # so they use the default resume_attempt_offset=0 / resume_checkpoint_id=None.
             if cfg_coalesce_name is None and cfg_branch_name and BranchName(cfg_branch_name) in self._branch_to_sink:
                 child_items.append(
                     self._nav.create_work_item(
@@ -2794,6 +2823,8 @@ class RowProcessor:
         coalesce_node_id: NodeID | None = None,
         coalesce_name: CoalesceName | None = None,
         on_success_sink: str | None = None,
+        resume_attempt_offset: int = 0,
+        resume_checkpoint_id: str | None = None,
     ) -> tuple[RowResult | tuple[RowResult, ...] | None, list[WorkItem]]:
         """Process a single token through processing nodes starting at node_id.
 
@@ -2806,6 +2837,10 @@ class RowProcessor:
             coalesce_node_id: Node ID at which fork children should coalesce
             coalesce_name: Name of the coalesce point for merging
             on_success_sink: Inherited sink from parent (e.g. terminal deagg parent's on_success)
+            resume_attempt_offset: Added to every attempt number for re-driven node_states
+                so they coexist with run-1 records. Defaults to 0 (no-op).
+            resume_checkpoint_id: Checkpoint ID stamped on re-driven node_states.
+                Defaults to None (no-op).
 
         Returns:
             Tuple of (RowResult or list of RowResults or None if held for coalesce,
@@ -2859,6 +2894,8 @@ class RowProcessor:
                 coalesce_node_id=coalesce_node_id,
                 coalesce_name=coalesce_name,
                 child_items=child_items,
+                resume_attempt_offset=resume_attempt_offset,
+                resume_checkpoint_id=resume_checkpoint_id,
             )
             if handled:
                 return (result, child_items)
@@ -2896,6 +2933,8 @@ class RowProcessor:
                     coalesce_node_id,
                     coalesce_name,
                     last_on_success_sink,
+                    resume_attempt_offset,
+                    resume_checkpoint_id,
                 )
                 if isinstance(transform_outcome, _TransformTerminal):
                     return transform_outcome.result, child_items

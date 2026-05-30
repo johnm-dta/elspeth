@@ -447,6 +447,8 @@ class CoalesceExecutor:
         self,
         token: TokenInfo,
         coalesce_name: str,
+        resume_attempt_offset: int = 0,
+        resume_checkpoint_id: str | None = None,
     ) -> CoalesceOutcome:
         """Accept a token at a coalesce point.
 
@@ -459,6 +461,11 @@ class CoalesceExecutor:
         Args:
             token: Token arriving at coalesce point (must have branch_name)
             coalesce_name: Name of the coalesce configuration
+            resume_attempt_offset: Added to attempt so re-driven node_states coexist
+                with run-1 records under UniqueConstraint(token_id, node_id, attempt).
+                Defaults to 0 (no-op for all normal processing).
+            resume_checkpoint_id: Checkpoint ID stamped on re-driven node_states.
+                Defaults to None (no-op for all normal processing).
 
         Returns:
             CoalesceOutcome indicating whether token was held or merged
@@ -503,6 +510,8 @@ class CoalesceExecutor:
                 run_id=self._run_id,
                 step_index=step,
                 input_data=token.row_data.to_dict(),  # Recorder expects dict
+                attempt=resume_attempt_offset,
+                resume_checkpoint_id=resume_checkpoint_id,
             )
             error = CoalesceFailureReason(
                 failure_reason=failure_reason,
@@ -566,6 +575,8 @@ class CoalesceExecutor:
             run_id=self._run_id,
             step_index=step,
             input_data=token.row_data.to_dict(),  # Recorder expects dict
+            attempt=resume_attempt_offset,
+            resume_checkpoint_id=resume_checkpoint_id,
         )
         pending.branches[token.branch_name] = _BranchEntry(
             token=token,

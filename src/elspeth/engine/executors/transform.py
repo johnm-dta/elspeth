@@ -203,6 +203,8 @@ class TransformExecutor:
         token: TokenInfo,
         ctx: PluginContext,
         attempt: int = 0,
+        resume_attempt_offset: int = 0,
+        resume_checkpoint_id: str | None = None,
     ) -> tuple[TransformResult, TokenInfo, str | None]:
         """Execute a transform with full audit recording and error routing.
 
@@ -230,6 +232,12 @@ class TransformExecutor:
             token: Current token with row data
             ctx: Plugin context
             attempt: Attempt number for retry tracking (0-indexed, default 0)
+            resume_attempt_offset: Added to attempt so that re-driven node_states
+                coexist with run-1 records under UniqueConstraint(token_id, node_id, attempt).
+                Defaults to 0 (no-op for all normal processing).
+            resume_checkpoint_id: Checkpoint ID stamped on re-driven node_states so
+                resume re-drives are provably distinguishable from run-1 retries.
+                Defaults to None (no-op for all normal processing).
 
         Returns:
             Tuple of (TransformResult with audit fields, updated TokenInfo, error_sink)
@@ -270,7 +278,8 @@ class TransformExecutor:
             run_id=ctx.run_id,
             step_index=step,
             input_data=input_dict,
-            attempt=attempt,
+            attempt=resume_attempt_offset + attempt,
+            resume_checkpoint_id=resume_checkpoint_id,
         ) as guard:
             # --- LIFECYCLE GUARD (pre-execution) ---
             # Centralized check: ensure on_start() was called before process().

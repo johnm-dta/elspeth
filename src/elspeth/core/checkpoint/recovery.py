@@ -508,9 +508,36 @@ class RecoveryManager:
         A token is incomplete when it is NOT a delegation marker (FORK_PARENT /
         EXPAND_PARENT) and has NO completed terminal outcome. Mirrors get_unprocessed_rows'
         completion semantics (shared _DELEGATION_PATHS) so recovery selection and resume
-        reconstruction cannot drift apart. UNFILTERED: returns fork, expand, AND
-        post-coalesce tokens — each is dispatched in resume_incomplete_token.
+        reconstruction cannot drift apart. Returns fork, expand, AND post-coalesce tokens —
+        each is dispatched in resume_incomplete_token.
+
+        BUFFERED-TOKEN EXCLUSION (mirrors get_unprocessed_rows' buffered exclusion):
+        tokens that are buffered in restored aggregation state OR held at a restored
+        coalesce barrier (collected by _get_buffered_checkpoint_token_ids — see that method
+        for the two arms) are EXCLUDED at the token level here. Such tokens are NOT re-driven
+        on resume: they are restored into the executor's in-memory state (aggregation buffer /
+        coalesce _pending) by restore_from_checkpoint and flushed/merged FROM that state.
+        Re-driving them double-emits or crashes the barrier:
+        - A coalesce-held branch re-driven re-arrives at the barrier where it already waits
+          (restored into _pending) → CoalesceExecutor.accept's duplicate-arrival guard fires
+          (OrchestrationInvariantError).
+        - An aggregation-buffered branch re-driven re-enters processing while it is ALSO
+          flushed from the restored buffer at end-of-source → double terminal outcome /
+          duplicate physical sink write.
+
+        Exclusion is at the TOKEN level (filter before grouping), so a row with mixed state
+        (one buffered token + one genuinely-incomplete sibling) still returns the
+        genuinely-incomplete token, while a row whose only incomplete tokens are all buffered
+        does not appear in the returned dict at all. This restores the invariant that
+        get_incomplete_tokens_by_row's rows are a subset of get_unprocessed_rows (both
+        functions now apply the same buffered exclusion).
+
+        If no checkpoint exists the run cannot be resumed, so no exclusion is applied
+        (the empty buffered set is a no-op).
         """
+        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
+        buffered_token_ids = self._get_buffered_checkpoint_token_ids(checkpoint) if checkpoint is not None else set()
+
         with self._db.engine.connect() as conn:
             delegation_tokens = (
                 select(token_outcomes_table.c.token_id)
@@ -551,6 +578,11 @@ class RecoveryManager:
 
         by_row: dict[str, list[IncompleteTokenSpec]] = {}
         for r in rows:
+            # Buffered/held tokens are restored-and-flushed from checkpoint state, not
+            # re-driven (see docstring). Exclude at the token level so mixed-state rows
+            # still return their genuinely-incomplete tokens.
+            if r.token_id in buffered_token_ids:
+                continue
             by_row.setdefault(r.row_id, []).append(
                 IncompleteTokenSpec(
                     token_id=r.token_id,

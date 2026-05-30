@@ -2220,6 +2220,272 @@ class TestForkRecoveryInvariant:
         post_stats = get_fork_group_stats(db, run_id)
         assert post_stats["total_fork_groups"] == 1, f"Fork-group count must remain 1 (one row, one fork); got {post_stats}"
 
+    def test_resume_coalesce_held_branch_not_redriven(self) -> None:
+        """A branch HELD at a coalesce barrier (checkpointed into coalesce pending) must
+        NOT be re-driven on resume — it is restored into the executor's _pending and
+        flushes there. Re-driving it re-arrives at the barrier and crashes the
+        duplicate-arrival guard. Only the genuinely-incomplete (not-yet-arrived) sibling
+        re-drives.
+
+        Topology (shared _setup_coalesce_pipeline):
+            source → gate(fork) → [path_a: PassTransform, path_b: PassTransform]
+                   → coalesce('merge', require_all, on_success='output') → sink 'output'
+
+        Construction of the partial-fan-in interrupt state (genuine, via production run +
+        targeted reversal — mirrors test_resume_fork_to_coalesce_before_barrier's
+        barrier-undo, then re-creates the HELD state for ONE branch):
+          - Run the pipeline to completion (both branches arrived, barrier merged).
+          - Undo the barrier: delete the merged token (outcome, node_states, token_parents,
+            row) and both branches' COALESCED outcomes — leaving both branch tokens with no
+            terminal outcome (pre-merge state).
+          - HELD branch: its coalesce-node node_state is reverted to the held/open state
+            (status='open', completed_at = NULL — the state CoalesceExecutor.accept's
+            begin_node_state writes on arrival) and its real state_id is captured. It is
+            then placed into a genuine CoalesceCheckpointState (pending.branches) carrying
+            its real row_data + contract + state_id, passed to
+            create_checkpoint(coalesce_state=). On resume, restore_from_checkpoint
+            repopulates _pending with this branch — it is "already arrived", awaiting the
+            sibling. The HELD branch is chosen as the one with the smaller token_id so it
+            is dispatched FIRST on resume (specs order by step_in_pipeline, token_id), which
+            makes the duplicate-arrival the deterministic RED (it re-arrives while it is the
+            only _pending entry, before any merge could complete).
+          - SIBLING branch: its coalesce-node node_state is DELETED (genuinely
+            not-yet-arrived) and it is NOT in the checkpoint pending. It must re-drive.
+
+        After this, _get_buffered_checkpoint_token_ids returns the held branch token
+        (asserted as a precondition: proof the coalesce-pending arm is live). The
+        incomplete-spec oracle (get_incomplete_tokens_by_row) returns BOTH branch tokens
+        BEFORE the fix (UNFILTERED) — including the held branch — which is the defect.
+
+        RED (fix absent — get_incomplete_tokens_by_row does NOT exclude buffered tokens):
+        resume dispatches BOTH branch tokens to resume_incomplete_token. The held branch
+        (dispatched first) is re-driven from its branch_first_node with coalesce context,
+        re-arrives at the barrier via _maybe_coalesce_token → CoalesceExecutor.accept. But
+        it is ALREADY in _pending['merge', row] (restored from the checkpoint), so accept()
+        hits the duplicate-arrival guard (coalesce_executor.py ~562-570):
+        Observed: OrchestrationInvariantError — "Duplicate arrival for branch 'path_a' at
+        coalesce 'merge'. Existing token: <id>, new token: <id>. This indicates a bug in
+        fork, retry, or checkpoint/resume logic." (existing == new token id: the held
+        branch re-arriving on itself; branch name is whichever token_id sorts first). This
+        is a DISTINCT exception from the I1a orphan AuditIntegrityError that the
+        before-barrier cell produces — confirming this cell pins the duplicate-arrival
+        defect specifically.
+
+        GREEN (fix present — buffered tokens excluded from the incomplete-spec oracle):
+        only the sibling re-drives; it arrives at the barrier where the restored held branch
+        already waits; require_all is satisfied → barrier fires exactly once → merged token
+        created → sink written once. The restored held branch's open node_state is completed
+        by _execute_merge (status 'open' is non-terminal). Conservation holds, zero orphans,
+        one outcome per leaf.
+        """
+        from elspeth.contracts.coalesce_checkpoint import (
+            CoalesceCheckpointState,
+            CoalescePendingCheckpoint,
+            CoalesceTokenCheckpoint,
+        )
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import CheckpointSettings
+        from elspeth.core.landscape.schema import token_outcomes_table, token_parents_table, tokens_table
+        from elspeth.engine.coalesce_executor import COALESCE_CHECKPOINT_VERSION
+
+        db, payload_store, config, graph, settings_obj, run_id = self._setup_coalesce_pipeline()
+
+        # ── Baseline (run-1 completed) ──────────────────────────────────────────
+        def _outcome_counts() -> dict[tuple[str, str], int]:
+            with db.engine.connect() as conn:
+                result = conn.execute(
+                    text("""
+                        SELECT t.row_id AS row_id, o.sink_name AS sink_name, COUNT(*) AS n
+                        FROM token_outcomes o
+                        JOIN tokens t ON t.token_id = o.token_id
+                        JOIN rows r ON r.row_id = t.row_id
+                        WHERE r.run_id = :run_id
+                          AND o.completed = 1
+                          AND o.sink_name IS NOT NULL
+                        GROUP BY t.row_id, o.sink_name
+                    """),
+                    {"run_id": run_id},
+                ).fetchall()
+            return {(row.row_id, row.sink_name): row.n for row in result}
+
+        baseline = _outcome_counts()
+        assert len(baseline) == 1, f"Expected exactly one (row_id, sink_name) completed outcome; got {baseline}"
+        assert all(n == 1 for n in baseline.values()), baseline
+
+        # ── Locate the merged token and the two branch tokens ─────────────────────
+        coalesce_node_id = str(graph.get_coalesce_id_map()[CoalesceName("merge")])
+        with db.engine.connect() as conn:
+            merged_rows = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id, t.join_group_id AS join_group_id
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id
+                      AND t.join_group_id IS NOT NULL
+                      AND t.branch_name IS NULL
+                      AND t.fork_group_id IS NULL
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+            branch_rows = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id, t.branch_name AS branch_name, t.row_id AS row_id,
+                           t.fork_group_id AS fork_group_id
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id AND t.branch_name IN ('path_a', 'path_b')
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+        assert len(merged_rows) == 1, f"Expected exactly one merged token; got {len(merged_rows)}"
+        merged_token_id = merged_rows[0].token_id
+        join_group_id = merged_rows[0].join_group_id
+        by_branch = {b.branch_name: b for b in branch_rows}
+        assert set(by_branch) == {"path_a", "path_b"}, f"expected path_a + path_b; got {set(by_branch)}"
+        # Hold the branch that dispatches FIRST so the held-branch re-drive is the FIRST
+        # coalesce arrival on resume — it re-arrives while it is the only _pending entry
+        # (sibling not yet re-driven, no merge yet, _check_landscape_for_completion False),
+        # deterministically hitting the duplicate-arrival guard rather than the
+        # late-arrival path. get_incomplete_tokens_by_row orders specs by
+        # (step_in_pipeline, token_id); both branches share the coalesce step, so dispatch
+        # order is ascending token_id → hold the lexicographically-smallest token_id.
+        held_branch = min(branch_rows, key=lambda b: b.token_id)  # held at barrier (restored into _pending)
+        incomplete_branch = next(b for b in branch_rows if b.token_id != held_branch.token_id)  # not-yet-arrived; re-drives
+        held_branch_name = held_branch.branch_name
+        row_id = held_branch.row_id
+
+        # ── Capture the held branch's coalesce-node state_id (real node_state) ─────
+        # restore_from_checkpoint requires a valid state_id for the held branch's pending
+        # node_state — reuse the genuine run-1 coalesce-node node_state for path_a.
+        with db.engine.connect() as conn:
+            held_state_row = conn.execute(
+                text("""
+                    SELECT state_id FROM node_states
+                    WHERE token_id = :tid AND node_id = :nid AND run_id = :rid
+                    ORDER BY attempt DESC LIMIT 1
+                """),
+                {"tid": held_branch.token_id, "nid": coalesce_node_id, "rid": run_id},
+            ).fetchone()
+        assert held_state_row is not None, (
+            "Setup precondition violated: path_a must have a coalesce-node node_state from run-1 "
+            "(CoalesceExecutor.accept calls begin_node_state on arrival)."
+        )
+        held_state_id = held_state_row.state_id
+
+        # ── The contract the row was produced under (for the held branch's checkpoint) ──
+        checkpoint_mgr = CheckpointManager(db)
+        recovery_for_contract = RecoveryManager(db, checkpoint_mgr)
+        source_contract = recovery_for_contract.verify_contract_integrity(run_id)
+        contract_dict = source_contract.to_checkpoint_format()
+
+        # ── Interrupt: undo the barrier; revert path_a to PENDING, drop path_b's arrival ──
+        with db.engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            # Merged token artifacts (the barrier's output)
+            conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
+            conn.execute(text("DELETE FROM node_states WHERE token_id = :tid"), {"tid": merged_token_id})
+            conn.execute(token_parents_table.delete().where(token_parents_table.c.token_id == merged_token_id))
+            conn.execute(tokens_table.delete().where(tokens_table.c.token_id == merged_token_id))
+            # Branch COALESCED outcomes (recorded by the barrier on both branches)
+            conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.join_group_id == join_group_id))
+            # HELD branch (path_a): revert its coalesce-node node_state to the held/open
+            # state (status='open', completed_at NULL) — the genuine pre-barrier state that
+            # CoalesceExecutor.accept's begin_node_state writes on arrival (the barrier never
+            # completed it because the crash happened before path_b arrived). 'open' is
+            # non-terminal, so on GREEN _execute_merge can complete this state by state_id
+            # when the barrier finally fires; deleting it would crash the completion write,
+            # and leaving it 'completed' would hit the immutable-terminal guard.
+            conn.execute(
+                text("UPDATE node_states SET status = 'open', completed_at = NULL, output_hash = NULL WHERE state_id = :sid"),
+                {"sid": held_state_id},
+            )
+            # SIBLING branch (path_b): delete its coalesce-node node_state entirely — it is
+            # genuinely not-yet-arrived (pre-barrier crash before path_b reached the barrier).
+            conn.execute(
+                text("DELETE FROM node_states WHERE token_id = :tid AND node_id = :nid AND run_id = :rid"),
+                {"tid": incomplete_branch.token_id, "nid": coalesce_node_id, "rid": run_id},
+            )
+            conn.commit()
+            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+
+        # ── Build a GENUINE CoalesceCheckpointState holding path_a at the barrier ──
+        held_token_ckpt = CoalesceTokenCheckpoint(
+            token_id=held_branch.token_id,
+            row_id=row_id,
+            branch_name=held_branch_name,
+            fork_group_id=held_branch.fork_group_id,
+            join_group_id=None,
+            expand_group_id=None,
+            row_data={"value": 1},
+            contract=contract_dict,
+            state_id=held_state_id,
+            arrival_offset_seconds=0.0,
+        )
+        coalesce_state = CoalesceCheckpointState(
+            version=COALESCE_CHECKPOINT_VERSION,
+            pending=(
+                CoalescePendingCheckpoint(
+                    coalesce_name="merge",
+                    row_id=row_id,
+                    elapsed_age_seconds=0.5,
+                    branches={held_branch_name: held_token_ckpt},
+                    lost_branches={},
+                ),
+            ),
+            completed_keys=(),
+        )
+
+        # ── Create the checkpoint WITH the genuine coalesce pending state ──
+        sink_node_ids = graph.get_sinks()
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=held_branch.token_id,
+            node_id=sink_node_ids[0],
+            sequence_number=1,
+            graph=graph,
+            coalesce_state=coalesce_state,
+        )
+        with db.engine.connect() as conn:
+            conn.execute(text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"), {"run_id": run_id})
+            conn.commit()
+
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+
+        # ── PRECONDITION: the coalesce-pending arm is genuinely live ──
+        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
+        assert checkpoint is not None
+        buffered_ids = recovery_mgr._get_buffered_checkpoint_token_ids(checkpoint)
+        assert held_branch.token_id in buffered_ids, (
+            f"PRECONDITION FAILED: the held path_a token must be in the checkpoint coalesce-pending "
+            f"buffered set (else the held-branch exclusion path is skipped). buffered_ids={buffered_ids}"
+        )
+        assert incomplete_branch.token_id not in buffered_ids, (
+            f"path_b must NOT be buffered (it is the not-yet-arrived sibling); buffered_ids={buffered_ids}"
+        )
+
+        # ── Resume ────────────────────────────────────────────────────────────────
+        check = recovery_mgr.can_resume(run_id, graph)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        resume_result = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+
+        # ── Conservation law ──────────────────────────────────────────────────────
+        after = _outcome_counts()
+        assert after == baseline, f"Resume must conserve the terminal-outcome multiset. baseline={baseline} after={after}"
+        orphans = orphan_leaf_token_ids(db, run_id)
+        assert not orphans, f"Resume left {len(orphans)} non-delegation leaf token(s) with no terminal outcome (orphans): {orphans}"
+        assert all(n == 1 for n in after.values()), f"No (row_id, sink_name) may carry two outcomes after resume: {after}"
+        assert resume_result.status == RunStatus.COMPLETED, resume_result.status
+
+        post_stats = get_fork_group_stats(db, run_id)
+        assert post_stats["total_fork_groups"] == 1, f"Fork-group count must remain 1 (one row, one fork); got {post_stats}"
+
     def test_resume_post_coalesce_before_downstream(self) -> None:
         """Re-driving a branchless merged token interrupted AFTER the barrier must
         reconstruct from token_data_ref, NOT restart-and-re-fork (B1 review finding).
@@ -4545,12 +4811,259 @@ class TestForkRecoveryInvariant:
             f"excluding it would silently orphan sink_b."
         )
 
-        # The incomplete (non-buffered) sink_b child must surface as a resume spec.
+        # The incomplete (non-buffered) sink_b child must surface as a resume spec; the
+        # buffered (sink_a) child must NOT (it is restored-and-flushed from the aggregation
+        # buffer, not re-driven — get_incomplete_tokens_by_row excludes buffered tokens at
+        # the token level via _get_buffered_checkpoint_token_ids' aggregation_state arm).
+        # This is the function-level guard for the aggregation arm; the full-resume
+        # double-emit guard is test_resume_aggregation_buffered_fork_branch_not_redriven.
         by_row = recovery_mgr.get_incomplete_tokens_by_row(run_id)
         incomplete_specs = [s for specs in by_row.values() for s in specs]
         spec_token_ids = {s.token_id for s in incomplete_specs}
         assert incomplete_child.token_id in spec_token_ids, (
             f"sink_b (non-buffered incomplete) must surface as a resume spec; specs={spec_token_ids}"
+        )
+        assert buffered_child.token_id not in spec_token_ids, (
+            f"sink_a (aggregation-buffered) must NOT surface as a resume spec — re-driving a buffered "
+            f"token double-emits; it is restored-and-flushed from the buffer instead. specs={spec_token_ids}"
+        )
+
+    def test_resume_expand_aggregation_all_buffered_row_excluded(self) -> None:
+        """An aggregation-buffered expand row is excluded from resume re-drive at the ROW
+        level — its tokens are restored-and-flushed from the aggregation buffer, never
+        dispatched to resume_incomplete_token.
+
+        This is the aggregation analogue of the coalesce held-branch defect
+        (test_resume_coalesce_held_branch_not_redriven), and it documents WHY the
+        aggregation case differs structurally from the coalesce case:
+
+        REACHABILITY (verified against dag/builder.py + resume.py):
+        - The buggy re-drive in run_resume_processing_loop only visits rows returned by
+          get_unprocessed_rows (resume.py loops `for row_id, ... in unprocessed_rows`), and
+          only dispatches tokens carrying a lineage field to resume_incomplete_token.
+        - A token buffered in an aggregation acquires a lineage field only via fork / expand
+          / join. fork→aggregation is STRUCTURALLY IMPOSSIBLE: the DAG builder
+          (dag/builder.py ~492-505) requires every fork branch to terminate at a sink (name
+          match) or a coalesce branch, and a fork branch cannot carry intermediate
+          transforms unless it routes to a coalesce — an aggregation input is neither.
+          (Verified: ExecutionGraph.from_plugin_instances on a fork→aggregation topology
+          raises GraphValidationError: "Gate '<g>' has fork branch '<b>' with no
+          destination. Fork branches must either: 1. Be listed in a coalesce 'branches'
+          dict/list, or 2. Match a sink name exactly".)
+        - expand→aggregation IS constructible, but ALL expand children of a row land in the
+          SAME aggregation batch → the row is ALL-buffered (no non-buffered sibling) →
+          get_unprocessed_rows excludes it → it is never visited by the resume loop → its
+          buffered tokens are never dispatched.
+        Therefore there is no mixed-state (one buffered + one non-buffered incomplete)
+        aggregation row analogous to the coalesce case: fork→coalesce is allowed but
+        fork→aggregation is not. The buffered-token exclusion in get_incomplete_tokens_by_row
+        is correct defense-in-depth mirroring get_unprocessed_rows; the reachable handling
+        is the ROW-level exclusion asserted here.
+
+        Topology (production ExecutionGraph.from_plugin_instances + Orchestrator.run):
+            source(1 row, items=[a, b]) → JSONExplode → aggregation(count=3; never fires on
+            the 2 exploded children → both BUFFERED in the same batch) → sink 'output'
+
+        Construction: run to completion, delete BOTH expand-child leaves' terminal outcomes
+        (both become incomplete), and place BOTH into a genuine AggregationCheckpointState
+        keyed on the real aggregation node id (all-buffered). Assert:
+        - _get_buffered_checkpoint_token_ids returns BOTH leaves (precondition: the
+          aggregation arm is live).
+        - get_unprocessed_rows EXCLUDES the row (all its incomplete leaves are buffered).
+        - get_incomplete_tokens_by_row returns NOTHING for the row (token-level exclusion;
+          mirrors the row-level exclusion so the resume loop never dispatches them).
+
+        RED LEVER (parallel to matrix #5): weakening get_incomplete_tokens_by_row to NOT
+        exclude buffered tokens makes both buffered leaves surface as resume specs — which,
+        for an all-buffered row that get_unprocessed_rows already excludes, drifts the
+        token-level oracle from the row-level one and breaks the incomplete_by_row ⊆
+        unprocessed_rows invariant the F1 dispatch relies on. The fix keeps the two
+        functions aligned.
+        Observed (buffered-exclusion disabled in get_incomplete_tokens_by_row):
+        AssertionError — "all-buffered aggregation row must contribute NO incomplete specs
+        (buffered tokens are excluded at the token level, mirroring get_unprocessed_rows);
+        got ['<leaf0>', '<leaf1>']" — both buffered expand leaves wrongly surface as
+        re-drivable resume specs.
+        """
+        import datetime
+
+        from elspeth.contracts.aggregation_checkpoint import (
+            AggregationCheckpointState,
+            AggregationNodeCheckpoint,
+            AggregationTokenCheckpoint,
+        )
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
+        from elspeth.contracts.schema_contract import SchemaContract as _SchemaContract
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import AggregationSettings, CheckpointSettings, SinkSettings, TriggerConfig
+        from elspeth.core.landscape.schema import token_outcomes_table
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+        from tests.integration.pipeline.test_aggregation_checkpoint_bug import BatchCollectorTransform
+
+        db = make_landscape_db()
+        payload_store = MockPayloadStore()
+
+        dt0 = datetime.datetime(2021, 1, 1, tzinfo=datetime.UTC)
+        dt1 = datetime.datetime(2022, 2, 2, tzinfo=datetime.UTC)
+
+        source = ListSource(
+            [{"id": 1, "value": 10, "items": [{"ts": dt0}, {"ts": dt1}]}],
+            on_success="explode_in",
+        )
+        sink = CollectSink("output")
+        explode = JSONExplode({"array_field": "items", "output_field": "item", "include_index": True, "schema": {"mode": "observed"}})
+        agg = BatchCollectorTransform()
+        agg_transform = as_transform(agg)
+        wired = wire_transforms(
+            [as_transform(explode), agg_transform],
+            source_connection="explode_in",
+            final_sink="output",
+            names=["explode", "agg"],
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            source=as_source(source),
+            source_settings=SourceSettings(plugin=source.name, on_success="explode_in", options={}),
+            transforms=wired,
+            sinks={"output": as_sink(sink)},
+            gates=[],
+            aggregations={},
+            coalesce_settings=[],
+        )
+        agg_node_id = graph.get_transform_id_map()[1]  # explode=0, agg=1
+        agg_settings = AggregationSettings(
+            name="agg",
+            plugin="batch_collector",
+            input="agg_in",
+            on_success="output",
+            on_error="discard",
+            trigger=TriggerConfig(count=3, timeout_seconds=3600),
+            output_mode="transform",
+        )
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(explode), agg_transform],
+            sinks={"output": as_sink(sink)},
+            aggregation_settings={agg_node_id: agg_settings},
+            coalesce_settings=[],
+        )
+        checkpoint_settings = CheckpointSettings(enabled=True, frequency="every_row")
+        settings_obj = ElspethSettings(
+            source={"plugin": "test", "on_success": "explode_in", "options": {}},
+            sinks={"output": SinkSettings(plugin="test", on_write_failure="discard", options={})},
+            aggregations=[agg_settings],
+            checkpoint=checkpoint_settings,
+        )
+
+        checkpoint_mgr = CheckpointManager(db)
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(checkpoint_settings)
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        run = orchestrator.run(config, graph=graph, settings=settings_obj, payload_store=payload_store)
+        run_id = run.run_id
+        assert run.status == RunStatus.COMPLETED, f"run-1 must complete: {run.status}"
+
+        # ── The two expand-child LEAVES (buffered into the aggregation batch) ──
+        with db.engine.connect() as conn:
+            children = conn.execute(
+                text("""
+                    SELECT DISTINCT t.token_id AS token_id, t.row_id AS row_id, t.expand_group_id AS expand_group_id,
+                           t.token_data_ref AS token_data_ref
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    JOIN token_outcomes o ON o.token_id = t.token_id
+                    WHERE r.run_id = :run_id AND t.expand_group_id IS NOT NULL
+                      AND o.path = :consumed AND o.completed = 1
+                    ORDER BY t.token_id
+                """),
+                {"run_id": run_id, "consumed": TerminalPath.BATCH_CONSUMED.value},
+            ).fetchall()
+        assert len(children) == 2, f"Expected exactly 2 expand-child leaves consumed into the aggregation batch; got {len(children)}"
+        row_id = children[0].row_id
+
+        def _envelope(token_data_ref: str) -> dict:
+            raw = payload_store.retrieve(token_data_ref)
+            return checkpoint_loads(raw.decode("utf-8"))
+
+        # ── Interrupt: delete BOTH leaves' terminal (batch_consumed) outcomes ──
+        with db.engine.connect() as conn:
+            both = conn.execute(
+                text("SELECT o.outcome_id AS outcome_id FROM token_outcomes o WHERE o.token_id IN (:a, :b) AND o.completed = 1"),
+                {"a": children[0].token_id, "b": children[1].token_id},
+            ).fetchall()
+            assert len(both) == 2, f"both expand leaves must have a completed outcome to delete (precondition); got {len(both)}"
+            for o in both:
+                conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == o.outcome_id))
+            conn.commit()
+
+        # ── Build a GENUINE all-buffered AggregationCheckpointState (both leaves) ──
+        token_ckpts = []
+        for c in children:
+            env = _envelope(c.token_data_ref)
+            token_ckpts.append(
+                AggregationTokenCheckpoint(
+                    token_id=c.token_id,
+                    row_id=row_id,
+                    branch_name=None,
+                    fork_group_id=None,
+                    join_group_id=None,
+                    expand_group_id=c.expand_group_id,
+                    row_data=env["data"],
+                    contract_version=_SchemaContract.from_checkpoint(dict(env["contract"])).version_hash(),
+                    contract=env["contract"],
+                )
+            )
+        agg_state = AggregationCheckpointState(
+            version="5.0",
+            nodes={
+                str(agg_node_id): AggregationNodeCheckpoint(
+                    tokens=tuple(token_ckpts),
+                    batch_id="batch-all-buffered-test",
+                    elapsed_age_seconds=0.5,
+                    count_fire_offset=None,
+                    condition_fire_offset=None,
+                    accepted_count_total=len(token_ckpts),
+                    completed_flush_count=0,
+                )
+            },
+        )
+
+        sink_node_ids = graph.get_sinks()
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=children[0].token_id,
+            node_id=sink_node_ids[0],
+            sequence_number=1,
+            graph=graph,
+            aggregation_state=agg_state,
+        )
+
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+
+        # ── PRECONDITION: the aggregation arm is live — both leaves are buffered ──
+        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
+        assert checkpoint is not None
+        buffered_ids = recovery_mgr._get_buffered_checkpoint_token_ids(checkpoint)
+        assert {children[0].token_id, children[1].token_id}.issubset(buffered_ids), (
+            f"PRECONDITION FAILED: both expand leaves must be in the checkpoint aggregation buffered set; buffered_ids={buffered_ids}"
+        )
+
+        # ── ROW-level exclusion: the all-buffered row is NOT in unprocessed_rows ──
+        # This is the reachable mechanism: the resume loop iterates unprocessed_rows, so an
+        # excluded row is never visited and its buffered tokens are never dispatched.
+        unprocessed = recovery_mgr.get_unprocessed_rows(run_id)
+        assert row_id not in unprocessed, (
+            f"all-buffered aggregation row must be excluded from unprocessed_rows (its tokens are restored-and-flushed, "
+            f"not re-driven); unprocessed={unprocessed}"
+        )
+
+        # ── TOKEN-level exclusion: get_incomplete_tokens_by_row returns nothing for the row ──
+        # Mirrors the row-level exclusion (incomplete_by_row ⊆ unprocessed_rows). Without the
+        # fix, both buffered leaves would surface here, drifting from get_unprocessed_rows.
+        by_row = recovery_mgr.get_incomplete_tokens_by_row(run_id)
+        row_specs = by_row.get(row_id, [])
+        assert not row_specs, (
+            f"all-buffered aggregation row must contribute NO incomplete specs (buffered tokens are excluded at the "
+            f"token level, mirroring get_unprocessed_rows); got {[s.token_id for s in row_specs]}"
         )
 
     def test_resume_expand_coalesce_full_type_domain_roundtrip(self) -> None:

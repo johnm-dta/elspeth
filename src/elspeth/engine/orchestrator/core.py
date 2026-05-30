@@ -2744,20 +2744,26 @@ class Orchestrator:
             # the no-rows branch already ships the 0 for the same structural
             # reason.
             #
-            # During-re-drive reachability is asymmetric across the two trigger
-            # sites in outcomes.py:
-            #   * flush_pending (end-of-source, "incomplete_branches"): the
-            #     during-re-drive failure was proven NON-CONSTRUCTIBLE in
-            #     deterministic flows — lost branches fail immediately via
-            #     notify_branch_lost (without incrementing rows_coalesce_failed),
-            #     buffered branches are restored-to-completion on resume
-            #     (CoalesceExecutor.restore_from_checkpoint re-includes arrived
-            #     branches), and a coalesce branch no gate produces is DAG-rejected.
-            #   * check_timeouts (wall-clock, "quorum_not_met_at_timeout"): a real
-            #     runtime trigger if a re-drive coalesce times out; reachability
-            #     of this on the resume path is unexplored. The graft is therefore
-            #     LIVE code (not dead) guarding this timeout path; in the
-            #     deterministic flush-path it copies 0-over-0 and is a no-op.
+            # This graft is a LIVE REGRESSION FIX, not future-proofing. The
+            # during-re-drive coalesce failure is CONFIRMED reachable: the resume
+            # loop calls handle_coalesce_timeouts → CoalesceExecutor.check_timeouts
+            # PER-ROW (resume.py:268-276), and a coalesce that times out before
+            # quorum during re-drive increments rows_coalesce_failed
+            # (outcomes.py:447/462, "quorum_not_met_at_timeout") in the live
+            # `result`. Pre-F2 that count was reported; F2 (pre-graft) discarded it
+            # by replacing `result` with audit-derived counters; this graft
+            # restores it. End-to-end regression test (with observed removed-graft
+            # red / restored-graft green):
+            # test_adr_019_resume_counter_parity.py::
+            #   test_resume_grafts_rows_coalesce_failed_from_timeout_redrive.
+            #
+            # The other increment site — flush_pending (end-of-source,
+            # "incomplete_branches") — does NOT produce a during-re-drive failure
+            # in deterministic flows (lost branches fail immediately via
+            # notify_branch_lost without touching this counter; buffered branches
+            # are restored-to-completion by restore_from_checkpoint; an unproduced
+            # coalesce branch is DAG-rejected), so on that path the graft copies
+            # 0-over-0 and is a no-op. The timeout path is where it earns its keep.
             audit_counters.rows_coalesce_failed = result.rows_coalesce_failed
 
             # Recompute terminal_status from the final reconciled counters (now

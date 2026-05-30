@@ -416,15 +416,17 @@ def test_derive_rows_processed_expand_counts_source_rows_not_children() -> None:
 # Restoring the graft → run_B == 1 → GREEN. The drop-to-0 proves the assertion
 # exercises the graft, not some incidental path.
 #
-# SCOPE (Item D, NOT asserted as equality): run_A (uninterrupted) and run_B
-# (resumed) do NOT report the same rows_coalesce_failed — run_A times out every
-# barrier (3) while run_B only re-drives barriers still PENDING at the interrupt
-# (1). rows_coalesce_failed is the lone resume-scoped field: run-1-consumed
-# timeouts are live-counter-only and unrecoverable on resume (the per-row timeout
-# check makes every barrier either unaged-at-interrupt → not re-fired, or
-# aged → already consumed in run-1). Exact run_A == run_B is therefore structurally
-# unreachable via the timeout path; the load-bearing guard is run_B >= 1 (the
-# graft carries the re-drive failure), which is what the regression fix restores.
+# SCOPE (Item D — tracked: filigree elspeth-7294de558e — NOT asserted as equality):
+# run_A (uninterrupted) and run_B (resumed) do NOT report the same
+# rows_coalesce_failed — run_A times out every barrier (3) while run_B only re-drives
+# barriers still PENDING at the interrupt (1). rows_coalesce_failed is the lone
+# resume-scoped field: run-1-consumed timeouts are live-counter-only and unrecoverable
+# on resume (the per-row timeout check makes every barrier either unaged-at-interrupt →
+# not re-fired, or aged → already consumed in run-1). Exact run_A == run_B is therefore
+# structurally unreachable via the timeout path; the load-bearing guard is run_B >= 1
+# (the graft carries the re-drive failure), which is what the regression fix restores.
+# The exact under-report (run_A == 3, run_B == 1) is characterization-pinned at the end
+# of the test below so the limitation can't silently widen or be silently "fixed".
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -637,4 +639,27 @@ def test_resume_grafts_rows_coalesce_failed_from_timeout_redrive() -> None:
         f"If this is 0, the graft in resume() (core.py) was removed/broken — derive cannot "
         f"reconstruct rows_coalesce_failed (telemetry-only roll-up), so the live re-drive "
         f"counter is the only source."
+    )
+
+    # CHARACTERIZATION PIN of the Item-D under-report (filigree elspeth-7294de558e).
+    # run_A (uninterrupted oracle) times out all 3 barriers; run_B (resume) re-drives
+    # only the 1 barrier still PENDING at the interrupt — the other 2 were consumed in
+    # run-1 and are unrecoverable (telemetry-only, no audit arm). So the resumed value
+    # STRUCTURALLY under-reports. Pinning exact values makes the limitation a guard, not
+    # prose: it goes RED if the under-report silently widens (B→0, also caught by the
+    # >=1 graft guard above) OR is silently "fixed" (B→3 == A) — the latter would mean an
+    # audit arm now reconstructs it cumulatively, which is exactly the elspeth-7294de558e
+    # resolution and MUST update this pin rather than land green by accident.
+    assert run_a.rows_coalesce_failed == 3, (
+        f"PIN: uninterrupted oracle must time out all 3 barriers; got {run_a.rows_coalesce_failed}. "
+        f"If this changed, the timeout topology moved — re-derive the expected oracle count."
+    )
+    assert run_b.rows_coalesce_failed == 1, (
+        f"PIN: resumed run under-reports — it re-drives only the 1 barrier PENDING at the interrupt; "
+        f"got {run_b.rows_coalesce_failed}. B != 1 means the under-report widened or rows_coalesce_failed "
+        f"gained an audit arm (the elspeth-7294de558e fix) — update this pin, do not let it pass silently."
+    )
+    assert run_b.rows_coalesce_failed < run_a.rows_coalesce_failed, (
+        f"PIN: resumed rows_coalesce_failed must UNDER-report vs the uninterrupted oracle until an audit "
+        f"arm exists (elspeth-7294de558e). oracle={run_a.rows_coalesce_failed}, resumed={run_b.rows_coalesce_failed}."
     )

@@ -3932,19 +3932,28 @@ class TestForkRecoveryInvariant:
     @staticmethod
     def _build_end_of_source_flush_aggregation(
         n_source_rows: int,
+        trigger_count: int | None = None,
     ) -> tuple[LandscapeDB, PipelineConfig, ExecutionGraph, ElspethSettings]:
-        """Build a fresh source(N rows) → batch aggregation(count > N) → sink
-        pipeline whose aggregation NEVER triggers mid-stream — all N input rows
-        are BUFFERED and flushed together at end-of-source.
+        """Build a fresh source(N rows) → batch aggregation → sink pipeline.
+
+        ``trigger_count`` is the aggregation's ``count`` trigger. Default
+        (``None`` → ``N + 1``) is the canonical end-of-source-flush topology:
+        the aggregation NEVER triggers mid-stream — all N input rows are BUFFERED
+        and flushed together at end-of-source, and ``live == derive == N`` for
+        ``rows_buffered``. Pass ``trigger_count=N`` to build the count==N
+        mid-stream-trigger topology that the rows_buffered live/derive divergence
+        pinning test (see ``test_count_equals_n_rows_buffered_divergence_is_pinned``)
+        exercises.
 
         WHY count > N (NOT count == N): a count==N trigger FIRES on the Nth row
         mid-stream, and the live accumulator and derive() then DISAGREE on
         rows_buffered (live counts N-1, derive counts N from the persisted
-        BATCH_CONSUMED→BUFFERED records — a separate, documented divergence,
-        out of scope for this reconciliation cell).  The end-of-source-flush
-        path (count > N) is the CANONICAL buffered path on which live == derive
-        == N for every field, so it is the honest topology for a field-for-field
-        live-vs-derive reconciliation cell.  (Mirrors
+        BATCH_CONSUMED→BUFFERED records — a separate divergence, out of scope for
+        THIS reconciliation cell but now tracked (filigree elspeth-e1dd5e1303) and
+        pinned by test_count_equals_n_rows_buffered_divergence_is_pinned).  The
+        end-of-source-flush path (count > N) is the CANONICAL buffered path on which
+        live == derive == N for every field, so it is the honest topology for a
+        field-for-field live-vs-derive reconciliation cell.  (Mirrors
         tests/property/audit/test_terminal_states.py's count=9999 construction.)
 
         Returns (db, config, graph, settings) — caller runs / resumes it.
@@ -3990,8 +3999,9 @@ class TestForkRecoveryInvariant:
             input="agg_in",
             on_success="output",
             on_error="discard",
-            # count > N → never fires mid-stream → all N rows buffer to end-of-source.
-            trigger=TriggerConfig(count=n_source_rows + 1, timeout_seconds=3600),
+            # Default count > N → never fires mid-stream → all N rows buffer to
+            # end-of-source. trigger_count=N forces the mid-stream-trigger topology.
+            trigger=TriggerConfig(count=trigger_count if trigger_count is not None else n_source_rows + 1, timeout_seconds=3600),
             output_mode=OutputMode.TRANSFORM,
         )
         graph = ExecutionGraph.from_plugin_instances(
@@ -4043,7 +4053,8 @@ class TestForkRecoveryInvariant:
         (TerminalPath.BUFFERED, non-completed) → ``rows_buffered == 3``
         (non-vacuous).  count > N is deliberate: see the helper docstring — a
         count==N mid-stream trigger makes the live accumulator and derive()
-        DISAGREE on rows_buffered (a separate finding, out of scope here).
+        DISAGREE on rows_buffered (tracked: elspeth-e1dd5e1303; pinned by
+        test_count_equals_n_rows_buffered_divergence_is_pinned).
 
         RUN A (uninterrupted oracle): a SEPARATE
         ``_build_end_of_source_flush_aggregation`` instance, NOT interrupted.
@@ -4182,6 +4193,116 @@ class TestForkRecoveryInvariant:
             f"F2 reconciliation failure on routed_destinations: "
             f"uninterrupted={dict(run_a.routed_destinations)}, resumed={dict(run_b_resume.routed_destinations)}"
         )
+
+    def test_count_equals_n_rows_buffered_divergence_is_pinned(self) -> None:
+        """CHARACTERIZATION PIN — known F2 parity break (filigree elspeth-e1dd5e1303).
+
+        For a batch aggregation with a ``count == N`` trigger (fires mid-stream on
+        the Nth row, NOT at end-of-source), the live accumulator and derive disagree
+        on ``rows_buffered``:
+
+            uninterrupted oracle (live):  rows_buffered == N - 1
+            resumed (derive):             rows_buffered == N
+
+        So a RESUMED run reports ``rows_buffered`` exactly one higher than the
+        uninterrupted oracle.  Every OTHER counter field reconciles — this is the
+        sole divergent field.  The canonical end-of-source-flush topology
+        (``count > N``) does not exhibit it (live == derive == N), which is why
+        ``test_resume_buffered_counter_reconciles_with_uninterrupted_run`` uses
+        ``count > N`` and the F2 reconciliation suite sidesteps this case.
+
+        WHY A CHARACTERIZATION PIN, NOT AN xfail: the follow-up note asked for an
+        "xfail-style pinning test so the divergence can't silently widen."  A strict
+        xfail asserting the ideal (resumed == oracle) catches an accidental *fix*
+        (xpass → fail) but a *widening* divergence (gap → 2) still just fails → stays
+        xfail → green, silently violating the stated goal.  This pin asserts the
+        EXACT current values, so it goes RED on widening, narrowing, OR a fix in
+        either direction — strictly stronger for "can't silently widen."  This is
+        NOT an endorsement of either value: elspeth-e1dd5e1303 tracks the decision
+        of which (N-1 or N) is authoritative; resolving it requires updating this
+        pin to the chosen value.
+        """
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import CheckpointSettings
+
+        n = 3
+
+        # ── Run A (uninterrupted oracle, count == N → mid-stream trigger) ──────
+        db_a, config_a, graph_a, settings_a = self._build_end_of_source_flush_aggregation(n, trigger_count=n)
+        run_a = Orchestrator(db_a).run(config_a, graph=graph_a, settings=settings_a, payload_store=MockPayloadStore())
+        assert run_a.status == RunStatus.COMPLETED, run_a.status
+
+        # ── Run B (run-1 + interrupt + resume via the all-terminal branch) ────
+        db, config, graph, settings_obj = self._build_end_of_source_flush_aggregation(n, trigger_count=n)
+        payload_store = MockPayloadStore()
+        run_b1 = Orchestrator(db).run(config, graph=graph, settings=settings_obj, payload_store=payload_store)
+        run_id = run_b1.run_id
+        checkpoint_mgr = CheckpointManager(db)
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        sink_node_ids = graph.get_sinks()
+        with db.engine.connect() as conn:
+            actual_token = conn.execute(
+                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
+                {"run_id": run_id},
+            ).fetchone()
+        assert actual_token is not None
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id, token_id=actual_token.token_id, node_id=sink_node_ids[0], sequence_number=1, graph=graph
+        )
+        with db.engine.connect() as conn:
+            conn.execute(text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"), {"run_id": run_id})
+            conn.commit()
+        check = recovery_mgr.can_resume(run_id, graph)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        run_b_resume = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+        assert run_b_resume.status == RunStatus.COMPLETED, run_b_resume.status
+
+        # ── Pin the EXACT divergence (elspeth-e1dd5e1303) ─────────────────────
+        assert run_a.rows_buffered == n - 1, (
+            f"PIN: uninterrupted oracle (live accumulator) must report rows_buffered == N-1 == {n - 1} "
+            f"on a count==N mid-stream trigger; got {run_a.rows_buffered}. If this changed, the live "
+            f"buffered-accounting semantics moved — update elspeth-e1dd5e1303 and this pin."
+        )
+        assert run_b_resume.rows_buffered == n, (
+            f"PIN: resumed run (derive) must report rows_buffered == N == {n} (one BUFFERED audit record "
+            f"per input row); got {run_b_resume.rows_buffered}. If this changed, derive's (None, BUFFERED) "
+            f"arm moved — update elspeth-e1dd5e1303 and this pin."
+        )
+        assert run_b_resume.rows_buffered == run_a.rows_buffered + 1, (
+            f"PIN: the known F2 parity break is exactly +1 (resumed over oracle). "
+            f"oracle={run_a.rows_buffered}, resumed={run_b_resume.rows_buffered}, "
+            f"delta={run_b_resume.rows_buffered - run_a.rows_buffered}. A delta != 1 means the divergence "
+            f"WIDENED or was fixed — neither may land silently. See elspeth-e1dd5e1303."
+        )
+
+        # ── rows_buffered must be the SOLE divergent field ────────────────────
+        other_fields = (
+            "rows_processed",
+            "rows_succeeded",
+            "rows_failed",
+            "rows_routed_success",
+            "rows_routed_failure",
+            "rows_quarantined",
+            "rows_forked",
+            "rows_coalesced",
+            "rows_coalesce_failed",
+            "rows_expanded",
+            "rows_diverted",
+        )
+        for field in other_fields:
+            a_val = getattr(run_a, field)
+            b_val = getattr(run_b_resume, field)
+            assert b_val == a_val, (
+                f"PIN: '{field}' must reconcile on the count==N topology (only rows_buffered is known to "
+                f"diverge). uninterrupted={a_val}, resumed={b_val}. A NEW divergent field is a regression "
+                f"beyond the tracked elspeth-e1dd5e1303 limitation."
+            )
 
     # ─────────────────────────────────────────────────────────────────────
     # Task 12: Remaining risk-ordered resume-recovery matrix

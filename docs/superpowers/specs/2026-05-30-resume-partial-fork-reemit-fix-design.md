@@ -552,3 +552,32 @@ the id is the enduring fact. Consequences:
 
 This was a genuine policy fork (referential integrity vs the deletion doctrine), not a
 single-correct-answer gap — so it went to the operator, who chose marker-only.
+
+## ADDENDUM 6 (2026-05-30, mid-implementation) — checkpoint_dumps type-fidelity delta (AUTHORITATIVE)
+
+**Fifth runtime-vs-plan gap, found during Task 10's value-fidelity cell.** The plan/spec/CLAUDE.md
+all stated `checkpoint_dumps` "preserves datetime/**Decimal** type fidelity." Empirically false:
+`checkpoint_dumps` only type-tagged `datetime` and raised a bare `TypeError` on every other
+non-JSON-native type. Because Task 3's `token_data_ref` envelope calls `checkpoint_dumps` on the
+row payload **at expand/coalesce time during a NORMAL run** (not just resume), this was a
+happy-path crash for any row carrying such a value — a regression from the pre-F1 `canonical_json`
+path (which accepted them lossily).
+
+**The risk surface is the delta `(canonical_json accepts) − (checkpoint_dumps accepts)`** —
+`canonical_json` was the pre-F1 row-payload serializer, so its input domain is the proven row
+domain. Measured delta: **Decimal, date, time, bytes, UUID, numpy scalars** (`set`/`frozenset`
+crash in both — not a regression).
+
+**Fix (clear, not a policy fork — the documented contract + Tier-1 fidelity both point one way):**
+extend `checkpoint_dumps`/`checkpoint_loads` **symmetrically** via the existing
+`__elspeth_type__`/`__elspeth_value__` envelope — `decimal`/`date`/`time`/`bytes`/`uuid` tagged for
+exact round-trip (datetime checked BEFORE date — subclass ordering is load-bearing); numpy scalars
+convert to Python primitives mirroring `canonical_json` (numpy-ness isn't semantic; numpy is a core
+dep via pandas, hard-imported like canonical.py); the unbounded `object` catch-all raises a typed
+error NAMING the type (audit "always explain"), not the cryptic json `TypeError`. Non-finite
+Decimal/float rejected. CLAUDE.md's "preserves datetime/Decimal" claim is now TRUE.
+
+**Forward gate (Task 13):** a gate-level test that drives the FULL row-payload type domain (every
+type `canonical_json` accepts) through expand AND coalesce end-to-end, so "the envelope round-trips
+everything a row can hold" is mechanically enforced — closing this gap class permanently rather
+than spot-fixing each type.

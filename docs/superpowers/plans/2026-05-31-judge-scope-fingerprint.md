@@ -19,6 +19,8 @@ This plan has a **hard line** between agent-buildable work and operator-only wor
 
 > **Conscious deviation from spec §4.2.** The spec described a single operator session with "no intermediate dual-version state ever committed." This plan instead commits a **dual-version state** at the end of Task 11 (v2 code present, v1 path retained, all entries still v1). That is unavoidable for an agent-buildable increment: the agent cannot run the keyed migration, so the v1 path must survive in committed code until the operator session. This is a deliberate, flagged choice — not a silent slip.
 
+> **Coordinated sibling feature (v2 payload is shared).** The Claude-Agent-SDK judge transport (`docs/superpowers/plans/2026-05-31-agent-sdk-judge-transport.md`) adds one more field — `judge_transport` — to **this plan's v2 signed payload**, and is sequenced to land **after this plan's Tasks 1–11 but before its operator Task 12**. When that plan has landed, the v2 payload includes `judge_transport`, `_validate_judge_metadata_atomic` requires it on v2 entries, and **`migrate-judge-scope` (Task 10) backfills `judge_transport="openrouter"`** as part of the single v1→v2 re-sign — so the operator migration (Task 12) produces complete v2 entries (`scope_fingerprint` + `judge_transport`) in one pass. If that sibling plan has *not* landed when you run this one, the v2 payload is scope-fingerprint-only and the transport feature reconciles to it later; the two must never produce two independent v2 payload schemas (transport-plan §5).
+
 ---
 
 ## File Structure

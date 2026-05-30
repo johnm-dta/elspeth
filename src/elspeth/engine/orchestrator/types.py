@@ -29,12 +29,12 @@ from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 
 if TYPE_CHECKING:
-    from elspeth.contracts import PendingOutcome, SinkProtocol, SourceProtocol, TokenInfo
+    from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.plugin_context import PluginContext
-    from elspeth.contracts.schema_contract import SchemaContract
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.contracts.types import CoalesceName, GateName, NodeID, SinkName
     from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
     from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings
@@ -88,7 +88,14 @@ class RowProcessorHandle(Protocol):
     def get_coalesce_checkpoint_state(self) -> CoalesceCheckpointState | None:
         raise NotImplementedError
 
-    def resume_incomplete_token(self, *args: Any, **kwargs: Any) -> Any:
+    def resume_incomplete_token(
+        self,
+        spec: IncompleteTokenSpec,
+        row_data: PipelineRow,
+        ctx: PluginContext,
+        *,
+        resume_checkpoint_id: str,
+    ) -> list[RowResult]:
         raise NotImplementedError
 
     def resolve_sink_step(self) -> int:
@@ -518,7 +525,12 @@ class ResumeState:
     recovery_manager: RecoveryManager
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "restored_aggregation_state")
+        # incomplete_by_row is a dict[str, list[IncompleteTokenSpec]] of frozen specs;
+        # deep_freeze converts it to MappingProxyType[str, tuple[IncompleteTokenSpec, ...]].
+        # The resume loop consumes it via membership (`row_id in incomplete_by_row`) and
+        # iteration (`for s in incomplete_by_row[row_id]`), both fine on the frozen shape.
+        # recovery_manager is a live service object (not a container) — NOT frozen here.
+        freeze_fields(self, "restored_aggregation_state", "incomplete_by_row")
         # unprocessed_rows contains raw row dicts that PipelineRow expects as
         # plain dict — deep_freeze would convert them to MappingProxyType.
         if not isinstance(self.unprocessed_rows, tuple):

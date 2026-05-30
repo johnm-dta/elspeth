@@ -87,9 +87,15 @@ Completed branches keep their run-1 tokens/outcomes untouched; the original
 incomplete child is driven to completion in place. No new parent, no orphan, no
 re-execution of completed branches.
 
-- **Audit shape:** clean — one fork parent, all children under it, the incomplete
-  one now terminal. Matches what an auditor expects ("forked once, each branch
-  resolved once").
+- **Audit shape:** one fork parent, all children under it, the incomplete one now
+  terminal — no second parent, no orphan. NOT "each branch resolved exactly once at
+  the node level": re-driving an incomplete branch re-runs the nodes between the
+  branch start and the crash point (their post-branch payload is unpersisted, so we
+  cannot restart mid-branch). Those re-runs are append-only at an **elevated attempt**
+  and carry a **resume-provenance marker** (`node_states.resume_checkpoint_id`, see
+  ADDENDUM 2) so an auditor can prove which records came from the resume vs run-1.
+  See the bounded non-goal in ADDENDUM 2 for the consequence on side-effecting
+  transforms (re-fired external calls are attributable, not silent).
 - **Fork-join balance:** preserved by construction.
 - **Risk / open question:** requires faithful reconstruction of the incomplete
   child `TokenInfo` and resolution of its resume-start node from `branch_name`.
@@ -133,6 +139,10 @@ record and touches the closed terminal-outcome enum.
 
 ## REVISED DESIGN (post-review, 2026-05-30) — AUTHORITATIVE
 
+> **Precedence:** This section is refined by **ADDENDUM 1** (node_states attempt collision)
+> and **ADDENDUM 2** (provenance marker, coalesce persistence, scope, test discipline) below.
+> Where they conflict, the later addendum wins. Read all three before implementing.
+
 Four reviewers (architecture-critic, systems pattern-recognizer, python-code-reviewer,
 quality coverage-gap-analyst) reviewed the above. Verdict: **Approach 1, with
 material corrections. Approach 2 rejected** (its new terminal-outcome value trips
@@ -145,32 +155,61 @@ the closed-enum / DB-CHECK / multi-consumer drift archetype — `_LEGAL_TERMINAL
 - **IN SCOPE: partial-expand/deaggregation resume**, via a schema change to persist
   per-token output payloads (operator approved the larger scope).
 
-### Expand-resume schema change (the enabling piece)
-Expand children carry independently-transformed per-child `row_data` created in memory
-(`tokens.py:383-393`) and never persisted — only the source row payload is retrievable
-by `row_id` (`data_flow_repository.create_row:429-448` stores it via `payload_store.store`
-→ `rows_table.source_data_ref`). `expand_token` (`data_flow_repository.py:749`) persists
-count + ids only. So an expand child is currently unreconstructable. Fix:
-- **New nullable column `token_data_ref String(64)` on `tokens_table`** (`schema.py:210`).
-  Holds the payload-store ref for a token whose `row_data` differs from its source row.
-  NULL for fork children (they share the parent/source payload, retrievable by `row_id`).
-- **`expand_token` persists each child's payload** at expand time via the existing
-  `payload_store.store(payload_bytes)` pattern (mirror `create_row:429-448`), writing the
-  ref into `tokens.token_data_ref`. This is a Tier-1 audit write — crash on store failure,
-  no best-effort.
-- **Recovery retrieval:** reconstructing an incomplete child reads `token_data_ref` when
-  set (expand child) else `rows.source_data_ref` (fork child). Missing/garbage ref where
-  one is required → raise (Tier-1, no coercion).
+### Schema change (the enabling piece) — TWO new columns, epoch 11
+Two distinct unpersisted facts block a correct fix. Both are resolved by columns added in
+the same epoch bump (one door opened once).
+
+**(A) Per-token transformed payload — `tokens.token_data_ref` (THREE writers).**
+Two token kinds carry `row_data` that differs from their source row and is created in
+memory only, never persisted:
+- **Expand children** (`tokens.py:383-393`): independently-transformed per-child rows.
+  `expand_token` (`data_flow_repository.py:749`) persists count + ids only.
+- **Post-coalesce merged tokens** (`coalesce_tokens`, `data_flow_repository.py:707-722`):
+  the merged row is computed in memory at barrier time and the INSERT writes **no** payload
+  ref. The COALESCED parent tokens are terminal (can't re-fire the merge), and the parent
+  branch payloads are themselves unpersisted — so a merged token is unreconstructable. A
+  crash *after* the barrier fires but *before* the post-merge sink/transform completes
+  (spec matrix #1, "crash-after-merge-before-downstream") therefore cannot be resumed
+  without this.
+
+Fix: **new nullable column `token_data_ref String(64)` on `tokens_table`** (`schema.py:210`),
+the payload-store ref for any token whose `row_data` differs from its source row.
+- **`expand_token` persists each child's payload**; **`coalesce_tokens` persists the merged
+  payload** — both via the existing `payload_store.store(payload_bytes)` pattern (mirror
+  `create_row`). Both are Tier-1 audit writes — crash on store failure, no best-effort.
+  NULL for **fork children** (they share the parent/source payload, retrievable by `row_id`).
+  So three writers: expand + coalesce set it; fork leaves it NULL.
+- **Type fidelity (Tier-1):** persist with `checkpoint_dumps` / read with `checkpoint_loads`
+  (`core/checkpoint/serialization.py`), NOT `canonical_json` — the latter stringifies
+  `datetime`/`Decimal`; the legal record must round-trip the exact Python types run 1 had.
+- **Recovery retrieval (one generic path):** reconstructing an incomplete token reads
+  `token_data_ref` when set (expand child or post-coalesce token) else `rows.source_data_ref`
+  (fork child). Missing/garbage ref where one is required → raise (Tier-1, no coercion).
+  Expand children and post-coalesce tokens share this reconstruction, keyed only on which
+  contract to apply (expand step's output contract vs the coalesce output contract).
+
+**(B) Resume provenance — `node_states.resume_checkpoint_id` (the attributability marker).**
+On resume, the re-drive records `node_states` at an elevated `attempt` (ADDENDUM 1) under
+the **same `run_id`** as run 1 (resume reuses the run; there is no distinct resume-run row).
+At the `node_states` level, `(run_id, token_id, node_id, attempt=N+1)` is then
+**indistinguishable from a run-1 tenacity retry** — only timestamps differ, and timestamps
+are non-probative under the "no inference" doctrine. That is an attributability gap in the
+legal record. Fix: **new nullable column `resume_checkpoint_id String(64)` on
+`node_states_table`** (FK to `checkpoints.checkpoint_id`), NULL for all run-1 records and
+set to the resumed-from checkpoint id (`ResumePoint.checkpoint.checkpoint_id`, reachable at
+the resume loop) for every `node_state` written during a resume re-drive. `explain()` can
+then query-separate a resume re-drive (`resume_checkpoint_id IS NOT NULL`) from a run-1
+retry (`IS NULL`) at the same `(token_id, node_id)`. Operator decision 2026-05-30 (faithful
+to "explain must prove complete lineage"). It rides the same `WorkItem` carrier and the same
+`begin_node_state` sites as the attempt offset (ADDENDUM 1), so threading cost is shared.
+
+**Epoch + backstop:**
 - **Epoch bump:** `SQLITE_SCHEMA_EPOCH` 10 → 11 (existing DBs incompatible → operator
   deletes per the delete-the-old-DB policy; no Alembic for the audit store).
-- **Co-fix review finding F3:** add the new column AND the two omitted
-  `runs.openrouter_catalog_*` columns to `_REQUIRED_COLUMNS` (`database.py`) so the
-  Postgres staleness backstop (which bypasses the SQLite-only epoch gate) catches a stale
-  DB. (F3 is an independent P1 from the same review; co-landing is cheap and correct.)
-- With per-child payload persisted, expand children reconstruct exactly like fork children
-  (their resume-start node derives from the expand step, continuing under the original
-  EXPAND_PARENT) — the mechanism below is shared, keyed on child kind only for which
-  payload ref to read.
+- **Co-fix review finding F3:** add **both** new columns AND the two omitted
+  `runs.openrouter_catalog_*` columns to `_REQUIRED_COLUMNS` (`database.py`) so the Postgres
+  staleness backstop (which bypasses the SQLite-only epoch gate) catches a stale DB. (F3 is
+  an independent P1 from the same review; co-landing is cheap and correct.)
 
 ### Mechanism (corrected) — mirror the live fork dispatch
 On resume, for a partial-fork row, do NOT restart from source. Instead:
@@ -183,18 +222,36 @@ On resume, for a partial-fork row, do NOT restart from source. Instead:
    from the source payload, valid for fork because fork children share the parent's
    deep-copied data). Read columns directly into `TokenInfo(...)` — no `.get`/`getattr`
    defaults; `TokenInfo.__post_init__` crashes on garbage (correct Tier-1 guard).
-3. **Resolve the resume-start node by mirroring `_handle_gate_fork` (processor.py:2674-2697),
-   NOT by `branch_name → destination`:**
-   - `branch ∈ _branch_to_sink` → terminal sink path (`current_node_id=None`).
-   - `branch ∈ _branch_to_coalesce` → start at `_branch_first_node[branch]`, pass
-     `coalesce_name`; coalesce re-entry then fires normally via `_maybe_coalesce_token`.
-   - branch in **neither** → audit/DAG inconsistency → **raise `OrchestrationInvariantError`**
-     (reuse existing raising helpers; never default-route).
+3. **Resolve the resume-start node by token kind (mirror `_handle_gate_fork`,
+   processor.py:2674-2697, NOT `branch_name → destination`).** The dispatch is keyed on the
+   persisted token shape; every case ends in `OrchestrationInvariantError` rather than a
+   default-route:
+   - **fork → sink** (`branch ∈ _branch_to_sink`) → terminal sink path
+     (`current_node_id=None`); fork child uses the source payload (`token_data_ref` NULL).
+   - **fork → coalesce, crash BEFORE barrier** (`branch ∈ _branch_to_coalesce`, token has a
+     `branch_name`) → start at `_branch_first_node[branch]`, pass `coalesce_name`; the
+     barrier then fires normally via `_maybe_coalesce_token`. Uses the source payload.
+   - **post-coalesce merged token, crash AFTER barrier** (`join_group_id` set;
+     `branch_name`/`fork_group_id`/`expand_group_id` all NULL — the shape `coalesce_tokens`
+     inserts) → re-drive **downstream of the coalesce node** (resolve via `step_in_pipeline`
+     → next node, or `current_node_id=None` if it fed straight to a sink). Payload from
+     `token_data_ref` (the merged payload persisted at barrier time), contract = coalesce
+     output contract. This is spec matrix #1's after-barrier case (review finding B1): it
+     MUST be dispatched, never filtered — an un-dispatched post-coalesce token would fall to
+     `process_existing_row` → restart → re-fork → reintroduce F1 for coalesce pipelines.
+   - **expand child** (`expand_group_id` set) → re-drive from the node after the expand step;
+     payload from `token_data_ref`, contract = expand step's output contract.
+   - **none of the above** → audit/DAG inconsistency → **raise `OrchestrationInvariantError`**.
 4. Continue under the **original** fork parent (reuse the persisted child token id; do
-   NOT mint a new parent). **Resume must start strictly downstream of the token's last
-   recorded `node_states` position** — re-driving an already-recorded `(token_id, node_id,
-   attempt)` violates the `node_states` unique constraint and crashes. For the fork→sink
-   and fork→first-coalesce-node shapes this holds by construction; assert it.
+   NOT mint a new parent). Re-driving a branch re-runs nodes whose run-1 `node_states`
+   already exist; the `node_states` unique constraint `(token_id, node_id, attempt)`
+   forbids a colliding insert. This is resolved by recording the re-drive at an **elevated
+   attempt** (see ADDENDUM 1) — *not* by requiring the resume to start strictly downstream
+   of the last recorded position. (An earlier draft of this point asserted the opposite —
+   "start strictly downstream… assert it." That clause is **WITHDRAWN**: it directly
+   contradicts the attempt-bump mechanism and the RED test, which deletes only the terminal
+   outcome and leaves the run-1 `node_state` in place precisely so the re-drive must coexist
+   with it. ADDENDUM 1 is authoritative.)
 5. `process_existing_row` (whole-row restart) remains correct ONLY for rows with **no
    tokens** (never started). The dispatch boundary (no-tokens → restart; partial → mid-DAG
    continuation) must be explicit.
@@ -243,7 +300,7 @@ toward the Approach-2 shape).
    `payload_store`; a stale DB (pre-epoch-11) is rejected at open with migration guidance
    (SQLite epoch gate) and `_REQUIRED_COLUMNS` rejects a Postgres DB missing the column.
 
-## ADDENDUM (2026-05-30, plan-grounding) — node_states attempt collision on re-drive (AUTHORITATIVE)
+## ADDENDUM 1 (2026-05-30, plan-grounding) — node_states attempt collision on re-drive (AUTHORITATIVE)
 
 Grounding the plan against primary source surfaced a load-bearing gap the REVISED
 DESIGN was silent on. It does **not** change the approved approach (Approach 1,
@@ -304,6 +361,68 @@ already applies to the linear whole-row-restart resume path; this fix neither
 introduces nor is obligated to solve it. The fix's contract is narrower and exact:
 **stop re-emitting *completed* branches.** The conservation-law oracle asserts the
 completed-branch invariant; it does not assert at-most-once for the in-flight branch.
+
+## ADDENDUM 2 (2026-05-30, post-adversarial-review) — provenance, coalesce persistence, scope (AUTHORITATIVE)
+
+Four independent reviewers (reality / architecture / systems / quality) reviewed the plan
+against primary source. All returned GO-WITH-CHANGES; two findings were NO-GO-class for an
+audit system. Operator adjudicated the two doctrine/scope calls on 2026-05-30. This addendum
+records the resulting authoritative changes. Where it conflicts with the REVISED DESIGN body
+or ADDENDUM 1, this addendum wins.
+
+### A. Resume provenance marker (closes the attributability gap)
+Verified: resume reuses the original `run_id` (no distinct resume-run row), so a re-driven
+`node_state` at `attempt=N+1` is indistinguishable from a run-1 tenacity retry except by
+timestamp (non-probative). **Decision: add `node_states.resume_checkpoint_id` (nullable, FK
+to `checkpoints.checkpoint_id`), NULL for run-1, set to `ResumePoint.checkpoint.checkpoint_id`
+for every re-drive `node_state`.** It threads on the same `WorkItem` carrier and through the
+same `begin_node_state` sites as `resume_attempt_offset` (ADDENDUM 1). The attempt-bump is
+still required (the unique constraint does **not** include the new column, so provenance
+alone does not avoid the collision). A test MUST prove query-separation, not just non-null:
+the same `(token_id, node_id)` shows a run-1 row with `resume_checkpoint_id IS NULL` and a
+re-drive row with it set.
+
+### B. Coalesce merged-payload persistence (closes review finding B1)
+Verified: `coalesce_tokens` (`data_flow_repository.py:707-722`) persists no payload ref, so a
+post-coalesce merged token is unreconstructable and the after-barrier resume case (matrix #1)
+cannot be served. **Decision: `coalesce_tokens` persists the merged payload to
+`token_data_ref`, making it a three-writer column (expand + coalesce; fork NULL).** The
+post-coalesce token is dispatched (Mechanism point 3), never filtered — filtering drops it to
+`process_existing_row` and reintroduces F1 for coalesce pipelines. Recovery reconstruction is
+one generic path shared with expand children.
+
+### C. Bounded non-goal — intermediate-transform re-execution (now attributable)
+Re-driving an incomplete branch from its start re-runs the intermediate transforms between
+branch start and the crash point (their post-branch payload is unpersisted). If such a
+transform makes an external call (LLM/HTTP), that call **re-fires** on resume and its
+`operation_calls` are recorded again. This is the same at-least-once class as the append-mode
+sink double-write (already a bounded non-goal below) and is **not** solved here. What this fix
+guarantees is that the duplication is **honest**: the re-fired transform's `node_states` (and
+the `operation_calls` recorded under them) carry the `resume_checkpoint_id` provenance marker,
+so an auditor can prove the second call came from the resume. A test MUST exercise a
+**side-effecting** transform on a re-driven branch (not a no-op `PassTransform`) and assert
+the duplicate carries the marker. The fix neither prevents nor is obligated to prevent the
+physical re-fire; per-node mid-branch payload persistence (which would enable true mid-branch
+resume) is a larger change than the approved scope.
+
+### D. Build-order consequence (provenance forces schema-first)
+Because the provenance column must be written by the **first** fork re-drive, the schema
+change can no longer follow the fork-resume core. Authoritative phase order: oracle →
+**schema (epoch 11, both columns)** → **payload persistence (expand + coalesce) + test-callsite
+migration** → **resume core (all token kinds, RED→GREEN)** → counters/matrix/gates. No
+add-then-remove query filters; persistence is a prerequisite consumed by the resume core.
+
+### E. Test-discipline corrections (from the quality review)
+- Every new regression/matrix cell must be demonstrated **RED for its own reason** before the
+  mechanism is relied upon (fork cells fail the conservation law via double-emit; the
+  post-coalesce cell, with its dispatch branch disabled, fails on `OrchestrationInvariantError`).
+- The collision cell must exercise an offset `> 0→1`: a node with **≥2** run-1 attempts, with
+  the re-drive landing at `max+1`, so a hardcoded `+1`/"resume generation = 1" cannot pass.
+- The expand value-fidelity cell must use **distinct per-child values** (a `datetime` and a
+  `Decimal` of different magnitudes) and assert each resumed child carries ITS OWN value —
+  `zip(strict=True)` guards length, not value↔token alignment.
+- F2 reconciliation must assert the actual counter fields (`rows_processed` /
+  `rows_succeeded` / `rows_failed`), not only the terminal-outcome multiset.
 
 ## Open questions for reviewers
 

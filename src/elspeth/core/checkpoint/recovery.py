@@ -615,8 +615,7 @@ class RecoveryManager:
             raise AuditIntegrityError(
                 f"token_data_ref payload for token {spec.token_id} (run {run_id}) is not a "
                 f"valid {{data, contract}} envelope — audit data corruption (Tier-1 violation). "
-                f"Got type={type(envelope).__name__!r}, "
-                f"keys={sorted(envelope.keys()) if isinstance(envelope, dict) else 'N/A'!r}"
+                f"Got type={type(envelope).__name__!r}."
             )
 
         # SchemaContract.from_checkpoint validates the version_hash (Tier-1 integrity).

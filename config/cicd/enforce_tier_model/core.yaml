@@ -256,13 +256,3 @@ allow_hits:
     guard for reconstruct_token_row, epoch 11.)"
   safety: Raises AuditIntegrityError if not a valid envelope; no silent coercion
   expires: '2026-08-30'
-- key: core/checkpoint/recovery.py:R5:RecoveryManager:reconstruct_token_row:fp=1f4dd53c57d90b69
-  owner: core
-  reason: "isinstance in error-message formatting only — the same envelope check
-    as above, but inlined into an f-string diagnostic to show 'N/A' rather than
-    crashing on .keys() when the corrupted payload is not a dict. The outer guard
-    (line 614) already raises; this isinstance is purely presentational in the
-    diagnostic path."
-  safety: No behaviour change — only affects the error message text; the guard above
-    already raises AuditIntegrityError before this line can cause data loss
-  expires: '2026-08-30'

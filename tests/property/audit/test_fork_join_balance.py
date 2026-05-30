@@ -1534,3 +1534,72 @@ class TestForkRecoveryInvariant:
         restored_names = {fc.normalized_name for fc in restored_contract.fields}
         expected_names = {fc.normalized_name for fc in output_contract.fields}
         assert restored_names == expected_names, f"Contract field names mismatch: expected {expected_names!r}, got {restored_names!r}"
+
+    def test_reconstruct_token_row_rejects_malformed_envelope(self) -> None:
+        """reconstruct_token_row raises AuditIntegrityError on a non-envelope payload.
+
+        The envelope-shape guard (recovery.py) is the Tier-1 safety net against a
+        corrupt or pre-ADDENDUM-3 (bare-dict) payload read from the audit store. It
+        must crash loudly — no silent coercion — for BOTH malformed shapes:
+
+        (a) non-dict payload (e.g. a bare string written by some other writer);
+        (b) a dict that is missing the required "data"/"contract" keys (e.g. the
+            old pre-envelope bare-data dict shape).
+
+        We inject each malformed payload directly into the MockPayloadStore and build
+        an IncompleteTokenSpec pointing at its ref — no full pipeline run is needed to
+        exercise the guard.
+        """
+        from elspeth.contracts.errors import AuditIntegrityError
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+        from elspeth.contracts.schema_contract import PipelineRow as PLRow
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
+        from elspeth.core.checkpoint.serialization import checkpoint_dumps
+
+        payload_store = MockPayloadStore()
+        db = make_landscape_db()
+        checkpoint_mgr = CheckpointManager(db)
+        recovery = RecoveryManager(db, checkpoint_mgr)
+
+        # A real source_row is only needed for the call signature; the guard fires
+        # before it would ever be consumed (token_data_ref is non-None here).
+        source_schema = SchemaContract(
+            mode="OBSERVED",
+            fields=(FieldContract(normalized_name="x", original_name="x", python_type=int, required=True, source="inferred"),),
+            locked=True,
+        )
+        source_row = PLRow({"x": 1}, source_schema)
+
+        def _spec_for(ref: str) -> IncompleteTokenSpec:
+            return IncompleteTokenSpec(
+                token_id="malformed-token",
+                row_id="row-malformed",
+                branch_name=None,
+                fork_group_id=None,
+                join_group_id=None,
+                expand_group_id="eg-malformed",
+                token_data_ref=ref,
+                step_in_pipeline=2,
+                max_attempt=-1,
+            )
+
+        # (a) non-dict payload: a bare string round-tripped through checkpoint_dumps.
+        non_dict_ref = payload_store.store(checkpoint_dumps("just a string").encode("utf-8"))
+        with pytest.raises(AuditIntegrityError, match="not a"):
+            recovery.reconstruct_token_row(
+                spec=_spec_for(non_dict_ref),
+                run_id="run-malformed",
+                source_row=source_row,
+                payload_store=payload_store,
+            )
+
+        # (b) dict-missing-keys payload: the pre-envelope bare-data dict shape.
+        missing_keys_ref = payload_store.store(checkpoint_dumps({"old_key": 1}).encode("utf-8"))
+        with pytest.raises(AuditIntegrityError, match="not a"):
+            recovery.reconstruct_token_row(
+                spec=_spec_for(missing_keys_ref),
+                run_id="run-malformed",
+                source_row=source_row,
+                payload_store=payload_store,
+            )

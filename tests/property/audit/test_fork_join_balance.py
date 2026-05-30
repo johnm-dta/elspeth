@@ -32,7 +32,7 @@ from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, Determinism, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.checkpoint.serialization import checkpoint_loads
-from elspeth.core.config import CoalesceSettings, GateSettings, SourceSettings
+from elspeth.core.config import CoalesceSettings, ElspethSettings, GateSettings, SourceSettings
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
@@ -936,6 +936,310 @@ class TestForkRecoveryInvariant:
         assert post_resume_stats["total_fork_groups"] == baseline_fork_stats["total_fork_groups"], (
             f"Resume changed fork-group shape: {baseline_fork_stats} -> {post_resume_stats}"
         )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # F1 Regression Cells (Task 8) — collision + provenance attributability
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _setup_fork_and_interrupt(
+        self,
+    ) -> tuple[
+        LandscapeDB,
+        MockPayloadStore,
+        PipelineConfig,
+        ExecutionGraph,
+        ElspethSettings,
+        str,  # run_id
+        str,  # incomplete_token_id (sink_a child)
+    ]:
+        """Shared setup: fork pipeline run → interrupt sink_a → return artifacts.
+
+        Runs the fork pipeline to completion, then deletes the sink_a child's
+        terminal OUTCOME (leaving its node_state row intact). Returns the
+        artifacts needed by each regression cell.
+        """
+        from elspeth.core.config import ElspethSettings
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        db = make_landscape_db()
+        payload_store = MockPayloadStore()
+
+        source = ListSource([{"value": 1}], on_success="sink_a")
+        sink_a = CollectSink("sink_a")
+        sink_b = CollectSink("sink_b")
+
+        gate = GateSettings(
+            name="fork_gate",
+            input="gate_in",
+            condition="True",
+            routes={"true": "fork", "false": "sink_a"},
+            fork_to=["sink_a", "sink_b"],
+        )
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
+            gates=[gate],
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            source=as_source(source),
+            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            transforms=[],
+            sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
+            gates=[gate],
+            aggregations={},
+            coalesce_settings=[],
+        )
+        settings_obj = ElspethSettings(
+            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sinks={
+                "sink_a": {"plugin": "test", "on_write_failure": "discard"},
+                "sink_b": {"plugin": "test", "on_write_failure": "discard"},
+            },
+            gates=[gate],
+        )
+
+        orchestrator = Orchestrator(db)
+        run = orchestrator.run(config, graph=graph, settings=settings_obj, payload_store=payload_store)
+        run_id = run.run_id
+
+        # Locate the sink_a child token (the incomplete branch after interruption).
+        with db.engine.connect() as conn:
+            sink_a_tokens = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id AND t.branch_name = 'sink_a'
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+        assert len(sink_a_tokens) == 1, f"Expected exactly one sink_a fork-child token, got {len(sink_a_tokens)}"
+        incomplete_token_id = sink_a_tokens[0].token_id
+
+        # Interrupt: delete sink_a's terminal OUTCOME only. The node_state row for
+        # the sink_a child at attempt=0 is NOT deleted — this is the run-1 record
+        # that Cell 1 asserts is preserved after resume (append-only invariant).
+        with db.engine.connect() as conn:
+            sink_a_outcomes = conn.execute(
+                text("""
+                    SELECT o.outcome_id AS outcome_id
+                    FROM token_outcomes o
+                    JOIN tokens t ON t.token_id = o.token_id
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id AND o.sink_name = 'sink_a'
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+            assert sink_a_outcomes, "expected a sink_a outcome to delete (setup precondition)"
+            for outcome in sink_a_outcomes:
+                conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
+            conn.commit()
+
+        return db, payload_store, config, graph, settings_obj, run_id, incomplete_token_id
+
+    def _resume_run(
+        self,
+        db: LandscapeDB,
+        payload_store: MockPayloadStore,
+        config: PipelineConfig,
+        graph: ExecutionGraph,
+        settings_obj: ElspethSettings,
+        run_id: str,
+    ) -> None:
+        """Complete the resume path: checkpoint + mark-failed + resume."""
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import CheckpointSettings
+
+        checkpoint_mgr = CheckpointManager(db)
+        sink_node_ids = graph.get_sinks()
+        with db.engine.connect() as conn:
+            actual_token = conn.execute(
+                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
+                {"run_id": run_id},
+            ).fetchone()
+        assert actual_token is not None
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=actual_token.token_id,
+            node_id=sink_node_ids[0],
+            sequence_number=1,
+            graph=graph,
+        )
+        with db.engine.connect() as conn:
+            conn.execute(
+                text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            conn.commit()
+
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        check = recovery_mgr.can_resume(run_id, graph)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+
+    def test_resume_fork_sink_coexists_with_run1_node_state(self) -> None:
+        """Re-driving an incomplete fork->sink child must not collide on node_states.
+
+        run-1 left a node_state at attempt=0 for the incomplete child (the
+        sink ran; only its terminal OUTCOME was deleted to simulate the
+        interruption — the node_state row remains). The re-drive must write
+        at attempt=1, and the run-1 record must be preserved (append-only).
+
+        RED (dispatch disabled): AssertionError — ``assert 1 in attempts``
+        fails because process_existing_row mints a fresh token and never
+        touches the original incomplete_token_id, so that token's node_states
+        remain at ``[0]`` only; the re-drive record at attempt=1 is never
+        written.
+        """
+        db, payload_store, config, graph, settings_obj, run_id, incomplete_token_id = self._setup_fork_and_interrupt()
+
+        # Precondition: the run-1 attempt-0 node_state must already exist for
+        # the incomplete child BEFORE resume. The setup deletes only the outcome,
+        # not the node_state.
+        with db.engine.connect() as conn:
+            pre_resume_attempts = [
+                r.attempt
+                for r in conn.execute(
+                    text("SELECT attempt FROM node_states WHERE token_id = :tid ORDER BY attempt"),
+                    {"tid": incomplete_token_id},
+                ).fetchall()
+            ]
+        assert 0 in pre_resume_attempts, (
+            f"Setup precondition violated: run-1 attempt=0 node_state absent before resume "
+            f"(attempts={pre_resume_attempts!r}). The outcome-delete must NOT remove node_states."
+        )
+
+        self._resume_run(db, payload_store, config, graph, settings_obj, run_id)
+
+        with db.engine.connect() as conn:
+            attempts = [
+                r.attempt
+                for r in conn.execute(
+                    text("SELECT attempt FROM node_states WHERE token_id = :tid ORDER BY attempt"),
+                    {"tid": incomplete_token_id},
+                ).fetchall()
+            ]
+        assert 0 in attempts, "run-1 node_state (attempt=0) must be preserved after resume (append-only invariant)"
+        assert 1 in attempts, (
+            f"resume re-drive must record a new node_state at attempt=1 (max+1); "
+            f"got attempts={attempts!r}. An IntegrityError here means the re-drive "
+            f"attempted attempt=0 and collided — offset computation missed begin_node_state."
+        )
+
+    def test_resume_offset_is_max_plus_one_not_hardcoded(self) -> None:
+        """If the incomplete child has TWO run-1 attempts (0 and 1, e.g. a tenacity
+        retry before the crash), the re-drive must land at attempt=2 (max+1), not
+        a hardcoded 1. Guards against offset = +1 / 'resume generation = 1'.
+
+        RED (dispatch disabled): AssertionError — ``assert 2 in attempts`` (and
+        ``assert max(attempts) == 2``) fail because process_existing_row mints a
+        fresh token and never touches the original token's node_states, so the
+        only attempt present on that token is the synthetic attempt=1 we inserted
+        (i.e. attempts == [0, 1], not [0, 1, 2]).
+        """
+
+        db, payload_store, config, graph, settings_obj, run_id, incomplete_token_id = self._setup_fork_and_interrupt()
+
+        # Insert a synthetic run-1 attempt-1 node_state for the incomplete child,
+        # simulating a tenacity retry that happened during run-1 before the crash.
+        # Clone all columns from the existing attempt-0 row via raw SQL INSERT/SELECT
+        # so SQLite handles the datetime columns directly (avoiding SQLAlchemy's
+        # DateTime type mapping, which rejects string values from fetchone().__mapping__).
+        # resume_checkpoint_id stays NULL so this reads as a genuine run-1 row.
+        import uuid
+
+        synthetic_state_id = f"ns-synthetic-{uuid.uuid4().hex[:16]}"
+        with db.engine.connect() as conn:
+            # Verify the source row exists first.
+            existing_count = conn.execute(
+                text("SELECT COUNT(*) FROM node_states WHERE token_id = :tid AND attempt = 0"),
+                {"tid": incomplete_token_id},
+            ).scalar()
+            assert existing_count == 1, "Expected an attempt=0 node_state for the incomplete sink_a child before insert"
+            # Copy all columns from attempt=0, overriding only state_id, attempt, and
+            # resume_checkpoint_id. Raw SQL INSERT...SELECT avoids the datetime coercion
+            # issue that occurs when passing SQLite-stored strings through SQLAlchemy's
+            # DateTime column type.
+            conn.execute(
+                text(
+                    "INSERT INTO node_states "
+                    "(state_id, token_id, run_id, node_id, step_index, attempt, status, "
+                    " input_hash, output_hash, context_before_json, context_after_json, "
+                    " duration_ms, error_json, success_reason_json, started_at, completed_at, "
+                    " resume_checkpoint_id) "
+                    "SELECT :new_state_id, token_id, run_id, node_id, step_index, 1, status, "
+                    "       input_hash, output_hash, context_before_json, context_after_json, "
+                    "       duration_ms, error_json, success_reason_json, started_at, completed_at, "
+                    "       NULL "  # run-1 row — no provenance marker
+                    "FROM node_states WHERE token_id = :tid AND attempt = 0"
+                ),
+                {"new_state_id": synthetic_state_id, "tid": incomplete_token_id},
+            )
+            conn.commit()
+
+        # Precondition: attempts are now [0, 1] (max=1) so max+1 should land at 2.
+        with db.engine.connect() as conn:
+            pre_attempts = [
+                r.attempt
+                for r in conn.execute(
+                    text("SELECT attempt FROM node_states WHERE token_id = :tid ORDER BY attempt"),
+                    {"tid": incomplete_token_id},
+                ).fetchall()
+            ]
+        assert pre_attempts == [0, 1], f"Pre-resume attempts must be [0, 1]; got {pre_attempts!r}"
+
+        self._resume_run(db, payload_store, config, graph, settings_obj, run_id)
+
+        with db.engine.connect() as conn:
+            attempts = [
+                r.attempt
+                for r in conn.execute(
+                    text("SELECT attempt FROM node_states WHERE token_id = :tid ORDER BY attempt"),
+                    {"tid": incomplete_token_id},
+                ).fetchall()
+            ]
+        assert 2 in attempts, (
+            f"resume re-drive must land at attempt=max+1=2 (max was 1 from synthetic insert); "
+            f"got attempts={attempts!r}. A hardcoded '1' would fail this assertion."
+        )
+        assert max(attempts) == 2, f"max(attempts) must be exactly 2 (max+1); got {max(attempts)!r} with attempts={attempts!r}"
+
+    def test_resume_redrive_is_query_separable_from_retry(self) -> None:
+        """A resume re-drive node_state carries resume_checkpoint_id; the run-1
+        record at the same (token_id, node_id) does not. Proves explain() can
+        separate them by NULL-ness alone.
+
+        RED (dispatch disabled): AssertionError — ``assert run1 and redrive``
+        fails because process_existing_row never touches the original token's
+        node_states, so every node_state on that token has
+        resume_checkpoint_id=NULL; the ``redrive`` list is empty.
+        """
+        db, payload_store, config, graph, settings_obj, run_id, incomplete_token_id = self._setup_fork_and_interrupt()
+
+        self._resume_run(db, payload_store, config, graph, settings_obj, run_id)
+
+        with db.engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT attempt, resume_checkpoint_id FROM node_states WHERE token_id = :tid ORDER BY attempt"),
+                {"tid": incomplete_token_id},
+            ).fetchall()
+        run1 = [r for r in rows if r.resume_checkpoint_id is None]
+        redrive = [r for r in rows if r.resume_checkpoint_id is not None]
+        assert run1 and redrive, (
+            f"Both a run-1 (resume_checkpoint_id=NULL) and a re-drive "
+            f"(resume_checkpoint_id non-NULL) record must exist for the incomplete token; "
+            f"run1={[(r.attempt,) for r in run1]!r} redrive={[(r.attempt,) for r in redrive]!r}"
+        )
+        assert all(r.attempt == 0 for r in run1), f"All run-1 records must be at attempt=0; got {[(r.attempt,) for r in run1]!r}"
+        assert all(r.attempt >= 1 for r in redrive), f"All re-drive records must be at attempt>=1; got {[(r.attempt,) for r in redrive]!r}"
 
     def test_expand_token_persists_per_child_payload(self) -> None:
         """expand_token stores a {data, contract} envelope and writes tokens.token_data_ref.

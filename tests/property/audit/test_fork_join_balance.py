@@ -2811,7 +2811,7 @@ class TestForkRecoveryInvariant:
         operation_call (operations-table) is NOT used here — transforms produce
         state-parented calls; resume_checkpoint_id lives only on node_states.
 
-        RED (dispatch disabled, fork_expand_coalesce_specs branch commented):
+        RED path A — dispatch disabled (fork_expand_coalesce_specs branch commented):
         process_existing_row re-forks the row from the source, creating NEW branch
         children.  The coalesce node_states from run-1 remain (completed_at IS NOT
         NULL).  The NEW branches arrive at the barrier, CoalesceExecutor.accept()
@@ -2821,8 +2821,17 @@ class TestForkRecoveryInvariant:
         original run-1 branch tokens (which had their COALESCED outcomes deleted)
         are never re-driven by the disabled dispatch, so they remain in the DB
         with no terminal outcomes → I1a fires on those.
-        Observed: AuditIntegrityError — 'fork/expand parent token(s) have no child
+        Observed A: AuditIntegrityError — 'fork/expand parent token(s) have no child
         token_outcomes rows at run-end.'
+
+        RED path B — stamp disabled (resume_checkpoint_id=None in resume_incomplete_token):
+        Dispatch ON, re-drive ON; record_a's transform re-fires and its new node_state
+        is written at attempt=max+1.  But with resume_checkpoint_id forced to None,
+        the re-drive node_state is indistinguishable from a run-1 entry.
+        Observed B: AssertionError — 'Re-drive node_state (attempt=1) must have
+        resume_checkpoint_id set (attributability invariant, ADDENDUM 2.C); got None.'
+        This confirms the attributability assertion has independent teeth beyond the
+        dispatch-disable path.
         """
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.contracts.enums import RunStatus

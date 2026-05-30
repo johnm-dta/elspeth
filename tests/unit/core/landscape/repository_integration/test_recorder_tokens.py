@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from tests.fixtures.stores import MockPayloadStore
 
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.enums import Determinism, NodeType, TerminalOutcome, TerminalPath
@@ -20,7 +21,7 @@ class TestRecorderFactoryTokens:
 
     def test_create_row(self) -> None:
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -50,7 +51,7 @@ class TestRecorderFactoryTokens:
         audit trail while weak tests still pass.
         """
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -75,7 +76,7 @@ class TestRecorderFactoryTokens:
 
     def test_create_initial_token(self) -> None:
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -100,7 +101,7 @@ class TestRecorderFactoryTokens:
 
     def test_fork_token(self) -> None:
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -140,7 +141,7 @@ class TestRecorderFactoryTokens:
         assertions would still pass.
         """
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -178,7 +179,7 @@ class TestRecorderFactoryTokens:
 
     def test_coalesce_tokens(self) -> None:
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -205,6 +206,7 @@ class TestRecorderFactoryTokens:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
 
         assert merged.token_id is not None
@@ -213,7 +215,7 @@ class TestRecorderFactoryTokens:
     def test_fork_token_with_step_in_pipeline(self) -> None:
         """Fork stores step_in_pipeline in tokens table."""
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -257,7 +259,7 @@ class TestRecorderFactoryTokens:
         upstream, recorder MUST also validate as defense-in-depth.
         """
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -286,7 +288,7 @@ class TestRecorderFactoryTokens:
     def test_coalesce_tokens_with_step_in_pipeline(self) -> None:
         """Coalesce stores step_in_pipeline in tokens table."""
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -314,6 +316,7 @@ class TestRecorderFactoryTokens:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
+            merged_payload={"merged": True},
             step_in_pipeline=3,
         )
 
@@ -332,7 +335,7 @@ class TestExpandToken:
     def test_expand_token_creates_children_with_parent_relationship(self) -> None:
         """expand_token creates child tokens linked to parent via token_parents."""
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
 
         # Setup: create run, node, row, and parent token
         run = factory.run_lifecycle.begin_run(config={"test": True}, canonical_version="1.0")
@@ -357,7 +360,7 @@ class TestExpandToken:
         children, _expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
-            count=3,
+            child_payloads=[{"item": 1}, {"item": 2}, {"item": 3}],
             step_in_pipeline=2,
         )
 
@@ -384,7 +387,7 @@ class TestExpandToken:
     def test_expand_token_with_zero_count_raises(self) -> None:
         """expand_token raises ValueError for count=0."""
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
 
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="1.0")
         node = factory.data_flow.register_node(
@@ -408,14 +411,14 @@ class TestExpandToken:
             factory.data_flow.expand_token(
                 parent_ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
                 row_id=row.row_id,
-                count=0,
+                child_payloads=[],
                 step_in_pipeline=1,
             )
 
     def test_expand_token_stores_step_in_pipeline(self) -> None:
         """expand_token stores step_in_pipeline on child tokens."""
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
 
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="1.0")
         node = factory.data_flow.register_node(
@@ -438,7 +441,7 @@ class TestExpandToken:
         children, _expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
-            count=2,
+            child_payloads=[{"item": 1}, {"item": 2}],
             step_in_pipeline=5,
         )
 
@@ -453,7 +456,7 @@ class TestExpandToken:
     def test_expand_token_with_single_child(self) -> None:
         """expand_token works with count=1."""
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
 
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="1.0")
         node = factory.data_flow.register_node(
@@ -476,7 +479,7 @@ class TestExpandToken:
         children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
-            count=1,
+            child_payloads=[{"item": 1}],
             step_in_pipeline=1,
         )
 
@@ -492,7 +495,7 @@ class TestExpandToken:
     def test_expand_token_preserves_expand_group_id_through_retrieval(self) -> None:
         """expand_group_id is preserved when retrieving tokens via get_token."""
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
 
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="1.0")
         node = factory.data_flow.register_node(
@@ -515,7 +518,7 @@ class TestExpandToken:
         children, _expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
             row_id=row.row_id,
-            count=2,
+            child_payloads=[{"item": 1}, {"item": 2}],
             step_in_pipeline=3,
         )
 
@@ -541,7 +544,7 @@ class TestAtomicTokenOperations:
         """
 
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -579,7 +582,7 @@ class TestAtomicTokenOperations:
         import json
 
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -619,7 +622,7 @@ class TestAtomicTokenOperations:
         """
 
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         node = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -642,7 +645,7 @@ class TestAtomicTokenOperations:
         _children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
-            count=3,
+            child_payloads=[{"item": 1}, {"item": 2}, {"item": 3}],
             step_in_pipeline=2,
         )
 
@@ -659,7 +662,7 @@ class TestAtomicTokenOperations:
         import json
 
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         node = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -682,7 +685,7 @@ class TestAtomicTokenOperations:
         factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
-            count=5,
+            child_payloads=[{"item": i} for i in range(5)],
             step_in_pipeline=2,
         )
 
@@ -703,7 +706,7 @@ class TestAtomicTokenOperations:
         (2) parent-link records in token_parents table.
         """
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -730,6 +733,7 @@ class TestAtomicTokenOperations:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
 
         # Verify merged token has join_group_id
@@ -750,7 +754,7 @@ class TestAtomicTokenOperations:
         """
 
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -777,6 +781,7 @@ class TestAtomicTokenOperations:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
 
         # Step 2: Record COALESCED outcomes on each parent (as CoalesceExecutor does)
@@ -805,7 +810,7 @@ class TestAtomicTokenOperations:
         each parent token with correct ordinals, enabling lineage traversal.
         """
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -832,6 +837,7 @@ class TestAtomicTokenOperations:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
 
         # Verify token_parents entries
@@ -849,7 +855,7 @@ class TestAtomicTokenOperations:
     def test_coalesce_tokens_stores_join_group_id_on_merged_token(self) -> None:
         """coalesce_tokens stores join_group_id on the merged token for lineage queries."""
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -875,6 +881,7 @@ class TestAtomicTokenOperations:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
 
         # join_group_id must be set on the merged token itself
@@ -892,7 +899,7 @@ class TestAtomicTokenOperations:
         CONSUMED_IN_BATCH separately for the parent (different semantics).
         """
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         node = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -915,7 +922,7 @@ class TestAtomicTokenOperations:
         children, _expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
-            count=2,
+            child_payloads=[{"item": 1}, {"item": 2}],
             step_in_pipeline=2,
             record_parent_outcome=False,  # Don't record EXPANDED
         )

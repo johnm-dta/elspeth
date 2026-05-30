@@ -20,16 +20,22 @@ Fork terminology:
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from sqlalchemy import text
 
 from elspeth.contracts import CoalesceName, GateName, RoutingAction, RoutingMode, SinkName
-from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
+from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, Determinism, NodeType, TerminalOutcome, TerminalPath
+from elspeth.contracts.schema import SchemaConfig
+from elspeth.core.checkpoint.serialization import checkpoint_loads
 from elspeth.core.config import CoalesceSettings, GateSettings, SourceSettings
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
 from tests.fixtures.base_classes import (
     as_sink,
@@ -930,3 +936,170 @@ class TestForkRecoveryInvariant:
         assert post_resume_stats["total_fork_groups"] == baseline_fork_stats["total_fork_groups"], (
             f"Resume changed fork-group shape: {baseline_fork_stats} -> {post_resume_stats}"
         )
+
+    def test_expand_token_persists_per_child_payload(self) -> None:
+        """expand_token stores each child's payload and writes tokens.token_data_ref.
+
+        Verifies that:
+        1. Each child has a non-null token_data_ref.
+        2. Retrieving the ref bytes and loading via checkpoint_loads round-trips
+           the CORRECT child's payload (not the sibling's), proving per-child
+           value alignment and type fidelity (datetime survives as datetime, not string).
+        3. The stored bytes are the result of checkpoint_dumps (type-faithful), NOT
+           canonical_json (which would stringify datetime).
+
+        This is the Tier-1 audit invariant: every expand child is reconstructable
+        from its token_data_ref on resume.
+        """
+        from datetime import datetime
+
+        _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+        payload_store = MockPayloadStore()
+        db = make_landscape_db()
+        factory = RecorderFactory(db, payload_store=payload_store)
+
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
+            run_id=run.run_id,
+            plugin_name="explode",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=_OBSERVED_SCHEMA,
+        )
+        row = factory.data_flow.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={"items": [1, 2]},
+        )
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
+
+        # Two DISTINCT payloads — one with a datetime (type-fidelity witness).
+        # canonical_json would stringify the datetime; checkpoint_dumps preserves it.
+        aware_dt = datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
+        child_payloads = [
+            {"name": "alpha", "value": 1, "ts": aware_dt},
+            {"name": "beta", "value": 2, "ts": aware_dt},
+        ]
+
+        children, expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
+            row_id=row.row_id,
+            child_payloads=child_payloads,
+            step_in_pipeline=1,
+        )
+
+        assert len(children) == 2
+        assert expand_group_id is not None
+
+        # Both children must have non-null token_data_ref
+        for child in children:
+            assert child.token_data_ref is not None, (
+                f"expand_token must set token_data_ref on every child (epoch 11 invariant); child {child.token_id} has token_data_ref=None"
+            )
+
+        # Round-trip: retrieve bytes → checkpoint_loads → compare to original payload.
+        # Critically, verify EACH child has ITS OWN payload (not the sibling's).
+        for i, (child, expected_payload) in enumerate(zip(children, child_payloads, strict=True)):
+            raw_bytes = payload_store.retrieve(child.token_data_ref)
+            restored = checkpoint_loads(raw_bytes.decode("utf-8"))
+
+            # Value alignment: correct child, correct fields
+            assert restored["name"] == expected_payload["name"], (
+                f"Child {i} (token_data_ref={child.token_data_ref!r}) stored wrong payload: "
+                f"expected name={expected_payload['name']!r}, got {restored['name']!r}"
+            )
+            assert restored["value"] == expected_payload["value"], (
+                f"Child {i} stored wrong value: expected {expected_payload['value']}, got {restored['value']}"
+            )
+
+            # Type fidelity: datetime must come back as datetime, not a string.
+            # This proves checkpoint_dumps was used (canonical_json would stringify datetime).
+            assert isinstance(restored["ts"], datetime), (
+                f"Type fidelity failure: 'ts' field came back as {type(restored['ts']).__name__!r}, "
+                f"not datetime — checkpoint_dumps was not used (canonical_json stringifies datetime)"
+            )
+            assert restored["ts"].tzinfo is not None, "Restored datetime must be timezone-aware"
+            assert restored["ts"] == aware_dt, f"datetime value mismatch: expected {aware_dt!r}, got {restored['ts']!r}"
+
+    def test_coalesce_token_persists_merged_payload(self) -> None:
+        """coalesce_tokens stores the merged payload and writes tokens.token_data_ref.
+
+        Verifies that:
+        1. The merged token has a non-null token_data_ref.
+        2. Retrieving the ref bytes and loading via checkpoint_loads round-trips
+           the merged payload with full type fidelity (datetime survives as datetime).
+        3. The stored bytes are the result of checkpoint_dumps, NOT canonical_json.
+
+        This is the Tier-1 audit invariant: the merged token is reconstructable
+        from its token_data_ref on resume without re-executing the merge strategy.
+        """
+        from datetime import datetime
+
+        _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+        payload_store = MockPayloadStore()
+        db = make_landscape_db()
+        factory = RecorderFactory(db, payload_store=payload_store)
+
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source = factory.data_flow.register_node(
+            run_id=run.run_id,
+            plugin_name="source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            schema_config=_OBSERVED_SCHEMA,
+        )
+        row = factory.data_flow.create_row(
+            run_id=run.run_id,
+            source_node_id=source.node_id,
+            row_index=0,
+            data={"key": "value"},
+        )
+
+        # Create two branch tokens to coalesce
+        token_a = factory.data_flow.create_token(row_id=row.row_id)
+        token_b = factory.data_flow.create_token(row_id=row.row_id)
+
+        # Merged payload includes a datetime to verify type fidelity.
+        # canonical_json would stringify datetime; checkpoint_dumps preserves it.
+        aware_dt = datetime(2025, 3, 10, 8, 30, 0, tzinfo=UTC)
+        merged_payload = {
+            "merged": True,
+            "count": 2,
+            "result_score": 0.87,
+            "resolved_at": aware_dt,
+        }
+
+        merged_token = factory.data_flow.coalesce_tokens(
+            parent_refs=[
+                TokenRef(token_id=token_a.token_id, run_id=run.run_id),
+                TokenRef(token_id=token_b.token_id, run_id=run.run_id),
+            ],
+            row_id=row.row_id,
+            merged_payload=merged_payload,
+            step_in_pipeline=2,
+        )
+
+        # Merged token must have non-null token_data_ref
+        assert merged_token.token_data_ref is not None, "coalesce_tokens must set token_data_ref on the merged token (epoch 11 invariant)"
+        assert merged_token.join_group_id is not None
+
+        # Round-trip: retrieve bytes → checkpoint_loads → compare to merged_payload
+        raw_bytes = payload_store.retrieve(merged_token.token_data_ref)
+        restored = checkpoint_loads(raw_bytes.decode("utf-8"))
+
+        assert restored["merged"] is True
+        assert restored["count"] == 2
+        assert abs(restored["result_score"] - 0.87) < 1e-9
+
+        # Type fidelity: datetime must come back as datetime, not a string.
+        # This proves checkpoint_dumps was used (canonical_json would stringify datetime).
+        assert isinstance(restored["resolved_at"], datetime), (
+            f"Type fidelity failure: 'resolved_at' came back as {type(restored['resolved_at']).__name__!r}, "
+            f"not datetime — checkpoint_dumps was not used (canonical_json stringifies datetime)"
+        )
+        assert restored["resolved_at"].tzinfo is not None, "Restored datetime must be timezone-aware"
+        assert restored["resolved_at"] == aware_dt, f"datetime value mismatch: expected {aware_dt!r}, got {restored['resolved_at']!r}"

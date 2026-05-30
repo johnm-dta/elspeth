@@ -55,6 +55,7 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 from tests.fixtures.landscape import make_factory, make_landscape_db
+from tests.fixtures.stores import MockPayloadStore
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 _ERROR_HASH = "a" * 64
@@ -65,6 +66,9 @@ def _make_repo(
     run_id: str = "run-1",
     payload_store: Any = None,
 ) -> tuple[LandscapeDB, DataFlowRepository, RecorderFactory]:
+    # Default to MockPayloadStore so expand_token / coalesce_tokens can persist payloads.
+    if payload_store is None:
+        payload_store = MockPayloadStore()
     """Create a DataFlowRepository with supporting infrastructure.
 
     Returns (db, repo, factory) — factory is for graph setup only.
@@ -1118,6 +1122,7 @@ class TestCoalesceTokensAtomicity:
             repo.coalesce_tokens(
                 parent_refs=[TokenRef(token_id=cid, run_id="run-1") for cid in child_ids],
                 row_id=row_id,
+                merged_payload={"merged": True},
             )
 
         # Verify: zero partial state
@@ -1164,7 +1169,7 @@ class TestExpandTokenAtomicity:
             repo.expand_token(
                 parent_ref=TokenRef(token_id=tok_id, run_id="run-1"),
                 row_id=row_id,
-                count=3,
+                child_payloads=[{"item": i} for i in range(3)],
                 step_in_pipeline=2,
             )
 
@@ -1258,6 +1263,7 @@ class TestCoalesceTokensRowcountValidation:
             repo.coalesce_tokens(
                 parent_refs=[TokenRef(token_id=cid, run_id="run-1") for cid in child_ids],
                 row_id=row_id,
+                merged_payload={"merged": True},
             )
 
 
@@ -1296,7 +1302,7 @@ class TestExpandTokenRowcountValidation:
             repo.expand_token(
                 parent_ref=TokenRef(token_id=tok_id, run_id="run-1"),
                 row_id=row_id,
-                count=2,
+                child_payloads=[{"item": 1}, {"item": 2}],
             )
 
 

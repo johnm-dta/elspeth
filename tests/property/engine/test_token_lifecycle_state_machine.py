@@ -380,6 +380,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
         merged = self.factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=sid, run_id=self.run.run_id) for sid in sibling_ids],
             row_id=model.row_id,
+            merged_payload={"merged": True},
             step_in_pipeline=self.step_counter,
         )
 
@@ -830,6 +831,7 @@ class TestTokenLifecycleInvariants:
             merged = factory.data_flow.coalesce_tokens(
                 parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
                 row_id=row.row_id,
+                merged_payload={"merged": True},
                 step_in_pipeline=2,
             )
 

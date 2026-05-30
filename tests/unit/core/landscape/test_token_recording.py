@@ -373,6 +373,7 @@ class TestCoalesceTokens:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-1"), TokenRef(token_id=token_b.token_id, run_id="run-1")],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
         assert merged.token_id is not None
         assert merged.row_id == row.row_id
@@ -384,6 +385,7 @@ class TestCoalesceTokens:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-1"), TokenRef(token_id=token_b.token_id, run_id="run-1")],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
         assert merged.join_group_id is not None
 
@@ -399,6 +401,7 @@ class TestCoalesceTokens:
                 TokenRef(token_id=token_c.token_id, run_id="run-1"),
             ],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
         assert merged.token_id is not None
         assert merged.join_group_id is not None
@@ -410,6 +413,7 @@ class TestCoalesceTokens:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-1"), TokenRef(token_id=token_b.token_id, run_id="run-1")],
             row_id=row.row_id,
+            merged_payload={"merged": True},
             step_in_pipeline=5,
         )
         assert merged.step_in_pipeline == 5
@@ -424,7 +428,7 @@ class TestExpandToken:
         children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=4,
+            child_payloads=[{"item": i} for i in range(4)],
         )
         assert len(children) == 4
         assert expand_group_id is not None
@@ -435,7 +439,7 @@ class TestExpandToken:
         children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=3,
+            child_payloads=[{"item": i} for i in range(3)],
         )
         assert all(c.expand_group_id == expand_group_id for c in children)
 
@@ -445,7 +449,7 @@ class TestExpandToken:
         children, _eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=2,
+            child_payloads=[{"item": 1}, {"item": 2}],
         )
         assert all(c.row_id == row.row_id for c in children)
 
@@ -455,7 +459,7 @@ class TestExpandToken:
         _children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=3,
+            child_payloads=[{"item": i} for i in range(3)],
         )
         outcome = factory.data_flow.get_token_outcome(token.token_id)
         assert outcome is not None
@@ -471,17 +475,20 @@ class TestExpandToken:
             factory.data_flow.expand_token(
                 parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
                 row_id=row.row_id,
-                count=0,
+                child_payloads=[],
             )
 
     def test_count_negative_raises_value_error(self):
+        """expand_token with empty child_payloads raises ValueError (was: negative count)."""
         _db, factory = _setup()
         row, token = _make_row(factory)
+        # With child_payloads, negative count is not possible — empty list is the equivalent.
+        # This test now verifies that the empty-payload guard works (same invariant).
         with pytest.raises(ValueError):
             factory.data_flow.expand_token(
                 parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
                 row_id=row.row_id,
-                count=-1,
+                child_payloads=[],
             )
 
     def test_record_parent_outcome_false_skips_outcome(self):
@@ -490,7 +497,7 @@ class TestExpandToken:
         _children, _eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=2,
+            child_payloads=[{"item": 1}, {"item": 2}],
             record_parent_outcome=False,
         )
         outcome = factory.data_flow.get_token_outcome(token.token_id)
@@ -502,7 +509,7 @@ class TestExpandToken:
         children, _eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=5,
+            child_payloads=[{"item": i} for i in range(5)],
         )
         token_ids = [c.token_id for c in children]
         assert len(set(token_ids)) == 5
@@ -513,7 +520,7 @@ class TestExpandToken:
         children, _eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=2,
+            child_payloads=[{"item": 1}, {"item": 2}],
             step_in_pipeline=7,
         )
         assert all(c.step_in_pipeline == 7 for c in children)
@@ -524,7 +531,7 @@ class TestExpandToken:
         children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=1,
+            child_payloads=[{"item": 1}],
         )
         assert len(children) == 1
         assert expand_group_id is not None
@@ -1297,7 +1304,7 @@ class TestCrossRunContaminationPrevention:
             factory.data_flow.expand_token(
                 parent_ref=TokenRef(token_id=token_a.token_id, run_id="run-B"),
                 row_id=row_a.row_id,
-                count=3,
+                child_payloads=[{"item": i} for i in range(3)],
             )
 
     def test_expand_token_rejects_wrong_row_id(self):
@@ -1322,7 +1329,7 @@ class TestCrossRunContaminationPrevention:
             factory.data_flow.expand_token(
                 parent_ref=TokenRef(token_id=token_a.token_id, run_id="run-A"),
                 row_id=row_b.row_id,
-                count=2,
+                child_payloads=[{"item": 1}, {"item": 2}],
             )
 
     def test_expand_token_accepts_correct_ownership(self):
@@ -1340,7 +1347,7 @@ class TestCrossRunContaminationPrevention:
         children, eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token_a.token_id, run_id="run-A"),
             row_id=row_a.row_id,
-            count=3,
+            child_payloads=[{"item": i} for i in range(3)],
         )
         assert len(children) == 3
         assert eg is not None
@@ -1371,6 +1378,7 @@ class TestCrossRunContaminationPrevention:
             factory.data_flow.coalesce_tokens(
                 parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-A"), TokenRef(token_id=token_b.token_id, run_id="run-B")],
                 row_id=row_a.row_id,
+                merged_payload={"merged": True},
             )
 
     def test_coalesce_tokens_rejects_wrong_row_id(self):
@@ -1397,6 +1405,7 @@ class TestCrossRunContaminationPrevention:
             factory.data_flow.coalesce_tokens(
                 parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-A"), TokenRef(token_id=token_b.token_id, run_id="run-A")],
                 row_id=row_b.row_id,
+                merged_payload={"merged": True},
             )
 
     def test_coalesce_tokens_accepts_correct_ownership(self):
@@ -1415,6 +1424,7 @@ class TestCrossRunContaminationPrevention:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-A"), TokenRef(token_id=token_b.token_id, run_id="run-A")],
             row_id=row_a.row_id,
+            merged_payload={"merged": True},
         )
         assert merged.token_id is not None
         assert merged.run_id == "run-A"
@@ -1463,7 +1473,7 @@ class TestTokenRunIdConsistency:
         children, _eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=3,
+            child_payloads=[{"item": i} for i in range(3)],
         )
         assert all(c.run_id == "run-1" for c in children)
 
@@ -1475,6 +1485,7 @@ class TestTokenRunIdConsistency:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-1"), TokenRef(token_id=token_b.token_id, run_id="run-1")],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
         assert merged.run_id == "run-1"
 

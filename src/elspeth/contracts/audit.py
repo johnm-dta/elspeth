@@ -189,6 +189,7 @@ class Token:
     expand_group_id: str | None = None  # For deaggregation grouping
     branch_name: str | None = None
     step_in_pipeline: int | None = None  # Step where token was created (fork/coalesce/expand)
+    token_data_ref: str | None = None  # Content-addressable ref for per-token payload (expand/coalesce writers)
 
     def __post_init__(self) -> None:
         """Validate int fields - Tier 1 crash on invalid types."""

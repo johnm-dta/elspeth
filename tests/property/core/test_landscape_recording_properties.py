@@ -627,7 +627,7 @@ class TestReferentialIntegrityProperties:
             children, expand_group_id = factory.data_flow.expand_token(
                 parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
                 row_id=row.row_id,
-                count=count,
+                child_payloads=[{"item": i} for i in range(count)],
             )
 
             assert len(children) == count

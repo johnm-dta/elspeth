@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.fixtures.stores import MockPayloadStore
+
 from elspeth.contracts import NodeType, RoutingMode
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.schema import SchemaConfig
@@ -94,7 +96,7 @@ class TestRecorderFactoryQueryMethods:
         from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -123,6 +125,7 @@ class TestRecorderFactoryQueryMethods:
         coalesced = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
 
         # Get parents of coalesced token
@@ -137,7 +140,7 @@ class TestRecorderFactoryQueryMethods:
         from elspeth.core.landscape.factory import RecorderFactory
 
         db = LandscapeDB.in_memory()
-        factory = RecorderFactory(db)
+        factory = RecorderFactory(db, payload_store=MockPayloadStore())
         run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
         source = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -166,6 +169,7 @@ class TestRecorderFactoryQueryMethods:
         coalesced = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in forked_children],
             row_id=row.row_id,
+            merged_payload={"merged": True},
         )
 
         # Forward lineage: given a consumed parent, find what it merged into

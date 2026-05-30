@@ -156,6 +156,36 @@ def test_both_transports_share_one_validation_path() -> None:
     bad = '{"verdict": "ACCEPTED", "rationale": "x", "confidence": 0.5, "should_use_decorator": "arguments"}'
     with pytest.raises(JudgeContractError):
         call_judge(_request(), transport=TRANSPORT_AGENT, transport_impl=_fake_transport(bad))
+
+
+def _capture_model_impl(captured: dict):
+    def _impl(request, model_id, max_tokens):
+        captured["model_id"] = model_id
+        return _TransportResult(
+            raw_text=_GOOD_JSON, served_model_id="claude-opus-4-7", prompt_tokens_total=1, prompt_tokens_cached=None
+        )
+
+    return _impl
+
+
+def test_openrouter_default_model_keeps_vendor_slug() -> None:
+    captured: dict = {}
+    call_judge(_request(), transport_impl=_capture_model_impl(captured))
+    assert captured["model_id"] == "anthropic/claude-opus-4-7"  # OpenRouter routing slug
+
+
+def test_agent_transport_default_model_is_unprefixed() -> None:
+    # The agent transport must NOT receive the OpenRouter "anthropic/..." slug —
+    # the SDK rejects it. call_judge resolves the per-transport default.
+    captured: dict = {}
+    call_judge(_request(), transport=TRANSPORT_AGENT, transport_impl=_capture_model_impl(captured))
+    assert "/" not in captured["model_id"]
+
+
+def test_explicit_model_id_overrides_transport_default() -> None:
+    captured: dict = {}
+    call_judge(_request(), model_id="some/explicit-model", transport_impl=_capture_model_impl(captured))
+    assert captured["model_id"] == "some/explicit-model"
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -173,7 +203,17 @@ In `judge.py`, after `DEFAULT_JUDGE_MAX_TOKENS` (:55) add:
 TRANSPORT_OPENROUTER: str = "openrouter"
 TRANSPORT_AGENT: str = "claude_agent_sdk"
 _VALID_TRANSPORTS: frozenset[str] = frozenset({TRANSPORT_OPENROUTER, TRANSPORT_AGENT})
+
+# Per-transport default model. CRITICAL: DEFAULT_JUDGE_MODEL is an OpenRouter
+# *routing slug* ("anthropic/claude-opus-4-7" — the vendor prefix is required
+# by OpenRouter, see :54). The Claude Agent SDK (Claude Code CLI /
+# ANTHROPIC_API_KEY) expects an UNPREFIXED Anthropic/Claude-Code model id and
+# will reject the slug. Each transport therefore has its own default; call_judge
+# resolves by transport when the caller passes no explicit model_id.
+DEFAULT_AGENT_JUDGE_MODEL: str = "claude-opus-4-7"  # confirm the SDK-accepted id post-install
 ```
+
+> Confirm the exact model id `ClaudeAgentOptions(model=...)` accepts against the installed SDK (it may be `"claude-opus-4-7"`, a `claude-code`-namespaced alias, or similar). The defect this guards against: passing `"anthropic/claude-opus-4-7"` to the agent path breaks at runtime while the fake-SDK tests — which accept any string — stay green. The capturing test in Step 2 (`test_agent_transport_default_model_is_unprefixed`) is the regression guard, and it exercises `call_judge`'s resolution, which is in our control rather than the SDK's.
 
 Add the result carrier near the error classes (after `JudgeContractError` at :632):
 
@@ -303,7 +343,7 @@ Replace `call_judge` (:786–949) with:
 def call_judge(
     request: JudgeRequest,
     *,
-    model_id: str = DEFAULT_JUDGE_MODEL,
+    model_id: str | None = None,
     max_tokens: int = DEFAULT_JUDGE_MAX_TOKENS,
     transport: str = TRANSPORT_OPENROUTER,
     transport_impl: Callable[[JudgeRequest, str, int], _TransportResult] | None = None,
@@ -311,11 +351,13 @@ def call_judge(
     """Send a judge request through the selected transport and return the verdict.
 
     ``transport`` selects the provider path (``TRANSPORT_OPENROUTER`` /
-    ``TRANSPORT_AGENT``). ``transport_impl`` is a test seam: inject a fake to
-    exercise the shared validation path without a real provider call. Both
-    transports funnel their extracted assistant text through the identical
-    ``_parse_judge_payload`` → validators path, so a verdict is validated the
-    same way regardless of origin.
+    ``TRANSPORT_AGENT``). When ``model_id`` is omitted, the default is resolved
+    **by transport** — the OpenRouter slug and the Agent-SDK model id are
+    different namespaces (see ``DEFAULT_AGENT_JUDGE_MODEL``). ``transport_impl``
+    is a test seam: inject a fake to exercise the shared validation path without
+    a real provider call. Both transports funnel their extracted assistant text
+    through the identical ``_parse_judge_payload`` → validators path, so a
+    verdict is validated the same way regardless of origin.
 
     Raises:
         JudgeConfigurationError: transport SDK not installed, or auth missing.
@@ -328,6 +370,11 @@ def call_judge(
         raise ValueError(f"max_tokens must be positive, got {max_tokens}")
     if transport not in _VALID_TRANSPORTS:
         raise ValueError(f"unknown judge transport {transport!r}; expected one of {sorted(_VALID_TRANSPORTS)}")
+
+    if model_id is None:
+        # Resolve the default by transport: the OpenRouter routing slug
+        # ("anthropic/...") is invalid for the Agent SDK and vice versa.
+        model_id = DEFAULT_AGENT_JUDGE_MODEL if transport == TRANSPORT_AGENT else DEFAULT_JUDGE_MODEL
 
     impl = transport_impl if transport_impl is not None else _TRANSPORTS[transport]
     result = impl(request, model_id, max_tokens)
@@ -569,6 +616,24 @@ def _call_agent_sdk(request: JudgeRequest, model_id: str, max_tokens: int) -> _T
     agent verdicts are less reproducible than the temperature=0 OpenRouter
     path. The signed ``judge_transport`` lets reaudit attribute a divergence on
     an agent-written entry to transport noise rather than source drift.
+
+    ``model_id`` here is an Agent-SDK model id (unprefixed), NOT an OpenRouter
+    slug — call_judge resolves the per-transport default before we are reached
+    (see ``DEFAULT_AGENT_JUDGE_MODEL``).
+
+    ``max_tokens`` is accepted for transport-contract uniformity but is NOT
+    wired into ``ClaudeAgentOptions`` (the SDK does not surface an equivalent at
+    the time of writing — confirm post-install and wire it if it does). One
+    consequence: there is no agent equivalent of the OpenRouter path's
+    ``finish_reason == "length"`` guard, so a truncated agent response degrades
+    to a generic ``_parse_judge_payload`` JSON error rather than the actionable
+    "increase max_tokens" message. Acceptable degradation; documented so it is
+    not mistaken for missed wiring.
+
+    ``asyncio.run`` below assumes no running event loop. That holds for the
+    synchronous justify / reaudit CLI callers today; if a future async caller
+    invokes ``call_judge``, this bridge raises ``RuntimeError`` and must be
+    revisited.
     """
     try:
         import claude_agent_sdk as sdk
@@ -989,6 +1054,8 @@ Locate the migrate re-sign call and the YAML surgery (`grep -n "compute_judge_me
 
 > If `_run_migrate_judge_scope` reuses `_build_yaml_entry_text` to render the v2 entry, this is a single change: pass `judge_transport="openrouter"`. If it does targeted line surgery, insert the one extra line. Either way, add a migrate test (Step 1) asserting the backfilled line and a clean v2 reload.
 
+> The scope-fingerprint plan's **existing** migrate tests (`test_migrate_rewrites_valid_v1_entry_as_v2`, and its byte-identical-non-binding-fields assertion) now see an extra `judge_transport: openrouter` line in the migrated output. Update those assertions in this same commit (locked-in-expectations — the same move as the golden-signature update in Step 8).
+
 - [ ] **Step 8: Run the signing + justify + migrate + atomic suites**
 
 Run: `cd /home/john/elspeth/elspeth-lints && ../.venv/bin/python -m pytest tests/core/test_allowlist_signing.py tests/core/test_cli_justify.py tests/core/test_cli_migrate_judge_scope.py tests/core/test_allowlist_schema.py -q`
@@ -1067,16 +1134,17 @@ Call `_add_judge_transport_arg(justify)` after the justify parser is built (:381
 
 - [ ] **Step 4: Thread it into the justify call site**
 
-At the justify `call_judge` invocation (:1342), pass the resolved transport:
+At the justify `call_judge` invocation (:1342), pass the resolved transport and **drop the hardcoded `model_id`** so `call_judge` resolves the per-transport default (the OpenRouter slug would break the agent path):
 
 ```python
         response: JudgeResponse = call_judge(
             request,
-            model_id=DEFAULT_JUDGE_MODEL,
             max_tokens=args.max_tokens or DEFAULT_JUDGE_MAX_TOKENS,
             transport=_CLI_TRANSPORT_CHOICES[args.judge_transport],
         )
 ```
+
+> Removing `model_id=DEFAULT_JUDGE_MODEL` is deliberate: under `--judge-transport agent`, `call_judge` must pick `DEFAULT_AGENT_JUDGE_MODEL`, not the OpenRouter slug. If `DEFAULT_JUDGE_MODEL` is now unused in `cli.py`, drop its import (ruff will flag it).
 
 - [ ] **Step 5: Thread it through reaudit to the judge boundary**
 
@@ -1085,6 +1153,8 @@ At the justify `call_judge` invocation (:1342), pass the resolved transport:
 ```python
         response = call_judge(request, transport=transport)
 ```
+
+> This omits `model_id`, so `call_judge` resolves the per-transport default automatically — reaudit under `agent` gets the SDK model id, under `openrouter` the slug. No model-id threading needed in reaudit.
 
 > Keep the existing per-entry try/except exactly as-is: `JudgeConfigurationError` stays sweep-fatal, `JudgeTransportError`/`JudgeContractError` stay per-entry isolated. The agent transport raises the same three error classes, so the isolation contract is unchanged. Record `transport` nowhere new in reaudit — reaudit reports divergence, it does not write entries; the entry's *origin* transport is already in the loaded `entry.judge_transport`.
 
@@ -1213,7 +1283,7 @@ git commit -m "docs: document --judge-transport, agent auth path, and v2 judge_t
 - §9 testing (fake in-process transport; contract-parity; provenance/tamper; config-error) → Task 1 (`_fake_transport` parity + unknown-transport), Task 2 (fake SDK + auth), Task 4 (provenance/tamper via signing + reload), Task 2 (config-error). ✓
 - §10 out-of-scope (tool-enabled judge; hashing the preset; agent-as-default) → not implemented; recorded. ✓
 
-**Advisor lock-ins:** migrate folded into the atomic Task 4 (every v2-emitting site in the require-commit). ✓ Two-layer default/requirement: function default `judge_transport="openrouter"` keeps scope-fingerprint signing tests green; validator enforces presence on persisted v2; no None-normalization in verify. ✓ scope-fingerprint dependency is a *checked* precondition (Task 1 Step 1 grep-or-halt) + migrate test asserts the backfill (Task 4 Step 1). ✓ `_call_openrouter` keeps `temperature=0` and `trust_env=False` verbatim. ✓ SDK symbols flagged "confirm at implementation time"; CI rests on fake-module tests. ✓ `judge_transport` → `_judge_metadata_payload`, not `_judge_binding_identity`. ✓
+**Advisor lock-ins:** migrate folded into the atomic Task 4 (every v2-emitting site in the require-commit). ✓ Two-layer default/requirement: function default `judge_transport="openrouter"` keeps scope-fingerprint signing tests green; validator enforces presence on persisted v2; no None-normalization in verify. ✓ scope-fingerprint dependency is a *checked* precondition (Task 1 Step 1 grep-or-halt) + migrate test asserts the backfill (Task 4 Step 1). ✓ `_call_openrouter` keeps `temperature=0` and `trust_env=False` verbatim. ✓ SDK symbols flagged "confirm at implementation time"; CI rests on fake-module tests. ✓ `judge_transport` → `_judge_metadata_payload`, not `_judge_binding_identity`. ✓ **Model-id namespace split (done-check):** `DEFAULT_JUDGE_MODEL` is an OpenRouter slug invalid for the Agent SDK; per-transport default (`DEFAULT_AGENT_JUDGE_MODEL`) resolved in `call_judge`, justify drops its hardcoded `model_id`, capturing test guards it (Task 1). The fake SDK accepts any string, so only this call_judge-level test catches the defect. ✓ `max_tokens`-unused + `asyncio.run`-sync-assumption documented at the seam (Task 2). ✓
 
 **Type consistency:** `_TransportResult(raw_text, served_model_id, prompt_tokens_total, prompt_tokens_cached)`; `call_judge(..., transport=TRANSPORT_OPENROUTER, transport_impl=None)`; `compute_judge_metadata_signature(..., judge_transport="openrouter")`; `JudgeResponse.judge_transport`; `AllowlistEntry.judge_transport`; CLI `agent`→`claude_agent_sdk` via `_CLI_TRANSPORT_CHOICES` — names used identically across all tasks. ✓
 

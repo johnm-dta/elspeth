@@ -23,6 +23,97 @@ This plan has a **hard line** between agent-buildable work and operator-only wor
 
 ---
 
+## Reconciliation Against Live Code (READ FIRST — corrects Tasks 1–11)
+
+This plan was authored in a prior session; a reality pass on RC5.2 (2026-05-31)
+found the **production-source anchors accurate** (every `allowlist.py` / `rule.py`
+/ `cli.py` symbol and line number is right to ±a few lines) but the **test-layer
+anchors systematically wrong**. Apply these corrections to every task below;
+they override the per-task `Run:` / `Test:` / `git add` paths wherever they
+conflict.
+
+**R-1 — Test root (affects EVERY task).** There is **no `elspeth-lints/tests/`
+directory**, and no `tests/core/` or `tests/rules/` tree. The elspeth-lints
+tests live at **`tests/unit/elspeth_lints/`** rooted at the repo
+(`/home/john/elspeth`). pytest `rootdir` is the repo root (`testpaths =
+["tests"]`). Translate every command:
+- `cd /home/john/elspeth/elspeth-lints && ../.venv/bin/python -m pytest tests/<X>`
+  → `cd /home/john/elspeth && .venv/bin/python -m pytest tests/unit/elspeth_lints/<X>`
+  (both spellings point at the same venv, `/home/john/elspeth/.venv`).
+- `git add elspeth-lints/tests/<X>` → `git add tests/unit/elspeth_lints/<X>`.
+- mypy/ruff/`check` commands (which target `src/`) are unaffected.
+
+**R-2 — New tier-model test files go FLAT (Tasks 1, 2).** Do **not** create a
+`tests/.../rules/trust_tier/tier_model/` subdir — the existing tier-model rule
+tests (`test_trust_tier_model_rule.py`, `test_tier_model_decorator_suppression.py`,
+`test_rotate_tier_model.py`) sit flat at `tests/unit/elspeth_lints/`. Place the
+new tests there too, matching the sibling convention (no `__init__.py` needed at
+that level):
+- Task 1 → `tests/unit/elspeth_lints/test_scope_fingerprint.py`
+- Task 2 → `tests/unit/elspeth_lints/test_finding_scope_fingerprint.py`
+The Task 2 import `from elspeth_lints.rules.trust_tier.tier_model.rule import
+scan_directory` is **correct** — `scan_directory(root, exclude_patterns=None)`
+exists (rule.py:1431); the single-positional-arg call in the test works.
+
+**R-3 — Real test-file homes (B2).** Re-point each task's `Test:` line and `-k`
+command to the real file (all under `tests/unit/elspeth_lints/`):
+
+| Task | Plan's (wrong) file | Real file to extend / create |
+|------|---------------------|------------------------------|
+| 3 (schema/loader) | `test_allowlist_schema.py` | extend `test_allowlist_loader_unification.py` |
+| 4 (signing) | `test_allowlist_signing.py` | extend `test_allowlist_judge_metadata_integrity.py` (note: it hand-builds `f"hmac-sha256:v1:{digest}"` at ~:68 rather than calling the signer — add v2 fixtures consistently) |
+| 5 (load binding) | `test_allowlist_load_binding.py` | extend `test_allowlist_judge_metadata_integrity.py` |
+| 6 (match binding) | `test_allowlist_match_binding.py` | **create** `test_allowlist_match_binding.py` (flat) |
+| 7 (justify) | `test_cli_justify.py` | extend `test_justify.py` |
+| 8 (coverage) | `test_judge_coverage.py` | extend `test_judge_coverage.py` (exists) |
+| 8 (sidecar) | `test_reaudit_sidecar.py` | **create** `test_reaudit_sidecar.py` — `_entry_to_dict`/`_entry_from_dict` have no current test coverage |
+| 8 (rotate) | `test_rotate*.py` | extend `test_rotate_tier_model.py` |
+| 9 (reaudit) | `test_reaudit*.py` | extend `test_reaudit.py` / `test_reaudit_multi_rule.py` |
+| 10 (migrate) | `test_cli_migrate_judge_scope.py` | **create** `test_cli_migrate_judge_scope.py` (flat) |
+
+**R-4 — Task 6 `shared.py` call site is `protocols.Finding`, which has NO
+`scope_fingerprint` field (MAJOR).** `shared.py:36` imports `Finding` from
+`core/protocols.py`, whose `Finding` (`:43`) defines `ast_path` (`:55`) but not
+`scope_fingerprint`. The literal code block in Task 6 Step 4 (`scope_fingerprint=
+finding.scope_fingerprint`) would `AttributeError` at runtime. Use the
+**getattr-fallback form from that step's prose-note** instead —
+`scope_fingerprint=getattr(finding, "scope_fingerprint", "")` with the comment
+explaining trust_boundary findings are v1-only today and a future v2
+trust_boundary entry would (correctly) fail-closed at match time. The
+tier-model `rule.py:2201` site keeps the real `finding.scope_fingerprint`
+(tier-model `Finding` gets the field in Task 2).
+
+**R-5 — Task 7 justify-v2 coverage is tier-model-only (MAJOR).**
+`_scan_single_file_findings_for_justify` (cli.py:1625) returns tier-model
+`rule.Finding` (has `scope_fingerprint`) for `trust_tier.tier_model`, but
+`protocols.Finding` (no `scope_fingerprint`) for `trust_boundary.*` rules.
+`_finding_scope_fingerprint` raising on a missing/empty value is therefore
+**correct fail-closed behaviour for tier-model**, but would raise on a
+`justify` of a trust_boundary rule. Task 7's claim that the finding "always
+carries scope_fingerprint — confirmed" holds only for tier-model. Keep the
+raise (do not fabricate a value); state in the accessor's comment that v2
+justify is tier-model-only until trust_boundary's scanner stamps the field.
+
+**R-6 — Minor anchor fixes.**
+- Task 8 rotate.py: the `_JUDGE_METADATA_SIGNATURE_PREFIX` *usages* are at
+  rotate.py **:833 and :835** (definition at :88), not the `:96`/`:820` the task
+  text implies. Grep `_JUDGE_METADATA_SIGNATURE_PREFIX` in rotate.py before
+  editing.
+- Task 8 sidecar: `reaudit_sidecar.py` already has `_optional_int` (:1011) and
+  `_optional_str` (:1002). Use the existing `_optional_int` — do **not** add a
+  new `_optional_int_field` helper.
+- Task 4 Step 4: `_verify_judge_metadata_signature_at_load` has a missing-key
+  early-return (`_can_skip_judge_metadata_hmac_recompute_for_missing_key()`,
+  ~:660) *before* the recompute call (:662). **Preserve it** when rewriting the
+  recompute; the plan's snippet shows only the recompute and must not drop the
+  guard above it.
+
+Everything else in the plan (production symbol names, signatures, invariant
+numbers 4 and 8, the two `verify_entry_binding_against_finding` call sites,
+the `compute_judge_metadata_signature` direct callers) was verified accurate.
+
+---
+
 ## File Structure
 
 | File | Responsibility | Change |

@@ -1023,8 +1023,15 @@ class CoalesceExecutor:
 
             # NOTE: The merged token does NOT get COALESCED recorded here.
             # - Consumed tokens: COALESCED (terminal) - they've been absorbed into the merge
-            # - Merged token: Will get COMPLETED when it reaches a sink, or COALESCED if
-            #   consumed by an outer coalesce (nested coalesce scenario)
+            # - Merged token: its node_state status here is COMPLETED (set above at
+            #   complete_node_state); its TERMINAL token_outcome is recorded later by
+            #   the sink path, with path=COALESCED and sink_name SET (the merged token
+            #   that reaches a sink), or path=COALESCED again if it is consumed by an
+            #   outer coalesce (nested scenario, recorded by that outer executor here
+            #   with sink_name=None). So a non-nested coalesce yields exactly ONE
+            #   (SUCCESS, COALESCED) record with sink_name set — the discriminator
+            #   derive_resume_terminal_status_from_audit uses to count rows_coalesced
+            #   without double-counting the sink_name=None consumed inputs.
             # Recording COALESCED for merged token here would break nested coalesces where
             # the inner merge result becomes a consumed token in the outer merge.
 

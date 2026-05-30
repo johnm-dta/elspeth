@@ -327,6 +327,10 @@ class DAGNavigator:
     def resolve_branch_first_node(self, branch_name: str) -> NodeID:
         """First processing node for a fork branch routed to a coalesce.
 
+        Exposes the same _branch_first_node lookup that create_continuation_work_item
+        performs inline (for fresh fork children); this accessor is the explicit entry
+        point used by the resume path (RowProcessor.resume_incomplete_token).
+
         _branch_first_node covers all coalesce-bound branches (built by
         ExecutionGraph.get_branch_first_nodes). Callers must only invoke this for
         branches that are in _branch_to_coalesce; calling it for a fork→sink branch

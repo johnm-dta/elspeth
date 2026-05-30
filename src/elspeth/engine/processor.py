@@ -1983,6 +1983,32 @@ class RowProcessor:
             coalesce_name=coalesce_name,
         )
 
+    def _terminal_coalesce_row_result(
+        self,
+        token: TokenInfo,
+        coalesce_name: CoalesceName,
+        *,
+        context: str,
+    ) -> RowResult:
+        """Build the terminal-coalesce RowResult (SUCCESS/COALESCED routed to the coalesce sink).
+
+        Single source of truth for the three terminal-coalesce sites (barrier-fire in
+        _maybe_coalesce_token, lost-branch in _notify_coalesce_of_lost_branch, and resume
+        re-drive in resume_incomplete_token) so the audit RowResult shape cannot drift between them.
+
+        This constructs ONLY the RowResult — it does NOT emit telemetry or record outcomes.
+        Each call site retains its own telemetry handling (e.g. _notify_coalesce_of_lost_branch
+        deliberately does not emit TokenCompleted here, deferring to accumulate_row_outcomes).
+        """
+        sink_name = self._nav.resolve_coalesce_sink(coalesce_name, context=context)
+        return RowResult(
+            token=token,
+            final_data=token.row_data,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.COALESCED,
+            sink_name=sink_name,
+        )
+
     def process_token(
         self,
         token: TokenInfo,
@@ -2104,6 +2130,8 @@ class RowProcessor:
 
         if spec.expand_group_id is not None:
             # expand child: re-drive from the node AFTER the expand node.
+            # expand is never terminal; an `after` of None here is an audit/DAG inconsistency
+            # that process_token's None-enforcement raises on (no branch_to_sink / on_success_sink).
             after = self._nav.resolve_next_node(self._resolve_step_node(spec))
             return self.process_token(token, ctx, current_node_id=after)
 
@@ -2119,20 +2147,25 @@ class RowProcessor:
             # Terminal coalesce: no downstream processing nodes.
             # process_token(current_node_id=None) is NOT valid for a branchless merged token
             # (no branch_to_sink entry, no on_success_sink). Mirror _maybe_coalesce_token's
-            # terminal-coalesce path: resolve the sink via coalesce_on_success_map and return
-            # the COALESCED RowResult directly for the caller (orchestrator) to route to sink.
-            coalesce_name = self._coalesce_name_by_node_id[coalesce_node_id]
-            sink_name = self._nav.resolve_coalesce_sink(
-                coalesce_name,
-                context=f"terminal coalesce resume for incomplete token '{spec.token_id}'",
-            )
+            # terminal-coalesce path: resolve the sink and return the COALESCED RowResult
+            # directly for the caller (orchestrator) to route to sink.
+            #
+            # _resolve_step_node guarantees coalesce_node_id is in _node_step_map but NOT
+            # that it is in _coalesce_name_by_node_id — wrap the lookup so a mismatch is an
+            # uncontexted-KeyError-free audit-grade invariant failure.
+            try:
+                coalesce_name = self._coalesce_name_by_node_id[coalesce_node_id]
+            except KeyError as exc:
+                raise OrchestrationInvariantError(
+                    f"Post-coalesce token {spec.token_id} resolved to node {coalesce_node_id!r} "
+                    f"which is not a known coalesce node (known: {sorted(self._coalesce_name_by_node_id)}). "
+                    f"Audit/DAG inconsistency."
+                ) from exc
             return [
-                RowResult(
-                    token=token,
-                    final_data=token.row_data,
-                    outcome=TerminalOutcome.SUCCESS,
-                    path=TerminalPath.COALESCED,
-                    sink_name=sink_name,
+                self._terminal_coalesce_row_result(
+                    token,
+                    coalesce_name,
+                    context=f"terminal coalesce resume for incomplete token '{spec.token_id}'",
                 )
             ]
 
@@ -2173,18 +2206,12 @@ class RowProcessor:
             if self._nav.resolve_next_node(coalesce_node_id) is None:
                 if coalesce_name is None:
                     raise OrchestrationInvariantError("Terminal coalesce outcome missing coalesce_name")
-                sink_name = self._nav.resolve_coalesce_sink(
-                    coalesce_name,
-                    context=f"terminal coalesce outcome for token '{coalesce_outcome.merged_token.token_id}'",
-                )
                 return (
                     True,
-                    RowResult(
-                        token=coalesce_outcome.merged_token,
-                        final_data=coalesce_outcome.merged_token.row_data,
-                        outcome=TerminalOutcome.SUCCESS,
-                        path=TerminalPath.COALESCED,
-                        sink_name=sink_name,
+                    self._terminal_coalesce_row_result(
+                        coalesce_outcome.merged_token,
+                        coalesce_name,
+                        context=f"terminal coalesce outcome for token '{coalesce_outcome.merged_token.token_id}'",
                     ),
                 )
 
@@ -2281,21 +2308,15 @@ class RowProcessor:
 
         if outcome.merged_token is not None:
             if self._nav.resolve_next_node(coalesce_node_id) is None:
-                sink_name = self._nav.resolve_coalesce_sink(
-                    coalesce_name,
-                    context=f"branch-loss notification for row '{current_token.row_id}'",
-                )
                 # Terminal coalesce — no downstream transforms.
                 # Do NOT emit TokenCompleted here: the merged token still
                 # needs to flow through the sink write for durable recording.
                 # Telemetry is emitted later by accumulate_row_outcomes.
                 return [
-                    RowResult(
-                        token=outcome.merged_token,
-                        final_data=outcome.merged_token.row_data,
-                        outcome=TerminalOutcome.SUCCESS,
-                        path=TerminalPath.COALESCED,
-                        sink_name=sink_name,
+                    self._terminal_coalesce_row_result(
+                        outcome.merged_token,
+                        coalesce_name,
+                        context=f"branch-loss notification for row '{current_token.row_id}'",
                     ),
                 ]
             # Non-terminal — resume merged token at coalesce step

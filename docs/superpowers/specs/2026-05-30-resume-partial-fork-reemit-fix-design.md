@@ -486,3 +486,44 @@ exist with Tier-1 hash-integrity validation. Therefore:
 dispatch reads, verify it is *written in production*, not merely that the column/method exists.
 The "symbol exists" spec check passed the broken resolver; the "is it populated in prod" check
 caught it.
+
+## ADDENDUM 4 (2026-05-30, mid-implementation) — resume offset/provenance live on TokenInfo, not WorkItem (AUTHORITATIVE)
+
+**Defect found during Task 5 implementation (per-token vs batched check).** Task 5 first put
+`resume_attempt_offset` / `resume_checkpoint_id` on `WorkItem` and threaded them to the
+transform and coalesce `begin_node_state` writers. That works for those two (one WorkItem
+processed at a time), but the **sink path was left unthreaded** — and the sink is the primary
+F1 path's collision site: `SinkExecutor.write` buffers `TokenInfo`s from *multiple* WorkItems
+and calls `begin_node_state` **per-token in a loop**. `WorkItem` context is destroyed at that
+buffer boundary, and each resumed token's offset (`spec.max_attempt + 1`) differs — so a scalar
+on `write()` cannot represent it. Unthreaded, a fork→sink re-drive writes its sink `node_state`
+at `attempt=0`, colliding with the run-1 record at `(token_id, sink_node_id, 0)` →
+`UniqueConstraint` violation or the silent collision the whole offset mechanism exists to
+prevent (Task 8 asserts run-1 at attempt 0, re-drive at attempt 1).
+
+**Resolution (carry resume state on the token):** put the two fields on **`TokenInfo`**
+(`contracts/identity.py`, L0; frozen/slots; not hashed or used as a set/dict key, so adding
+scalar defaulted fields is safe), **remove them from `WorkItem`**, and read them from the token
+at every per-token `begin_node_state` site (sink loop, coalesce, transform/state_guard). The
+sink's existing `TokenInfo` buffer then carries the offset for free — no parallel side-map (a
+side-map would invite `.get(token_id, default)`, the banned defensive pattern). One mechanism,
+not two.
+
+**Propagation rule (must be encoded, verified by Tasks 8/9):**
+- **token_id-preserving steps (row transform):** the continuation token re-traverses under the
+  same `token_id` and re-writes the next node's state, so it **must keep** the offset/provenance
+  (else it collides one node downstream). Ensure the continuation-token construction propagates
+  the fields (free if built via `dataclasses.replace(token, …)`; copy explicitly if built fresh).
+- **token_id-minting steps (fork / expand / coalesce):** children get **new** token_ids with no
+  run-1 record, so `attempt=0` is correct and they must **not** inherit the parent's offset; new
+  children default to `0 / None`.
+
+The resume values are first set in Task 6's `resume_incomplete_token`, on the `TokenInfo` it
+builds for the incomplete token (`resume_attempt_offset=spec.max_attempt+1`,
+`resume_checkpoint_id=<resumed-from checkpoint id>`); from there they flow via the token.
+
+**Forward lens (Tasks 6/7/9/10):** apply two checks at *design* time, not in review — "per-token
+or batched?" (where does the state need to live to survive buffering) and "written/preserved in
+prod?" (is the column/field actually populated and carried by the live path). This is the third
+runtime-vs-plan gap (B1 crash → contract-NULL → sink batching); the reviews caught all three, but
+mapping the resume drive granularity up front is cheaper than rediscovering it.

@@ -593,6 +593,8 @@ git commit -m "feat(recovery): IncompleteTokenSpec + get_incomplete_tokens_by_ro
 
 ### Task 5: `WorkItem` offset + provenance + executor threading
 
+> **REVISED by spec ADDENDUM 4.** The two resume fields live on **`TokenInfo`** (read per-token at every `begin_node_state` site), NOT on `WorkItem` — because `SinkExecutor.write` buffers `TokenInfo`s across WorkItems and writes node_states per-token, so `WorkItem` context is lost at the buffer boundary (the fork→sink collision site). Carry the offset/provenance on the token; remove from `WorkItem`. Propagation rule: row transforms (token_id-preserving) keep the fields; fork/expand/coalesce children (new token_ids) reset to `0/None`. See ADDENDUM 4.
+
 **Files:**
 - Modify: `src/elspeth/engine/dag_navigator.py` (`WorkItem`, `create_work_item`, `create_continuation_work_item`)
 - Modify: `src/elspeth/engine/processor.py` (`_process_single_token` + the handlers it calls)

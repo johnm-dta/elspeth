@@ -7,9 +7,13 @@ from tests.fixtures.stores import MockPayloadStore
 from elspeth.contracts import NodeType, RoutingMode
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.schema_contract import SchemaContract
 
 # Dynamic schema for tests that don't care about specific fields
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+# Minimal contract for tests that only care about token lifecycle, not contract content.
+_MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 
 
 class TestRecorderFactoryQueryMethods:
@@ -126,6 +130,7 @@ class TestRecorderFactoryQueryMethods:
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
             merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         # Get parents of coalesced token
@@ -170,6 +175,7 @@ class TestRecorderFactoryQueryMethods:
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in forked_children],
             row_id=row.row_id,
             merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         # Forward lineage: given a consumed parent, find what it merged into

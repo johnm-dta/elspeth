@@ -38,6 +38,9 @@ from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run
 
+# Minimal contract for tests that only care about token lifecycle, not contract content.
+_MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
+
 # =============================================================================
 # Strategies
 # =============================================================================
@@ -628,6 +631,7 @@ class TestReferentialIntegrityProperties:
                 parent_ref=TokenRef(token_id=parent.token_id, run_id=run.run_id),
                 row_id=row.row_id,
                 child_payloads=[{"item": i} for i in range(count)],
+                output_contract=_MINIMAL_CONTRACT,
             )
 
             assert len(children) == count

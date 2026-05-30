@@ -8,12 +8,16 @@ from tests.fixtures.stores import MockPayloadStore
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.enums import Determinism, NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 
 # Dynamic schema for tests that don't care about specific fields
 DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+# Minimal contract for tests that only care about token lifecycle, not contract content.
+_MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 
 
 class TestRecorderFactoryTokens:
@@ -207,6 +211,7 @@ class TestRecorderFactoryTokens:
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
             merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         assert merged.token_id is not None
@@ -318,6 +323,7 @@ class TestRecorderFactoryTokens:
             row_id=row.row_id,
             merged_payload={"merged": True},
             step_in_pipeline=3,
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         # Verify step_in_pipeline is stored
@@ -362,6 +368,7 @@ class TestExpandToken:
             row_id=row.row_id,
             child_payloads=[{"item": 1}, {"item": 2}, {"item": 3}],
             step_in_pipeline=2,
+            output_contract=_MINIMAL_CONTRACT,
         )
 
         # Assert: 3 children created
@@ -413,6 +420,7 @@ class TestExpandToken:
                 row_id=row.row_id,
                 child_payloads=[],
                 step_in_pipeline=1,
+                output_contract=_MINIMAL_CONTRACT,
             )
 
     def test_expand_token_stores_step_in_pipeline(self) -> None:
@@ -443,6 +451,7 @@ class TestExpandToken:
             row_id=row.row_id,
             child_payloads=[{"item": 1}, {"item": 2}],
             step_in_pipeline=5,
+            output_contract=_MINIMAL_CONTRACT,
         )
 
         # Verify step_in_pipeline stored
@@ -481,6 +490,7 @@ class TestExpandToken:
             row_id=row.row_id,
             child_payloads=[{"item": 1}],
             step_in_pipeline=1,
+            output_contract=_MINIMAL_CONTRACT,
         )
 
         assert len(children) == 1
@@ -520,6 +530,7 @@ class TestExpandToken:
             row_id=row.row_id,
             child_payloads=[{"item": 1}, {"item": 2}],
             step_in_pipeline=3,
+            output_contract=_MINIMAL_CONTRACT,
         )
 
         # Retrieve each child and verify expand_group_id matches
@@ -647,6 +658,7 @@ class TestAtomicTokenOperations:
             row_id=row.row_id,
             child_payloads=[{"item": 1}, {"item": 2}, {"item": 3}],
             step_in_pipeline=2,
+            output_contract=_MINIMAL_CONTRACT,
         )
 
         # Verify parent has EXPANDED outcome recorded atomically
@@ -687,6 +699,7 @@ class TestAtomicTokenOperations:
             row_id=row.row_id,
             child_payloads=[{"item": i} for i in range(5)],
             step_in_pipeline=2,
+            output_contract=_MINIMAL_CONTRACT,
         )
 
         # Verify expected_branches_json stores count
@@ -734,6 +747,7 @@ class TestAtomicTokenOperations:
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
             merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         # Verify merged token has join_group_id
@@ -782,6 +796,7 @@ class TestAtomicTokenOperations:
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
             merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         # Step 2: Record COALESCED outcomes on each parent (as CoalesceExecutor does)
@@ -838,6 +853,7 @@ class TestAtomicTokenOperations:
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
             merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         # Verify token_parents entries
@@ -882,6 +898,7 @@ class TestAtomicTokenOperations:
             parent_refs=[TokenRef(token_id=c.token_id, run_id=run.run_id) for c in children],
             row_id=row.row_id,
             merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         # join_group_id must be set on the merged token itself
@@ -925,6 +942,7 @@ class TestAtomicTokenOperations:
             child_payloads=[{"item": 1}, {"item": 2}],
             step_in_pipeline=2,
             record_parent_outcome=False,  # Don't record EXPANDED
+            output_contract=_MINIMAL_CONTRACT,
         )
 
         # Children should be created

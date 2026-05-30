@@ -45,10 +45,14 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape import LandscapeDB
 from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.strategies.ids import multiple_branches
 from tests.strategies.json import row_data
+
+# Minimal contract for tests that only care about token lifecycle, not contract content.
+_MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 
 # =============================================================================
 # Model Types for State Machine
@@ -382,6 +386,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
             row_id=model.row_id,
             merged_payload={"merged": True},
             step_in_pipeline=self.step_counter,
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         # Record COALESCED outcome for each sibling (requires join_group_id per contract)
@@ -833,6 +838,7 @@ class TestTokenLifecycleInvariants:
                 row_id=row.row_id,
                 merged_payload={"merged": True},
                 step_in_pipeline=2,
+                merged_contract=_MINIMAL_CONTRACT,
             )
 
             # Verify merged token exists and has correct parents

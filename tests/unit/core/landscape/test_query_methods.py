@@ -18,6 +18,7 @@ from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.payload_store import IntegrityError as PayloadIntegrityError
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape import LandscapeDB, QueryRepository
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.factory import RecorderFactory
@@ -34,6 +35,9 @@ from elspeth.core.landscape.row_data import RowDataResult, RowDataState
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+# Minimal contract for tests that only care about token lifecycle, not contract content.
+_MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 
 
 def _setup(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFactory]:
@@ -498,6 +502,7 @@ class TestGetTokenParents:
             parent_refs=[TokenRef(token_id="tok-1", run_id="run-1"), TokenRef(token_id="tok-2", run_id="run-1")],
             row_id="row-1",
             merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         parents = factory.query.get_token_parents(merged.token_id)
@@ -1116,6 +1121,7 @@ class TestGetAllTokenParentsForRun:
             parent_refs=[TokenRef(token_id="tok-1", run_id="run-1"), TokenRef(token_id="tok-2", run_id="run-1")],
             row_id="row-1",
             merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         parents = factory.query.get_all_token_parents_for_run("run-1")

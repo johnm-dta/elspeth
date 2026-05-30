@@ -30,7 +30,6 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
 from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
-from elspeth.contracts.contract_records import ContractAuditRecord
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, IncompatibleCheckpointError
@@ -39,7 +38,6 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import (
     node_states_table,
-    nodes_table,
     rows_table,
     runs_table,
     token_outcomes_table,
@@ -577,41 +575,55 @@ class RecoveryManager:
     ) -> PipelineRow:
         """Build the PipelineRow to re-drive an incomplete token with.
 
-        Fork children share the source payload → return source_row unchanged.
-        Expand children / post-coalesce tokens carry their own payload in
-        token_data_ref → restore it type-faithfully (checkpoint_loads) and wrap it in
-        the contract under which the token was created. Missing/garbage ref where one is
-        required → raise (Tier-1, no coercion).
+        Fork children share the source payload → return source_row unchanged. Expand
+        children / post-coalesce tokens carry a self-contained {data, contract} envelope
+        in token_data_ref → restore both type-faithfully (checkpoint_loads +
+        SchemaContract.from_checkpoint, which hash-validates the contract). No nodes-table
+        lookup: the contract the token was produced under is persisted with its payload
+        (ADDENDUM 3 — nodes.output_contract_json is NULL for non-source nodes in prod,
+        making the nodes-table approach unsalvageable).
+
+        Args:
+            spec: IncompleteTokenSpec from get_incomplete_tokens_by_row.
+            run_id: The run being resumed (for diagnostic messages).
+            source_row: The source PipelineRow for this row_id (used for fork children
+                that share the parent/source payload).
+            payload_store: PayloadStore to retrieve token_data_ref bytes from.
+
+        Returns:
+            PipelineRow to re-drive the incomplete token with.
+
+        Raises:
+            ValueError: If token_data_ref is set but the payload has been purged.
+            AuditIntegrityError: If the retrieved payload is not a valid {data, contract}
+                envelope (Tier-1 corruption guard), or if the contract hash does not match
+                (via SchemaContract.from_checkpoint — Tier-1 integrity).
         """
         if spec.token_data_ref is None:
-            return source_row  # fork child
-        payload_bytes = payload_store.retrieve(spec.token_data_ref)
-        data = checkpoint_loads(payload_bytes.decode("utf-8"))
-        contract = self._resolve_token_contract(run_id, spec)
-        return PipelineRow(data=data, contract=contract)
+            return source_row  # fork child — shares the source payload
 
-    def _resolve_token_contract(self, run_id: str, spec: IncompleteTokenSpec) -> SchemaContract:
-        """Output contract for the step that created an expand/coalesce token.
+        try:
+            payload_bytes = payload_store.retrieve(spec.token_data_ref)
+        except PayloadNotFoundError as exc:
+            raise ValueError(
+                f"Incomplete token {spec.token_id} (run {run_id}) payload purged "
+                f"(token_data_ref={spec.token_data_ref!r}) — cannot resume; re-run instead."
+            ) from exc
 
-        The node that created the token is the one whose `nodes.sequence_in_pipeline`
-        equals the token's `step_in_pipeline`. Pure-DB lookup — recovery (L1) resolves
-        step -> node via the `nodes` table directly, with NO dependency on the processor's
-        in-memory step map (L2). Its output_contract_json is the contract under which the
-        token's payload was produced.
-        """
-        with self._db.engine.connect() as conn:
-            row = conn.execute(
-                select(nodes_table.c.output_contract_json)
-                .where(nodes_table.c.run_id == run_id)
-                .where(nodes_table.c.sequence_in_pipeline == spec.step_in_pipeline)
-            ).fetchone()
-        if row is None or row.output_contract_json is None:
+        envelope = checkpoint_loads(payload_bytes.decode("utf-8"))
+        if not isinstance(envelope, dict) or "data" not in envelope or "contract" not in envelope:
             raise AuditIntegrityError(
-                f"No node with output_contract_json at sequence_in_pipeline="
-                f"{spec.step_in_pipeline} for run {run_id} — cannot reconstruct the "
-                f"contract for token {spec.token_id}. Audit/DAG inconsistency."
+                f"token_data_ref payload for token {spec.token_id} (run {run_id}) is not a "
+                f"valid {{data, contract}} envelope — audit data corruption (Tier-1 violation). "
+                f"Got type={type(envelope).__name__!r}, "
+                f"keys={sorted(envelope.keys()) if isinstance(envelope, dict) else 'N/A'!r}"
             )
-        return ContractAuditRecord.from_json(row.output_contract_json).to_schema_contract()
+
+        # SchemaContract.from_checkpoint validates the version_hash (Tier-1 integrity).
+        # It raises AuditIntegrityError if the hash does not match — crash is correct,
+        # the contract stored in the audit trail is our data (Tier-1) and must be pristine.
+        contract = SchemaContract.from_checkpoint(envelope["contract"])
+        return PipelineRow(envelope["data"], contract)
 
     def _get_buffered_checkpoint_token_ids(self, checkpoint: Checkpoint) -> set[str]:
         """Collect token IDs restored from checkpoint state."""
@@ -706,7 +718,7 @@ class RecoveryManager:
                 f"Resume aborted - audit trail may be corrupted or tampered with."
             ) from e
         except (ValueError, KeyError) as e:
-            # ContractAuditRecord.from_json() raises json.JSONDecodeError (subclass of
+            # SchemaContract deserialization raises json.JSONDecodeError (subclass of
             # ValueError) for malformed JSON, or KeyError for missing required fields.
             # Both indicate Tier 1 data corruption — stored contract JSON is garbage.
             raise CheckpointCorruptionError(

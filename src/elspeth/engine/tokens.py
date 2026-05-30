@@ -306,13 +306,16 @@ class TokenManager:
 
         step = self._step_resolver(node_id)
 
-        # Pass the merged row dict as merged_payload so it is persisted atomically
-        # with the coalesced token INSERT (epoch 11: token_data_ref).
+        # Pass the merged row dict and its contract so the envelope is persisted
+        # atomically with the coalesced token INSERT (epoch 11: token_data_ref).
         # merged_data is a PipelineRow; .to_dict() is mandated over dict(row).
+        # merged_contract = merged_data.contract — the contract the PipelineRow carries
+        # (set by the coalesce executor after merging the branch contracts).
         merged = self._data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=p.token_id, run_id=run_id) for p in parents],
             row_id=row_id,
             merged_payload=merged_data.to_dict(),
+            merged_contract=merged_data.contract,
             step_in_pipeline=step,
         )
 
@@ -368,14 +371,17 @@ class TokenManager:
             )
 
         # Delegate to recorder which handles DB operations and parent linking.
-        # Pass expanded_rows as child_payloads so each child's payload is persisted
-        # atomically with its token INSERT (epoch 11: token_data_ref).
+        # Pass expanded_rows as child_payloads and output_contract so each child's
+        # {data, contract} envelope is persisted atomically with its token INSERT
+        # (epoch 11: token_data_ref). output_contract is the locked contract from
+        # TransformResult.contract, shared by all expanded children.
         # expanded_rows are already plain dicts (transform output) — no .to_dict() needed.
         step = self._step_resolver(node_id)
         db_children, expand_group_id = self._data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run_id),
             row_id=parent_token.row_id,
             child_payloads=expanded_rows,
+            output_contract=output_contract,
             step_in_pipeline=step,
             record_parent_outcome=record_parent_outcome,
         )

@@ -37,6 +37,7 @@ from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcom
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import repr_hash
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape._database_ops import DatabaseOps
@@ -59,6 +60,9 @@ from tests.fixtures.stores import MockPayloadStore
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 _ERROR_HASH = "a" * 64
+
+# Minimal contract for tests that only care about token lifecycle, not contract content.
+_MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 
 
 def _make_repo(
@@ -1123,6 +1127,7 @@ class TestCoalesceTokensAtomicity:
                 parent_refs=[TokenRef(token_id=cid, run_id="run-1") for cid in child_ids],
                 row_id=row_id,
                 merged_payload={"merged": True},
+                merged_contract=_MINIMAL_CONTRACT,
             )
 
         # Verify: zero partial state
@@ -1171,6 +1176,7 @@ class TestExpandTokenAtomicity:
                 row_id=row_id,
                 child_payloads=[{"item": i} for i in range(3)],
                 step_in_pipeline=2,
+                output_contract=_MINIMAL_CONTRACT,
             )
 
         # Verify: zero partial state
@@ -1264,6 +1270,7 @@ class TestCoalesceTokensRowcountValidation:
                 parent_refs=[TokenRef(token_id=cid, run_id="run-1") for cid in child_ids],
                 row_id=row_id,
                 merged_payload={"merged": True},
+                merged_contract=_MINIMAL_CONTRACT,
             )
 
 
@@ -1303,6 +1310,7 @@ class TestExpandTokenRowcountValidation:
                 parent_ref=TokenRef(token_id=tok_id, run_id="run-1"),
                 row_id=row_id,
                 child_payloads=[{"item": 1}, {"item": 2}],
+                output_contract=_MINIMAL_CONTRACT,
             )
 
 

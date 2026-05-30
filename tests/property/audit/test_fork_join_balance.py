@@ -938,20 +938,24 @@ class TestForkRecoveryInvariant:
         )
 
     def test_expand_token_persists_per_child_payload(self) -> None:
-        """expand_token stores each child's payload and writes tokens.token_data_ref.
+        """expand_token stores a {data, contract} envelope and writes tokens.token_data_ref.
 
         Verifies that:
         1. Each child has a non-null token_data_ref.
-        2. Retrieving the ref bytes and loading via checkpoint_loads round-trips
-           the CORRECT child's payload (not the sibling's), proving per-child
+        2. Retrieving the ref bytes and loading via checkpoint_loads gives an envelope
+           dict with keys "data" and "contract" — NOT a bare data dict (ADDENDUM 3).
+        3. env["data"] round-trips the CORRECT child's payload, proving per-child
            value alignment and type fidelity (datetime survives as datetime, not string).
-        3. The stored bytes are the result of checkpoint_dumps (type-faithful), NOT
-           canonical_json (which would stringify datetime).
+        4. SchemaContract.from_checkpoint(env["contract"]) restores the contract with
+           field names and mode equal to the persisted contract (hash-validated by
+           from_checkpoint itself — Tier-1 integrity).
 
-        This is the Tier-1 audit invariant: every expand child is reconstructable
-        from its token_data_ref on resume.
+        This is the Tier-1 audit invariant: every expand child is self-contained and
+        reconstructable from its token_data_ref on resume without any nodes-table lookup.
         """
         from datetime import datetime
+
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
         _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
         payload_store = MockPayloadStore()
@@ -976,6 +980,17 @@ class TestForkRecoveryInvariant:
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
+        # Build a real SchemaContract — the one the expand step would produce.
+        output_contract = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                FieldContract(normalized_name="name", original_name="name", python_type=str, required=True, source="declared"),
+                FieldContract(normalized_name="value", original_name="value", python_type=int, required=True, source="declared"),
+                FieldContract(normalized_name="ts", original_name="ts", python_type=datetime, required=True, source="declared"),
+            ),
+            locked=True,
+        )
+
         # Two DISTINCT payloads — one with a datetime (type-fidelity witness).
         # canonical_json would stringify the datetime; checkpoint_dumps preserves it.
         aware_dt = datetime(2024, 6, 15, 12, 0, 0, tzinfo=UTC)
@@ -988,6 +1003,7 @@ class TestForkRecoveryInvariant:
             parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             child_payloads=child_payloads,
+            output_contract=output_contract,
             step_in_pipeline=1,
         )
 
@@ -1000,43 +1016,69 @@ class TestForkRecoveryInvariant:
                 f"expand_token must set token_data_ref on every child (epoch 11 invariant); child {child.token_id} has token_data_ref=None"
             )
 
-        # Round-trip: retrieve bytes → checkpoint_loads → compare to original payload.
+        # Round-trip: retrieve bytes → checkpoint_loads → assert envelope shape + content.
         # Critically, verify EACH child has ITS OWN payload (not the sibling's).
         for i, (child, expected_payload) in enumerate(zip(children, child_payloads, strict=True)):
             raw_bytes = payload_store.retrieve(child.token_data_ref)
-            restored = checkpoint_loads(raw_bytes.decode("utf-8"))
+            env = checkpoint_loads(raw_bytes.decode("utf-8"))
+
+            # Envelope shape — must be {data, contract}, NOT a bare data dict (ADDENDUM 3).
+            assert isinstance(env, dict) and "data" in env and "contract" in env, (
+                f"Child {i} token_data_ref payload is not a {{data, contract}} envelope; "
+                f"got keys={sorted(env.keys()) if isinstance(env, dict) else type(env).__name__!r}"
+            )
+
+            data = env["data"]
 
             # Value alignment: correct child, correct fields
-            assert restored["name"] == expected_payload["name"], (
+            assert data["name"] == expected_payload["name"], (
                 f"Child {i} (token_data_ref={child.token_data_ref!r}) stored wrong payload: "
-                f"expected name={expected_payload['name']!r}, got {restored['name']!r}"
+                f"expected name={expected_payload['name']!r}, got {data['name']!r}"
             )
-            assert restored["value"] == expected_payload["value"], (
-                f"Child {i} stored wrong value: expected {expected_payload['value']}, got {restored['value']}"
+            assert data["value"] == expected_payload["value"], (
+                f"Child {i} stored wrong value: expected {expected_payload['value']}, got {data['value']}"
             )
 
             # Type fidelity: datetime must come back as datetime, not a string.
             # This proves checkpoint_dumps was used (canonical_json would stringify datetime).
-            assert isinstance(restored["ts"], datetime), (
-                f"Type fidelity failure: 'ts' field came back as {type(restored['ts']).__name__!r}, "
+            assert isinstance(data["ts"], datetime), (
+                f"Type fidelity failure: 'ts' field came back as {type(data['ts']).__name__!r}, "
                 f"not datetime — checkpoint_dumps was not used (canonical_json stringifies datetime)"
             )
-            assert restored["ts"].tzinfo is not None, "Restored datetime must be timezone-aware"
-            assert restored["ts"] == aware_dt, f"datetime value mismatch: expected {aware_dt!r}, got {restored['ts']!r}"
+            assert data["ts"].tzinfo is not None, "Restored datetime must be timezone-aware"
+            assert data["ts"] == aware_dt, f"datetime value mismatch: expected {aware_dt!r}, got {data['ts']!r}"
+
+            # Contract round-trip: SchemaContract.from_checkpoint validates hash integrity
+            # (Tier-1 — raises AuditIntegrityError on mismatch) and restores the contract.
+            restored_contract = SchemaContract.from_checkpoint(env["contract"])
+            assert restored_contract.mode == output_contract.mode, (
+                f"Contract mode mismatch: expected {output_contract.mode!r}, got {restored_contract.mode!r}"
+            )
+            assert restored_contract.locked == output_contract.locked
+            restored_names = {fc.normalized_name for fc in restored_contract.fields}
+            expected_names = {fc.normalized_name for fc in output_contract.fields}
+            assert restored_names == expected_names, f"Contract field names mismatch: expected {expected_names!r}, got {restored_names!r}"
 
     def test_coalesce_token_persists_merged_payload(self) -> None:
-        """coalesce_tokens stores the merged payload and writes tokens.token_data_ref.
+        """coalesce_tokens stores a {data, contract} envelope and writes tokens.token_data_ref.
 
         Verifies that:
         1. The merged token has a non-null token_data_ref.
-        2. Retrieving the ref bytes and loading via checkpoint_loads round-trips
-           the merged payload with full type fidelity (datetime survives as datetime).
-        3. The stored bytes are the result of checkpoint_dumps, NOT canonical_json.
+        2. Retrieving the ref bytes and loading via checkpoint_loads gives an envelope
+           dict with keys "data" and "contract" — NOT a bare data dict (ADDENDUM 3).
+        3. env["data"] round-trips the merged payload with full type fidelity (datetime
+           survives as datetime, not string).
+        4. SchemaContract.from_checkpoint(env["contract"]) restores the contract with
+           field names and mode equal to the persisted contract (hash-validated by
+           from_checkpoint itself — Tier-1 integrity).
 
         This is the Tier-1 audit invariant: the merged token is reconstructable
-        from its token_data_ref on resume without re-executing the merge strategy.
+        from its token_data_ref on resume without re-executing the merge strategy
+        and without any nodes-table lookup (ADDENDUM 3).
         """
         from datetime import datetime
+
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
         _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
         payload_store = MockPayloadStore()
@@ -1057,6 +1099,22 @@ class TestForkRecoveryInvariant:
             source_node_id=source.node_id,
             row_index=0,
             data={"key": "value"},
+        )
+
+        # Build a real SchemaContract — the one the coalesce step would produce.
+        merged_contract = SchemaContract(
+            mode="FIXED",
+            fields=(
+                FieldContract(normalized_name="merged", original_name="merged", python_type=bool, required=True, source="declared"),
+                FieldContract(normalized_name="count", original_name="count", python_type=int, required=True, source="declared"),
+                FieldContract(
+                    normalized_name="result_score", original_name="result_score", python_type=float, required=True, source="declared"
+                ),
+                FieldContract(
+                    normalized_name="resolved_at", original_name="resolved_at", python_type=datetime, required=True, source="declared"
+                ),
+            ),
+            locked=True,
         )
 
         # Create two branch tokens to coalesce
@@ -1080,6 +1138,7 @@ class TestForkRecoveryInvariant:
             ],
             row_id=row.row_id,
             merged_payload=merged_payload,
+            merged_contract=merged_contract,
             step_in_pipeline=2,
         )
 
@@ -1087,21 +1146,40 @@ class TestForkRecoveryInvariant:
         assert merged_token.token_data_ref is not None, "coalesce_tokens must set token_data_ref on the merged token (epoch 11 invariant)"
         assert merged_token.join_group_id is not None
 
-        # Round-trip: retrieve bytes → checkpoint_loads → compare to merged_payload
+        # Round-trip: retrieve bytes → checkpoint_loads → assert envelope shape + content.
         raw_bytes = payload_store.retrieve(merged_token.token_data_ref)
-        restored = checkpoint_loads(raw_bytes.decode("utf-8"))
+        env = checkpoint_loads(raw_bytes.decode("utf-8"))
 
-        assert restored["merged"] is True
-        assert restored["count"] == 2
-        assert abs(restored["result_score"] - 0.87) < 1e-9
+        # Envelope shape — must be {data, contract}, NOT a bare data dict (ADDENDUM 3).
+        assert isinstance(env, dict) and "data" in env and "contract" in env, (
+            f"Merged token payload is not a {{data, contract}} envelope; "
+            f"got keys={sorted(env.keys()) if isinstance(env, dict) else type(env).__name__!r}"
+        )
+
+        data = env["data"]
+
+        assert data["merged"] is True
+        assert data["count"] == 2
+        assert abs(data["result_score"] - 0.87) < 1e-9
 
         # Type fidelity: datetime must come back as datetime, not a string.
         # This proves checkpoint_dumps was used (canonical_json would stringify datetime).
-        assert isinstance(restored["resolved_at"], datetime), (
-            f"Type fidelity failure: 'resolved_at' came back as {type(restored['resolved_at']).__name__!r}, "
+        assert isinstance(data["resolved_at"], datetime), (
+            f"Type fidelity failure: 'resolved_at' came back as {type(data['resolved_at']).__name__!r}, "
             f"not datetime — checkpoint_dumps was not used (canonical_json stringifies datetime)"
         )
-        assert restored["resolved_at"].tzinfo is not None, "Restored datetime must be timezone-aware"
+        assert data["resolved_at"].tzinfo is not None, "Restored datetime must be timezone-aware"
+
+        # Contract round-trip: SchemaContract.from_checkpoint validates hash integrity
+        # (Tier-1 — raises AuditIntegrityError on mismatch) and restores the contract.
+        restored_contract = SchemaContract.from_checkpoint(env["contract"])
+        assert restored_contract.mode == merged_contract.mode, (
+            f"Contract mode mismatch: expected {merged_contract.mode!r}, got {restored_contract.mode!r}"
+        )
+        assert restored_contract.locked == merged_contract.locked
+        restored_names = {fc.normalized_name for fc in restored_contract.fields}
+        expected_names = {fc.normalized_name for fc in merged_contract.fields}
+        assert restored_names == expected_names, f"Contract field names mismatch: expected {expected_names!r}, got {restored_names!r}"
 
     def test_get_incomplete_tokens_by_row_returns_only_incomplete_leaf(self) -> None:
         """Recovery surfaces exactly the non-delegation tokens lacking a terminal outcome.
@@ -1261,10 +1339,18 @@ class TestForkRecoveryInvariant:
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Persist two expand children — both write token_data_ref (epoch 11 invariant).
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+
+        _read_path_contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(FieldContract(normalized_name="name", original_name="name", python_type=str, required=True, source="inferred"),),
+            locked=True,
+        )
         children, _expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
             row_id=row.row_id,
             child_payloads=[{"name": "alpha"}, {"name": "beta"}],
+            output_contract=_read_path_contract,
             step_in_pipeline=1,
         )
         assert len(children) == 2
@@ -1299,3 +1385,152 @@ class TestForkRecoveryInvariant:
             f"spec.token_data_ref={child_spec.token_data_ref!r} != "
             f"expand_token result.token_data_ref={child.token_data_ref!r}"
         )
+
+    def test_reconstruct_token_row_fork_vs_envelope(self) -> None:
+        """reconstruct_token_row covers both branches: fork (source_row) and envelope.
+
+        Fork branch: spec.token_data_ref is None → source_row returned unchanged.
+        Envelope branch: spec.token_data_ref is set (expand child) → payload retrieved
+        from store, {data, contract} envelope decoded, PipelineRow(data, contract)
+        returned. Datetime type fidelity and contract hash-validation are verified.
+
+        This test pins the two-branch contract described in ADDENDUM 3 so neither
+        branch silently breaks in future refactors.
+        """
+        from datetime import datetime
+
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
+
+        _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+        payload_store = MockPayloadStore()
+        db = make_landscape_db()
+        factory = RecorderFactory(db, payload_store=payload_store)
+
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source_node = factory.data_flow.register_node(
+            run_id=run.run_id,
+            plugin_name="explode",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=_OBSERVED_SCHEMA,
+        )
+
+        # Build a source row and source_row PipelineRow to use as the fork reference.
+        row = factory.data_flow.create_row(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            data={"source_val": 99},
+        )
+        source_schema = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                FieldContract(normalized_name="source_val", original_name="source_val", python_type=int, required=True, source="inferred"),
+            ),
+            locked=True,
+        )
+        from elspeth.contracts.schema_contract import PipelineRow as PLRow
+
+        source_row = PLRow({"source_val": 99}, source_schema)
+
+        # ── Fork branch: token_data_ref is None ──────────────────────────────────
+        # Build a minimal IncompleteTokenSpec with token_data_ref=None (fork child).
+        fork_spec = IncompleteTokenSpec(
+            token_id="fork-child-token",
+            row_id=row.row_id,
+            branch_name="sink_a",
+            fork_group_id="fg-1",
+            join_group_id=None,
+            expand_group_id=None,
+            token_data_ref=None,
+            step_in_pipeline=1,
+            max_attempt=0,
+        )
+
+        checkpoint_mgr = CheckpointManager(db)
+        recovery = RecoveryManager(db, checkpoint_mgr)
+
+        fork_result = recovery.reconstruct_token_row(
+            spec=fork_spec,
+            run_id=run.run_id,
+            source_row=source_row,
+            payload_store=payload_store,
+        )
+        # Fork branch must return source_row identity — shared payload, no copy.
+        assert fork_result is source_row, "Fork branch (token_data_ref=None) must return source_row unchanged (identity)"
+
+        # ── Envelope branch: expand child with {data, contract} in token_data_ref ──
+        # Build the output contract the expand step would produce.
+        aware_dt = datetime(2024, 11, 5, 9, 15, 0, tzinfo=UTC)
+        output_contract = SchemaContract(
+            mode="FIXED",
+            fields=(
+                FieldContract(normalized_name="item", original_name="item", python_type=str, required=True, source="declared"),
+                FieldContract(normalized_name="score", original_name="score", python_type=float, required=True, source="declared"),
+                FieldContract(
+                    normalized_name="recorded_at", original_name="recorded_at", python_type=datetime, required=True, source="declared"
+                ),
+            ),
+            locked=True,
+        )
+
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
+        expand_payload = {"item": "widget", "score": 0.95, "recorded_at": aware_dt}
+        children, _expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
+            row_id=row.row_id,
+            child_payloads=[expand_payload],
+            output_contract=output_contract,
+            step_in_pipeline=2,
+        )
+        assert len(children) == 1
+        child = children[0]
+        assert child.token_data_ref is not None, "expand_token must set token_data_ref (epoch 11 invariant)"
+
+        # Build the IncompleteTokenSpec that recovery would produce for this child.
+        envelope_spec = IncompleteTokenSpec(
+            token_id=child.token_id,
+            row_id=row.row_id,
+            branch_name=None,
+            fork_group_id=None,
+            join_group_id=None,
+            expand_group_id=child.expand_group_id,
+            token_data_ref=child.token_data_ref,
+            step_in_pipeline=2,
+            max_attempt=-1,
+        )
+
+        envelope_result = recovery.reconstruct_token_row(
+            spec=envelope_spec,
+            run_id=run.run_id,
+            source_row=source_row,
+            payload_store=payload_store,
+        )
+
+        # Must NOT be source_row — it carries its own payload.
+        assert envelope_result is not source_row
+
+        # Data fidelity: correct values.
+        assert envelope_result["item"] == "widget"
+        assert abs(envelope_result["score"] - 0.95) < 1e-9
+
+        # Type fidelity: datetime must survive as datetime, not a string.
+        assert isinstance(envelope_result["recorded_at"], datetime), (
+            f"Type fidelity failure: 'recorded_at' came back as {type(envelope_result['recorded_at']).__name__!r}, not datetime"
+        )
+        assert envelope_result["recorded_at"].tzinfo is not None
+        assert envelope_result["recorded_at"] == aware_dt
+
+        # Contract fidelity: the restored contract must match the persisted one.
+        # SchemaContract.from_checkpoint validates the hash — if we reach here, Tier-1
+        # integrity is confirmed.
+        restored_contract = envelope_result.contract
+        assert restored_contract.mode == output_contract.mode
+        assert restored_contract.locked == output_contract.locked
+        restored_names = {fc.normalized_name for fc in restored_contract.fields}
+        expected_names = {fc.normalized_name for fc in output_contract.fields}
+        assert restored_names == expected_names, f"Contract field names mismatch: expected {expected_names!r}, got {restored_names!r}"

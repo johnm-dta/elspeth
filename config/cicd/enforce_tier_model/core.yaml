@@ -201,13 +201,13 @@ allow_hits:
     so ANY failure in grade updates must not abort the loop for remaining runs
   safety: Exception caught and logged via structlog, run_id added to grade_update_failures
     in PurgeResult, operator informed via CLI output
-- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=1e85408fdfc1a5c7
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=1707b0fbd6672873
   owner: core
   reason: Tier 1 integrity check — deserialized checkpoint data must be dict; isinstance
     guards against corrupted checkpoint
   safety: Raises AuditIntegrityError if not dict; no silent coercion
   expires: null
-- key: core/checkpoint/recovery.py:R6:RecoveryManager:get_resume_point:fp=27d8e85e908d8c0e
+- key: core/checkpoint/recovery.py:R6:RecoveryManager:get_resume_point:fp=54948171154c08e1
   owner: checkpoint
   reason: Resume-point read may discover the persisted checkpoint is incompatible
     with the current schema (post-deploy migration scenario); narrow catch falls back
@@ -216,32 +216,53 @@ allow_hits:
     treats the run as not-resumable and starts from the source. No audit data is lost;
     lineage is preserved by full recompute.
   expires: '2026-08-20'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=60affc486e53170e
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=392656e9caba2bde
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash
     rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
   expires: '2026-11-13'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=7d0809b197d9ab44
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=97624a174e31d397
   owner: bugfix
   reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash
     rejects
   safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
   expires: '2026-11-13'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=5d39923434a1b710
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=3688461f6ab01933
   owner: architecture
   reason: Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically
     serializable
   safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=ec4658370df974ec
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=826cabfefbde5e8a
   owner: bugfix
   pattern: audit-record-fallback
   reason: Tier-3 boundary — error_details from transform results may contain NaN/Infinity
     that canonical_json rejects
   safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=f234b4284f04a49d
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=4248e0e1ad50b6df
   owner: bugfix
   pattern: audit-record-fallback
   reason: Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity
     that canonical_json rejects
   safety: Falls back to repr_hash + NonCanonicalMetadata — audit trail preserved
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:reconstruct_token_row:fp=b8840fd73f01302a
+  owner: core
+  reason: "Tier-1 corruption guard — token_data_ref payload decoded from the audit
+    store must be a {data, contract} envelope; isinstance validates the deserialized
+    structure before field access. Guard raises AuditIntegrityError on corruption —
+    no silent coercion. This is the correct offensive-programming pattern for Tier-1
+    data integrity: we validate OUR OWN data exactly once at the trust boundary,
+    then crash loudly if it isn't what we wrote. (F1 ADDENDUM 3: envelope shape
+    guard for reconstruct_token_row, epoch 11.)"
+  safety: Raises AuditIntegrityError if not a valid envelope; no silent coercion
+  expires: '2026-08-30'
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:reconstruct_token_row:fp=1f4dd53c57d90b69
+  owner: core
+  reason: "isinstance in error-message formatting only — the same envelope check
+    as above, but inlined into an f-string diagnostic to show 'N/A' rather than
+    crashing on .keys() when the corrupted payload is not a dict. The outer guard
+    (line 614) already raises; this isinstance is purely presentational in the
+    diagnostic path."
+  safety: No behaviour change — only affects the error message text; the guard above
+    already raises AuditIntegrityError before this line can cause data loss
+  expires: '2026-08-30'

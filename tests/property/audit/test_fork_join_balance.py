@@ -2492,3 +2492,592 @@ class TestForkRecoveryInvariant:
             f"restored merged contract fields mismatch: expected {{'value'}}, "
             f"got {{{', '.join(repr(fc.normalized_name) for fc in restored_contract.fields)}}}"
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # F1 Regression Cells (Task 10) — expand resume + value-fidelity +
+    # re-driven external-call attributability
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def test_resume_partial_expand_does_not_reemit(self) -> None:
+        """A deaggregation row with one completed and one incomplete expanded child resumes
+        the incomplete child only — no re-expansion, no double-emit.
+
+        Topology:
+            source → JSONExplode(array_field='items', output_field='ts')
+                   → PassTransform('pass_after_explode') → sink 'output'
+
+        The PassTransform is required: expand-child resume re-drives from the node
+        AFTER the expand node (resolve_next_node(explode_node)).  Without a downstream
+        transform, that node is None and process_token rejects it (no sink context).
+        PassTransform is the re-drive target — the expand child is resumed from there.
+
+        Source provides one row: {'score': 1, 'items': [dt0, dt1]}.
+        JSONExplode emits two children:
+          child0: {'score': 1, 'ts': dt0, 'item_index': 0}
+          child1: {'score': 1, 'ts': dt1, 'item_index': 1}
+
+        Each child carries its own DISTINCT datetime value in 'ts' — the datetime
+        is the ITEM VALUE from the exploded array (output_field='ts'), giving each
+        child a different token_data_ref envelope payload.
+
+        VALUE FIDELITY: dt0=datetime(2021,1,1) for child0, dt1=datetime(2022,2,2)
+        for child1.  After interrupting child1 and resuming, retrieve child1's
+        token_data_ref envelope and assert it carries ts=dt1 as a datetime.datetime
+        INSTANCE (not str), proving checkpoint_dumps/_loads type fidelity AND that
+        child1 carries ITS OWN value (not the sibling's dt0).
+
+        Decimal was considered as a second type-fidelity witness but is not
+        supported by checkpoint_dumps (serializer handles int/str/float/bool/
+        datetime/tuple/None — not decimal.Decimal).  The task's "datetime + Decimal"
+        framing is explicit about adapting to what the fixture emits.  datetime
+        suffices: it is the only non-JSON-native type checkpoint_dumps preserves, and
+        distinct per-child values are achievable by embedding the datetimes directly
+        in the exploded array.
+
+        RED (dispatch disabled, fork_expand_coalesce_specs branch commented):
+        process_existing_row re-runs the entire source row from the beginning,
+        which triggers JSONExplode again and creates TWO NEW expand children in
+        addition to the existing (run-1) children (total 4 expand children in DB).
+        The conservation assertion fires first (before the I1a sweep).
+        Observed: AssertionError — 'Resume must NOT re-expand (no new children
+        minted): expected 2 expand children, got 4.'
+        """
+        import datetime
+
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.checkpoint.serialization import checkpoint_loads
+        from elspeth.core.config import CheckpointSettings
+        from elspeth.core.landscape.schema import token_outcomes_table
+        from elspeth.plugins.transforms.json_explode import JSONExplode
+
+        db = make_landscape_db()
+        payload_store = MockPayloadStore()
+
+        dt0 = datetime.datetime(2021, 1, 1, tzinfo=datetime.UTC)
+        dt1 = datetime.datetime(2022, 2, 2, tzinfo=datetime.UTC)
+
+        # Source: one row whose 'items' contains the two distinct datetime values.
+        # JSONExplode explodes this into child0 (ts=dt0, item_index=0) and
+        # child1 (ts=dt1, item_index=1).  Each child's 'ts' IS the exploded item
+        # value — distinct per child — proving value<->token alignment.
+        #
+        # TOPOLOGY: source → JSONExplode → PassTransform → sink
+        # The PassTransform after JSONExplode is required for resume: the expand child's
+        # resume_incomplete_token path calls process_token(current_node_id=after) where
+        # `after = resolve_next_node(explode_node)`.  Without a downstream transform node,
+        # `after` would be None, which process_token rejects (no sink context for branchless
+        # tokens).  The PassTransform is the re-drive target — the child continues from there
+        # rather than from the expand node itself.
+        source = ListSource([{"score": 1, "items": [dt0, dt1]}], on_success="explode_in")
+        sink = CollectSink("output")
+
+        explode = JSONExplode(
+            {
+                "array_field": "items",
+                "output_field": "ts",  # each child gets its own datetime as 'ts'
+                "include_index": True,  # item_index 0/1 identifies which child
+                "schema": {"mode": "observed"},
+            }
+        )
+        # PassTransform downstream of explode — required for expand-child resume.
+        pass_after = PassTransform(name="pass_after_explode")
+
+        wired_transforms = wire_transforms(
+            [explode, pass_after],
+            source_connection="explode_in",
+            final_sink="output",
+            names=["explode", "pass_after"],
+        )
+
+        graph = ExecutionGraph.from_plugin_instances(
+            source=as_source(source),
+            source_settings=SourceSettings(plugin=source.name, on_success="explode_in", options={}),
+            transforms=wired_transforms,
+            sinks={"output": as_sink(sink)},
+            gates=[],
+            aggregations={},
+            coalesce_settings=[],
+        )
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(explode), as_transform(pass_after)],
+            sinks={"output": as_sink(sink)},
+        )
+        settings_obj = ElspethSettings(
+            source={"plugin": "test", "on_success": "explode_in", "options": {}},
+            sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
+        )
+
+        orchestrator = Orchestrator(db)
+        run = orchestrator.run(config, graph=graph, settings=settings_obj, payload_store=payload_store)
+        run_id = run.run_id
+
+        # ── Baseline: both expand children completed (2 outcomes at 'output') ──
+        with db.engine.connect() as conn:
+            all_children = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id, t.token_data_ref AS token_data_ref
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id AND t.expand_group_id IS NOT NULL
+                    ORDER BY t.token_id
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+
+        assert len(all_children) == 2, f"Expected exactly 2 expand children from a 2-element array; got {len(all_children)}"
+
+        # Identify child1 (item_index=1) by reading its token_data_ref envelope.
+        # We interrupt child1 (leave child0 complete) to simulate a mid-run crash.
+        def _get_item_index(token_data_ref: str) -> int:
+            raw = payload_store.retrieve(token_data_ref)
+            env = checkpoint_loads(raw.decode("utf-8"))
+            return env["data"]["item_index"]
+
+        child_by_index: dict[int, str] = {_get_item_index(c.token_data_ref): c.token_id for c in all_children}
+        assert set(child_by_index.keys()) == {0, 1}, f"Expected children with item_index 0 and 1; got indices {set(child_by_index.keys())}"
+        incomplete_token_id = child_by_index[1]  # interrupt child1 (ts=dt1)
+
+        # Pre-record child1's token_data_ref for value-fidelity assertion after resume.
+        child1_token_data_ref = next(c.token_data_ref for c in all_children if c.token_id == incomplete_token_id)
+        assert child1_token_data_ref is not None, "expand child1 must have token_data_ref before interruption (epoch 11 invariant)"
+
+        # ── Interrupt: delete child1's terminal outcome only ──────────────────
+        with db.engine.connect() as conn:
+            child1_outcomes = conn.execute(
+                text("""
+                    SELECT o.outcome_id AS outcome_id
+                    FROM token_outcomes o
+                    WHERE o.token_id = :tid AND o.completed = 1
+                """),
+                {"tid": incomplete_token_id},
+            ).fetchall()
+            assert child1_outcomes, "expand child1 must have a completed outcome to delete (setup precondition)"
+            for outcome in child1_outcomes:
+                conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
+            conn.commit()
+
+        # ── Checkpoint + mark failed ──────────────────────────────────────────
+        checkpoint_mgr = CheckpointManager(db)
+        sink_node_ids = graph.get_sinks()
+        with db.engine.connect() as conn:
+            any_token = conn.execute(
+                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
+                {"run_id": run_id},
+            ).fetchone()
+        assert any_token is not None
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=any_token.token_id,
+            node_id=sink_node_ids[0],
+            sequence_number=1,
+            graph=graph,
+        )
+        with db.engine.connect() as conn:
+            conn.execute(
+                text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            conn.commit()
+
+        # ── Resume ───────────────────────────────────────────────────────────
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        check = recovery_mgr.can_resume(run_id, graph)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        resume_result = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+        assert resume_result.status == RunStatus.COMPLETED, resume_result.status
+
+        # ── Conservation: expand child count unchanged (no re-expansion) ──────
+        with db.engine.connect() as conn:
+            post_children = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id AND t.expand_group_id IS NOT NULL
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+
+        assert len(post_children) == 2, (
+            f"Resume must NOT re-expand (no new children minted): "
+            f"expected 2 expand children, got {len(post_children)}. "
+            f"If dispatch is disabled, process_existing_row re-runs JSONExplode and "
+            f"creates 2 additional children → total 4."
+        )
+
+        # Each expand child must have exactly one completed outcome (no double-emit).
+        with db.engine.connect() as conn:
+            outcome_counts_by_token = {
+                row.token_id: row.n
+                for row in conn.execute(
+                    text("""
+                        SELECT o.token_id AS token_id, COUNT(*) AS n
+                        FROM token_outcomes o
+                        JOIN tokens t ON t.token_id = o.token_id
+                        JOIN rows r ON r.row_id = t.row_id
+                        WHERE r.run_id = :run_id
+                          AND t.expand_group_id IS NOT NULL
+                          AND o.completed = 1
+                        GROUP BY o.token_id
+                    """),
+                    {"run_id": run_id},
+                ).fetchall()
+            }
+
+        child_token_ids = {c.token_id for c in post_children}
+        for token_id in child_token_ids:
+            count = outcome_counts_by_token.get(token_id, 0)
+            assert count == 1, (
+                f"Expand child {token_id!r} has {count} completed outcomes after resume; "
+                f"expected exactly 1 (conservation law — no double-emit). "
+                f"incomplete_token_id={incomplete_token_id!r}"
+            )
+
+        # No orphan leaf tokens (all non-delegation tokens have a terminal outcome).
+        orphans = orphan_leaf_token_ids(db, run_id)
+        assert not orphans, f"Resume left {len(orphans)} orphan leaf token(s): {orphans}"
+
+        # ── VALUE FIDELITY: child1's envelope carries ts=dt1 as datetime ──────
+        # Retrieve child1's token_data_ref envelope (run-1 artifact, unmodified by resume).
+        # This is the payload the resume path's reconstruct_token_row() consumed to
+        # re-drive child1.  Asserting type+value here proves:
+        #   (a) checkpoint_dumps preserved the datetime type (not stringified it),
+        #   (b) child1's envelope carries ITS OWN dt1, not the sibling's dt0.
+        raw = payload_store.retrieve(child1_token_data_ref)
+        env = checkpoint_loads(raw.decode("utf-8"))
+
+        assert isinstance(env, dict) and "data" in env and "contract" in env, (
+            f"child1 token_data_ref is not a {{data, contract}} envelope; "
+            f"got keys={sorted(env.keys()) if isinstance(env, dict) else type(env).__name__!r}"
+        )
+        child1_data = env["data"]
+
+        # Type fidelity: 'ts' field must come back as datetime.datetime, not str.
+        assert isinstance(child1_data["ts"], datetime.datetime), (
+            f"Type fidelity failure: 'ts' field came back as {type(child1_data['ts']).__name__!r}, "
+            f"not datetime — checkpoint_dumps was not used (canonical_json stringifies datetime)"
+        )
+        assert child1_data["ts"].tzinfo is not None, "Restored datetime must be timezone-aware"
+
+        # Value alignment: child1's 'ts' must be dt1 (NOT dt0 — the sibling's value).
+        assert child1_data["ts"] == dt1, (
+            f"Value alignment failure: child1 carries ts={child1_data['ts']!r}, "
+            f"expected dt1={dt1!r}. Got dt0={dt0!r} would mean zip(strict=True) alignment is broken."
+        )
+        # item_index alignment: child1 must have item_index=1.
+        assert child1_data["item_index"] == 1, f"item_index alignment: expected 1 for child1, got {child1_data['item_index']!r}"
+
+    def test_resume_redriven_transform_external_call_is_attributable(self) -> None:
+        """A fork→coalesce branch whose transform makes a recorded state call is
+        re-driven on resume; the call RE-FIRES (at-least-once) but the re-fired
+        call's parent node_state carries resume_checkpoint_id, so an auditor can
+        prove it came from the resume — the duplication is honest, not silent.
+
+        Topology:
+            source → gate(fork_to=[path_a, path_b])
+                   → path_a: CallRecordingTransform(record_a) → coalesce 'merge'
+                   → path_b: PassTransform(pass_b)            → coalesce 'merge'
+                   → sink 'output'
+
+        CallRecordingTransform records one HTTP state call (calls.state_id set)
+        per invocation via ctx.record_call().  Being state-parented, the call
+        inherits the resume_checkpoint_id of its parent node_state.
+
+        Interruption: after a complete run, undo the barrier by deleting:
+          - the merged token's outcome, node_states, token_parents, and token row;
+          - both branch COALESCED outcomes;
+          - branch tokens' completed coalesce node_states.
+        This simulates a pre-barrier crash (both branches must re-drive).
+        record_a's transform re-drives on resume → a SECOND state call is recorded.
+
+        ATTRIBUTABILITY PROOF:
+          - Run-1 node_state for record_a's transform: resume_checkpoint_id IS NULL
+            (it was a first-pass execution, not a re-drive).
+          - Resume node_state for record_a's transform (attempt = max+1):
+            resume_checkpoint_id IS NOT NULL (set by the resume path, Task 5/7).
+          - The re-fired call links to the resume node_state (calls.state_id).
+          - Together these prove: the second call is provably attributable to the
+            resume, not a silent duplicate appearing to be a run-1 call.
+
+        Linkage used: calls.state_id → node_states.resume_checkpoint_id.
+        operation_call (operations-table) is NOT used here — transforms produce
+        state-parented calls; resume_checkpoint_id lives only on node_states.
+
+        RED (dispatch disabled, fork_expand_coalesce_specs branch commented):
+        process_existing_row re-forks the row from the source, creating NEW branch
+        children.  The coalesce node_states from run-1 remain (completed_at IS NOT
+        NULL).  The NEW branches arrive at the barrier, CoalesceExecutor.accept()
+        sees them as late arrivals (already completed per run-1 node_states) and
+        records UNROUTED outcomes.  The new fork parent carries FORK_PARENT outcome
+        and its NEW children carry UNROUTED — no I1a sweep violation.  But the
+        original run-1 branch tokens (which had their COALESCED outcomes deleted)
+        are never re-driven by the disabled dispatch, so they remain in the DB
+        with no terminal outcomes → I1a fires on those.
+        Observed: AuditIntegrityError — 'fork/expand parent token(s) have no child
+        token_outcomes rows at run-end.'
+        """
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import CheckpointSettings
+        from elspeth.core.landscape.schema import (
+            token_outcomes_table,
+            token_parents_table,
+            tokens_table,
+        )
+        from tests.fixtures.plugins import CallRecordingTransform
+
+        db = make_landscape_db()
+        payload_store = MockPayloadStore()
+
+        source = ListSource([{"value": 1}], on_success="gate_in")
+        sink = CollectSink("output")
+
+        record_a = CallRecordingTransform(name="record_a")
+        pass_b = PassTransform(name="pass_b")
+
+        gate = GateSettings(
+            name="fork_gate",
+            input="gate_in",
+            condition="True",
+            routes={"true": "fork", "false": "output"},
+            fork_to=["path_a", "path_b"],
+        )
+        coalesce = CoalesceSettings(
+            name="merge",
+            branches={"path_a": "done_a", "path_b": "done_b"},
+            policy="require_all",
+            merge="union",
+            on_success="output",
+        )
+
+        wired_a = wire_transforms([record_a], source_connection="path_a", final_sink="done_a", names=["record_a"])
+        wired_b = wire_transforms([pass_b], source_connection="path_b", final_sink="done_b", names=["pass_b"])
+
+        graph = ExecutionGraph.from_plugin_instances(
+            source=as_source(source),
+            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            transforms=wired_a + wired_b,
+            sinks={"output": as_sink(sink)},
+            gates=[gate],
+            aggregations={},
+            coalesce_settings=[coalesce],
+        )
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(record_a), as_transform(pass_b)],
+            sinks={"output": as_sink(sink)},
+            gates=[gate],
+            coalesce_settings=[coalesce],
+        )
+        settings_obj = ElspethSettings(
+            source={"plugin": "test", "on_success": "gate_in", "options": {}},
+            sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
+            gates=[gate],
+            coalesce=[coalesce],
+        )
+
+        orchestrator = Orchestrator(db)
+        run = orchestrator.run(config, graph=graph, settings=settings_obj, payload_store=payload_store)
+        run_id = run.run_id
+
+        # ── Find the record_a branch token and its run-1 node_state ──────────
+        # graph.get_transform_id_map() uses integer keys (sequential index), not names.
+        # Find the node_id for record_a by searching graph.get_nodes() by plugin_name.
+        record_a_node_id = next(n.node_id for n in graph.get_nodes() if n.plugin_name == "record_a")
+
+        with db.engine.connect() as conn:
+            record_a_run1_ns = conn.execute(
+                text("""
+                    SELECT ns.state_id AS state_id,
+                           ns.attempt AS attempt,
+                           ns.resume_checkpoint_id AS resume_checkpoint_id
+                    FROM node_states ns
+                    JOIN tokens t ON t.token_id = ns.token_id
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id
+                      AND ns.node_id = :node_id
+                    ORDER BY ns.attempt
+                """),
+                {"run_id": run_id, "node_id": str(record_a_node_id)},
+            ).fetchall()
+
+        assert len(record_a_run1_ns) == 1, f"Expected 1 run-1 node_state for record_a transform; got {len(record_a_run1_ns)}"
+        run1_state_id = record_a_run1_ns[0].state_id
+        assert record_a_run1_ns[0].resume_checkpoint_id is None, (
+            f"Run-1 node_state must have resume_checkpoint_id IS NULL (not a re-drive); got {record_a_run1_ns[0].resume_checkpoint_id!r}"
+        )
+
+        # ── Verify run-1 recorded exactly one state call ──────────────────────
+        with db.engine.connect() as conn:
+            run1_calls = conn.execute(
+                text("SELECT call_id FROM calls WHERE state_id = :sid"),
+                {"sid": run1_state_id},
+            ).fetchall()
+
+        assert len(run1_calls) == 1, f"Run-1 record_a transform must have recorded exactly 1 state call; got {len(run1_calls)}"
+
+        # ── Find the merged token for barrier reversal ─────────────────────────
+        with db.engine.connect() as conn:
+            merged_rows = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id, t.join_group_id AS join_group_id
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id
+                      AND t.join_group_id IS NOT NULL
+                      AND t.branch_name IS NULL
+                      AND t.fork_group_id IS NULL
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+        assert len(merged_rows) == 1, f"Expected exactly one merged token; got {len(merged_rows)}"
+        merged_token_id = merged_rows[0].token_id
+        join_group_id = merged_rows[0].join_group_id
+        coalesce_node_id = graph.get_coalesce_id_map()[CoalesceName("merge")]
+
+        # ── Interrupt: undo the barrier (same pattern as test_resume_fork_to_coalesce_before_barrier) ──
+        with db.engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            # 1. merged token outcomes
+            conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
+            # 2. merged token node_states
+            conn.execute(
+                text("DELETE FROM node_states WHERE token_id = :tid"),
+                {"tid": merged_token_id},
+            )
+            # 3. token_parents for merged token
+            conn.execute(token_parents_table.delete().where(token_parents_table.c.token_id == merged_token_id))
+            # 4. merged token row
+            conn.execute(tokens_table.delete().where(tokens_table.c.token_id == merged_token_id))
+            # 5. branch COALESCED outcomes
+            conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.join_group_id == join_group_id))
+            # 6. branch tokens' completed coalesce node_states
+            conn.execute(
+                text("DELETE FROM node_states WHERE node_id = :nid AND run_id = :rid"),
+                {"nid": str(coalesce_node_id), "rid": run_id},
+            )
+            conn.commit()
+            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+
+        # ── Checkpoint + mark failed ──────────────────────────────────────────
+        checkpoint_mgr = CheckpointManager(db)
+        sink_node_ids = graph.get_sinks()
+        with db.engine.connect() as conn:
+            any_token = conn.execute(
+                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
+                {"run_id": run_id},
+            ).fetchone()
+        assert any_token is not None
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=any_token.token_id,
+            node_id=sink_node_ids[0],
+            sequence_number=1,
+            graph=graph,
+        )
+        with db.engine.connect() as conn:
+            conn.execute(
+                text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            conn.commit()
+
+        # ── Resume ───────────────────────────────────────────────────────────
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        check = recovery_mgr.can_resume(run_id, graph)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        resume_result = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+        assert resume_result.status == RunStatus.COMPLETED, resume_result.status
+
+        # ── Attributability proof: re-driven node_state has resume_checkpoint_id ──
+        # After resume, the record_a branch re-drove at attempt = max+1 (the resume
+        # attempt).  Its node_state must carry resume_checkpoint_id IS NOT NULL.
+        with db.engine.connect() as conn:
+            record_a_all_ns = conn.execute(
+                text("""
+                    SELECT ns.state_id AS state_id,
+                           ns.attempt AS attempt,
+                           ns.resume_checkpoint_id AS resume_checkpoint_id
+                    FROM node_states ns
+                    JOIN tokens t ON t.token_id = ns.token_id
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id
+                      AND ns.node_id = :node_id
+                    ORDER BY ns.attempt
+                """),
+                {"run_id": run_id, "node_id": str(record_a_node_id)},
+            ).fetchall()
+
+        assert len(record_a_all_ns) == 2, (
+            f"After resume, record_a transform must have 2 node_states (run-1 + re-drive); "
+            f"got {len(record_a_all_ns)} with attempts={[r.attempt for r in record_a_all_ns]!r}"
+        )
+        run1_ns = record_a_all_ns[0]
+        redrive_ns = record_a_all_ns[1]
+
+        # Run-1 node_state must still have resume_checkpoint_id IS NULL (append-only).
+        assert run1_ns.state_id == run1_state_id, f"First node_state must be run-1 (state_id={run1_state_id!r}); got {run1_ns.state_id!r}"
+        assert run1_ns.resume_checkpoint_id is None, (
+            f"Run-1 node_state resume_checkpoint_id must remain NULL after resume; got {run1_ns.resume_checkpoint_id!r}"
+        )
+
+        # Re-drive node_state must have resume_checkpoint_id IS NOT NULL.
+        assert redrive_ns.resume_checkpoint_id is not None, (
+            f"Re-drive node_state (attempt={redrive_ns.attempt}) must have "
+            f"resume_checkpoint_id set (attributability invariant, ADDENDUM 2.C); "
+            f"got None.  The re-fired call cannot be attributed to the resume without this."
+        )
+
+        # ── Call count: the call RE-FIRED (at-least-once, bounded non-goal) ──
+        # The re-driven node_state must have recorded a NEW state call.
+        with db.engine.connect() as conn:
+            redrive_calls = conn.execute(
+                text("SELECT call_id FROM calls WHERE state_id = :sid"),
+                {"sid": redrive_ns.state_id},
+            ).fetchall()
+
+        assert len(redrive_calls) == 1, (
+            f"Re-drive node_state (state_id={redrive_ns.state_id!r}) must have exactly 1 re-fired state call; got {len(redrive_calls)}"
+        )
+
+        # Confirm total calls for record_a's transform: 1 (run-1) + 1 (re-drive) = 2.
+        with db.engine.connect() as conn:
+            all_record_a_calls = conn.execute(
+                text("""
+                    SELECT c.call_id AS call_id, c.state_id AS state_id
+                    FROM calls c
+                    WHERE c.state_id IN (
+                        SELECT ns.state_id FROM node_states ns
+                        JOIN tokens t ON t.token_id = ns.token_id
+                        JOIN rows r ON r.row_id = t.row_id
+                        WHERE r.run_id = :run_id AND ns.node_id = :node_id
+                    )
+                """),
+                {"run_id": run_id, "node_id": str(record_a_node_id)},
+            ).fetchall()
+
+        assert len(all_record_a_calls) == 2, (
+            f"Total calls for record_a transform must be 2 (run-1 + re-drive = at-least-once); "
+            f"got {len(all_record_a_calls)}.  "
+            f"run1_state={run1_state_id!r}, redrive_state={redrive_ns.state_id!r}"
+        )
+        # Confirm one call per node_state (run-1 → run1_state_id, re-drive → redrive_ns.state_id).
+        calls_by_state = {}
+        for c in all_record_a_calls:
+            calls_by_state.setdefault(c.state_id, []).append(c.call_id)
+        assert run1_state_id in calls_by_state, "Run-1 state must have a call"
+        assert redrive_ns.state_id in calls_by_state, "Re-drive state must have a call"

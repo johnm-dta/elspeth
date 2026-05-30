@@ -321,7 +321,16 @@ node_states_table = Table(
     # while re-driving a reconstructed incomplete token on resume. Makes a resume re-drive
     # (which records at attempt = max+1 under the SAME run_id) provably distinguishable
     # from a run-1 tenacity retry — explain() filters on resume_checkpoint_id IS NULL.
-    Column("resume_checkpoint_id", String(64), ForeignKey("checkpoints.checkpoint_id"), nullable=True),
+    #
+    # MARKER-ONLY (no FK): the id is a durable provenance fact, like a content hash — it
+    # endures even after its checkpoint row is purged. Checkpoints are deletable progress
+    # state (delete_checkpoints clears them unconditionally on successful completion); the
+    # marker on node_states does NOT keep them alive and carries NO referential constraint
+    # to the checkpoints table. explain() distinguishes resume re-drives from run-1 retries
+    # purely by this column's NULL-ness (resume_checkpoint_id IS NOT NULL), which survives
+    # checkpoint purge. (Operator decision 2026-05-30, faithful to "hashes survive payload
+    # deletion".)
+    Column("resume_checkpoint_id", String(64), nullable=True),
     # Composite unique target for run-scoped FKs to node_states.
     UniqueConstraint("state_id", "run_id"),
     UniqueConstraint("token_id", "node_id", "attempt"),

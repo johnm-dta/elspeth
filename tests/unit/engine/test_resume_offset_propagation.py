@@ -18,8 +18,6 @@ Task 7's full RED→GREEN drive of the integration test.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Any
 from unittest.mock import MagicMock
 
 from sqlalchemy import select
@@ -29,30 +27,12 @@ from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.schema_contract import SchemaContract
-from elspeth.core.landscape.schema import checkpoints_table, node_states_table
+from elspeth.core.landscape.schema import node_states_table
 from elspeth.engine.executors import SinkExecutor
 from elspeth.engine.spans import SpanFactory
 from elspeth.testing import make_field, make_row
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_recorder_with_run, register_test_node
-
-
-def _insert_checkpoint(db: Any, *, checkpoint_id: str, run_id: str, token_id: str, node_id: str) -> None:
-    """Insert a minimal checkpoint row to satisfy the FK from node_states.resume_checkpoint_id."""
-    with db.engine.begin() as conn:
-        conn.execute(
-            checkpoints_table.insert().values(
-                checkpoint_id=checkpoint_id,
-                run_id=run_id,
-                token_id=token_id,
-                node_id=node_id,
-                sequence_number=1,
-                created_at=datetime.now(UTC),
-                upstream_topology_hash="a" * 64,
-                checkpoint_node_config_hash="b" * 64,
-                format_version=4,
-            )
-        )
 
 
 def _make_permissive_contract() -> SchemaContract:
@@ -131,17 +111,9 @@ class TestTokenResumeOffsetReachesSinkNodeState:
         )
         token_db = factory.data_flow.create_token(row.row_id)
 
-        # Insert a checkpoint row for the FK in node_states.resume_checkpoint_id.
-        # node_states.resume_checkpoint_id → checkpoints.checkpoint_id (FK).
-        # We use the source node as the checkpoint's node_id since it's already registered.
+        # resume_checkpoint_id is a marker-only id (no FK to checkpoints), so no checkpoint
+        # row needs to exist — the provenance string is written/read on node_states alone.
         checkpoint_id = "ck-test"
-        _insert_checkpoint(
-            db,
-            checkpoint_id=checkpoint_id,
-            run_id=run_id,
-            token_id=token_db.token_id,
-            node_id=setup.source_node_id,
-        )
 
         # ── The critical TokenInfo: carries nonzero resume offset and provenance ──
         contract = _make_permissive_contract()

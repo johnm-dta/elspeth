@@ -733,3 +733,157 @@ class TestForkRecoveryInvariant:
             f"(all have partial fork completion), got {len(unprocessed)}. "
             f"Recovery is incorrectly marking partially-completed forks as done."
         )
+
+    def test_resume_does_not_reemit_completed_fork_branch(self) -> None:
+        """Resuming a partial-fork row must not re-emit its completed branch.
+
+        Reproduction of the resume double-emission defect (F1):
+        a checkpoint-enabled fork pipeline is interrupted after one branch's
+        sink write (and checkpoint) but before the sibling branch completes.
+        Recovery correctly *detects* the row as unprocessed
+        (``test_partial_fork_detected_by_recovery`` covers that), but
+        ``process_existing_row`` then restarts the row from the source and
+        re-forks to ALL branches — re-emitting the branch that already reached
+        a terminal state. The audit trail (the legal record) then holds two
+        terminal outcomes for the surviving branch under one ``row_id``, and the
+        sink is written twice.
+
+        INVARIANT: after resume, each (row_id, sink_name) has exactly ONE
+        completed, non-delegation terminal outcome. The defect yields two for
+        the branch that completed before the interruption.
+        """
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import CheckpointSettings, ElspethSettings
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        db = make_landscape_db()
+        payload_store = MockPayloadStore()
+
+        # Single row keeps the reproduction deterministic.
+        source = ListSource([{"value": 1}], on_success="sink_a")
+        sink_a = CollectSink("sink_a")
+        sink_b = CollectSink("sink_b")
+
+        # Gate forks the row to both sinks → two terminal sink outcomes per row.
+        gate = GateSettings(
+            name="fork_gate",
+            input="gate_in",
+            condition="True",
+            routes={"true": "fork", "false": "sink_a"},
+            fork_to=["sink_a", "sink_b"],
+        )
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
+            gates=[gate],
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            source=as_source(source),
+            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            transforms=[],
+            sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
+            gates=[gate],
+            aggregations={},
+            coalesce_settings=[],
+        )
+        settings_obj = ElspethSettings(
+            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sinks={
+                "sink_a": {"plugin": "test", "on_write_failure": "discard"},
+                "sink_b": {"plugin": "test", "on_write_failure": "discard"},
+            },
+            gates=[gate],
+        )
+
+        orchestrator = Orchestrator(db)
+        run = orchestrator.run(config, graph=graph, settings=settings_obj, payload_store=payload_store)
+        run_id = run.run_id
+
+        # Baseline: the one row forked to both sinks — exactly one terminal
+        # outcome per (row, sink).
+        def _outcome_counts() -> dict[tuple[str, str], int]:
+            with db.engine.connect() as conn:
+                result = conn.execute(
+                    text("""
+                        SELECT t.row_id AS row_id, o.sink_name AS sink_name, COUNT(*) AS n
+                        FROM token_outcomes o
+                        JOIN tokens t ON t.token_id = o.token_id
+                        JOIN rows r ON r.row_id = t.row_id
+                        WHERE r.run_id = :run_id
+                          AND o.completed = 1
+                          AND o.sink_name IS NOT NULL
+                        GROUP BY t.row_id, o.sink_name
+                    """),
+                    {"run_id": run_id},
+                ).fetchall()
+            return {(row.row_id, row.sink_name): row.n for row in result}
+
+        baseline = _outcome_counts()
+        assert sorted(k[1] for k in baseline) == ["sink_a", "sink_b"], baseline
+        assert all(n == 1 for n in baseline.values()), baseline
+
+        # Interrupt the sink_a branch: delete its terminal outcome so the row
+        # has one completed branch (sink_b) and one incomplete branch (sink_a).
+        with db.engine.connect() as conn:
+            sink_a_outcomes = conn.execute(
+                text("""
+                    SELECT o.outcome_id AS outcome_id
+                    FROM token_outcomes o
+                    JOIN tokens t ON t.token_id = o.token_id
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id AND o.sink_name = 'sink_a'
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+            assert sink_a_outcomes, "expected a sink_a outcome to delete"
+            for outcome in sink_a_outcomes:
+                conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
+            conn.commit()
+
+        # A checkpoint is the precondition for resume. Anchor it on a real token
+        # and the sink node from the run.
+        checkpoint_mgr = CheckpointManager(db)
+        sink_node_ids = graph.get_sinks()
+        with db.engine.connect() as conn:
+            actual_token = conn.execute(
+                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
+                {"run_id": run_id},
+            ).fetchone()
+        assert actual_token is not None
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=actual_token.token_id,
+            node_id=sink_node_ids[0],
+            sequence_number=1,
+            graph=graph,
+        )
+
+        # Mark the run failed so it is resumable.
+        with db.engine.connect() as conn:
+            conn.execute(text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"), {"run_id": run_id})
+            conn.commit()
+
+        # Resume through the production path.
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        check = recovery_mgr.can_resume(run_id, graph)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+
+        # INVARIANT: no (row_id, sink_name) may carry more than one terminal
+        # outcome. The defect re-emits sink_b (the branch that completed before
+        # the interruption), leaving it with two.
+        after = _outcome_counts()
+        duplicated = {key: n for key, n in after.items() if n != 1}
+        assert not duplicated, (
+            f"Resume re-emitted an already-completed fork branch: {duplicated}. "
+            f"Each (row_id, sink_name) must carry exactly one terminal outcome after resume "
+            f"(the audit trail is the legal record and must not contain duplicate lineage)."
+        )

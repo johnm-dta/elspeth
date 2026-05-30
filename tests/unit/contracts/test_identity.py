@@ -121,6 +121,26 @@ class TestTokenInfo:
         assert updated.join_group_id == "join-456"
         assert updated.expand_group_id == "expand-789"
 
+    def test_with_updated_data_preserves_resume_fields(self) -> None:
+        """resume_attempt_offset and resume_checkpoint_id survive with_updated_data().
+
+        These are the propagation fields for mid-DAG resume re-drives (ADDENDUM 4).
+        Dropping them in with_updated_data would cause a node_states collision one node
+        downstream on resume. This test mechanically enforces the dataclasses.replace
+        propagation that the docstring describes.
+        """
+        contract = _make_contract()
+        original = TokenInfo(
+            row_id="row-1",
+            token_id="tok-1",
+            row_data=PipelineRow({"field": "original"}, contract),
+            resume_attempt_offset=3,
+            resume_checkpoint_id="ck-abc",
+        )
+        updated = original.with_updated_data(PipelineRow({"field": "updated"}, contract))
+        assert updated.resume_attempt_offset == 3
+        assert updated.resume_checkpoint_id == "ck-abc"
+
 
 class TestTokenInfoLineageFieldGuards:
     """Empty-string lineage fields corrupt coalesce keys — must be rejected."""

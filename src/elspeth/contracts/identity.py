@@ -22,6 +22,10 @@ class TokenInfo:
     - join_group_id: Groups all tokens merged in a coalesce operation
     - expand_group_id: Groups all children from an expand operation
 
+    Resume state (resume_attempt_offset, resume_checkpoint_id): carried on the token —
+    not WorkItem — because SinkExecutor buffers TokenInfos across WorkItem boundaries,
+    so the per-token offset must survive that buffering. See ADDENDUM 4 in the F1 design spec.
+
     Frozen for immutability - use with_updated_data() to create new instances.
     """
 

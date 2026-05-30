@@ -276,6 +276,8 @@ class TransformExecutor:
             run_id=ctx.run_id,
             step_index=step,
             input_data=input_dict,
+            # resume_attempt_offset is the generation base (run-1 max+1 for a re-driven token;
+            # 0 for run-1 tokens); `attempt` is the tenacity retry index within this generation.
             attempt=token.resume_attempt_offset + attempt,
             resume_checkpoint_id=token.resume_checkpoint_id,
         ) as guard:

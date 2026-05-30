@@ -1907,3 +1907,573 @@ class TestForkRecoveryInvariant:
                 source_row=source_row,
                 payload_store=payload_store,
             )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # F1 Regression Cells (Task 9) — fork→coalesce + post-coalesce (B1)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _setup_coalesce_pipeline(
+        self,
+    ) -> tuple[
+        LandscapeDB,
+        MockPayloadStore,
+        PipelineConfig,
+        ExecutionGraph,
+        ElspethSettings,
+        str,  # run_id
+    ]:
+        """Shared setup: build and run a fork→PassTransform→coalesce→sink pipeline.
+
+        Topology: source → gate(fork_to=[path_a, path_b])
+                    → path_a: PassTransform(pass_a) → coalesce 'merge'
+                    → path_b: PassTransform(pass_b) → coalesce 'merge'
+                    → sink 'output'
+
+        PassTransforms on both branches ensure branch_first_node is a REAL
+        processing node distinct from the coalesce barrier — this exercises
+        resolve_branch_first_node() (not the coalesce node itself).
+
+        CoalesceSettings.on_success='output' makes the coalesce TERMINAL
+        (resolve_next_node(coalesce_node_id) is None in the traversal map —
+        the sink is reached via resolve_coalesce_sink, not the next-node map).
+
+        Returns (db, payload_store, config, graph, settings_obj, run_id) for
+        the completed run.  The same payload_store MUST be used for both
+        the initial run and the resume (merged token_data_ref lives there).
+        """
+        from elspeth.core.config import ElspethSettings
+
+        db = make_landscape_db()
+        payload_store = MockPayloadStore()
+
+        source = ListSource([{"value": 1}], on_success="gate_in")
+        sink = CollectSink("output")
+
+        pass_a = PassTransform(name="pass_a")
+        pass_b = PassTransform(name="pass_b")
+
+        gate = GateSettings(
+            name="fork_gate",
+            input="gate_in",
+            condition="True",
+            routes={"true": "fork", "false": "output"},
+            fork_to=["path_a", "path_b"],
+        )
+
+        # branches dict maps branch-name → final-connection-into-coalesce.
+        # wire_transforms wires: path_a → pass_a → done_a (consumed by coalesce 'merge').
+        coalesce = CoalesceSettings(
+            name="merge",
+            branches={"path_a": "done_a", "path_b": "done_b"},
+            policy="require_all",
+            merge="union",
+            on_success="output",
+        )
+
+        wired_a = wire_transforms([pass_a], source_connection="path_a", final_sink="done_a", names=["pass_a"])
+        wired_b = wire_transforms([pass_b], source_connection="path_b", final_sink="done_b", names=["pass_b"])
+
+        graph = ExecutionGraph.from_plugin_instances(
+            source=as_source(source),
+            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            transforms=wired_a + wired_b,
+            sinks={"output": as_sink(sink)},
+            gates=[gate],
+            aggregations={},
+            coalesce_settings=[coalesce],
+        )
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(pass_a), as_transform(pass_b)],
+            sinks={"output": as_sink(sink)},
+            gates=[gate],
+            coalesce_settings=[coalesce],
+        )
+
+        settings_obj = ElspethSettings(
+            source={"plugin": "test", "on_success": "gate_in", "options": {}},
+            sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
+            gates=[gate],
+            coalesce=[coalesce],
+        )
+
+        orchestrator = Orchestrator(db)
+        run = orchestrator.run(config, graph=graph, settings=settings_obj, payload_store=payload_store)
+        run_id = run.run_id
+        return db, payload_store, config, graph, settings_obj, run_id
+
+    def test_resume_fork_to_coalesce_before_barrier(self) -> None:
+        """Re-driving branch tokens interrupted BEFORE the coalesce barrier must not
+        double-emit: the barrier fires exactly once and conservation holds.
+
+        Topology:
+            source → gate(fork) → [path_a: PassTransform, path_b: PassTransform]
+                   → coalesce('merge', on_success='output') → sink 'output'
+
+        The PassTransform on each branch makes branch_first_node a REAL processing
+        node distinct from the coalesce node, exercising resolve_branch_first_node().
+
+        Interruption: after a complete run, undo the barrier entirely by deleting:
+          - the merged token's terminal outcome, node_states, token_parents, and
+            token row itself;
+          - both branch children's COALESCED outcomes (which the barrier recorded).
+        This leaves the two branch child tokens with no terminal outcome — faithfully
+        mirroring a pre-barrier crash (the barrier code never ran).
+
+        Resume-dispatch oracle (get_incomplete_tokens_by_row): must return exactly
+        the two branch child tokens (branch_name set, join_group_id=None,
+        token_data_ref=None) — no merged token.  This confirms dispatch Case 2
+        (fork → coalesce, before-barrier) for both specs.
+
+        RED (dispatch disabled, resume.py fork_expand_coalesce_specs branch commented):
+        process_existing_row re-forks the row from the source node, creating a NEW
+        fork parent and NEW branch children.  The interruption (step #6 above) deleted
+        the coalesce node_states, so _check_landscape_for_completion returns False for
+        the NEW children → they merge cleanly via the fresh CoalesceExecutor and a
+        SECOND merged token is created.  However, the ORIGINAL branch tokens (path_a,
+        path_b from run-1) remain in the DB with NO terminal outcomes (their COALESCED
+        outcomes were deleted in step #5 and process_existing_row never re-drives them).
+        At end-of-row, sweep_deferred_invariants_or_crash (ADR-019 I1a) scans fork
+        parents: the ORIGINAL run-1 fork parent has FORK_PARENT outcome but its original
+        children (path_a, path_b) have zero terminal outcomes → I1a fires.
+        Observed: AuditIntegrityError — "fork/expand parent token(s) have no child
+        token_outcomes rows at run-end." (1 token, path=fork_parent).
+
+        GREEN (dispatch restored): both branch specs driven to the barrier; barrier
+        fires exactly once on the second; merged token (re-)created; sink written once;
+        full conservation holds.
+        """
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import CheckpointSettings
+        from elspeth.core.landscape.schema import token_outcomes_table, token_parents_table, tokens_table
+
+        db, payload_store, config, graph, settings_obj, run_id = self._setup_coalesce_pipeline()
+
+        # ── Baseline (run-1 completed) ──────────────────────────────────────────
+        def _outcome_counts() -> dict[tuple[str, str], int]:
+            with db.engine.connect() as conn:
+                result = conn.execute(
+                    text("""
+                        SELECT t.row_id AS row_id, o.sink_name AS sink_name, COUNT(*) AS n
+                        FROM token_outcomes o
+                        JOIN tokens t ON t.token_id = o.token_id
+                        JOIN rows r ON r.row_id = t.row_id
+                        WHERE r.run_id = :run_id
+                          AND o.completed = 1
+                          AND o.sink_name IS NOT NULL
+                        GROUP BY t.row_id, o.sink_name
+                    """),
+                    {"run_id": run_id},
+                ).fetchall()
+            return {(row.row_id, row.sink_name): row.n for row in result}
+
+        baseline = _outcome_counts()
+        assert len(baseline) == 1, f"Expected exactly one (row_id, sink_name) completed outcome; got {baseline}"
+        assert all(n == 1 for n in baseline.values()), baseline
+
+        # ── Find the merged token (join_group_id set, branch_name NULL) ───────────
+        with db.engine.connect() as conn:
+            merged_rows = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id, t.join_group_id AS join_group_id
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id
+                      AND t.join_group_id IS NOT NULL
+                      AND t.branch_name IS NULL
+                      AND t.fork_group_id IS NULL
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+        assert len(merged_rows) == 1, f"Expected exactly one merged token (join_group_id set, branch/fork NULL); got {len(merged_rows)}"
+        merged_token_id = merged_rows[0].token_id
+        join_group_id = merged_rows[0].join_group_id
+
+        # ── Interrupt: undo the barrier entirely ───────────────────────────────────
+        # A pre-barrier crash means: the barrier code never ran.  In production this
+        # means no merged token exists, no branch COALESCED outcomes were recorded,
+        # and the branch tokens' node_states at the coalesce node are NOT marked
+        # completed (the CoalesceExecutor calls begin_node_state on arrival but only
+        # calls complete_node_state once the barrier fires).
+        #
+        # We must therefore reverse everything the barrier wrote:
+        #   1. merged token's terminal outcome (COMPLETED at sink)
+        #   2. merged token's node_states
+        #   3. token_parents where token_id = merged (merged→branch parent links)
+        #   4. merged token row itself
+        #   5. branch tokens' COALESCED outcomes (path='coalesced', jgid=join_group_id)
+        #   6. branch tokens' COMPLETED node_states at the coalesce node —
+        #      CoalesceExecutor._check_landscape_for_completion queries
+        #      get_completed_row_ids_for_nodes which joins node_states→tokens and
+        #      checks completed_at IS NOT NULL; if these remain, accept() sees
+        #      "already completed" and records a spurious UNROUTED outcome instead
+        #      of holding/merging the re-driven branch tokens.
+        #
+        # After this, the two branch child tokens have no terminal outcome and no
+        # completed coalesce node_state — faithful pre-barrier crash state.
+
+        # First, find the coalesce node_id so we can delete the branch tokens'
+        # coalesce-node node_states by (token_id, node_id) rather than all states.
+        coalesce_node_id_for_deletion = graph.get_coalesce_id_map()[CoalesceName("merge")]
+
+        with db.engine.connect() as conn:
+            # Temporarily disable FK enforcement to allow deletion of the merged token
+            # and its dependents in a single connection without a strict topological order.
+            # All rows being deleted are barrier artifacts from this specific run; the
+            # connection is committed before FKs are re-enabled to keep the DB consistent.
+            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+
+            # 1. merged token outcomes (COMPLETED at sink)
+            conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
+            # 2. merged token node_states (coalesce node may have routing_events referencing
+            #    them; disable FKs makes this safe without a full cascade walk)
+            conn.execute(
+                text("DELETE FROM node_states WHERE token_id = :tid"),
+                {"tid": merged_token_id},
+            )
+            # 3. token_parents for merged token (FK: token_id → token_parents.token_id)
+            conn.execute(token_parents_table.delete().where(token_parents_table.c.token_id == merged_token_id))
+            # 4. merged token row (FK deps removed above)
+            conn.execute(tokens_table.delete().where(tokens_table.c.token_id == merged_token_id))
+            # 5. branch COALESCED outcomes (recorded by the barrier, path='coalesced')
+            conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.join_group_id == join_group_id))
+            # 6. branch tokens' COMPLETED node_states at the coalesce node.
+            #    CoalesceExecutor._check_landscape_for_completion (called by accept())
+            #    queries completed_at IS NOT NULL for the coalesce node.  If these
+            #    remain, the re-driven branch tokens are treated as late arrivals
+            #    and get UNROUTED/FAILURE instead of being held/merged.
+            #    We delete by (node_id=coalesce_node_id, run_id=run_id) — which covers
+            #    both branch token_ids without needing to enumerate them.
+            conn.execute(
+                text("DELETE FROM node_states WHERE node_id = :nid AND run_id = :rid"),
+                {"nid": str(coalesce_node_id_for_deletion), "rid": run_id},
+            )
+            conn.commit()
+            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+
+        # ── Oracle: incomplete specs must be the TWO branch children (Case 2) ────
+        checkpoint_mgr = CheckpointManager(db)
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        by_row = recovery_mgr.get_incomplete_tokens_by_row(run_id)
+
+        all_specs = [s for specs in by_row.values() for s in specs]
+        assert len(all_specs) == 2, (
+            f"Oracle must return exactly 2 incomplete specs (both branch children, "
+            f"pre-barrier state); got {len(all_specs)}: {[s.token_id for s in all_specs]}"
+        )
+        for spec in all_specs:
+            assert spec.branch_name is not None, (
+                f"Before-barrier spec must have branch_name set (Case 2); got None for token {spec.token_id!r}"
+            )
+            assert spec.join_group_id is None, (
+                f"Before-barrier spec must NOT have join_group_id (no merged token); got {spec.join_group_id!r} for token {spec.token_id!r}"
+            )
+            assert spec.token_data_ref is None, (
+                f"Before-barrier spec (fork child) must NOT have token_data_ref (shares source payload); got {spec.token_data_ref!r}"
+            )
+
+        # ── Resume ────────────────────────────────────────────────────────────────
+        sink_node_ids = graph.get_sinks()
+        with db.engine.connect() as conn:
+            actual_token = conn.execute(
+                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
+                {"run_id": run_id},
+            ).fetchone()
+        assert actual_token is not None
+
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=actual_token.token_id,
+            node_id=sink_node_ids[0],
+            sequence_number=1,
+            graph=graph,
+        )
+        with db.engine.connect() as conn:
+            conn.execute(
+                text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            conn.commit()
+
+        check = recovery_mgr.can_resume(run_id, graph)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        resume_result = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+
+        # ── Conservation law ──────────────────────────────────────────────────────
+        after = _outcome_counts()
+        assert after == baseline, f"Resume must conserve the terminal-outcome multiset. baseline={baseline} after={after}"
+        orphans = orphan_leaf_token_ids(db, run_id)
+        assert not orphans, f"Resume left {len(orphans)} non-delegation leaf token(s) with no terminal outcome (orphans): {orphans}"
+        assert all(n == 1 for n in after.values()), f"No (row_id, sink_name) may carry two outcomes after resume: {after}"
+        assert resume_result.status == RunStatus.COMPLETED, resume_result.status
+
+        post_stats = get_fork_group_stats(db, run_id)
+        assert post_stats["total_fork_groups"] == 1, f"Fork-group count must remain 1 (one row, one fork); got {post_stats}"
+
+    def test_resume_post_coalesce_before_downstream(self) -> None:
+        """Re-driving a branchless merged token interrupted AFTER the barrier must
+        reconstruct from token_data_ref, NOT restart-and-re-fork (B1 review finding).
+
+        Topology: same as test_resume_fork_to_coalesce_before_barrier
+            source → gate(fork) → [path_a: PassTransform, path_b: PassTransform]
+                   → coalesce('merge', on_success='output') → sink 'output'
+
+        B1 sub-case exercised: TERMINAL coalesce.
+        resolve_next_node(coalesce_node_id) is None because 'on_success' routes the
+        merged token directly to a sink (the sink is reached via resolve_coalesce_sink,
+        not via the next-node map).  This exercises the `_terminal_coalesce_row_result`
+        reconstruction path in resume_incomplete_token (Case 4, terminal branch).
+        The NON-terminal sub-case (coalesce → downstream transform → sink, where
+        resolve_next_node returns a real node) is NOT covered here — it is left for
+        Task 12's resume matrix.
+
+        Interruption: after a complete run, delete ONLY the merged token's terminal
+        COMPLETED outcome at the sink.  The merged token row, its token_data_ref,
+        token_parents links, and the branch COALESCED outcomes are all preserved.
+
+        Resume-dispatch oracle (get_incomplete_tokens_by_row): must return exactly the
+        merged token (join_group_id set, fork_group_id=None, branch_name=None).
+        The branch children must NOT appear (they keep their COALESCED outcomes).
+        This confirms dispatch Case 4 (post-coalesce merged token).
+
+        RED (dispatch disabled, resume.py fork_expand_coalesce_specs branch commented):
+        The merged token has join_group_id set but no branch_name — it is not a
+        fork→sink child and not an expand child.  process_existing_row re-drives the
+        ORIGINAL row from the source node, minting a fresh fork parent and new branch
+        children.  Unlike Cell 1, the interruption here preserves the run-1 coalesce
+        node_states (completed_at IS NOT NULL).  The fresh children arrive at the
+        coalesce and CoalesceExecutor._check_landscape_for_completion returns True
+        (run-1 node_states still present) → late-arrival path → UNROUTED outcomes.
+        The new fork parent has its FORK_PARENT outcome AND child tokens with UNROUTED
+        outcomes → no I1a sweep violation.  Instead, no (row_id, 'output') completed
+        outcome with sink_name IS NOT NULL is ever recorded (UNROUTED outcomes have
+        NULL sink_name), so the conservation assertion fires directly.
+        Observed: AssertionError — "Resume must conserve the terminal-outcome
+        multiset. baseline={(..., 'output'): 1} after={}".
+        The RED mechanism is DIFFERENT from Cell 1 (conservation assertion, not I1a);
+        the ORACLE is also different (one Case-4 merged-token spec vs two Case-2 branch
+        specs), confirming the cells exercise distinct dispatch paths.
+
+        GREEN (dispatch restored): the merged token's token_data_ref is retrieved and
+        decoded as a {data, contract} envelope; the merged payload is re-delivered to
+        the sink; one COMPLETED outcome is recorded; conservation holds.  The
+        token_data_ref round-trip assertion (below) proves the B1 envelope path was
+        exercised — not merely that sink received some data.
+        """
+        from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+        from elspeth.contracts.enums import RunStatus
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.checkpoint.serialization import checkpoint_loads
+        from elspeth.core.config import CheckpointSettings
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        db, payload_store, config, graph, settings_obj, run_id = self._setup_coalesce_pipeline()
+
+        # ── Baseline ──────────────────────────────────────────────────────────────
+        def _outcome_counts() -> dict[tuple[str, str], int]:
+            with db.engine.connect() as conn:
+                result = conn.execute(
+                    text("""
+                        SELECT t.row_id AS row_id, o.sink_name AS sink_name, COUNT(*) AS n
+                        FROM token_outcomes o
+                        JOIN tokens t ON t.token_id = o.token_id
+                        JOIN rows r ON r.row_id = t.row_id
+                        WHERE r.run_id = :run_id
+                          AND o.completed = 1
+                          AND o.sink_name IS NOT NULL
+                        GROUP BY t.row_id, o.sink_name
+                    """),
+                    {"run_id": run_id},
+                ).fetchall()
+            return {(row.row_id, row.sink_name): row.n for row in result}
+
+        baseline = _outcome_counts()
+        assert len(baseline) == 1, f"Expected exactly one (row_id, sink_name) completed outcome; got {baseline}"
+        assert all(n == 1 for n in baseline.values()), baseline
+
+        # ── Verify TERMINAL sub-case: resolve_next_node(coalesce_node) is None ────
+        # The 'merge' coalesce has on_success='output' (a sink); the DAG has no
+        # processing node after the coalesce node in the traversal map.
+        # This is the B1 terminal path: _terminal_coalesce_row_result is used.
+        coalesce_node_id = graph.get_coalesce_id_map()[CoalesceName("merge")]
+        # The coalesce node is TERMINAL if its only successors are sinks (leaf nodes
+        # with no outgoing edges in the traversal map).  The authoritative check is
+        # performed at resume time by the processor via resolve_next_node, but we can
+        # confirm via the graph that the only outgoing edge from coalesce goes to the
+        # sink — which is NOT a processing node.
+        sink_node_ids = set(graph.get_sinks())
+        edges = graph.get_edges()
+        coalesce_successors = {e.to_node for e in edges if e.from_node == coalesce_node_id}
+        assert coalesce_successors.issubset(sink_node_ids), (
+            f"TERMINAL sub-case precondition: all successors of the coalesce node must "
+            f"be sinks (so resolve_next_node returns None in the traversal map). "
+            f"Got non-sink successors: {coalesce_successors - sink_node_ids}. "
+            f"If any non-sink successor is present this exercises the NON-TERMINAL path — "
+            f"update the test or the topology."
+        )
+
+        # ── Find the merged token ──────────────────────────────────────────────────
+        with db.engine.connect() as conn:
+            merged_rows = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id, t.token_data_ref AS token_data_ref
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id
+                      AND t.join_group_id IS NOT NULL
+                      AND t.branch_name IS NULL
+                      AND t.fork_group_id IS NULL
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+        assert len(merged_rows) == 1, f"Expected exactly one merged token; got {len(merged_rows)}"
+        merged_token_id = merged_rows[0].token_id
+        merged_data_ref = merged_rows[0].token_data_ref
+        assert merged_data_ref is not None, (
+            "Merged token must have token_data_ref set (epoch 11 invariant). "
+            "Without it the B1 re-drive cannot reconstruct the merged payload."
+        )
+
+        # ── Interrupt: delete only the merged token's terminal COMPLETED outcome ──
+        # The branch COALESCED outcomes, the merged token row, and its token_data_ref
+        # are all preserved.  This is the "crashed between barrier-fire and sink-write
+        # completion" scenario.
+        with db.engine.connect() as conn:
+            merged_outcomes = conn.execute(
+                text("""
+                    SELECT outcome_id FROM token_outcomes
+                    WHERE token_id = :tid AND completed = 1
+                """),
+                {"tid": merged_token_id},
+            ).fetchall()
+            assert merged_outcomes, (
+                f"Setup precondition: merged token {merged_token_id!r} must have a completed outcome to delete; none found."
+            )
+            for o in merged_outcomes:
+                conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == o.outcome_id))
+            conn.commit()
+
+        # ── Oracle: exactly the merged token as Case-4 spec ───────────────────────
+        checkpoint_mgr = CheckpointManager(db)
+        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        by_row = recovery_mgr.get_incomplete_tokens_by_row(run_id)
+
+        all_specs = [s for specs in by_row.values() for s in specs]
+        assert len(all_specs) == 1, (
+            f"Oracle must return exactly 1 incomplete spec (merged token, Case 4); got {len(all_specs)}: {[s.token_id for s in all_specs]}"
+        )
+        spec = all_specs[0]
+        assert spec.token_id == merged_token_id, f"Spec must be the merged token; got {spec.token_id!r} != {merged_token_id!r}"
+        assert spec.join_group_id is not None, "Post-coalesce spec must have join_group_id set (Case 4)"
+        assert spec.fork_group_id is None, "Post-coalesce spec must NOT have fork_group_id"
+        assert spec.branch_name is None, "Post-coalesce spec must NOT have branch_name"
+        assert spec.token_data_ref == merged_data_ref, (
+            f"Recovery must surface the token_data_ref from the DB; got {spec.token_data_ref!r} != {merged_data_ref!r}"
+        )
+
+        # ── Resume ────────────────────────────────────────────────────────────────
+        with db.engine.connect() as conn:
+            actual_token = conn.execute(
+                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
+                {"run_id": run_id},
+            ).fetchone()
+        assert actual_token is not None
+
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            token_id=actual_token.token_id,
+            node_id=next(iter(sink_node_ids)),
+            sequence_number=1,
+            graph=graph,
+        )
+        with db.engine.connect() as conn:
+            conn.execute(
+                text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"),
+                {"run_id": run_id},
+            )
+            conn.commit()
+
+        check = recovery_mgr.can_resume(run_id, graph)
+        assert check.can_resume, f"cannot resume: {check.reason}"
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
+        resume_orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        resume_result = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
+
+        # ── Conservation law ──────────────────────────────────────────────────────
+        after = _outcome_counts()
+        assert after == baseline, f"Resume must conserve the terminal-outcome multiset. baseline={baseline} after={after}"
+        orphans = orphan_leaf_token_ids(db, run_id)
+        assert not orphans, f"Resume left {len(orphans)} non-delegation leaf token(s) with no terminal outcome (orphans): {orphans}"
+        assert all(n == 1 for n in after.values()), f"No (row_id, sink_name) may carry two outcomes after resume: {after}"
+        assert resume_result.status == RunStatus.COMPLETED, resume_result.status
+
+        # ── B1 token-identity proof ───────────────────────────────────────────────
+        # The B1 Case-4 path drives the SAME merged token in place (reuses its
+        # existing token_id / join_group_id).  A re-fork would create a SECOND merged
+        # token → 2 join tokens in the DB, different token_id.  This check distinguishes
+        # them: if dispatch was disabled and process_existing_row re-forked, a SECOND
+        # merged token would appear (different token_id) and this assertion would fail.
+        with db.engine.connect() as conn:
+            merged_after = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id
+                      AND t.join_group_id IS NOT NULL
+                      AND t.branch_name IS NULL
+                      AND t.fork_group_id IS NULL
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+        assert len(merged_after) == 1, (
+            f"B1: exactly ONE merged token must exist after resume; "
+            f"got {len(merged_after)} — a second means process_existing_row re-forked "
+            f"instead of re-driving the original: {[t.token_id for t in merged_after]}"
+        )
+        assert merged_after[0].token_id == merged_token_id, (
+            f"B1: resume must reuse the SAME merged token (token_id={merged_token_id!r}); "
+            f"got {merged_after[0].token_id!r} — different token_id means it re-forked "
+            f"and re-merged instead of driving the original branchless token in place."
+        )
+        # The same merged token now has its terminal outcome recorded.
+        with db.engine.connect() as conn:
+            term_outcomes = conn.execute(
+                text("""
+                    SELECT path, sink_name FROM token_outcomes
+                    WHERE token_id = :tid AND completed = 1
+                """),
+                {"tid": merged_token_id},
+            ).fetchall()
+        assert term_outcomes, (
+            f"B1: merged token {merged_token_id!r} has no terminal outcome after resume; "
+            f"the Case-4 reconstruction path must record a COALESCED outcome."
+        )
+
+        # ── token_data_ref round-trip (B1 envelope payload verification) ─────────
+        # This proves the {data, contract} envelope stored in run-1 is well-formed and
+        # carries the merged payload — not that resume *read* it (the token-identity
+        # check above already proves reconstruction ran).
+        raw_bytes = payload_store.retrieve(merged_data_ref)
+        env = checkpoint_loads(raw_bytes.decode("utf-8"))
+
+        assert isinstance(env, dict) and "data" in env and "contract" in env, (
+            f"Merged token payload is not a {{data, contract}} envelope; "
+            f"got keys={sorted(env.keys()) if isinstance(env, dict) else type(env).__name__!r}"
+        )
+        # The union-merge of path_a({'value':1}) and path_b({'value':1}) produces
+        # {'value': 1} (union, last_wins, identical fields → one 'value' key).
+        data = env["data"]
+        assert "value" in data, f"token_data_ref envelope must contain the merged row data; got {data!r}"
+        assert data["value"] == 1, f"Merged payload 'value' must be 1 (source value); got {data['value']!r}"

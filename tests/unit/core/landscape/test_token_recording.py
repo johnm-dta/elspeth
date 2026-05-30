@@ -478,19 +478,6 @@ class TestExpandToken:
                 child_payloads=[],
             )
 
-    def test_count_negative_raises_value_error(self):
-        """expand_token with empty child_payloads raises ValueError (was: negative count)."""
-        _db, factory = _setup()
-        row, token = _make_row(factory)
-        # With child_payloads, negative count is not possible — empty list is the equivalent.
-        # This test now verifies that the empty-payload guard works (same invariant).
-        with pytest.raises(ValueError):
-            factory.data_flow.expand_token(
-                parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                row_id=row.row_id,
-                child_payloads=[],
-            )
-
     def test_record_parent_outcome_false_skips_outcome(self):
         _db, factory = _setup()
         row, token = _make_row(factory)

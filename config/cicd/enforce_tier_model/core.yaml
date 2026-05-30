@@ -201,13 +201,13 @@ allow_hits:
     so ANY failure in grade updates must not abort the loop for remaining runs
   safety: Exception caught and logged via structlog, run_id added to grade_update_failures
     in PurgeResult, operator informed via CLI output
-- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=7a2f9a2b860707a7
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=1e85408fdfc1a5c7
   owner: core
   reason: Tier 1 integrity check — deserialized checkpoint data must be dict; isinstance
     guards against corrupted checkpoint
   safety: Raises AuditIntegrityError if not dict; no silent coercion
   expires: null
-- key: core/checkpoint/recovery.py:R6:RecoveryManager:get_resume_point:fp=c48ba8486b6c2e03
+- key: core/checkpoint/recovery.py:R6:RecoveryManager:get_resume_point:fp=27d8e85e908d8c0e
   owner: checkpoint
   reason: Resume-point read may discover the persisted checkpoint is incompatible
     with the current schema (post-deploy migration scenario); narrow catch falls back

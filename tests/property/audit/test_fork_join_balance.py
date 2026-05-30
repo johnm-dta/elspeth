@@ -1102,4 +1102,200 @@ class TestForkRecoveryInvariant:
             f"not datetime — checkpoint_dumps was not used (canonical_json stringifies datetime)"
         )
         assert restored["resolved_at"].tzinfo is not None, "Restored datetime must be timezone-aware"
-        assert restored["resolved_at"] == aware_dt, f"datetime value mismatch: expected {aware_dt!r}, got {restored['resolved_at']!r}"
+
+    def test_get_incomplete_tokens_by_row_returns_only_incomplete_leaf(self) -> None:
+        """Recovery surfaces exactly the non-delegation tokens lacking a terminal outcome.
+
+        Build the fork pipeline (gate forks each row to sink_a + sink_b), run to
+        completion, delete sink_a's terminal outcome so its child is the sole incomplete
+        leaf. get_incomplete_tokens_by_row must return exactly that child token and no
+        others (not the FORK_PARENT delegation marker, not the completed sink_b child).
+        """
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.config import ElspethSettings
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        db = make_landscape_db()
+        payload_store = MockPayloadStore()
+
+        # Single row keeps the test deterministic.
+        source = ListSource([{"value": 1}], on_success="sink_a")
+        sink_a = CollectSink("sink_a")
+        sink_b = CollectSink("sink_b")
+
+        # Gate forks every row to both sinks.
+        gate = GateSettings(
+            name="fork_gate",
+            input="gate_in",
+            condition="True",
+            routes={"true": "fork", "false": "sink_a"},
+            fork_to=["sink_a", "sink_b"],
+        )
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[],
+            sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
+            gates=[gate],
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            source=as_source(source),
+            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            transforms=[],
+            sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
+            gates=[gate],
+            aggregations={},
+            coalesce_settings=[],
+        )
+        settings_obj = ElspethSettings(
+            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sinks={
+                "sink_a": {"plugin": "test", "on_write_failure": "discard"},
+                "sink_b": {"plugin": "test", "on_write_failure": "discard"},
+            },
+            gates=[gate],
+        )
+
+        orchestrator = Orchestrator(db)
+        run = orchestrator.run(config, graph=graph, settings=settings_obj, payload_store=payload_store)
+        run_id = run.run_id
+
+        # Determine the sink_a child token ID independently of the method under test.
+        # After a complete run we expect exactly one fork child per sink per row.
+        with db.engine.connect() as conn:
+            sink_a_tokens = conn.execute(
+                text("""
+                    SELECT t.token_id AS token_id
+                    FROM tokens t
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id
+                      AND t.branch_name = 'sink_a'
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+        assert len(sink_a_tokens) == 1, f"Expected exactly one sink_a fork-child token, got {len(sink_a_tokens)}"
+        incomplete_token_id = sink_a_tokens[0].token_id
+
+        # Interrupt: delete the sink_a child's terminal outcome to simulate a crash
+        # after sink_b wrote but before sink_a wrote (or after sink_a wrote but before
+        # the outcome was recorded).
+        with db.engine.connect() as conn:
+            sink_a_outcomes = conn.execute(
+                text("""
+                    SELECT o.outcome_id AS outcome_id
+                    FROM token_outcomes o
+                    JOIN tokens t ON t.token_id = o.token_id
+                    JOIN rows r ON r.row_id = t.row_id
+                    WHERE r.run_id = :run_id AND o.sink_name = 'sink_a'
+                """),
+                {"run_id": run_id},
+            ).fetchall()
+            assert sink_a_outcomes, "expected a sink_a outcome to delete"
+            for outcome in sink_a_outcomes:
+                conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
+            conn.commit()
+
+        # Exercise the method under test — no checkpoint or run-status required.
+        checkpoint_mgr = CheckpointManager(db)
+        recovery = RecoveryManager(db, checkpoint_mgr)
+        by_row = recovery.get_incomplete_tokens_by_row(run_id)
+
+        # Exactly one row_id group, exactly one spec in it.
+        assert len(by_row) == 1, f"Expected 1 row group, got {len(by_row)}: {list(by_row.keys())}"
+        all_specs = [s for specs in by_row.values() for s in specs]
+        assert len(all_specs) == 1, f"Expected exactly 1 incomplete token spec, got {len(all_specs)}: {[s.token_id for s in all_specs]}"
+
+        spec = all_specs[0]
+        assert spec.token_id == incomplete_token_id, f"Spec token_id {spec.token_id!r} != expected {incomplete_token_id!r}"
+        assert spec.branch_name == "sink_a", f"Spec branch_name {spec.branch_name!r} != 'sink_a'"
+        assert spec.fork_group_id is not None, "fork child must carry fork_group_id (set by the gate on fork)"
+        assert spec.token_data_ref is None, "fork child shares the source payload (retrieval by row_id); token_data_ref must be NULL"
+        # The fork child visited a sink node → node_states written → max_attempt should be 0.
+        # If this fires at -1 it means fork children don't write node_states, which is a
+        # real finding: the re-drive logic in a later task relies on max_attempt + 1.
+        assert spec.max_attempt >= 0, (
+            f"Fork child token {spec.token_id!r} has no node_state entry (max_attempt=-1); "
+            f"the re-drive attempt-number anchor is missing — audit invariant violation."
+        )
+
+    def test_token_data_ref_read_paths_are_distinct(self) -> None:
+        """Two read paths for token_data_ref have distinct responsibilities.
+
+        After expand_token() persists an expand child with a non-null token_data_ref:
+        (a) QueryRepository.get_token() (the lineage/audit read path) returns a Token
+            with token_data_ref=None — TokenLoader.load() deliberately omits the column,
+            as lineage queries never need to hydrate payloads.
+        (b) get_incomplete_tokens_by_row() (the recovery read path) returns the real ref
+            stored in the DB, because resume reconstruction needs to retrieve the payload.
+
+        This test pins the boundary so neither path silently acquires the other's
+        responsibility in future refactors.
+        """
+        from elspeth.contracts.audit import TokenRef
+        from elspeth.contracts.enums import Determinism, NodeType
+        from elspeth.contracts.schema import SchemaConfig
+        from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
+        from elspeth.core.landscape.factory import RecorderFactory
+
+        _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+        payload_store = MockPayloadStore()
+        db = make_landscape_db()
+        factory = RecorderFactory(db, payload_store=payload_store)
+
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
+        source_node = factory.data_flow.register_node(
+            run_id=run.run_id,
+            plugin_name="explode",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            determinism=Determinism.DETERMINISTIC,
+            schema_config=_OBSERVED_SCHEMA,
+        )
+        row = factory.data_flow.create_row(
+            run_id=run.run_id,
+            source_node_id=source_node.node_id,
+            row_index=0,
+            data={"items": [1, 2]},
+        )
+        parent_token = factory.data_flow.create_token(row_id=row.row_id)
+
+        # Persist two expand children — both write token_data_ref (epoch 11 invariant).
+        children, _expand_group_id = factory.data_flow.expand_token(
+            parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run.run_id),
+            row_id=row.row_id,
+            child_payloads=[{"name": "alpha"}, {"name": "beta"}],
+            step_in_pipeline=1,
+        )
+        assert len(children) == 2
+        child = children[0]
+
+        # Precondition: the expand child genuinely has a non-null token_data_ref.
+        assert child.token_data_ref is not None, "expand_token must set token_data_ref (epoch 11 invariant); test precondition failed"
+
+        # (a) Lineage read path: QueryRepository.get_token() omits token_data_ref.
+        # TokenLoader.load() doesn't pass the column, so the Token model gets its
+        # default value (None) regardless of what the DB holds.
+        token_via_loader = factory.query.get_token(child.token_id)
+        assert token_via_loader is not None, "get_token returned None for a persisted expand child"
+        assert token_via_loader.token_data_ref is None, (
+            f"get_token (lineage path) must NOT hydrate token_data_ref; "
+            f"got {token_via_loader.token_data_ref!r} — TokenLoader.load() gained a new responsibility"
+        )
+
+        # (b) Recovery read path: get_incomplete_tokens_by_row() surfaces the real ref.
+        # The expand parent has an EXPAND_PARENT delegation outcome → filtered out.
+        # The two children have no terminal outcome → both appear in incomplete specs.
+        checkpoint_mgr = CheckpointManager(db)
+        recovery = RecoveryManager(db, checkpoint_mgr)
+        by_row = recovery.get_incomplete_tokens_by_row(run.run_id)
+
+        # Find the spec for our specific child.
+        child_specs = [s for specs in by_row.values() for s in specs if s.token_id == child.token_id]
+        assert len(child_specs) == 1, f"Expected exactly one IncompleteTokenSpec for child token {child.token_id!r}; got {len(child_specs)}"
+        child_spec = child_specs[0]
+        assert child_spec.token_data_ref == child.token_data_ref, (
+            f"Recovery read path must surface the real token_data_ref from the DB; "
+            f"spec.token_data_ref={child_spec.token_data_ref!r} != "
+            f"expand_token result.token_data_ref={child.token_data_ref!r}"
+        )

@@ -182,6 +182,50 @@ class TestTokenInfoLineageFieldGuards:
         assert getattr(t, field) == "valid_value"
 
 
+class TestTokenInfoResumeOffsetInvariant:
+    """One-way invariant: resume_attempt_offset > 0 ⟹ resume_checkpoint_id is not None.
+
+    A positive offset only originates from a resume re-drive (which always stamps a
+    checkpoint id). Offset 0 is deliberately ambiguous — it covers both a run-1 token
+    AND a never-stepped token re-driven on resume (max_attempt -1 → offset 0) — so the
+    converse is NOT required. The authoritative resume marker is resume_checkpoint_id,
+    not the offset (see explain()).
+    """
+
+    def _kwargs(self, **overrides: Any) -> dict[str, Any]:
+        contract = _make_contract()
+        base: dict[str, Any] = {
+            "row_id": "r1",
+            "token_id": "t1",
+            "row_data": PipelineRow({"x": 1}, contract=contract),
+        }
+        base.update(overrides)
+        return base
+
+    def test_positive_offset_without_checkpoint_id_rejected(self) -> None:
+        with pytest.raises(ValueError, match="resume_attempt_offset=1 > 0 requires a resume_checkpoint_id"):
+            TokenInfo(**self._kwargs(resume_attempt_offset=1, resume_checkpoint_id=None))
+
+    def test_positive_offset_with_checkpoint_id_accepted(self) -> None:
+        t = TokenInfo(**self._kwargs(resume_attempt_offset=1, resume_checkpoint_id="ck-1"))
+        assert t.resume_attempt_offset == 1
+        assert t.resume_checkpoint_id == "ck-1"
+
+    def test_zero_offset_without_checkpoint_id_accepted(self) -> None:
+        # Ambiguous-but-valid: a run-1 token, OR a never-stepped token re-driven on resume.
+        t = TokenInfo(**self._kwargs(resume_attempt_offset=0, resume_checkpoint_id=None))
+        assert t.resume_attempt_offset == 0
+        assert t.resume_checkpoint_id is None
+
+    def test_zero_offset_with_checkpoint_id_accepted(self) -> None:
+        # A genuine resume re-drive of a token never stepped before the interrupt
+        # (max_attempt -1 → offset 0) still carries the checkpoint id. This is the
+        # exact case the old "0 = not a resume re-drive" comment got wrong.
+        t = TokenInfo(**self._kwargs(resume_attempt_offset=0, resume_checkpoint_id="ck-1"))
+        assert t.resume_attempt_offset == 0
+        assert t.resume_checkpoint_id == "ck-1"
+
+
 class TestTokenInfoExtraFields:
     """Tests covering two specific extras on TokenInfo.row_data:
 

@@ -68,11 +68,19 @@ class IncompleteTokenSpec:
     """A non-delegation child token that lacks a terminal outcome on a resumed run.
 
     Identity fields read directly from persisted columns (Tier-1: no defaults, no
-    coercion — TokenInfo.__post_init__ rejects garbage downstream). ``token_data_ref``
-    is NULL for fork children (they share the parent/source payload, retrievable by
-    ``row_id``) and set for expand children and post-coalesce merged tokens.
-    ``max_attempt`` is the highest ``attempt`` already recorded for this token in
-    ``node_states`` (-1 if none); the re-drive uses ``max_attempt + 1``.
+    coercion). ``token_data_ref`` is NULL for fork children (they share the
+    parent/source payload, retrievable by ``row_id``) and set for expand children
+    and post-coalesce merged tokens. ``max_attempt`` is the highest ``attempt``
+    already recorded for this token in ``node_states`` (-1 if none); the re-drive
+    uses ``max_attempt + 1``.
+
+    Validates its own identity at construction (``__post_init__``) rather than
+    deferring to the downstream ``TokenInfo`` guard: this spec reaches
+    ``reconstruct_token_row`` — which uses ``token_id`` in diagnostics and
+    ``token_data_ref`` as a payload-store key — BEFORE any ``TokenInfo`` is built.
+    NOT NULL (the DB constraint) is not the same as non-empty, so an empty-string
+    identity read from a corrupt/tampered Tier-1 row must crash here, mirroring the
+    sibling identity types (``TokenInfo``, ``ValueSourceFinding``).
 
     All fields are scalars or None — no deep_freeze guard needed (frozen=True suffices).
     """
@@ -86,6 +94,30 @@ class IncompleteTokenSpec:
     token_data_ref: str | None
     step_in_pipeline: int | None
     max_attempt: int
+
+    def __post_init__(self) -> None:
+        """Validate identity invariants at construction time (Tier-1 boundary).
+
+        ``token_id`` and ``row_id`` are the fundamental identity fields — every
+        audit record references them; empty strings would produce valid-looking
+        but meaningless audit entries. The optional lineage/payload fields are
+        either NULL (legitimately not applicable) or non-empty strings — an empty
+        string is anomalous, and ``token_data_ref`` in particular is dereferenced
+        as a payload-store key before any ``TokenInfo`` guard exists.
+        """
+        for _field_name in ("token_id", "row_id"):
+            _value = getattr(self, _field_name)
+            if not isinstance(_value, str):
+                raise TypeError(f"IncompleteTokenSpec.{_field_name} must be str, got {type(_value).__name__}: {_value!r}")
+            if not _value:
+                raise ValueError(f"IncompleteTokenSpec.{_field_name} must not be empty")
+        for _field_name in ("branch_name", "fork_group_id", "join_group_id", "expand_group_id", "token_data_ref"):
+            _value = getattr(self, _field_name)
+            if _value is not None:
+                if not isinstance(_value, str):
+                    raise TypeError(f"IncompleteTokenSpec.{_field_name} must be str or None, got {type(_value).__name__}: {_value!r}")
+                if not _value:
+                    raise ValueError(f"IncompleteTokenSpec.{_field_name} must be None or non-empty string, got {_value!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -528,12 +560,16 @@ class RecoveryManager:
         Exclusion is at the TOKEN level (filter before grouping), so a row with mixed state
         (one buffered token + one genuinely-incomplete sibling) still returns the
         genuinely-incomplete token, while a row whose only incomplete tokens are all buffered
-        does not appear in the returned dict at all. This restores the invariant that
-        get_incomplete_tokens_by_row's rows are a subset of get_unprocessed_rows (both
-        functions now apply the same buffered exclusion).
+        does not appear in the returned dict at all. With the same buffered exclusion applied,
+        get_incomplete_tokens_by_row's rows are a subset of get_unprocessed_rows ON THE RESUME
+        PATH — i.e. when a checkpoint exists. This holds for the only caller (resume, gated by
+        can_resume, which requires a checkpoint).
 
-        If no checkpoint exists the run cannot be resumed, so no exclusion is applied
-        (the empty buffered set is a no-op).
+        The subset relation does NOT hold unconditionally: unlike get_unprocessed_rows, this
+        method has no `checkpoint is None -> return []` early-return. With no checkpoint it
+        applies an empty buffered set (a no-op exclusion) and still returns every incomplete
+        token, whereas get_unprocessed_rows returns []. In that (non-resume) case this method's
+        rows are a SUPERSET, not a subset. Safe because the run is unresumable then anyway.
         """
         checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
         buffered_token_ids = self._get_buffered_checkpoint_token_ids(checkpoint) if checkpoint is not None else set()
@@ -749,9 +785,10 @@ class RecoveryManager:
                 f"Resume aborted - audit trail may be corrupted or tampered with."
             ) from e
         except (ValueError, KeyError) as e:
-            # SchemaContract deserialization raises json.JSONDecodeError (subclass of
-            # ValueError) for malformed JSON, or KeyError for missing required fields.
-            # Both indicate Tier 1 data corruption — stored contract JSON is garbage.
+            # get_run_contract deserializes via ContractAuditRecord.from_json, which raises
+            # json.JSONDecodeError (subclass of ValueError) for malformed JSON, or KeyError
+            # for missing required fields. Both indicate Tier 1 data corruption — stored
+            # contract JSON is garbage.
             raise CheckpointCorruptionError(
                 f"Contract integrity verification failed for run '{run_id}': {e}. "
                 f"Resume aborted - stored contract JSON is malformed (database corruption)."

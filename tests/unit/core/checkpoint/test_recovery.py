@@ -34,7 +34,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.checkpoint import CheckpointCorruptionError, CheckpointManager, RecoveryManager
 from elspeth.core.checkpoint.manager import IncompatibleCheckpointError
-from elspeth.core.checkpoint.recovery import _DELEGATION_PATHS
+from elspeth.core.checkpoint.recovery import _DELEGATION_PATHS, IncompleteTokenSpec
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -1239,3 +1239,68 @@ def test_get_unprocessed_rows_excludes_diverted_rows(
 
     assert "row-diverted" not in unprocessed, "DIVERTED row should be excluded — it is terminal"
     assert "row-pending" in unprocessed
+
+
+# ── IncompleteTokenSpec construction-time identity validation ───────────────
+# IncompleteTokenSpec is a Tier-1-sourced identity type (built directly from
+# tokens_table columns) that reaches reconstruct_token_row BEFORE any TokenInfo
+# guard fires. NOT NULL (the DB constraint) is not the same as non-empty, so an
+# empty-string identity could produce valid-looking but meaningless audit work.
+# Mirrors TokenInfo.__post_init__ (contracts/identity.py) — see tests/unit/
+# contracts/test_identity.py for the sibling pattern.
+
+
+def _valid_incomplete_token_spec_kwargs() -> dict[str, Any]:
+    return {
+        "token_id": "tok-1",
+        "row_id": "row-1",
+        "branch_name": None,
+        "fork_group_id": None,
+        "join_group_id": None,
+        "expand_group_id": None,
+        "token_data_ref": None,
+        "step_in_pipeline": 1,
+        "max_attempt": -1,
+    }
+
+
+def test_incomplete_token_spec_accepts_valid_identity() -> None:
+    spec = IncompleteTokenSpec(**_valid_incomplete_token_spec_kwargs())
+    assert spec.token_id == "tok-1"
+    assert spec.row_id == "row-1"
+
+
+@pytest.mark.parametrize("field", ["token_id", "row_id"])
+def test_incomplete_token_spec_rejects_empty_identity(field: str) -> None:
+    kwargs = _valid_incomplete_token_spec_kwargs()
+    kwargs[field] = ""
+    with pytest.raises(ValueError, match=f"{field} must not be empty"):
+        IncompleteTokenSpec(**kwargs)
+
+
+@pytest.mark.parametrize("field", ["token_id", "row_id"])
+def test_incomplete_token_spec_rejects_non_str_identity(field: str) -> None:
+    kwargs = _valid_incomplete_token_spec_kwargs()
+    kwargs[field] = 123
+    with pytest.raises(TypeError, match=f"{field} must be str"):
+        IncompleteTokenSpec(**kwargs)
+
+
+@pytest.mark.parametrize("field", ["branch_name", "fork_group_id", "join_group_id", "expand_group_id", "token_data_ref"])
+def test_incomplete_token_spec_rejects_empty_optional_string(field: str) -> None:
+    # NULL is the legitimate "not applicable" value for these columns; an empty
+    # string is anomalous. token_data_ref in particular is used as a payload-store
+    # key in reconstruct_token_row before any TokenInfo exists, so "" must crash
+    # here rather than surface as a misleading "payload purged" error.
+    kwargs = _valid_incomplete_token_spec_kwargs()
+    kwargs[field] = ""
+    with pytest.raises(ValueError, match=f"{field} must be None or non-empty"):
+        IncompleteTokenSpec(**kwargs)
+
+
+@pytest.mark.parametrize("field", ["branch_name", "fork_group_id", "join_group_id", "expand_group_id", "token_data_ref"])
+def test_incomplete_token_spec_accepts_none_optional_string(field: str) -> None:
+    kwargs = _valid_incomplete_token_spec_kwargs()
+    kwargs[field] = None
+    spec = IncompleteTokenSpec(**kwargs)
+    assert getattr(spec, field) is None

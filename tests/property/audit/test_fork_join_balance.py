@@ -1603,17 +1603,22 @@ class TestForkRecoveryInvariant:
         )
 
     def test_token_data_ref_read_paths_are_distinct(self) -> None:
-        """Two read paths for token_data_ref have distinct responsibilities.
+        """The two read paths for token_data_ref differ in HYDRATION, not in the ref.
 
         After expand_token() persists an expand child with a non-null token_data_ref:
-        (a) QueryRepository.get_token() (the lineage/audit read path) returns a Token
-            with token_data_ref=None — TokenLoader.load() deliberately omits the column,
-            as lineage queries never need to hydrate payloads.
-        (b) get_incomplete_tokens_by_row() (the recovery read path) returns the real ref
-            stored in the DB, because resume reconstruction needs to retrieve the payload.
+        (a) QueryRepository.get_token() (the lineage/audit read path) returns the REAL
+            ref persisted in the DB — TokenLoader.load() reads the column faithfully
+            (omitting it fabricated None for a value the audit trail recorded). The
+            lineage path reads the ref column but does NOT hydrate the payload bytes
+            (it never touches the payload store).
+        (b) get_incomplete_tokens_by_row() + reconstruct_token_row() (the recovery read
+            path) ALSO surface the real ref and, additionally, HYDRATE the payload via
+            payload_store.retrieve() — that hydration is the recovery path's distinct
+            responsibility.
 
-        This test pins the boundary so neither path silently acquires the other's
-        responsibility in future refactors.
+        The pinned boundary is therefore "lineage reads the ref but never hydrates the
+        payload; only recovery hydrates", not "lineage fabricates None". A payload-store
+        spy enforces the no-hydration-on-lineage half.
         """
         from elspeth.contracts.audit import TokenRef
         from elspeth.contracts.enums import Determinism, NodeType
@@ -1621,8 +1626,19 @@ class TestForkRecoveryInvariant:
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.landscape.factory import RecorderFactory
 
+        class _RetrieveSpyPayloadStore(MockPayloadStore):
+            """MockPayloadStore that counts retrieve() (payload hydration) calls."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.retrieve_count = 0
+
+            def retrieve(self, content_hash: str) -> bytes:
+                self.retrieve_count += 1
+                return super().retrieve(content_hash)
+
         _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
-        payload_store = MockPayloadStore()
+        payload_store = _RetrieveSpyPayloadStore()
         db = make_landscape_db()
         factory = RecorderFactory(db, payload_store=payload_store)
 
@@ -1645,7 +1661,7 @@ class TestForkRecoveryInvariant:
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
 
         # Persist two expand children — both write token_data_ref (epoch 11 invariant).
-        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+        from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 
         _read_path_contract = SchemaContract(
             mode="OBSERVED",
@@ -1665,19 +1681,23 @@ class TestForkRecoveryInvariant:
         # Precondition: the expand child genuinely has a non-null token_data_ref.
         assert child.token_data_ref is not None, "expand_token must set token_data_ref (epoch 11 invariant); test precondition failed"
 
-        # (a) Lineage read path: QueryRepository.get_token() omits token_data_ref.
-        # TokenLoader.load() doesn't pass the column, so the Token model gets its
-        # default value (None) regardless of what the DB holds.
+        # (a) Lineage read path: QueryRepository.get_token() reads the real ref column
+        # faithfully (no fabrication) but does NOT hydrate the payload bytes.
         token_via_loader = factory.query.get_token(child.token_id)
         assert token_via_loader is not None, "get_token returned None for a persisted expand child"
-        assert token_via_loader.token_data_ref is None, (
-            f"get_token (lineage path) must NOT hydrate token_data_ref; "
-            f"got {token_via_loader.token_data_ref!r} — TokenLoader.load() gained a new responsibility"
+        assert token_via_loader.token_data_ref == child.token_data_ref, (
+            f"get_token (lineage path) must surface the persisted token_data_ref, not a fabricated None; "
+            f"got {token_via_loader.token_data_ref!r}, expected {child.token_data_ref!r}"
+        )
+        assert payload_store.retrieve_count == 0, (
+            f"Lineage read path must NOT hydrate the payload (reading the ref column is not retrieval); "
+            f"payload_store.retrieve was called {payload_store.retrieve_count} time(s) during get_token"
         )
 
-        # (b) Recovery read path: get_incomplete_tokens_by_row() surfaces the real ref.
-        # The expand parent has an EXPAND_PARENT delegation outcome → filtered out.
-        # The two children have no terminal outcome → both appear in incomplete specs.
+        # (b) Recovery read path: get_incomplete_tokens_by_row() surfaces the real ref,
+        # and reconstruct_token_row() additionally HYDRATES the payload (the distinct
+        # recovery responsibility). The expand parent has an EXPAND_PARENT delegation
+        # outcome → filtered out; the two children have no terminal outcome → both appear.
         checkpoint_mgr = CheckpointManager(db)
         recovery = RecoveryManager(db, checkpoint_mgr)
         by_row = recovery.get_incomplete_tokens_by_row(run.run_id)
@@ -1691,6 +1711,16 @@ class TestForkRecoveryInvariant:
             f"spec.token_data_ref={child_spec.token_data_ref!r} != "
             f"expand_token result.token_data_ref={child.token_data_ref!r}"
         )
+
+        # The recovery hydrator IS the path that retrieves the payload bytes — this is
+        # the responsibility the lineage path must never acquire.
+        source_row = PipelineRow({"name": "unused-for-envelope-branch"}, _read_path_contract)
+        reconstructed = recovery.reconstruct_token_row(child_spec, run.run_id, source_row, payload_store)
+        assert payload_store.retrieve_count == 1, (
+            f"reconstruct_token_row (recovery hydrator) must retrieve the payload exactly once; "
+            f"retrieve_count={payload_store.retrieve_count}"
+        )
+        assert reconstructed.to_dict()["name"] == "alpha", "envelope payload must round-trip the persisted child data"
 
     def test_reconstruct_token_row_fork_vs_envelope(self) -> None:
         """reconstruct_token_row covers both branches: fork (source_row) and envelope.

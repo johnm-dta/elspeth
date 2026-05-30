@@ -38,9 +38,14 @@ class TokenInfo:
     expand_group_id: str | None = None
     resume_attempt_offset: int = 0  # Added to every node_states.attempt written while
     # re-driving THIS token on resume, so its records coexist with the append-only run-1
-    # records under UniqueConstraint(token_id, node_id, attempt). 0 = not a resume re-drive.
+    # records under UniqueConstraint(token_id, node_id, attempt). Value is the prior run's
+    # highest recorded attempt + 1 (processor.resume_incomplete_token), so 0 is NOT a
+    # reliable "run-1" marker: a token never stepped before the interrupt (max_attempt = -1)
+    # is re-driven on resume with offset 0. The authoritative resume discriminator is
+    # `resume_checkpoint_id is not None` — the field explain() filters on.
     resume_checkpoint_id: str | None = None  # Resumed-from checkpoint id, stamped on every
-    # node_state written during this token's resume re-drive (provenance). None = run-1.
+    # node_state written during this token's resume re-drive (provenance). None = run-1;
+    # not None = resume re-drive. This — NOT a zero/non-zero offset — is the resume marker.
 
     def __post_init__(self) -> None:
         """Validate identity invariants at construction time.
@@ -64,6 +69,15 @@ class TokenInfo:
                     raise TypeError(f"TokenInfo.{_field_name} must be str or None, got {type(_value).__name__}: {_value!r}")
                 if not _value:
                     raise ValueError(f"TokenInfo.{_field_name} must be None or non-empty string, got {_value!r}")
+        # One-way resume invariant: a positive resume_attempt_offset only ever originates
+        # from a resume re-drive (processor.resume_incomplete_token), which always stamps
+        # the checkpoint id. The implication is one-directional — offset 0 is ambiguous
+        # (run-1 OR a never-stepped resume token), so we do NOT require the converse.
+        if self.resume_attempt_offset > 0 and self.resume_checkpoint_id is None:
+            raise ValueError(
+                f"TokenInfo.resume_attempt_offset={self.resume_attempt_offset} > 0 requires a "
+                f"resume_checkpoint_id (a positive offset only arises from a resume re-drive), got None"
+            )
 
     def with_updated_data(self, new_data: PipelineRow) -> TokenInfo:
         """Return a new TokenInfo with updated row_data, preserving all lineage fields.

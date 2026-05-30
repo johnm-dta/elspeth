@@ -461,6 +461,8 @@ class TestTokenLoader:
             "expand_group_id": None,
             "branch_name": None,
             "step_in_pipeline": None,
+            # Epoch-11 column: real select(tokens_table) rows always carry it.
+            "token_data_ref": None,
         }
         defaults.update(overrides)
         return _make_sa_row(**defaults)
@@ -492,6 +494,24 @@ class TestTokenLoader:
         assert result.expand_group_id == "eg-1"
         assert result.branch_name == "path_a"
         assert result.step_in_pipeline == 3
+
+    def test_load_populates_token_data_ref(self) -> None:
+        # The loader must reflect the persisted token_data_ref (epoch-11 column),
+        # not silently fabricate None. Expand children and post-coalesce merged
+        # tokens carry a non-NULL ref; dropping it would hand a future reader a
+        # synthetic None for a value the audit trail actually recorded.
+        sa_row = self._make_token_row(token_data_ref="payload-ref-abc123")
+        loader = TokenLoader()
+        result = loader.load(sa_row)
+        assert result.token_data_ref == "payload-ref-abc123"
+
+    def test_load_token_data_ref_none_stays_none(self) -> None:
+        # NULL is the legitimate value for fork children (they share the source
+        # payload) — None here is real absence, not fabrication.
+        sa_row = self._make_token_row(token_data_ref=None)
+        loader = TokenLoader()
+        result = loader.load(sa_row)
+        assert result.token_data_ref is None
 
 
 # ---------------------------------------------------------------------------

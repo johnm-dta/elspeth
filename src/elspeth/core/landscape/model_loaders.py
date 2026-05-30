@@ -208,6 +208,11 @@ class TokenLoader:
             branch_name=row.branch_name,
             step_in_pipeline=row.step_in_pipeline,
             run_id=row.run_id,
+            # Epoch-11 column (tokens.token_data_ref): per-token payload ref for
+            # expand children + post-coalesce merged tokens. Read directly from the
+            # persisted column — omitting it fabricated None for a Tier-1 value the
+            # audit trail actually recorded.
+            token_data_ref=row.token_data_ref,
         )
 
 

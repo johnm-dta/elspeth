@@ -573,7 +573,7 @@ def compute_judge_metadata_signature(
     judge_model: str,
     judge_rationale: str,
     judge_policy_hash: str,
-    signature_version: int = 2,
+    signature_version: int = 1,
     file_fingerprint: str | None = None,
     scope_fingerprint: str | None = None,
     judge_model_verdict: JudgeVerdict | None = None,
@@ -728,7 +728,7 @@ In `_validate_judge_metadata_atomic`, invariant 8 (:948–962) currently require
 - [ ] **Step 6: Run the signing tests + the full allowlist suite**
 
 Run: `cd /home/john/elspeth/elspeth-lints && ../.venv/bin/python -m pytest tests/core/test_allowlist_signing.py tests/core/test_allowlist_schema.py -q`
-Expected: PASS. Existing v1 signing tests still pass because `signature_version` defaults to 2 only for *new* calls — **check**: existing tests call `compute_judge_metadata_signature` without `signature_version` and expect a v1 result. If they do, they will now get v2 and fail. Fix by updating those existing tests to pass `signature_version=1, file_fingerprint=...` explicitly (they are testing the v1 path, which still exists). This is the "locked-in buggy expectations after structural change" pattern — update the tests to name the version they mean.
+Expected: PASS. **The default `signature_version=1` is deliberate for the dual-version window** (advisor fix B): existing direct callers that omit the version keep getting a v1 signature and stay green untouched — including `_build_yaml_entry_text`, which still calls `compute_judge_metadata_signature(..., file_fingerprint=...)` until Task 7. If the default were `2`, justify would raise "scope_fingerprint is required" across Tasks 4–6 and the full suite (notably `test_cli_justify`) would be red between commits — violating the green-between-commits guarantee. Task 7 passes `signature_version=2` explicitly; Task 13 makes v2 the only path and flips/removes the default.
 
 - [ ] **Step 7: Commit**
 
@@ -1283,15 +1283,25 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
     are refused (they need justify/reaudit against the changed source). Requires
     the operator HMAC key.
     """
-    # Load WITHOUT source_root first to read raw entries without the v1
-    # file_fingerprint load gate firing on entries we are about to migrate.
+    # Load WITHOUT source_root to read raw entries without the v1
+    # file_fingerprint *live-source* gate firing on entries we are about to
+    # migrate (byte-drift elsewhere in the file must not block migration —
+    # that is the whole point). BUT loading without source_root ALSO skips the
+    # HMAC signature check (allowlist.py:468 gates both on source_root), so this
+    # command MUST verify each v1 signature itself before re-signing (see the
+    # integrity note below) — otherwise it would launder tampering into a clean
+    # v2 signature.
     # Then scan the source tree once, build a {canonical_key: finding} map,
     # and for each v1 judge-gated entry:
-    #   - if key in finding_map and entry is valid v1 (file_fingerprint matches
-    #     live bytes): recompute v2 signature with finding.scope_fingerprint and
-    #     rewrite the YAML entry in place (drop file_fingerprint, add
-    #     scope_fingerprint + judge_signature_version: 2 + v2 signature).
-    #   - else: append to `refused`, leave untouched.
+    #   - if key in finding_map (suppressed node unchanged) AND the entry's v1
+    #     signature verifies: recompute the v2 signature with
+    #     finding.scope_fingerprint and rewrite the YAML entry in place
+    #     (drop file_fingerprint, add scope_fingerprint +
+    #     judge_signature_version: 2 + v2 signature), carrying verdict /
+    #     rationale / recorded_at forward unchanged.
+    #   - else: append to `refused` with the reason (no matching finding =
+    #     stale → re-justify; signature mismatch = tampering → STOP), leave
+    #     untouched.
     # Emit a report (migrated count, refused list with reasons). Return 1 if any
     # refused, else 0. In --dry-run, compute and report but do not write.
     ...
@@ -1299,7 +1309,10 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
 
 > Implementation notes for the engineer:
 > - Reuse `_scan_single_file_findings` / the tier_model scanner the justify path uses to build the finding map; key each finding by its `canonical_key`.
-> - "Valid v1" = `entry.judge_signature_version in (None, 1)` and `entry.file_fingerprint` equals `_compute_file_fingerprint(root / file_path)`. If the file bytes already drifted, the entry is *stale-by-bytes*; still attempt the key match — if the suppressed node is unchanged the key matches and migration is safe (the whole point is that byte-drift elsewhere shouldn't block migration). The refusal criterion is **no matching live finding**, not byte drift. (This is the relief, applied to migration itself.)
+> - **Two independent gates, do not conflate them (advisor fix A):**
+>   1. **Integrity gate (always):** before re-signing, call `_verify_judge_metadata_signature_at_load(entry, context=...)` so the entry's existing v1 signature is verified with the operator key. This is the property §6 promises to keep — without it, a key-holder running migrate would mint a clean v2 signature over content whose v1 signature was never checked, laundering any keyless tamper (e.g. a hand-flipped verdict with a recomputed, publicly-computable `file_fingerprint`). A signature mismatch here is **tampering → refuse and STOP**, not a routine stale entry.
+>   2. **Relevance gate:** does the entry's `canonical_key` match a live finding? Yes → the suppressed node is unchanged → migrate. No → already stale → refuse with "re-justify required."
+> - **Do NOT gate on byte-freshness** (`file_fingerprint == live bytes`). That would refuse exactly the byte-drifted-but-scope-stable entries migration exists to relieve. `signature_version in (None, 1)` selects v1 entries; the integrity gate proves they weren't tampered; the relevance gate proves the node is unchanged. Byte equality is irrelevant.
 > - Rewrite YAML by locating the entry block by `key:` line and replacing its `file_fingerprint:` line with the three v2 lines, recomputing the signature. Reuse `_build_yaml_entry_text` where practical by reconstructing the entry's fields, OR do a targeted line surgery — pick whichever keeps the rest of the entry byte-identical (prefer surgery to avoid reflowing rationale block scalars). Add a test asserting the non-binding fields are byte-identical after migration.
 > - This command writes signed metadata, so it carries the same custody constraint as `justify`: it calls `_judge_metadata_hmac_key()` and fails without the key. Document in `--help` that it is operator-only.
 
@@ -1403,6 +1416,16 @@ git commit -m "chore(cicd): migrate judge-gated tier-model entries to v2 scope b
 
 > Only after Task 12 leaves **zero** v1 entries on disk. This satisfies the No Legacy Code policy: the dual-version state was a transient migration scaffold, not a kept compatibility shim.
 
+- [ ] **Step 0: DECISION — the redaction salt (advisor note C; resolve before deleting the field)**
+
+`source_excerpt.py:757` salts `RedactionRecord.redacted_hash` with the whole-file `file_fingerprint`, and its comments (:122–129) state that verifying a persisted redaction record needs **both** the `redacted_hash` AND the `file_fingerprint`. Deleting `file_fingerprint` from `AllowlistEntry` drops, for any entry that carries `judge_excerpt_redactions`, the salt an auditor needs to verify those records. This is rare (only when the judge prompt had secrets scrubbed) and was considered by neither the spec nor the original plan.
+
+Decide consciously, do not delete blindly:
+- **(a) Accept the loss:** if no live entry carries `judge_excerpt_redactions` (check: `grep -rl "judge_excerpt_redactions" config/cicd/enforce_tier_model/`), the salt was never load-bearing on disk; document that and proceed.
+- **(b) Retain the salt:** keep the whole-file digest on redaction-bearing entries under a dedicated, **unsigned**, clearly-named field (e.g. `redaction_salt`) so the binding semantics (now scope-scoped) and the audit-verification semantics (still whole-file) are not conflated. This is *not* the binding primitive — it must not re-introduce the re-sign tax.
+
+Record the choice in the commit message. The rest of Task 13 assumes (a) unless the operator selects (b).
+
 - [ ] **Step 1: Delete the v1 field + payload branch + byte-hash load path**
 
 Remove from `core/allowlist.py`: the `file_fingerprint` field on `AllowlistEntry`; the v1 branch in `compute_judge_metadata_signature` (and the `signature_version`/`file_fingerprint` params — v2 becomes the only path); `_compute_file_fingerprint`; the v1 byte-hash branch in `_verify_source_binding_at_load`; the v1 prefix constant and the dual-prefix shape acceptance; the v1 branches in `_validate_judge_metadata_atomic` invariant 8 and the version dispatch in `_verify_judge_metadata_signature_at_load`. Make `judge_signature_version` required (must be 2) for judge-gated entries.
@@ -1444,7 +1467,9 @@ git commit -m "refactor(allowlist): delete v1 file_fingerprint binding (all entr
 - §8 testing (determinism, fallback, version self-protection, migrate valid/stale, deletion leaves no refs) → Tasks 1, 4, 10, 13. ✓
 - §9 separate tracks (keyless RC5.2 debt; today's 7; ast_path Phase 2) → explicitly out of scope; today's 7 surface naturally as Task 12 refusals. ✓
 
-**Advisor lock-ins:** #1 single `_scope_fingerprint`, justify-from-scan, migrate-by-matcher → Tasks 1/7/10. #2 reaudit gap → Task 9. #3 stamp every Finding site + v2 rejects empty → Tasks 2/6. #4 operator boundary hard line + flagged dual-version deviation → Operator Boundary section + Tasks 12/13. ✓
+**Advisor lock-ins (pre-write):** #1 single `_scope_fingerprint`, justify-from-scan, migrate-by-matcher → Tasks 1/7/10. #2 reaudit gap → Task 9. #3 stamp every Finding site + v2 rejects empty → Tasks 2/6. #4 operator boundary hard line + flagged dual-version deviation → Operator Boundary section + Tasks 12/13. ✓
+
+**Advisor pass (post-write):** **A** — migrate must verify the v1 signature before re-signing (else it launders tampering into a clean v2 sig) and must NOT gate on byte-freshness → Task 10 integrity/relevance gates rewritten. **B** — `compute_judge_metadata_signature` defaults to `signature_version=1` during the dual-version window so justify stays green across Tasks 4–6 → Task 4 Step 3/Step 6. **C** — deleting `file_fingerprint` drops the redaction-record salt for entries with `judge_excerpt_redactions` → Task 13 Step 0 decision gate. ✓
 
 **Type consistency:** `compute_scope_fingerprint(scope_node, *, module=None)`, `enclosing_scope_node(ancestors)`, `verify_entry_binding_against_finding(entry, *, file_path, ast_path, scope_fingerprint)`, `compute_judge_metadata_signature(..., signature_version=2, file_fingerprint=None, scope_fingerprint=None)`, `Finding.scope_fingerprint`, `AllowlistEntry.scope_fingerprint`/`.judge_signature_version` — names used identically across all tasks. ✓
 

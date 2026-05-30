@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
@@ -398,3 +399,20 @@ def test_checkpoint_numpy_non_finite_float_rejected() -> None:
 
     with pytest.raises(ValueError, match="non-finite float"):
         checkpoint_dumps({"f": np.float32("nan")})
+
+
+def test_checkpoint_numpy_longdouble_overflow_rejected() -> None:
+    """A np.longdouble finite in native form but overflowing float() must raise the
+    clear ELSPETH error, not json's 'Out of range float values' (canonical parity).
+    """
+    np = pytest.importorskip("numpy")
+
+    # On platforms where longdouble == float64 (e.g. some ARM/Windows builds) no
+    # value is finite-in-native-but-overflowing-on-narrowing, so the guard is
+    # unreachable there — skip rather than assert a platform-specific behaviour.
+    max_ld = np.longdouble(np.finfo(np.longdouble).max)
+    if math.isfinite(float(max_ld)):
+        pytest.skip("longdouble has no values outside IEEE-754 double range on this platform")
+
+    with pytest.raises(ValueError, match="exceeds IEEE 754 double range"):
+        checkpoint_dumps({"f": max_ld})

@@ -151,7 +151,17 @@ class CheckpointEncoder(json.JSONEncoder):
             # overflowing the IEEE-754 double range (matches canonical_json).
             if not np.isfinite(obj):
                 raise ValueError(f"Cannot serialize non-finite float: {obj}. Use None for missing values, not NaN/Infinity.")
-            return float(obj)
+            converted = float(obj)
+            # Secondary guard: a value finite in np.longdouble can overflow to inf
+            # when narrowed to a Python float (which json then rejects). Raise the
+            # clear ELSPETH message instead of json's "Out of range float values".
+            # Mirrors canonical_json's post-conversion check.
+            if not math.isfinite(converted):
+                raise ValueError(
+                    f"Cannot serialize {type(obj).__name__} value: exceeds IEEE 754 double range. "
+                    f"Value is finite in native representation but overflows JSON number format."
+                )
+            return converted
         if isinstance(obj, np.integer):
             return int(obj)
         if isinstance(obj, np.bool_):
@@ -246,7 +256,8 @@ def _escape_reserved_keys(obj: Any) -> Any:
 def checkpoint_dumps(obj: Any) -> str:
     """Serialize object to JSON with type preservation.
 
-    Preserves datetime objects using collision-safe type envelopes.
+    Preserves rich types (datetime, Decimal, date, time, bytes, UUID) using
+    collision-safe type envelopes; numpy scalars convert to Python primitives.
     Escapes user dicts that coincidentally contain the reserved key.
     Rejects NaN/Infinity per CLAUDE.md audit integrity requirements.
 
@@ -254,7 +265,8 @@ def checkpoint_dumps(obj: Any) -> str:
         obj: Data structure to serialize (typically aggregation state)
 
     Returns:
-        JSON string with type envelopes for datetime
+        JSON string with type envelopes for rich types
+        (datetime/Decimal/date/time/bytes/UUID).
 
     Raises:
         ValueError: If data contains NaN or Infinity
@@ -272,9 +284,12 @@ def checkpoint_dumps(obj: Any) -> str:
 def _restore_types(obj: Any) -> Any:
     """Recursively restore type-tagged values.
 
-    Handles:
-    - New envelopes: {"__elspeth_type__": "datetime", "__elspeth_value__": iso_string}
+    Handles the collision-safe ``__elspeth_type__``/``__elspeth_value__`` envelopes:
+    - Rich types: datetime, decimal, date, time, bytes, uuid (restored to their
+      Python types from the json-native envelope value).
+    - Tuple: {"__elspeth_type__": "tuple", "__elspeth_value__": [...]} → tuple.
     - Escaped dicts: {"__elspeth_type__": "escaped_dict", "__elspeth_value__": {...}}
+      → the original user dict that happened to contain the reserved key.
 
     The old shape-based tag {"__datetime__": iso_string} is NOT restored. Per
     CLAUDE.md No Legacy Code Policy, there are no existing checkpoints to
@@ -352,8 +367,10 @@ def _restore_types(obj: Any) -> Any:
 def checkpoint_loads(s: str) -> Any:
     """Deserialize JSON string with type restoration.
 
-    Restores datetime objects from type envelopes. Supports both new
-    collision-safe envelopes and legacy __datetime__ tags.
+    Restores Python types from the collision-safe ``__elspeth_type__`` envelopes
+    (datetime, decimal, date, time, bytes, uuid), plus escaped dicts and tuples.
+    The legacy ``__datetime__`` shape tag is intentionally NOT restored (No Legacy
+    Code Policy — see ``_restore_types``).
 
     Args:
         s: JSON string (from checkpoint_dumps)

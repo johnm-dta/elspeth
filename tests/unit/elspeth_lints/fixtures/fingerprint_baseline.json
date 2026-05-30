@@ -764,10 +764,6 @@
       "fingerprint": "19c383f767c4ed8c"
     },
     {
-      "file_path": "contracts/schema_contract_factory.py",
-      "fingerprint": "caa0070eb7edad8e"
-    },
-    {
       "file_path": "contracts/secret_scrub.py",
       "fingerprint": "632c3578c777667a"
     },
@@ -1322,14 +1318,6 @@
     {
       "file_path": "core/dag/graph.py",
       "fingerprint": "034b31cfc88d8f9c"
-    },
-    {
-      "file_path": "core/dag/graph.py",
-      "fingerprint": "ea839197606998d2"
-    },
-    {
-      "file_path": "core/events.py",
-      "fingerprint": "6f513a170f117689"
     },
     {
       "file_path": "core/expression_parser.py",
@@ -1893,15 +1881,11 @@
     },
     {
       "file_path": "engine/orchestrator/core.py",
-      "fingerprint": "49d051713c4a7398"
+      "fingerprint": "019440ebb17bbab0"
     },
     {
       "file_path": "engine/orchestrator/core.py",
-      "fingerprint": "66df89cda67df405"
-    },
-    {
-      "file_path": "engine/orchestrator/core.py",
-      "fingerprint": "d525bf7e07ab70ed"
+      "fingerprint": "b1be0a96de0e9f0f"
     },
     {
       "file_path": "engine/processor.py",
@@ -4202,6 +4186,10 @@
     {
       "file_path": "web/composer/tools/generation.py",
       "fingerprint": "170da3b1e8b91a7c"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "176985867214e183"
     },
     {
       "file_path": "web/composer/tools/generation.py",

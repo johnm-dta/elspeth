@@ -84,7 +84,6 @@ from elspeth.contracts.events import (
     RunStarted,
     RunSummary,
 )
-from elspeth.contracts.hashing import repr_hash
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.run_result import derive_terminal_run_status
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
@@ -1842,19 +1841,14 @@ class Orchestrator:
             ),
         )
 
-        # Emit RowCreated telemetry AFTER Landscape recording succeeds
-        # Quarantined rows are Tier-3 data that may contain non-canonical
-        # values (NaN, Infinity). Use stable_hash when possible, fall back
-        # to repr_hash for non-canonical data.
-        try:
-            quarantine_content_hash = stable_hash(source_item.row)
-        except (ValueError, TypeError) as e:
-            slog.debug(
-                "stable_hash_fallback_to_repr_hash",
-                error_type=type(e).__name__,
-                error=str(e),
-            )
-            quarantine_content_hash = repr_hash(source_item.row)
+        # Emit RowCreated telemetry AFTER Landscape recording succeeds.
+        # source_item.row was already sanitized for Tier-3 non-canonical values
+        # (NaN/Infinity -> None) above, so stable_hash gives a single deterministic
+        # semantics for content_hash. No repr_hash fallback: after sanitization the
+        # only residual stable_hash failure is a structurally non-serializable type,
+        # which is a plugin-contract violation that must surface, not be masked by a
+        # second, divergent hash function recorded under the same field name.
+        quarantine_content_hash = stable_hash(source_item.row)
         self._emit_telemetry(
             RowCreated(
                 timestamp=datetime.now(UTC),

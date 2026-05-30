@@ -222,17 +222,6 @@ allow_hits:
   file_fingerprint: 8ccb75ecfeb4c16cb1524b30d01ad7ba55ecd35220c6465b9fcc36acd6089bdc
   ast_path: 'body[14]/body[2]/body[1]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v1:e5838245a0894c176ebfa14cdd97ce344da17395514b6138e8e8dd9f0ddb86b4'
-- key: core/events.py:R1:EventBus:emit:fp=6f513a170f117689
-  owner: architecture
-  reason: Optional field access at trust boundary
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-07-02'
-- key: core/dag/graph.py:R6:ExecutionGraph:warn_divert_coalesce_interactions:fp=ea839197606998d2
-  owner: architecture
-  reason: Silent except in schema lookup — DIVERT edge may target non-existent node
-    (forward reference or optional path)
-  safety: Continues to next coalesce point; warning about potential data loss is best-effort
-  expires: '2026-11-13'
 - key: core/retention/purge.py:R6:PurgeManager:purge_payloads:fp=0d32fa231299f2d6
   owner: bugfix
   reason: |-

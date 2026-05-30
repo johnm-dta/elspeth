@@ -329,17 +329,3 @@ allow_hits:
   file_fingerprint: 28afa0115b76f4e3a133baf831d1635543fd07aa6d0a637a7935c0ecad7ae1ab
   ast_path: 'body[10]/body[5]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v1:4f25aad1de4565b0215c88223734f75a04c9ceae2e80f4d0cc0581fee2eb850c'
-- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=49d051713c4a7398
-  owner: bugfix
-  pattern: audit-record-fallback
-  reason: "Tier-3 quarantine boundary \u2014 quarantined row data may contain NaN/Infinity
-    rejected by stable_hash. Coercion at the source/quarantine boundary is the one
-    Tier-3 location where canonical hashing must accept non-canonical floats. The
-    catch is narrow (ValueError, TypeError) and the fallback (repr_hash) is itself
-    deterministic on the row contents \u2014 the audit trail records which hashing path
-    was used, so an auditor can always tell whether stable_hash or repr_hash produced
-    the recorded value."
-  safety: "Narrow catch on (ValueError, TypeError) only \u2014 anything else propagates.
-    repr_hash is deterministic and recorded as the fallback path; the quarantine
-    audit row carries which hash path produced the value."
-  expires: null

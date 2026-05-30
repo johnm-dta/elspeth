@@ -134,9 +134,29 @@ repos:
 
       - id: elspeth-lints-trust-tier
         name: elspeth-lints trust-tier
-        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
+        entry: env PYTHONPATH=elspeth-lints/src ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=shape-only-when-key-missing .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
         language: system
-        types: [python]
+        # Verify mode mirrors CI's fork-PR treatment (ci.yaml). The mode is
+        # ADAPTIVE: with the operator's ELSPETH_JUDGE_METADATA_HMAC_KEY present
+        # in the shell env, the load does FULL judge-metadata signature
+        # verification; with the key absent (keyless agents, or an operator
+        # shell without the key after the .env O1 removal) it DOWNGRADES to
+        # shape-only and prints a prominent load-time warning rather than
+        # hard-failing the commit. Without this, the default `required` mode
+        # makes the now-firing hook raise on EVERY keyless local commit that
+        # touches the allowlist. Required-mode signature enforcement that blocks
+        # merge remains CI's job (HMAC key as a GitHub Actions secret).
+        # NO `types:` filter. pre-commit ANDs `types` with `files`; adding
+        # `types: [python]` here made the intersection near-empty — allowlist
+        # YAMLs under config/cicd/enforce_tier_model/ matched `files` but were
+        # excluded as non-python, so the gate Skipped on the most common way
+        # tier_model state changes. This is a whole-repo policy gate
+        # (pass_filenames: false, scans --root src/elspeth regardless of which
+        # file triggered it); the `files` regex is purely the trigger condition
+        # and matches every sibling policy gate above (freeze-guards,
+        # audit-evidence, composer-policy, plugin-contract). Per the header
+        # contract, src/elspeth/*.py edits are intentionally CI-covered, not a
+        # local trigger here. See issue elspeth-d3877f9262.
         files: ^(config/cicd/enforce_tier_model/|elspeth-lints/src/elspeth_lints/rules/trust_tier/)
         pass_filenames: false
 

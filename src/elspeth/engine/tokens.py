@@ -263,6 +263,10 @@ class TokenManager:
         # CRITICAL: Use deepcopy to prevent nested mutable objects from being
         # shared across forked children. Shallow copy would cause mutations in
         # one branch to leak to siblings, breaking audit trail integrity.
+        #
+        # resume_attempt_offset and resume_checkpoint_id are intentionally NOT
+        # inherited here. Fork children mint new token_ids with no run-1 node_states,
+        # so attempt=0 is correct and they must not inherit the parent's resume offset.
         child_infos = [
             TokenInfo(
                 row_id=parent_token.row_id,
@@ -319,6 +323,11 @@ class TokenManager:
             step_in_pipeline=step,
         )
 
+        # resume_attempt_offset and resume_checkpoint_id are intentionally NOT
+        # inherited here. The merged token is a brand-new token_id with no run-1
+        # node_states, so attempt=0 is correct and it must not inherit the parent
+        # branches' resume offsets. (The branch tokens' coalesce node_states already
+        # carry the provenance marker for the arriving tokens.)
         return TokenInfo(
             row_id=row_id,
             token_id=merged.token_id,
@@ -393,6 +402,10 @@ class TokenManager:
         # shared across expanded children. Same reasoning as fork_token - without
         # this, mutations in one sibling leak to others, corrupting audit trail.
         # Bug fix: expand_token was sharing row_data references across tokens
+        #
+        # resume_attempt_offset and resume_checkpoint_id are intentionally NOT
+        # inherited here. Expand children mint new token_ids with no run-1 node_states,
+        # so attempt=0 is correct and they must not inherit the parent's resume offset.
         child_infos = [
             TokenInfo(
                 row_id=parent_token.row_id,

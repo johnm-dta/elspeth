@@ -45,13 +45,6 @@ class WorkItem:
     coalesce_node_id: NodeID | None = None
     coalesce_name: CoalesceName | None = None  # Name of the coalesce point (if any)
     on_success_sink: str | None = None  # Inherited sink for terminal children (deagg)
-    resume_attempt_offset: int = 0  # Added to every node_states.attempt written while
-    # re-driving a reconstructed incomplete token on resume, so its records coexist with
-    # the append-only run-1 records under UniqueConstraint(token_id, node_id, attempt).
-    resume_checkpoint_id: str | None = None  # Stamped on every node_state written during a
-    # resume re-drive (the resumed-from checkpoint id) so re-drives are provably
-    # distinguishable from run-1 retries. Both default to the no-op (0 / None) for all
-    # normal processing — the only nonzero/non-None source is resume_incomplete_token() (Task 6).
 
     def __post_init__(self) -> None:
         has_id = self.coalesce_node_id is not None
@@ -134,8 +127,6 @@ class DAGNavigator:
         coalesce_name: CoalesceName | None = None,
         coalesce_node_id: NodeID | None = None,
         on_success_sink: str | None = None,
-        resume_attempt_offset: int = 0,
-        resume_checkpoint_id: str | None = None,
     ) -> WorkItem:
         """Create node-id based work item."""
         resolved_coalesce_node_id = coalesce_node_id
@@ -168,8 +159,6 @@ class DAGNavigator:
             coalesce_node_id=resolved_coalesce_node_id,
             coalesce_name=resolved_coalesce_name,
             on_success_sink=on_success_sink,
-            resume_attempt_offset=resume_attempt_offset,
-            resume_checkpoint_id=resume_checkpoint_id,
         )
 
     def resolve_plugin_for_node(self, node_id: NodeID) -> TransformProtocol | GateSettings | None:
@@ -269,8 +258,6 @@ class DAGNavigator:
         current_node_id: NodeID,
         coalesce_name: CoalesceName | None = None,
         on_success_sink: str | None = None,
-        resume_attempt_offset: int = 0,
-        resume_checkpoint_id: str | None = None,
     ) -> WorkItem:
         """Create child work item that continues after current node or resumes at coalesce.
 
@@ -283,6 +270,10 @@ class DAGNavigator:
         token is already mid-branch, advances to the next node via
         resolve_next_node while preserving coalesce metadata for eventual
         coalesce handling.
+
+        resume_attempt_offset and resume_checkpoint_id are carried on the token
+        itself (TokenInfo fields) and propagate automatically via the token
+        reference — no explicit threading through WorkItem required.
         """
         if coalesce_name is not None:
             coalesce_node_id = self._coalesce_node_ids[coalesce_name]
@@ -316,8 +307,6 @@ class DAGNavigator:
                     coalesce_name=coalesce_name,
                     coalesce_node_id=coalesce_node_id,
                     on_success_sink=on_success_sink,
-                    resume_attempt_offset=resume_attempt_offset,
-                    resume_checkpoint_id=resume_checkpoint_id,
                 )
 
             # Non-fork continuation — advance forward, preserving coalesce metadata.
@@ -327,14 +316,10 @@ class DAGNavigator:
                 coalesce_name=coalesce_name,
                 coalesce_node_id=coalesce_node_id,
                 on_success_sink=on_success_sink,
-                resume_attempt_offset=resume_attempt_offset,
-                resume_checkpoint_id=resume_checkpoint_id,
             )
 
         return self.create_work_item(
             token=token,
             current_node_id=self.resolve_next_node(current_node_id),
             on_success_sink=on_success_sink,
-            resume_attempt_offset=resume_attempt_offset,
-            resume_checkpoint_id=resume_checkpoint_id,
         )

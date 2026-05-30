@@ -1259,7 +1259,7 @@ class TestProcessRowSingleTransform:
         )
 
         # side_effect receives the real token and returns it with the desired result
-        def executor_side_effect(*, transform, token, ctx, attempt=0, resume_attempt_offset=0, resume_checkpoint_id=None):
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
             return (success_result, token, None)
 
         with patch.object(
@@ -1290,7 +1290,7 @@ class TestProcessRowSingleTransform:
             retryable=False,
         )
 
-        def executor_side_effect(*, transform, token, ctx, attempt=0, resume_attempt_offset=0, resume_checkpoint_id=None):
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
             return (error_result, token, "discard")
 
         with patch.object(
@@ -1325,7 +1325,7 @@ class TestProcessRowSingleTransform:
             retryable=False,
         )
 
-        def executor_side_effect(*, transform, token, ctx, attempt=0, resume_attempt_offset=0, resume_checkpoint_id=None):
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
             return (error_result, token, "errors")
 
         with patch.object(
@@ -2154,16 +2154,14 @@ class TestProcessRowGateBranching:
                 next_node_id=expander_node,
             )
 
-        def transform_side_effect(*, transform, token, ctx, attempt=0, resume_attempt_offset=0, resume_checkpoint_id=None):
+        def transform_side_effect(*, transform, token, ctx, attempt=0):
             if transform.name == "expander":
                 return (expand_result, token, None)
             raise AssertionError("terminal transform should not execute in this regression harness")
 
         inherited_sinks: list[str | None] = []
 
-        def continuation_side_effect(
-            *, token, current_node_id, coalesce_name=None, on_success_sink=None, resume_attempt_offset=0, resume_checkpoint_id=None
-        ):
+        def continuation_side_effect(*, token, current_node_id, coalesce_name=None, on_success_sink=None):
             inherited_sinks.append(on_success_sink)
             return WorkItem(
                 token=token,
@@ -2458,7 +2456,7 @@ class TestProcessRowMultiRowOutput:
             node_to_plugin={transform_node: transform},
         )
 
-        def executor_side_effect(*, transform, token, ctx, attempt=0, resume_attempt_offset=0, resume_checkpoint_id=None):
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
             return (multi_result, token, None)
 
         with patch.object(
@@ -2505,7 +2503,7 @@ class TestProcessRowMultiRowOutput:
             node_to_plugin={transform_node: transform},
         )
 
-        def executor_side_effect(*, transform, token, ctx, attempt=0, resume_attempt_offset=0, resume_checkpoint_id=None):
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
             return (multi_result, token, None)
 
         with (
@@ -3822,7 +3820,7 @@ class TestTerminalDeaggregationSinkRouting:
             node_to_plugin={transform_node: transform},
         )
 
-        def executor_side_effect(*, transform, token, ctx, attempt=0, resume_attempt_offset=0, resume_checkpoint_id=None):
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
             return (multi_result, token, None)
 
         with patch.object(
@@ -3900,7 +3898,7 @@ class TestTerminalDeaggregationSinkRouting:
 
         call_count = 0
 
-        def executor_side_effect(*, transform, token, ctx, attempt=0, resume_attempt_offset=0, resume_checkpoint_id=None):
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
             nonlocal call_count
             call_count += 1
             if transform.name == "expander":
@@ -4614,7 +4612,7 @@ class TestGateJumpPastCoalesceInvariant:
                 next_node_id=transform_node,  # Jump to BEFORE coalesce — allowed
             )
 
-        def transform_side_effect(*, transform, token, ctx, attempt=0, resume_attempt_offset=0, resume_checkpoint_id=None):
+        def transform_side_effect(*, transform, token, ctx, attempt=0):
             return (
                 TransformResult.success(
                     make_row({"value": 42}),

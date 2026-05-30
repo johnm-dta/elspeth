@@ -7,7 +7,7 @@ LandscapeDB.connection() usage.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, select
@@ -34,7 +34,9 @@ from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcom
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
 from elspeth.contracts.hashing import repr_hash
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.canonical import canonical_json, stable_hash
+from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape._database_ops import DatabaseOps, LandscapeConnectionProvider
 from elspeth.core.landscape._helpers import generate_id, now
 from elspeth.core.landscape.model_loaders import (
@@ -62,7 +64,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.errors import ContractViolation
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.schema import SchemaConfig
-    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+    from elspeth.contracts.schema_contract import PipelineRow
 
 
 class DataFlowRepository:
@@ -657,13 +659,19 @@ class DataFlowRepository:
         self,
         parent_refs: list[TokenRef],
         row_id: str,
+        merged_payload: Mapping[str, object],
         *,
+        merged_contract: SchemaContract,
         step_in_pipeline: int | None = None,
     ) -> Token:
         """Coalesce multiple tokens into one (join operation).
 
         Creates a new token representing the merged result.
         Records all parent relationships.
+        Persists a {data, contract} envelope to the payload store so the merged token
+        is reconstructable on resume without re-executing the merge strategy and without
+        any nodes-table lookup (ADDENDUM 3 — nodes.output_contract_json is NULL in prod
+        for non-source nodes; the envelope is self-contained).
 
         Validates that all parent tokens belong to the specified row_id and
         that they all share the same run_id. Cross-run/cross-row contamination
@@ -672,15 +680,27 @@ class DataFlowRepository:
         Args:
             parent_refs: TokenRefs for tokens being merged (bundled token_id + run_id)
             row_id: Row ID for the merged token
+            merged_payload: The merged row data dict to persist (Tier-1 audit write).
+            merged_contract: The SchemaContract under which the merged token was produced.
+                Serialised into the envelope via to_checkpoint_format() so recovery can
+                restore a faithful PipelineRow without any nodes-table lookup.
+                Uses checkpoint_dumps (type-faithful: preserves datetime via type-tagged
+                envelopes) — NOT canonical_json, which would stringify datetime.
             step_in_pipeline: Step in the DAG where the coalesce occurs
 
         Returns:
             Merged Token model
 
         Raises:
-            AuditIntegrityError: If parent tokens do not belong to specified row
-                or if parent tokens span multiple runs
+            AuditIntegrityError: If parent tokens do not belong to specified row,
+                if parent tokens span multiple runs, or if no payload store is configured
         """
+        if self._payload_store is None:
+            raise AuditIntegrityError(
+                "coalesce_tokens requires a configured payload store — the merged token's "
+                "payload must be persisted for resume correctness (epoch 11 invariant). "
+                "Pass payload_store= to DataFlowRepository or RecorderFactory."
+            )
         if not parent_refs:
             raise AuditIntegrityError(
                 "coalesce_tokens requires at least one parent token — a coalesce with zero parents creates an unexplainable audit state"
@@ -708,6 +728,18 @@ class DataFlowRepository:
         token_id = generate_id()
         timestamp = now()
 
+        # Persist a self-contained {data, contract} envelope before the DB write so
+        # the token_data_ref is available atomically at INSERT time.
+        # The envelope carries both the row data and its SchemaContract so recovery can
+        # reconstruct a faithful PipelineRow without any nodes-table lookup (ADDENDUM 3:
+        # nodes.output_contract_json is NULL for non-source nodes in production).
+        # checkpoint_dumps is type-faithful (datetime survives as datetime, not a
+        # string) — canonical_json would stringify datetime and destroy Tier-1 fidelity.
+        # Crash on store failure: a merged token with no persisted payload is
+        # unreconstructable on resume (Tier-1 audit invariant).
+        envelope = {"data": dict(merged_payload), "contract": merged_contract.to_checkpoint_format()}
+        token_data_ref = self._payload_store.store(checkpoint_dumps(envelope).encode("utf-8"))
+
         with self._db.connection() as conn:
             # Create merged token
             result = conn.execute(
@@ -718,6 +750,7 @@ class DataFlowRepository:
                     join_group_id=join_group_id,
                     step_in_pipeline=step_in_pipeline,
                     created_at=timestamp,
+                    token_data_ref=token_data_ref,
                 )
             )
             if result.rowcount == 0:
@@ -744,14 +777,16 @@ class DataFlowRepository:
             step_in_pipeline=step_in_pipeline,
             created_at=timestamp,
             run_id=run_id,
+            token_data_ref=token_data_ref,
         )
 
     def expand_token(
         self,
         parent_ref: TokenRef,
         row_id: str,
-        count: int,
+        child_payloads: Sequence[Mapping[str, object]],
         *,
+        output_contract: SchemaContract,
         step_in_pipeline: int | None = None,
         record_parent_outcome: bool = True,
     ) -> tuple[list[Token], str]:
@@ -771,10 +806,21 @@ class DataFlowRepository:
         Unlike fork_token (parallel DAG paths with branch names), expand_token
         creates sequential children for deaggregation transforms.
 
+        Each child's {data, contract} envelope is persisted to the payload store before
+        the DB write so token_data_ref is written atomically at INSERT time. This
+        makes each expanded child self-contained and reconstructable on resume without
+        re-executing the deaggregation transform and without any nodes-table lookup
+        (ADDENDUM 3 — nodes.output_contract_json is NULL for non-source nodes in prod).
+
         Args:
             parent_ref: TokenRef bundling parent token_id and run_id
             row_id: Row ID (same for all children)
-            count: Number of child tokens to create (must be >= 1)
+            child_payloads: Per-child row data dicts (one per expanded child).
+                Must have at least 1 element. Uses checkpoint_dumps (type-faithful:
+                preserves datetime via type-tagged envelopes) — NOT canonical_json.
+            output_contract: The SchemaContract shared by all expanded children (from
+                TransformResult.contract, locked before expansion). Serialised into each
+                child's envelope so recovery can restore a faithful PipelineRow.
             step_in_pipeline: Step where expansion occurs (optional)
             record_parent_outcome: If True (default), record EXPANDED outcome for parent.
                 Set to False for batch aggregation where parent gets CONSUMED_IN_BATCH.
@@ -783,11 +829,20 @@ class DataFlowRepository:
             Tuple of (child Token list, expand_group_id)
 
         Raises:
-            ValueError: If count < 1
-            AuditIntegrityError: If parent token does not belong to specified run/row
+            ValueError: If child_payloads is empty
+            AuditIntegrityError: If parent token does not belong to specified run/row,
+                or if no payload store is configured
         """
+        count = len(child_payloads)
         if count < 1:
-            raise ValueError("expand_token requires at least 1 child")
+            raise ValueError("expand_token requires at least 1 child payload")
+
+        if self._payload_store is None:
+            raise AuditIntegrityError(
+                "expand_token requires a configured payload store — each expanded child's "
+                "payload must be persisted for resume correctness (epoch 11 invariant). "
+                "Pass payload_store= to DataFlowRepository or RecorderFactory."
+            )
 
         # Validate parent token ownership before any writes (Tier 1 invariant)
         self._validate_token_run_ownership(parent_ref)
@@ -796,8 +851,23 @@ class DataFlowRepository:
         expand_group_id = generate_id()
         children = []
 
+        # Persist each child's {data, contract} envelope BEFORE the DB transaction so
+        # the token_data_ref values are ready to write atomically at INSERT time.
+        # The envelope is self-contained: recovery can restore a faithful PipelineRow
+        # without any nodes-table lookup (ADDENDUM 3 — nodes.output_contract_json is
+        # NULL for non-source nodes in production).
+        # checkpoint_dumps is type-faithful (datetime preserved as datetime, not
+        # stringified) — canonical_json would destroy Tier-1 fidelity.
+        # Crash on store failure: a child token with no persisted payload is
+        # unreconstructable on resume (epoch 11 invariant).
+        contract_fmt = output_contract.to_checkpoint_format()
+        child_data_refs = [
+            self._payload_store.store(checkpoint_dumps({"data": dict(payload), "contract": contract_fmt}).encode("utf-8"))
+            for payload in child_payloads
+        ]
+
         with self._db.connection() as conn:
-            for ordinal in range(count):
+            for ordinal, payload_ref in enumerate(child_data_refs):
                 child_id = generate_id()
                 timestamp = now()
 
@@ -810,6 +880,7 @@ class DataFlowRepository:
                         expand_group_id=expand_group_id,
                         step_in_pipeline=step_in_pipeline,
                         created_at=timestamp,
+                        token_data_ref=payload_ref,
                     )
                 )
                 if result.rowcount == 0:
@@ -838,6 +909,7 @@ class DataFlowRepository:
                         step_in_pipeline=step_in_pipeline,
                         created_at=timestamp,
                         run_id=parent_ref.run_id,
+                        token_data_ref=payload_ref,
                     )
                 )
 

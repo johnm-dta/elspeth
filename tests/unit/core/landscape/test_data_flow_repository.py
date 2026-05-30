@@ -37,6 +37,7 @@ from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcom
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.hashing import repr_hash
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape._database_ops import DatabaseOps
@@ -55,9 +56,13 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 from tests.fixtures.landscape import make_factory, make_landscape_db
+from tests.fixtures.stores import MockPayloadStore
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 _ERROR_HASH = "a" * 64
+
+# Minimal contract for tests that only care about token lifecycle, not contract content.
+_MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 
 
 def _make_repo(
@@ -69,6 +74,9 @@ def _make_repo(
 
     Returns (db, repo, factory) — factory is for graph setup only.
     """
+    # Default to MockPayloadStore so expand_token / coalesce_tokens can persist payloads.
+    if payload_store is None:
+        payload_store = MockPayloadStore()
     db = make_landscape_db()
     ops = DatabaseOps(db)
     repo = DataFlowRepository(
@@ -1118,6 +1126,8 @@ class TestCoalesceTokensAtomicity:
             repo.coalesce_tokens(
                 parent_refs=[TokenRef(token_id=cid, run_id="run-1") for cid in child_ids],
                 row_id=row_id,
+                merged_payload={"merged": True},
+                merged_contract=_MINIMAL_CONTRACT,
             )
 
         # Verify: zero partial state
@@ -1164,8 +1174,9 @@ class TestExpandTokenAtomicity:
             repo.expand_token(
                 parent_ref=TokenRef(token_id=tok_id, run_id="run-1"),
                 row_id=row_id,
-                count=3,
+                child_payloads=[{"item": i} for i in range(3)],
                 step_in_pipeline=2,
+                output_contract=_MINIMAL_CONTRACT,
             )
 
         # Verify: zero partial state
@@ -1258,6 +1269,8 @@ class TestCoalesceTokensRowcountValidation:
             repo.coalesce_tokens(
                 parent_refs=[TokenRef(token_id=cid, run_id="run-1") for cid in child_ids],
                 row_id=row_id,
+                merged_payload={"merged": True},
+                merged_contract=_MINIMAL_CONTRACT,
             )
 
 
@@ -1296,7 +1309,8 @@ class TestExpandTokenRowcountValidation:
             repo.expand_token(
                 parent_ref=TokenRef(token_id=tok_id, run_id="run-1"),
                 row_id=row_id,
-                count=2,
+                child_payloads=[{"item": 1}, {"item": 2}],
+                output_contract=_MINIMAL_CONTRACT,
             )
 
 

@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from elspeth.contracts import NodeType
+from elspeth.contracts.payload_store import PayloadStore
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.database import LandscapeDB
@@ -26,6 +27,7 @@ from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from tests.fixtures.stores import MockPayloadStore
 
 # Shared default for schema_config across all factory-created nodes
 _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
@@ -36,11 +38,19 @@ def make_landscape_db() -> LandscapeDB:
     return LandscapeDB.in_memory()
 
 
-def make_factory(db: LandscapeDB | None = None) -> RecorderFactory:
-    """Factory for RecorderFactory."""
+def make_factory(db: LandscapeDB | None = None, *, payload_store: PayloadStore | None = None) -> RecorderFactory:
+    """Factory for RecorderFactory.
+
+    Always wires a payload store so expand_token / coalesce_tokens can
+    persist per-token payloads (required since epoch 11). Tests that don't
+    care about the stored bytes get a fresh MockPayloadStore automatically.
+    Pass an explicit payload_store to inspect stored payloads in assertions.
+    """
     if db is None:
         db = make_landscape_db()
-    return RecorderFactory(db)
+    if payload_store is None:
+        payload_store = MockPayloadStore()
+    return RecorderFactory(db, payload_store=payload_store)
 
 
 # =============================================================================
@@ -85,6 +95,7 @@ def make_recorder_with_run(
     source_node_id: str | None = None,
     source_plugin_name: str = "source",
     canonical_version: str = "v1",
+    payload_store: PayloadStore | None = None,
 ) -> RecorderSetup:
     """Create LandscapeDB + RecorderFactory + run + source node in one call.
 
@@ -101,9 +112,13 @@ def make_recorder_with_run(
         source_plugin_name: Plugin name for the source node (default "source").
         canonical_version: Version string for begin_run (default "v1").
             Some tests (e.g., test_processor.py) use "sha256-rfc8785-v1".
+        payload_store: Payload store to inject (defaults to MockPayloadStore).
+            Pass a specific MockPayloadStore instance to inspect stored payloads.
+            Tests that explicitly test "no payload store" behavior must pass
+            RecorderFactory(db) directly rather than using this helper.
     """
     db = make_landscape_db()
-    factory = make_factory(db)
+    factory = make_factory(db, payload_store=payload_store)
 
     # Build kwargs, only passing explicit IDs if provided
     begin_kwargs: dict[str, Any] = {

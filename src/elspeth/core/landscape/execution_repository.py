@@ -144,6 +144,7 @@ class ExecutionRepository:
         state_id: str | None = None,
         attempt: int = 0,
         quarantined: bool = False,
+        resume_checkpoint_id: str | None = None,
     ) -> NodeStateOpen:
         """Begin recording a node state (token visiting a node).
 
@@ -157,6 +158,10 @@ class ExecutionRepository:
             attempt: Attempt number (0 for first attempt)
             quarantined: If True, input_data is Tier-3 external data that may
                 contain non-canonical values (NaN, Infinity). Uses repr_hash fallback.
+            resume_checkpoint_id: Checkpoint ID this node_state was re-driven from
+                during a resume operation. NULL for every original-run write; set when
+                re-driving an incomplete token so explain() can distinguish resume
+                re-drives from run-1 tenacity retries (epoch 11).
 
         Returns:
             NodeStateOpen model with status=OPEN
@@ -194,6 +199,7 @@ class ExecutionRepository:
                 status=state.status,
                 input_hash=state.input_hash,
                 started_at=state.started_at,
+                resume_checkpoint_id=resume_checkpoint_id,
             )
         )
 

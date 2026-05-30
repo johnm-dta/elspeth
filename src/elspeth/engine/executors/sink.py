@@ -456,6 +456,8 @@ class SinkExecutor:
                     run_id=ctx.run_id,
                     step_index=step_in_pipeline,
                     input_data=input_dict,
+                    attempt=token.resume_attempt_offset,
+                    resume_checkpoint_id=token.resume_checkpoint_id,
                 )
                 all_states.append((token, state))
         except contract_errors.TIER_1_ERRORS as e:
@@ -845,6 +847,8 @@ class SinkExecutor:
                             # node_state's (token_id, step_index, attempt).
                             step_index=step_in_pipeline + 1,
                             input_data=input_dict,
+                            attempt=token.resume_attempt_offset,
+                            resume_checkpoint_id=token.resume_checkpoint_id,
                         )
                         failsink_states.append((token, state))
                 except contract_errors.TIER_1_ERRORS as e:

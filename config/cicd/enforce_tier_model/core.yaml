@@ -148,23 +148,6 @@ allow_hits:
   file_fingerprint: cbf18dfa261f31b786a4f737b6f85e3ed5f36d00a65707557fb5e5071557dc5f
   ast_path: 'body[11]/body[6]/body[2]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v1:365be702e7142488551864c3b1df27e4e692ce56294a11af25f526ceea838e9e'
-- key: core/landscape/query_repository.py:R6:QueryRepository:explain_row:fp=5b5158345e746330
-  owner: architecture
-  reason: |-
-    PayloadNotFoundError from PayloadStore when payload purged by retention policy — expected, not corruption
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:22:18.634845+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    This is a narrow catch of a specific, semantically meaningful exception (PayloadNotFoundError) representing an expected state — payload purged by retention policy — not a generic except-swallow. The code correctly distinguishes 'payload absent due to retention' from 'payload corrupt/integrity failure' (which still raises AuditIntegrityError per docstring), and signals absence honestly via payload_available=False and source_data=None rather than fabricating data. This is offensive programming: a documented domain exception is being handled as a known business outcome, while infrastructure/integrity failures continue to propagate.
-  file_fingerprint: 96119c00effff49aeabd64d591a080273c1cf37d79270b72a0a81037f319113f
-  ast_path: 'body[15]/body[22]/body[6]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:5ee035835df6f5e2841d289bae15fce90c5d203adaab36c48003604a27e36f39'
 - key: core/canonical.py:R6:_normalize_value:fp=b26d50562c16f852
   owner: architecture
   reason: TypeError from np.isnan/isinf on non-numeric dtypes is expected — non-numeric
@@ -239,23 +222,6 @@ allow_hits:
   file_fingerprint: 813dcb995d7a5fb3503061b2fa09f003bee9e15f1eb0d17100f49e739d37596e
   ast_path: 'body[16]/body[8]/body[6]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v1:64c3ecf9ec510d5d3a120a9f4aed836fae1ea07810b988cd6e36cd965c0bc47c'
-- key: core/landscape/execution_repository.py:R6:ExecutionRepository:begin_node_state:fp=6e0f00f363e89415
-  owner: bugfix
-  reason: |-
-    Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:22:12.054562+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.78
-  judge_rationale: |-
-    The function explicitly distinguishes quarantined (Tier-3) input via a boolean parameter, and the try/except is narrowly scoped to the stable_hash call on data documented as potentially containing non-canonical floats (NaN/Infinity). The fallback to repr_hash is a meaning-preserving alternative hash for quarantined data, not silent error swallowing — the exception types caught (ValueError, TypeError) are exactly what stable_hash raises for non-canonical values, and the non-quarantined path remains strict. This is a legitimate Tier-3 boundary handling pattern with a documented invariant, not defensive programming. The decorator nudge does not apply: R6 is not in the {R1, R5} suppressible set.
-  file_fingerprint: acb027b6fb746ffe47157802c7ac39bf1a5f9908b8b876332a715a0944374fcf
-  ast_path: 'body[28]/body[2]/body[2]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:c74781b50ad7faf28974d6f9a7dd4d4769d47256f935f22cca17ea30b8018d01'
 - key: core/security/web.py:R4:validate_url_for_ssrf:_resolve_worker:fp=bdf07052a9f75058
   owner: bugfix
   reason: |-
@@ -301,24 +267,7 @@ allow_hits:
     so ANY failure in grade updates must not abort the loop for remaining runs
   safety: Exception caught and logged via structlog, run_id added to grade_update_failures
     in PurgeResult, operator informed via CLI output
-- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=7a2f9a2b860707a7
-  owner: core
-  reason: |-
-    Tier 1 integrity check — deserialized checkpoint data must be dict; isinstance guards against corrupted checkpoint
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:21:37.253291+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    The isinstance check at line 297 is an offensive integrity guard on Tier-1 data (payload retrieved from our own payload store and deserialized from JSON). It raises AuditIntegrityError on any anomaly rather than silently coercing — exactly the prescribed Tier-1 behaviour ('bad data in the audit trail = crash immediately'). The R5 rule targets defensive shape-guards at boundaries; here the isinstance is paired with an immediate raise that surfaces the corruption with full diagnostic context. The decorator nudge does not apply: this is not a Tier-3 external parameter, and source_data_ref/payload_store are Tier-1.
-  file_fingerprint: 80c85a3049fe94255b8c4ad8c3082c5826f29aa2cbc7275b8622f916cb1bed59
-  ast_path: 'body[25]/body[4]/body[6]/body[5]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v1:c0f8dec878e9ce8d50acf0fd8f0549a0563ba62d8e36eebe7b5ed41a54005a7c'
-- key: core/checkpoint/recovery.py:R6:RecoveryManager:get_resume_point:fp=c48ba8486b6c2e03
+- key: core/checkpoint/recovery.py:R6:RecoveryManager:get_resume_point:fp=54948171154c08e1
   owner: checkpoint
   reason: Resume-point read may discover the persisted checkpoint is incompatible
     with the current schema (post-deploy migration scenario); narrow catch falls back
@@ -327,77 +276,166 @@ allow_hits:
     treats the run as not-resumable and starts from the source. No audit data is lost;
     lineage is preserved by full recompute.
   expires: '2026-08-20'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=8ca3a7ee3cc84783
-  owner: bugfix
-  reason: |-
-    Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:21:46.174621+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.78
-  judge_rationale: |-
-    The suppression sits on an explicit `quarantined=True` branch where the function contract documents that `data` is Tier-3 external content possibly containing NaN/Infinity that the canonical stable_hash rejects. The try/except is a narrow, intentional fallback to repr_hash — a documented canonical.py-sanctioned path — not silent error swallowing: the exception types are specific (ValueError, TypeError), the fallback still produces a recorded hash (no fabrication, no absence), and the branch is gated on the caller asserting Tier-3 provenance. This is precisely the trust-boundary wrapping the policy permits for external data. The decorator nudge does not apply: R6 is not in the decorator's suppressible set {R1, R5}, and the boundary here is a typed `data` payload from a quarantine path rather than a raw external-arguments dict.
-  file_fingerprint: 7a274ec60be159209411939cc6231221e15da34dc04a24b42f185b56b43e6f12
-  ast_path: 'body[19]/body[9]/body[2]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:193717f572f1a3b3d144d3a5efaac356370ea0969e0a29140943b97738249b5a'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=90984799b1de3e99
-  owner: bugfix
-  reason: |-
-    Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T06:21:54.337070+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    This is a genuine Tier-3 boundary handler: when persisting quarantined rows (data that failed source validation and may contain NaN/Infinity), canonical_json legitimately raises ValueError/TypeError on non-canonical values, and the code does NOT silently swallow — it falls back to an explicit repr-based representation that records what was received. This preserves the audit trail (records the bad data rather than fabricating or dropping) and is gated on the quarantined branch, so non-quarantined rows still crash on canonical_json failure. R6's concern (silent swallow) is directly addressed: the except produces an explicit alternative payload, not a default. The decorator nudge does not apply — R6 is not in the suppressible set {R1, R5}.
-  file_fingerprint: 7a274ec60be159209411939cc6231221e15da34dc04a24b42f185b56b43e6f12
-  ast_path: 'body[19]/body[9]/body[5]/body[0]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:f690a02fc5e9503c2d34e5686d3a0158d4e4947292c0c119de737e66d32c0285'
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=79239e021b66fa02
-  owner: architecture
-  reason: |-
-    Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically serializable
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:22:04.918867+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    This is a genuine Tier-3 boundary case for recording a validation failure: row_data is by definition the malformed external input that just failed schema validation, and the function's whole purpose is to record what we saw even when it isn't canonically serializable (NaN/Infinity/non-dict). The try/except narrowly catches ValueError/TypeError from canonical_json/stable_hash and falls back to a typed NonCanonicalMetadata representation rather than swallowing the error — meaning is preserved, absence is recorded as structured metadata, not fabricated. R6 (broad exception handling) at this exact site is the documented Tier-3 quarantine-path behavior. The decorator nudge does not apply: R6 is not in the {R1, R5} suppressible set.
-  file_fingerprint: 7a274ec60be159209411939cc6231221e15da34dc04a24b42f185b56b43e6f12
-  ast_path: 'body[19]/body[29]/body[2]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:045ba565976979102ef4b6b10dca23bef168efc1e0d1cab47b07b528a5e74de5'
 - key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=b4edfad55e521778
   owner: bugfix
   pattern: audit-record-fallback
   reason: Tier-3 boundary — error_details from transform results may contain NaN/Infinity
     that canonical_json rejects
   safety: Falls back to repr() — audit trail preserved with NonCanonicalMetadata
-- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=cf71d23d49a057eb
-  owner: bugfix
+- key: core/landscape/query_repository.py:R6:QueryRepository:explain_row:fp=b81f5371dd48636a
+  owner: john
+  reason: |-
+    This is a narrow catch of a specific, semantically meaningful exception (PayloadNotFoundError) representing an expected state — payload purged by retention policy — not a generic except-swallow. The code correctly distinguishes 'payload absent 
+      due to retention' from 'payload corrupt/integrity failure' (which still raises AuditIntegrityError per docstring), and signals absence honestly via payload_available=False and source_data=None rather than fabricating data. This is offensive programming: a 
+      documented domain exception is being handled as a known business outcome, while infrastructure/integrity failures continue to propagate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T19:58:46.930543+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    The except clause catches a single, narrowly-typed domain exception (PayloadNotFoundError) representing the documented expected state of a payload purged by retention policy, not a generic swallow. Absence is signaled honestly to the caller via payload_available=False and source_data=None — no fabrication — while integrity/infrastructure failures continue to propagate as AuditIntegrityError per the docstring. This is the legitimate pattern of handling a known business outcome as a typed exception; the R6 rule's concern (silently swallowing errors) does not apply because the handled exception is semantically meaningful and the absence is recorded in the returned structure.
+  file_fingerprint: d94cb69d3707881903656e6e2fe840e46b21ed251eb8923dd9f2de44e667e266
+  ast_path: 'body[15]/body[23]/body[6]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:71fc2f728edf67ce3d7de8f0a6c33cde9b1e3dfa66c41033c94e9ed6a3c61f57'
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:get_unprocessed_row_data:fp=1707b0fbd6672873
+  owner: john
+  reason: |-
+    Tier 1 integrity check — deserialized checkpoint data must be dict; isinstance guards against corrupted checkpoint
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T19:58:53.978036+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The isinstance check guards the shape of data deserialized from the payload store — Tier-1 data whose integrity must be verified offensively. The code raises AuditIntegrityError on shape mismatch rather than silently coercing or defaulting, which matches the Tier-1 'crash on any anomaly' rule and the offensive-programming pattern (detect invalid state, throw meaningful exception). The rationale correctly identifies the rule's concern (R5 isinstance) and addresses it at this site: the check exists to surface corruption, not to mask a contract violation. This is the legitimate use of isinstance as an assertion of an invariant on persisted data.
+  file_fingerprint: a1fe26f104d7271e276a9f4cf6044fc2ebc67d0824ea2001cf7013e8029f7dd9
+  ast_path: 'body[26]/body[4]/body[6]/body[5]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v1:1b7ea6e6b070c26bf15fd85a3cf5d23da72ca37f43c7d06c92fc63523f6ba397'
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=3688461f6ab01933
+  owner: john
+  reason: |-
+    Tier-3 boundary - row_data may contain NaN/Infinity which are not canonically serializable
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T19:59:01.510663+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    This is a legitimate Tier-3 boundary case for R6 (silent-except). The function records validation errors from rows that already failed schema validation — row_data is explicitly external untrusted data that may contain NaN/Infinity or other non-canonical values. The except block does not silently swallow the error: it captures the exception via NonCanonicalMetadata.from_error(row_data, e), substitutes a safe repr_hash and a structured metadata JSON, and continues to record the audit row. This is the policy-prescribed 'coerce/record what we got' pattern at a Tier-3 boundary, not silent recovery — the error and its type information are preserved in the audit trail. The decorator nudge does not apply: R6 is not in the decorator's suppressible set {R1, R5}.
+  file_fingerprint: d14b48bc2c77d644d6f6af6ec3002a2ccbcc3ec2b5a2b20926cf87e3ab858d69
+  ast_path: 'body[21]/body[29]/body[2]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:d1d61d92092d6f042a01c59a7253a4d94ff2bcd705b768a50f381c99ca351aef'
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=826cabfefbde5e8a
+  owner: john
   reason: |-
     Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity that canonical_json rejects
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
   expires: '2026-08-28'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:21:57.753092+00:00'
+  judge_recorded_at: '2026-05-30T19:59:08.873193+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
   judge_confidence: 0.78
   judge_rationale: |-
-    This is a legitimate Tier-2 serialization boundary: row_data is pipeline data that passed source validation as type-valid floats, but may legitimately contain NaN/Infinity values that canonical_json (strict JSON) rejects. The try/except is not swallowing the error — it records a NonCanonicalMetadata fallback so the error record is preserved with full provenance (repr-based hash, error context, allow_nan=False on the fallback). Per the auditability standard, losing the error record entirely would be worse than recording a structured non-canonical marker; the fallback path is itself auditable and meaning-preserving (records the serialization failure as a fact rather than fabricating values). The decorator nudge does not apply — this is a Tier-1 write site handling Tier-2 data, not a Tier-3 external-parameter entry, and R6 is not in the decorator's suppressible rule set.
-  file_fingerprint: 7a274ec60be159209411939cc6231221e15da34dc04a24b42f185b56b43e6f12
-  ast_path: 'body[19]/body[31]/body[9]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:968fc4fb640e95800c2e2bd680962c791f325f5a7b6f704b2b977c425eccfc6c'
+    The except blocks here are not silent — both catch ValueError/TypeError from canonical_json serialization and substitute an explicit fallback record (NonCanonicalMetadata / __non_canonical__ marker) that preserves the failure as auditable data rather than swallowing it. row_data and error_details originate from transform results that may contain row-derived NaN/Infinity values which canonical_json legitimately rejects; the rationale correctly identifies that losing the error record entirely is worse than recording a repr-based hash with explicit non-canonical metadata. The R6 concern (swallow-without-explicit-error-result) is directly addressed: the fallback IS an explicit, structured error result written to the audit trail. The decorator nudge does not apply — R6 is not in the suppressible set {R1, R5}.
+  file_fingerprint: d14b48bc2c77d644d6f6af6ec3002a2ccbcc3ec2b5a2b20926cf87e3ab858d69
+  ast_path: 'body[21]/body[31]/body[8]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:ef7fb60c9ea60b0cad3c3887c9fc1122935312023cda7c57c8a803eb8f7034cb'
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_transform_error:fp=4248e0e1ad50b6df
+  owner: john
+  reason: |-
+    Tier-2 boundary — row_data entering audit trail may contain NaN/Infinity that canonical_json rejects
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T19:59:16.686356+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    This is a Tier-1 audit-trail write boundary where row_data (Tier-2 pipeline data that may legitimately contain NaN/Infinity floats per IEEE 754) is being serialized via canonical_json which rejects non-finite floats. The except block does NOT silently swallow the error — it captures the failure mode explicitly via NonCanonicalMetadata.from_error(row_data, e), substitutes a repr-based hash, and records the serialization failure in the audit row itself. This is the 'record what we got' pattern: the error is preserved as a fact in the audit trail rather than discarded, and losing the error record entirely (by letting the exception propagate) would be worse than recording a degraded but honest representation. The R6 rule's concern (errors swallowed without explicit error result) is directly addressed by the metadata capture.
+  file_fingerprint: d14b48bc2c77d644d6f6af6ec3002a2ccbcc3ec2b5a2b20926cf87e3ab858d69
+  ast_path: 'body[21]/body[31]/body[9]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:635ff9a04aa6cb832124955056783441414faa7a7ca22d20aff3245b0af77f23'
+- key: core/landscape/execution_repository.py:R6:ExecutionRepository:begin_node_state:fp=6e0f00f363e89415
+  owner: john
+  reason: |-
+    Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T19:59:24.307310+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The finding is R6 (silent-except) on a try/except that wraps stable_hash() of quarantined Tier-3 input_data and falls back to repr_hash on ValueError/TypeError. The quarantined=True branch explicitly signals Tier-3 external data that may contain non-canonical values (NaN/Infinity) which stable_hash legitimately rejects; repr_hash is a documented fallback that still records what we got rather than fabricating a default or swallowing silently. The except is narrowly scoped to the two exception types stable_hash raises for non-canonical input and produces an explicit alternative hash value — the audit row still records the input. This is a legitimate Tier-3 boundary handling pattern, not silent error suppression. R6 is not in the decorator's suppressible set (R1/R5), so no decorator nudge applies.
+  file_fingerprint: 441d30eaea55fd66ac3adad6d2fe6622a997f133ea48f73648fdecfd3fe92d9c
+  ast_path: 'body[28]/body[2]/body[2]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:e2a23faf1010c19a8b83cb3ac9c3439511c2a4f625cc4bb576305987c5ef97ae'
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=97624a174e31d397
+  owner: john
+  reason: |-
+    Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T19:59:31.745512+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The finding is R6 (silent-except) on a try/except around stable_hash(data) when the quarantined flag is set. The data parameter at this point is explicitly Tier-3 quarantined row data that may contain NaN/Infinity — values stable_hash legitimately rejects with ValueError/TypeError. The except does not silently swallow: it falls back to repr_hash, which is a documented canonical.py fallback for non-canonical values, and the resulting hash is still recorded in the audit trail. This is a genuine Tier-3 boundary coercion (record what we got via a documented fallback hash), not silent recovery — absence/badness is preserved as a distinct hash rather than fabricated. The exception types are narrow and the fallback path is explicit and auditable.
+  file_fingerprint: d14b48bc2c77d644d6f6af6ec3002a2ccbcc3ec2b5a2b20926cf87e3ab858d69
+  ast_path: 'body[21]/body[9]/body[2]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:173723c3a223403b40d0aed23711b986d1d16e7ab63439c06b90182d11c47993'
+- key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=392656e9caba2bde
+  owner: john
+  reason: |-
+    Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T19:59:39.911838+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The except clause is at a genuine Tier-3 quarantine path: `quarantined=True` signals the data is known-malformed external content that may contain NaN/Infinity, which canonical_json explicitly rejects. The fallback is not silent — it substitutes a deterministic `{"_repr": repr(data)}` envelope so the audit trail still records what was received (preserving the auditability principle that absence/malformation is recorded, not hidden). This is the documented coerce-at-boundary pattern, not error swallowing, and the non-quarantined branch correctly lets canonical_json raise. R6's concern (swallowing without an explicit recovery result) is addressed because the except produces an explicit, recorded payload.
+  file_fingerprint: d14b48bc2c77d644d6f6af6ec3002a2ccbcc3ec2b5a2b20926cf87e3ab858d69
+  ast_path: 'body[21]/body[9]/body[5]/body[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:42d8df88ae7ae86e9fcfc0ba3b0f2e7ed736e11d7fe49e5dfec20b03bee6a7e8'
+- key: core/checkpoint/recovery.py:R5:RecoveryManager:reconstruct_token_row:fp=b8840fd73f01302a
+  owner: john
+  reason: |-
+    Tier-1 integrity guard on the payload-store envelope: reconstruct_token_row reads a {data, contract} envelope persisted in tokens.token_data_ref (our own audit data). The isinstance/shape check raises AuditIntegrityError when the deserialized 
+      envelope is not a dict carrying both 'data' and 'contract' keys — surfacing corruption loudly rather than coercing or defaulting. This is offensive programming on Tier-1 data (crash on anomaly per the policy), not defensive suppression; well-formed envelopes 
+      proceed and integrity failures propagate.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T20:08:41.305177+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    The isinstance check guards a deserialized envelope read from our own payload store (Tier-1 audit data) and raises AuditIntegrityError on any shape anomaly rather than coercing or defaulting. This is the policy-prescribed offensive pattern for Tier-1 data: crash loudly on corruption. The check has no recovery path, no .get() fallback, and no fabrication — malformed envelopes propagate as integrity errors. R5's concern (masking contract violations) is directly addressed: the isinstance is the detector, not a silencer.
+  file_fingerprint: a1fe26f104d7271e276a9f4cf6044fc2ebc67d0824ea2001cf7013e8029f7dd9
+  ast_path: 'body[26]/body[7]/body[4]/test/values[0]/operand'
+  judge_metadata_signature: 'hmac-sha256:v1:83eb10e5595011d4206bf3aed471db84898e44cbcd0220ea58842ccc72c4bf67'

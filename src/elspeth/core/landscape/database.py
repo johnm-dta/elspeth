@@ -101,6 +101,16 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("preflight_results", "name"),
     ("preflight_results", "result_json"),
     ("preflight_results", "created_at"),
+    # Epoch 11: resume fork/expand/coalesce re-emit fix (F1).
+    # token_data_ref persists per-token payloads for expand children + coalesce merged tokens.
+    # resume_checkpoint_id marks resume re-drives so explain() can distinguish them from
+    # run-1 tenacity retries (filters on resume_checkpoint_id IS NULL).
+    ("tokens", "token_data_ref"),
+    ("node_states", "resume_checkpoint_id"),
+    # F3 co-fix: the OpenRouter catalog columns (epoch 10) were never added to the
+    # Postgres staleness backstop, so a stale Postgres DB would slip past validation.
+    ("runs", "openrouter_catalog_sha256"),
+    ("runs", "openrouter_catalog_source"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).

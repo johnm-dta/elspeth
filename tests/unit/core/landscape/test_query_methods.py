@@ -18,6 +18,7 @@ from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.payload_store import IntegrityError as PayloadIntegrityError
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape import LandscapeDB, QueryRepository
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.factory import RecorderFactory
@@ -34,6 +35,9 @@ from elspeth.core.landscape.row_data import RowDataResult, RowDataState
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+# Minimal contract for tests that only care about token lifecycle, not contract content.
+_MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 
 
 def _setup(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFactory]:
@@ -282,24 +286,30 @@ class TestGetRowData:
 
     def test_never_stored_when_no_payload_ref(self):
         """Row without source_data_ref → NEVER_STORED."""
-        # Factory with no payload store — create_row will not store payload
-        setup = make_recorder_with_run(run_id="run-1", source_node_id="source-0", source_plugin_name="csv")
-        factory = setup.factory
+        # Explicitly create factory with NO payload store — create_row will not store payload
+        # (Note: make_factory defaults to MockPayloadStore to support expand/coalesce;
+        # this test needs a storeless factory to verify the NEVER_STORED code path.)
+        db = make_landscape_db()
+        factory = RecorderFactory(db)  # No payload store
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="source-0",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
         factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
 
-        # Verify the row has no source_data_ref
+        # With no store, create_row produces no source_data_ref
         row = factory.query.get_row("row-1")
         assert row is not None
-        if row.source_data_ref is None:
-            result = factory.query.get_row_data("row-1")
-            assert result.state == RowDataState.NEVER_STORED
-            assert result.data is None
-        else:
-            # If the factory sets a ref even without a store, this row is
-            # STORE_NOT_CONFIGURED — covered by the next test
-            result = factory.query.get_row_data("row-1")
-            assert result.state == RowDataState.STORE_NOT_CONFIGURED
-            assert result.data is None
+        assert row.source_data_ref is None, "Factory with no payload store must not set source_data_ref"
+        result = factory.query.get_row_data("row-1")
+        assert result.state == RowDataState.NEVER_STORED
+        assert result.data is None
 
     def test_store_not_configured_when_ref_exists_but_no_store(self):
         """Row has source_data_ref but QueryRepository has no payload_store → STORE_NOT_CONFIGURED."""
@@ -491,6 +501,8 @@ class TestGetTokenParents:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id="tok-1", run_id="run-1"), TokenRef(token_id="tok-2", run_id="run-1")],
             row_id="row-1",
+            merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         parents = factory.query.get_token_parents(merged.token_id)
@@ -1108,6 +1120,8 @@ class TestGetAllTokenParentsForRun:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id="tok-1", run_id="run-1"), TokenRef(token_id="tok-2", run_id="run-1")],
             row_id="row-1",
+            merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
 
         parents = factory.query.get_all_token_parents_for_run("run-1")
@@ -1149,7 +1163,20 @@ class TestExplainRow:
             factory.query.explain_row("wrong-run", "row-1")
 
     def test_payload_available_false_when_no_payload_store(self):
-        _, factory = _setup()
+        # Explicitly use a factory with no payload store so source_data_ref is absent.
+        # (make_factory now defaults to MockPayloadStore; override for this path.)
+        db = make_landscape_db()
+        factory = RecorderFactory(db)  # No payload store
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="source-0",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
         factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
 
         lineage = factory.query.explain_row("run-1", "row-1")
@@ -1178,7 +1205,20 @@ class TestExplainRow:
         assert lineage.created_at is not None
 
     def test_source_data_none_without_payload_store(self):
-        _, factory = _setup()
+        # Explicitly use a factory with no payload store so source_data_ref is absent.
+        # (make_factory now defaults to MockPayloadStore; override for this path.)
+        db = make_landscape_db()
+        factory = RecorderFactory(db)  # No payload store
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+        factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="source-0",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
         factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
 
         lineage = factory.query.explain_row("run-1", "row-1")

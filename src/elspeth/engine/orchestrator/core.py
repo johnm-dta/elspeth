@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.payload_store import PayloadStore
+    from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
     from elspeth.core.events import EventBusProtocol
     from elspeth.engine.orchestrator.types import TelemetryManagerProtocol
 
@@ -2528,6 +2529,11 @@ class Orchestrator:
 
         unprocessed_rows = recovery.get_unprocessed_row_data(run_id, payload_store, source_schema_class=source_schema_class)
 
+        # F1 fix: pre-compute incomplete child tokens so the resume loop can dispatch
+        # partial-fork/expand/coalesce rows via mid-DAG continuation rather than
+        # whole-row restart (which would re-emit already-completed branches).
+        incomplete_by_row = recovery.get_incomplete_tokens_by_row(run_id)
+
         return ResumeState(
             factory=factory,
             run_id=run_id,
@@ -2535,6 +2541,8 @@ class Orchestrator:
             restored_coalesce_state=restored_coalesce_state,
             unprocessed_rows=unprocessed_rows,
             schema_contract=schema_contract,
+            incomplete_by_row=incomplete_by_row,
+            recovery_manager=recovery,
         )
 
     def resume(
@@ -2586,6 +2594,10 @@ class Orchestrator:
             restored_coalesce_state = None
         schema_contract = state.schema_contract
         unprocessed_rows = state.unprocessed_rows
+        # F1 fix: pre-computed by _reconstruct_resume_state; forwarded to the loop.
+        incomplete_by_row = state.incomplete_by_row
+        recovery_manager = state.recovery_manager
+        resume_checkpoint_id = resume_point.checkpoint.checkpoint_id
         resume_start_time = time.perf_counter()
 
         # 5. Process unprocessed rows (with graceful shutdown support)
@@ -2654,6 +2666,9 @@ class Orchestrator:
                     settings=settings,
                     payload_store=payload_store,
                     schema_contract=schema_contract,
+                    incomplete_by_row=incomplete_by_row,
+                    recovery_manager=recovery_manager,
+                    resume_checkpoint_id=resume_checkpoint_id,
                     shutdown_event=active_event,
                 )
 
@@ -2663,20 +2678,104 @@ class Orchestrator:
             # Fix: elspeth-rapid-sg0q — previously this was after the finally block,
             # meaning RunFinished was emitted after telemetry flush (never exported).
             #
-            # Phase 2.2 (elspeth-0de989c56d): pick the new four-value terminal
-            # status from the row-count shape returned by the resume's row
-            # processing.
+            # F2 (resume-fork-reemit) — UNIFY both resume branches on the audit
+            # trail.  This with-unprocessed-rows branch previously derived its
+            # terminal status + counters from the resume loop's *local* counters
+            # (only what THIS resume call reprocessed), so a resumed run's
+            # RunResult disagreed field-for-field with an uninterrupted run
+            # (e.g. a resumed 1-row 2-branch fork reported rows_succeeded=1,
+            # rows_forked=0 instead of the cumulative 2, 1) — while the
+            # no-unprocessed-rows branch already reconstructed cumulative
+            # counters from token_outcomes.  Both branches now finalize from the
+            # SAME audit-derived cumulative (status, counters).
+            #
+            # ORDERING: this runs AFTER _process_resumed_rows returned, i.e.
+            # after run_resume_processing_loop's end-of-source aggregation /
+            # coalesce flushes, after _flush_and_write_sinks recorded sink
+            # diversions, and after sweep_deferred_invariants_or_crash — so every
+            # outcome this resume wrote is committed and visible to the derive
+            # query.  Deriving before those flushes commit would undercount.
+            # The status returned here is computed from the audit-only counters
+            # (rows_coalesce_failed == 0, see graft below); it is intentionally
+            # discarded and RECOMPUTED post-graft so terminal_status stays a pure
+            # function of the FINAL reconciled counters — the same set the
+            # uninterrupted path derives from. This is correctness-by-symmetry,
+            # NOT crash-prevention: a coalesce failure always co-increments
+            # rows_failed (outcomes.py flush_coalesce_pending does both, and the
+            # consumed branches land in audit as UNROUTED), so derive's audit-only
+            # rows_failed is already > 0 → failure_indicator already True → the
+            # pre-graft status is already COMPLETED_WITH_FAILURES, never COMPLETED.
+            # So grafting rows_coalesce_failed does not flip the status in any
+            # real flow and the RunResult biconditional's COMPLETED+failure arm
+            # cannot fire here. Recomputing is still the honest, future-proof
+            # construction (status derived from the same final counters as the
+            # uninterrupted path) and guards against a future counter whose graft
+            # WOULD be status-bearing.
+            _audit_only_status, audit_counters = derive_resume_terminal_status_from_audit(factory, run_id)
+
+            # F2 — per-field "best available source" graft.
+            #
+            # Each counter field is taken from its best available source. For
+            # the 11 fields the audit trail records per-token, that source is
+            # derive_resume_terminal_status_from_audit (cumulative, queryable
+            # from token_outcomes). rows_coalesce_failed is the LONE field the
+            # audit trail does NOT record: a failed coalesce records per-branch
+            # FAILURE/UNROUTED outcomes (so rows_failed reconstructs) but the
+            # coalesce-operation roll-up is emitted to TELEMETRY ONLY
+            # (outcomes.py flush_coalesce_pending → _emit_failed_coalesce_telemetry;
+            # there is no queryable token_outcomes signal for it). derive()
+            # therefore has no match arm for it and returns 0. For the with-rows
+            # branch its best source is the live re-drive counter captured by
+            # flush_coalesce_pending into the resume loop's `result`, so graft it
+            # back over the audit-derived 0.
+            #
+            # NOTE (scope + reachability): this recovers only coalesce failures
+            # that occurred DURING THIS RESUME's re-drive. Coalesce failures from
+            # run-1 (before the interrupt) were live-counter-only — never
+            # persisted as a queryable signal — and are unrecoverable here.
+            # Making rows_coalesce_failed reconstructable cumulatively (incl.
+            # run-1) is a schema/epoch change tracked as an operator follow-up;
+            # the no-rows branch already ships the 0 for the same structural
+            # reason.
+            #
+            # This graft is a LIVE REGRESSION FIX, not future-proofing. The
+            # during-re-drive coalesce failure is CONFIRMED reachable: the resume
+            # loop calls handle_coalesce_timeouts → CoalesceExecutor.check_timeouts
+            # PER-ROW (resume.py:268-276), and a coalesce that times out before
+            # quorum during re-drive increments rows_coalesce_failed
+            # (outcomes.py:447/462, "quorum_not_met_at_timeout") in the live
+            # `result`. Pre-F2 that count was reported; F2 (pre-graft) discarded it
+            # by replacing `result` with audit-derived counters; this graft
+            # restores it. End-to-end regression test (with observed removed-graft
+            # red / restored-graft green):
+            # test_adr_019_resume_counter_parity.py::
+            #   test_resume_grafts_rows_coalesce_failed_from_timeout_redrive.
+            #
+            # The other increment site — flush_pending (end-of-source,
+            # "incomplete_branches") — does NOT produce a during-re-drive failure
+            # in deterministic flows (lost branches fail immediately via
+            # notify_branch_lost without touching this counter; buffered branches
+            # are restored-to-completion by restore_from_checkpoint; an unproduced
+            # coalesce branch is DAG-rejected), so on that path the graft copies
+            # 0-over-0 and is a no-op. The timeout path is where it earns its keep.
+            audit_counters.rows_coalesce_failed = result.rows_coalesce_failed
+
+            # Recompute terminal_status from the final reconciled counters (now
+            # carrying the grafted rows_coalesce_failed) via the pure L0 function
+            # — NOT by re-calling derive_resume_terminal_status_from_audit, which
+            # would re-query token_outcomes and silently re-zero the graft.
             terminal_status = derive_terminal_run_status(
-                rows_processed=result.rows_processed,
-                rows_succeeded=result.rows_succeeded,
-                rows_failed=result.rows_failed,
-                rows_routed_success=result.rows_routed_success,
-                rows_routed_failure=result.rows_routed_failure,
-                rows_quarantined=result.rows_quarantined,
-                rows_coalesce_failed=result.rows_coalesce_failed,
+                rows_processed=audit_counters.rows_processed,
+                rows_succeeded=audit_counters.rows_succeeded,
+                rows_failed=audit_counters.rows_failed,
+                rows_routed_success=audit_counters.rows_routed_success,
+                rows_routed_failure=audit_counters.rows_routed_failure,
+                rows_quarantined=audit_counters.rows_quarantined,
+                rows_coalesce_failed=audit_counters.rows_coalesce_failed,
             )
+
             factory.run_lifecycle.finalize_run(run_id, status=terminal_status)
-            result = replace(result, status=terminal_status)
+            result = audit_counters.to_run_result(run_id, terminal_status)
 
             # 7. Emit RunFinished telemetry
             resume_duration_ms = (time.perf_counter() - resume_start_time) * 1000
@@ -2749,6 +2848,9 @@ class Orchestrator:
         *,
         payload_store: PayloadStore,
         schema_contract: SchemaContract,
+        incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]],
+        recovery_manager: RecoveryManager,
+        resume_checkpoint_id: str,
         shutdown_event: threading.Event | None = None,
     ) -> RunResult:
         """Process unprocessed rows during resume.
@@ -2811,6 +2913,11 @@ class Orchestrator:
                 loop_ctx,
                 unprocessed_rows,
                 schema_contract,
+                incomplete_by_row=incomplete_by_row,
+                recovery_manager=recovery_manager,
+                payload_store=payload_store,
+                run_id=run_id,
+                resume_checkpoint_id=resume_checkpoint_id,
                 shutdown_event=shutdown_event,
             )
 

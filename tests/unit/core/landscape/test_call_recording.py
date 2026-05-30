@@ -24,6 +24,24 @@ def _setup(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFactory, str]
     return db, factory, state.state_id
 
 
+def _setup_no_store(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFactory, str]:
+    """Like _setup() but with NO payload store.
+
+    Use for tests that specifically verify "hash only, no store" code paths.
+    make_recorder_with_run() defaults to MockPayloadStore (required for expand/coalesce),
+    so those tests need an explicitly storeless factory.
+    """
+    db = make_landscape_db()
+    factory = RecorderFactory(db)  # No payload store
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+    register_test_node(factory.data_flow, run_id, "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
+    register_test_node(factory.data_flow, run_id, "transform-1", plugin_name="transform")
+    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    factory.data_flow.create_token("row-1", token_id="tok-1")
+    state = factory.execution.begin_node_state("tok-1", "transform-1", run_id, 0, {"name": "test"}, state_id="state-1")
+    return db, factory, state.state_id
+
+
 def _setup_with_operation(
     *,
     run_id: str = "run-1",
@@ -299,8 +317,11 @@ class TestBeginOperation:
 
     def test_input_hash_persisted_without_payload_store(self):
         """Hash must be computed even when no payload store is configured."""
-        setup = make_recorder_with_run(run_id="run-1", source_node_id="source-0", source_plugin_name="csv")
-        factory = setup.factory
+        # Use a storeless factory explicitly — make_recorder_with_run defaults to MockPayloadStore
+        db = make_landscape_db()
+        factory = RecorderFactory(db)  # No payload store
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+        register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
 
         op = factory.execution.begin_operation("run-1", "source-0", "source_load", input_data={"file": "data.csv"})
 
@@ -381,8 +402,11 @@ class TestCompleteOperation:
 
     def test_output_hash_persisted_without_payload_store(self):
         """Output hash must be computed even when no payload store is configured."""
-        setup = make_recorder_with_run(run_id="run-1", source_node_id="source-0", source_plugin_name="csv")
-        factory = setup.factory
+        # Use a storeless factory explicitly — make_recorder_with_run defaults to MockPayloadStore
+        db = make_landscape_db()
+        factory = RecorderFactory(db)  # No payload store
+        factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
+        register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
         op = factory.execution.begin_operation("run-1", "source-0", "source_load")
 
         factory.execution.complete_operation(op.operation_id, "completed", output_data={"count": 42}, duration_ms=100)
@@ -830,7 +854,7 @@ class TestGetCallResponseData:
 
     def test_returns_hash_only_without_payload_store(self):
         """Without a payload store, response_ref is never set but response_hash is — state is HASH_ONLY."""
-        _db, factory, state_id = _setup()
+        _db, factory, state_id = _setup_no_store()
         idx = factory.execution.allocate_call_index(state_id)
         call = factory.execution.record_call(
             state_id,
@@ -868,7 +892,7 @@ class TestGetCallResponseData:
     def test_returns_hash_only_when_response_recorded_without_payload_store(self):
         """When response_data is provided but no payload store exists,
         response_hash is set but response_ref is NULL — state should be HASH_ONLY."""
-        _db, factory, state_id = _setup()
+        _db, factory, state_id = _setup_no_store()
         idx = factory.execution.allocate_call_index(state_id)
         call = factory.execution.record_call(
             state_id,

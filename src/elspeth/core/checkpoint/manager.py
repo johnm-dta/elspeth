@@ -311,7 +311,10 @@ class CheckpointManager:
     def delete_checkpoints(self, run_id: str) -> int:
         """Delete all checkpoints for a completed run.
 
-        Called after successful run completion to clean up.
+        Called after successful run completion to clean up. Checkpoints are deletable
+        progress state — node_states.resume_checkpoint_id is a marker-only id (no FK),
+        so the resume-provenance fact endures on node_states even after its checkpoint
+        row is purged here.
 
         Args:
             run_id: The run to clean up

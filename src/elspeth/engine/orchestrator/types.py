@@ -29,13 +29,14 @@ from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 
 if TYPE_CHECKING:
-    from elspeth.contracts import PendingOutcome, SinkProtocol, SourceProtocol, TokenInfo
+    from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.plugin_context import PluginContext
-    from elspeth.contracts.schema_contract import SchemaContract
+    from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
     from elspeth.contracts.types import CoalesceName, GateName, NodeID, SinkName
+    from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
     from elspeth.core.config import AggregationSettings, CoalesceSettings, GateSettings
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.coalesce_executor import CoalesceExecutor
@@ -85,6 +86,16 @@ class RowProcessorHandle(Protocol):
         raise NotImplementedError
 
     def get_coalesce_checkpoint_state(self) -> CoalesceCheckpointState | None:
+        raise NotImplementedError
+
+    def resume_incomplete_token(
+        self,
+        spec: IncompleteTokenSpec,
+        row_data: PipelineRow,
+        ctx: PluginContext,
+        *,
+        resume_checkpoint_id: str,
+    ) -> list[RowResult]:
         raise NotImplementedError
 
     def resolve_sink_step(self) -> int:
@@ -506,9 +517,20 @@ class ResumeState:
     restored_coalesce_state: CoalesceCheckpointState | None
     unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]]
     schema_contract: SchemaContract
+    # F1 fix: incomplete child tokens grouped by row_id — used by the resume loop
+    # to dispatch partial-fork/expand/coalesce rows via mid-DAG continuation
+    # instead of whole-row restart (which re-emits completed branches).
+    incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]]
+    # RecoveryManager needed by resume loop for reconstruct_token_row.
+    recovery_manager: RecoveryManager
 
     def __post_init__(self) -> None:
-        freeze_fields(self, "restored_aggregation_state")
+        # incomplete_by_row is a dict[str, list[IncompleteTokenSpec]] of frozen specs;
+        # deep_freeze converts it to MappingProxyType[str, tuple[IncompleteTokenSpec, ...]].
+        # The resume loop consumes it via membership (`row_id in incomplete_by_row`) and
+        # iteration (`for s in incomplete_by_row[row_id]`), both fine on the frozen shape.
+        # recovery_manager is a live service object (not a container) — NOT frozen here.
+        freeze_fields(self, "restored_aggregation_state", "incomplete_by_row")
         # unprocessed_rows contains raw row dicts that PipelineRow expects as
         # plain dict — deep_freeze would convert them to MappingProxyType.
         if not isinstance(self.unprocessed_rows, tuple):

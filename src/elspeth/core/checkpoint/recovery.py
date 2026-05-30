@@ -13,13 +13,14 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Row
 
 from elspeth.contracts import (
     Checkpoint,
     PayloadNotFoundError,
     PayloadStore,
+    PipelineRow,
     PluginSchema,
     ResumeCheck,
     ResumePoint,
@@ -36,6 +37,7 @@ from elspeth.core.checkpoint.serialization import checkpoint_loads
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.schema import (
+    node_states_table,
     rows_table,
     runs_table,
     token_outcomes_table,
@@ -54,10 +56,36 @@ _RESUMABLE_RUN_STATUSES = frozenset({RunStatus.FAILED, RunStatus.INTERRUPTED})
 _CheckpointStateCacheKey = tuple[str, str | None, str | None]
 
 __all__ = [
+    "IncompleteTokenSpec",
     "RecoveryManager",
     "ResumeCheck",  # Re-exported from contracts for convenience
     "ResumePoint",  # Re-exported from contracts for convenience
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class IncompleteTokenSpec:
+    """A non-delegation child token that lacks a terminal outcome on a resumed run.
+
+    Identity fields read directly from persisted columns (Tier-1: no defaults, no
+    coercion — TokenInfo.__post_init__ rejects garbage downstream). ``token_data_ref``
+    is NULL for fork children (they share the parent/source payload, retrievable by
+    ``row_id``) and set for expand children and post-coalesce merged tokens.
+    ``max_attempt`` is the highest ``attempt`` already recorded for this token in
+    ``node_states`` (-1 if none); the re-drive uses ``max_attempt + 1``.
+
+    All fields are scalars or None — no deep_freeze guard needed (frozen=True suffices).
+    """
+
+    token_id: str
+    row_id: str
+    branch_name: str | None
+    fork_group_id: str | None
+    join_group_id: str | None
+    expand_group_id: str | None
+    token_data_ref: str | None
+    step_in_pipeline: int | None
+    max_attempt: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,6 +502,160 @@ class RecoveryManager:
 
         return unprocessed
 
+    def get_incomplete_tokens_by_row(self, run_id: str) -> dict[str, list[IncompleteTokenSpec]]:
+        """Return incomplete non-delegation child tokens, grouped by row_id.
+
+        A token is incomplete when it is NOT a delegation marker (FORK_PARENT /
+        EXPAND_PARENT) and has NO completed terminal outcome. Mirrors get_unprocessed_rows'
+        completion semantics (shared _DELEGATION_PATHS) so recovery selection and resume
+        reconstruction cannot drift apart. Returns fork, expand, AND post-coalesce tokens —
+        each is dispatched in resume_incomplete_token.
+
+        BUFFERED-TOKEN EXCLUSION (mirrors get_unprocessed_rows' buffered exclusion):
+        tokens that are buffered in restored aggregation state OR held at a restored
+        coalesce barrier (collected by _get_buffered_checkpoint_token_ids — see that method
+        for the two arms) are EXCLUDED at the token level here. Such tokens are NOT re-driven
+        on resume: they are restored into the executor's in-memory state (aggregation buffer /
+        coalesce _pending) by restore_from_checkpoint and flushed/merged FROM that state.
+        Re-driving them double-emits or crashes the barrier:
+        - A coalesce-held branch re-driven re-arrives at the barrier where it already waits
+          (restored into _pending) → CoalesceExecutor.accept's duplicate-arrival guard fires
+          (OrchestrationInvariantError).
+        - An aggregation-buffered branch re-driven re-enters processing while it is ALSO
+          flushed from the restored buffer at end-of-source → double terminal outcome /
+          duplicate physical sink write.
+
+        Exclusion is at the TOKEN level (filter before grouping), so a row with mixed state
+        (one buffered token + one genuinely-incomplete sibling) still returns the
+        genuinely-incomplete token, while a row whose only incomplete tokens are all buffered
+        does not appear in the returned dict at all. This restores the invariant that
+        get_incomplete_tokens_by_row's rows are a subset of get_unprocessed_rows (both
+        functions now apply the same buffered exclusion).
+
+        If no checkpoint exists the run cannot be resumed, so no exclusion is applied
+        (the empty buffered set is a no-op).
+        """
+        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
+        buffered_token_ids = self._get_buffered_checkpoint_token_ids(checkpoint) if checkpoint is not None else set()
+
+        with self._db.engine.connect() as conn:
+            delegation_tokens = (
+                select(token_outcomes_table.c.token_id)
+                .where(token_outcomes_table.c.run_id == run_id)
+                .where(token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
+            ).scalar_subquery()
+            terminal_tokens = (
+                select(token_outcomes_table.c.token_id)
+                .where(token_outcomes_table.c.run_id == run_id)
+                .where(token_outcomes_table.c.completed == 1)
+                .where(~token_outcomes_table.c.path.in_(_DELEGATION_PATHS))
+            ).scalar_subquery()
+            max_attempt_sq = (
+                select(func.max(node_states_table.c.attempt))
+                .where(node_states_table.c.token_id == tokens_table.c.token_id)
+                .where(node_states_table.c.run_id == run_id)
+                .correlate(tokens_table)
+                .scalar_subquery()
+            )
+            query = (
+                select(
+                    tokens_table.c.token_id,
+                    tokens_table.c.row_id,
+                    tokens_table.c.branch_name,
+                    tokens_table.c.fork_group_id,
+                    tokens_table.c.join_group_id,
+                    tokens_table.c.expand_group_id,
+                    tokens_table.c.token_data_ref,
+                    tokens_table.c.step_in_pipeline,
+                    max_attempt_sq.label("max_attempt"),
+                )
+                .where(tokens_table.c.run_id == run_id)
+                .where(~tokens_table.c.token_id.in_(delegation_tokens))
+                .where(~tokens_table.c.token_id.in_(terminal_tokens))
+                .order_by(tokens_table.c.step_in_pipeline, tokens_table.c.token_id)
+            )
+            rows = conn.execute(query).fetchall()
+
+        by_row: dict[str, list[IncompleteTokenSpec]] = {}
+        for r in rows:
+            # Buffered/held tokens are restored-and-flushed from checkpoint state, not
+            # re-driven (see docstring). Exclude at the token level so mixed-state rows
+            # still return their genuinely-incomplete tokens.
+            if r.token_id in buffered_token_ids:
+                continue
+            by_row.setdefault(r.row_id, []).append(
+                IncompleteTokenSpec(
+                    token_id=r.token_id,
+                    row_id=r.row_id,
+                    branch_name=r.branch_name,
+                    fork_group_id=r.fork_group_id,
+                    join_group_id=r.join_group_id,
+                    expand_group_id=r.expand_group_id,
+                    token_data_ref=r.token_data_ref,
+                    step_in_pipeline=r.step_in_pipeline,
+                    max_attempt=-1 if r.max_attempt is None else int(r.max_attempt),
+                )
+            )
+        return by_row
+
+    def reconstruct_token_row(
+        self,
+        spec: IncompleteTokenSpec,
+        run_id: str,
+        source_row: PipelineRow,
+        payload_store: PayloadStore,
+    ) -> PipelineRow:
+        """Build the PipelineRow to re-drive an incomplete token with.
+
+        Fork children share the source payload → return source_row unchanged. Expand
+        children / post-coalesce tokens carry a self-contained {data, contract} envelope
+        in token_data_ref → restore both type-faithfully (checkpoint_loads +
+        SchemaContract.from_checkpoint, which hash-validates the contract). No nodes-table
+        lookup: the contract the token was produced under is persisted with its payload
+        (ADDENDUM 3 — nodes.output_contract_json is NULL for non-source nodes in prod,
+        making the nodes-table approach unsalvageable).
+
+        Args:
+            spec: IncompleteTokenSpec from get_incomplete_tokens_by_row.
+            run_id: The run being resumed (for diagnostic messages).
+            source_row: The source PipelineRow for this row_id (used for fork children
+                that share the parent/source payload).
+            payload_store: PayloadStore to retrieve token_data_ref bytes from.
+
+        Returns:
+            PipelineRow to re-drive the incomplete token with.
+
+        Raises:
+            ValueError: If token_data_ref is set but the payload has been purged.
+            AuditIntegrityError: If the retrieved payload is not a valid {data, contract}
+                envelope (Tier-1 corruption guard), or if the contract hash does not match
+                (via SchemaContract.from_checkpoint — Tier-1 integrity).
+        """
+        if spec.token_data_ref is None:
+            return source_row  # fork child — shares the source payload
+
+        try:
+            payload_bytes = payload_store.retrieve(spec.token_data_ref)
+        except PayloadNotFoundError as exc:
+            raise ValueError(
+                f"Incomplete token {spec.token_id} (run {run_id}) payload purged "
+                f"(token_data_ref={spec.token_data_ref!r}) — cannot resume; re-run instead."
+            ) from exc
+
+        envelope = checkpoint_loads(payload_bytes.decode("utf-8"))
+        if not isinstance(envelope, dict) or "data" not in envelope or "contract" not in envelope:
+            raise AuditIntegrityError(
+                f"token_data_ref payload for token {spec.token_id} (run {run_id}) is not a "
+                f"valid {{data, contract}} envelope — audit data corruption (Tier-1 violation). "
+                f"Got type={type(envelope).__name__!r}."
+            )
+
+        # SchemaContract.from_checkpoint validates the version_hash (Tier-1 integrity).
+        # It raises AuditIntegrityError if the hash does not match — crash is correct,
+        # the contract stored in the audit trail is our data (Tier-1) and must be pristine.
+        contract = SchemaContract.from_checkpoint(envelope["contract"])
+        return PipelineRow(envelope["data"], contract)
+
     def _get_buffered_checkpoint_token_ids(self, checkpoint: Checkpoint) -> set[str]:
         """Collect token IDs restored from checkpoint state."""
         buffered_token_ids: set[str] = set()
@@ -567,7 +749,7 @@ class RecoveryManager:
                 f"Resume aborted - audit trail may be corrupted or tampered with."
             ) from e
         except (ValueError, KeyError) as e:
-            # ContractAuditRecord.from_json() raises json.JSONDecodeError (subclass of
+            # SchemaContract deserialization raises json.JSONDecodeError (subclass of
             # ValueError) for malformed JSON, or KeyError for missing required fields.
             # Both indicate Tier 1 data corruption — stored contract JSON is garbage.
             raise CheckpointCorruptionError(

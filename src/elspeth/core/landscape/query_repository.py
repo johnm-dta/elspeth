@@ -10,7 +10,7 @@ import json
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from elspeth.contracts import (
     Call,
@@ -520,6 +520,71 @@ class QueryRepository:
         )
         db_rows = self._ops.execute_fetchall(query)
         return [self._token_outcome_loader.load(r) for r in db_rows]
+
+    def count_distinct_source_rows_with_terminal_outcome(self, run_id: str) -> int:
+        """Count the distinct source rows that reached a terminal outcome.
+
+        ``rows_processed`` semantics — the canonical definition (F2,
+        elspeth-resume-fork-reemit) — is "one per *source row*", NOT one per
+        terminal token.  The live processing loops increment ``rows_processed``
+        exactly once per source row pulled from the source iterator
+        (``resume.py`` ``run_resume_processing_loop`` and the main
+        ``_run_main_processing_loop``), and structural fan-out
+        (fork / expand) or fan-in (aggregation / coalesce) never moves that
+        counter.  Reconstructing it from the audit trail therefore CANNOT be a
+        per-token tally: a 1-source-row fork emits two leaf tokens, a
+        3-source-row aggregation emits one result token, a 1-source-row expand
+        emits N children — yet each contributes exactly its *source rows* to
+        ``rows_processed`` (1, 3, 1 respectively).
+
+        ``row_id`` is the stable source-row identity (CLAUDE.md DAG model):
+        fork and expand children inherit their parent's ``row_id``
+        (``tokens.expand_token`` / ``fork_token`` pass ``row_id=parent.row_id``),
+        and aggregation's ``BATCH_CONSUMED`` tokens retain their own source
+        ``row_id`` while the synthetic result token reuses one of them.  So the
+        faithful reconstruction is the count of DISTINCT ``row_id`` among tokens
+        that reached a *terminal* outcome (``completed = 1``) — this counts each
+        source row once regardless of how many tokens it spawned, and matches an
+        uninterrupted run field-for-field (verified across fork / aggregation /
+        expand archetypes).
+
+        ``completed = 1`` is the terminal boundary: it includes structural
+        TRANSIENT parents (``FORK_PARENT`` / ``EXPAND_PARENT``) and
+        ``BATCH_CONSUMED`` tokens (all terminal), and excludes non-terminal
+        ``BUFFERED`` rows (``completed = 0``) — a row whose only audit record is
+        ``BUFFERED`` has not yet been processed to a terminal state, so it must
+        not inflate ``rows_processed``.
+
+        Args:
+            run_id: Run ID
+
+        Returns:
+            Distinct source-row count among terminal token outcomes.
+
+        Raises:
+            AuditIntegrityError: If the count query returns no row — a
+                ``COUNT`` aggregate always returns exactly one row, so a NULL
+                result indicates Tier-1 audit-database corruption.
+        """
+        query = (
+            select(func.count(func.distinct(tokens_table.c.row_id)))
+            .select_from(
+                token_outcomes_table.join(
+                    tokens_table,
+                    (token_outcomes_table.c.token_id == tokens_table.c.token_id) & (token_outcomes_table.c.run_id == tokens_table.c.run_id),
+                )
+            )
+            .where(token_outcomes_table.c.run_id == run_id)
+            .where(token_outcomes_table.c.completed == 1)
+        )
+        r = self._ops.execute_fetchone(query)
+        if r is None:
+            raise AuditIntegrityError(
+                f"count_distinct_source_rows_with_terminal_outcome returned no row for run {run_id!r} — "
+                f"a COUNT aggregate must always return exactly one row; a NULL result is a Tier-1 "
+                f"audit-database integrity violation."
+            )
+        return int(r[0])
 
     # === Explain Methods (Graceful Degradation) ===
 

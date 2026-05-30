@@ -57,7 +57,10 @@ metadata = MetaData()
 #  10 → OpenRouter catalog snapshot anchor (audit-completeness):
 #        runs.openrouter_catalog_sha256 and runs.openrouter_catalog_source
 #        record which model catalog blessed each run's decisions.
-SQLITE_SCHEMA_EPOCH = 10
+#  11 → resume fork/expand/coalesce re-emit fix: tokens.token_data_ref persists per-token
+#        payloads (expand children + coalesce merged tokens) and node_states.resume_checkpoint_id
+#        marks resume re-drives, so incomplete tokens are reconstructable + attributable.
+SQLITE_SCHEMA_EPOCH = 11
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
@@ -218,6 +221,12 @@ tokens_table = Table(
     Column("expand_group_id", String(32), nullable=True, index=True),  # For deaggregation
     Column("branch_name", String(64)),
     Column("step_in_pipeline", Integer),  # Step where this token was created (fork/coalesce/expand)
+    # Payload-store ref for a token whose row_data differs from its source row:
+    # expand/deaggregation children (independently-transformed data) AND post-coalesce
+    # merged tokens (the merged row, computed in memory at barrier time). NULL for fork
+    # children, which share the parent/source payload retrievable by row_id. Enables
+    # faithful reconstruction of incomplete expand/coalesce tokens on resume (epoch 11).
+    Column("token_data_ref", String(64), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     # Composite unique target for downstream composite FKs (token_id, run_id)
     UniqueConstraint("token_id", "run_id"),
@@ -307,6 +316,21 @@ node_states_table = Table(
     Column("success_reason_json", Text),  # TransformSuccessReason for successful transforms
     Column("started_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True)),
+    # Resume provenance marker (epoch 11): NULL for every node_state written during the
+    # original run; set to the resumed-from checkpoint id for every node_state written
+    # while re-driving a reconstructed incomplete token on resume. Makes a resume re-drive
+    # (which records at attempt = max+1 under the SAME run_id) provably distinguishable
+    # from a run-1 tenacity retry — explain() filters on resume_checkpoint_id IS NULL.
+    #
+    # MARKER-ONLY (no FK): the id is a durable provenance fact, like a content hash — it
+    # endures even after its checkpoint row is purged. Checkpoints are deletable progress
+    # state (delete_checkpoints clears them unconditionally on successful completion); the
+    # marker on node_states does NOT keep them alive and carries NO referential constraint
+    # to the checkpoints table. explain() distinguishes resume re-drives from run-1 retries
+    # purely by this column's NULL-ness (resume_checkpoint_id IS NOT NULL), which survives
+    # checkpoint purge. (Operator decision 2026-05-30, faithful to "hashes survive payload
+    # deletion".)
+    Column("resume_checkpoint_id", String(64), nullable=True),
     # Composite unique target for run-scoped FKs to node_states.
     UniqueConstraint("state_id", "run_id"),
     UniqueConstraint("token_id", "node_id", "attempt"),

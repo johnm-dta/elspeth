@@ -22,6 +22,10 @@ class TokenInfo:
     - join_group_id: Groups all tokens merged in a coalesce operation
     - expand_group_id: Groups all children from an expand operation
 
+    Resume state (resume_attempt_offset, resume_checkpoint_id): carried on the token —
+    not WorkItem — because SinkExecutor buffers TokenInfos across WorkItem boundaries,
+    so the per-token offset must survive that buffering. See ADDENDUM 4 in the F1 design spec.
+
     Frozen for immutability - use with_updated_data() to create new instances.
     """
 
@@ -32,6 +36,11 @@ class TokenInfo:
     fork_group_id: str | None = None
     join_group_id: str | None = None
     expand_group_id: str | None = None
+    resume_attempt_offset: int = 0  # Added to every node_states.attempt written while
+    # re-driving THIS token on resume, so its records coexist with the append-only run-1
+    # records under UniqueConstraint(token_id, node_id, attempt). 0 = not a resume re-drive.
+    resume_checkpoint_id: str | None = None  # Resumed-from checkpoint id, stamped on every
+    # node_state written during this token's resume re-drive (provenance). None = run-1.
 
     def __post_init__(self) -> None:
         """Validate identity invariants at construction time.
@@ -62,6 +71,12 @@ class TokenInfo:
         This method ensures that when row_data is updated after a transform,
         all identity and lineage metadata (branch_name, fork_group_id,
         join_group_id, expand_group_id) are preserved.
+
+        Critically, resume_attempt_offset and resume_checkpoint_id are also
+        preserved via dataclasses.replace — this is the propagation mechanism that
+        ensures a token re-driven on resume carries its offset through every
+        downstream node_state write (transform → next transform → sink). Dropping
+        these fields here would cause a collision one node downstream.
 
         Use this instead of constructing TokenInfo manually when updating
         a token's data after processing.

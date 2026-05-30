@@ -225,9 +225,15 @@ class TransformExecutor:
         The step position in the DAG is resolved internally via StepResolver
         using transform.node_id, rather than being passed as a parameter.
 
+        Resume state (attempt offset and checkpoint provenance) is read from the
+        token itself (token.resume_attempt_offset, token.resume_checkpoint_id).
+        These fields propagate automatically via TokenInfo.with_updated_data()
+        (which uses dataclasses.replace) so no explicit threading is needed.
+
         Args:
             transform: Transform plugin to execute
-            token: Current token with row data
+            token: Current token with row data; token.resume_attempt_offset and
+                token.resume_checkpoint_id carry the resume state for this token.
             ctx: Plugin context
             attempt: Attempt number for retry tracking (0-indexed, default 0)
 
@@ -270,7 +276,10 @@ class TransformExecutor:
             run_id=ctx.run_id,
             step_index=step,
             input_data=input_dict,
-            attempt=attempt,
+            # resume_attempt_offset is the generation base (run-1 max+1 for a re-driven token;
+            # 0 for run-1 tokens); `attempt` is the tenacity retry index within this generation.
+            attempt=token.resume_attempt_offset + attempt,
+            resume_checkpoint_id=token.resume_checkpoint_id,
         ) as guard:
             # --- LIFECYCLE GUARD (pre-execution) ---
             # Centralized check: ensure on_start() was called before process().

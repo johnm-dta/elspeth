@@ -336,8 +336,14 @@ class TestResumeComprehensive:
         )
 
         # Verify results
-        assert result.rows_processed == 2  # Rows 3 and 4
-        assert result.rows_succeeded == 2
+        # F2 (resume-fork-reemit): the resume RunResult now reports CUMULATIVE
+        # counters reconstructed from the audit trail (both resume branches
+        # finalize via derive_resume_terminal_status_from_audit), not resume-only
+        # counts. 3 rows were pre-marked completed + 2 re-driven here = 5 source
+        # rows reaching a terminal outcome. (Pre-F2 this reported the resume-only
+        # 2 — rows 3 and 4.)
+        assert result.rows_processed == 5
+        assert result.rows_succeeded == 5
         assert result.status == RunStatus.COMPLETED
 
         # Verify output file has all 5 rows
@@ -674,14 +680,18 @@ class TestResumeComprehensive:
             payload_store=payload_store,
         )
 
-        # Verify resume succeeded - should process rows 1-2 (2 rows)
+        # Verify resume succeeded.
+        # F2 (resume-fork-reemit): resume RunResult reports CUMULATIVE counters
+        # from the audit trail. 1 row pre-marked completed (t0) + 2 re-driven
+        # (r1, r2) = 3 source rows reaching a terminal outcome. (Pre-F2 this
+        # reported the resume-only 2.)
         assert result.status == RunStatus.COMPLETED
-        assert result.rows_processed == 2, f"Expected 2 rows processed (r1, r2), got {result.rows_processed}"
+        assert result.rows_processed == 3, f"Expected 3 cumulative rows processed (t0 + r1 + r2), got {result.rows_processed}"
 
         # The fact that resume succeeded without type errors proves datetime restoration worked
         # If schema reconstruction had failed, Pydantic would have kept timestamps as strings
         # and downstream transforms expecting datetime would have crashed
-        assert result.rows_succeeded == 2
+        assert result.rows_succeeded == 3
 
     def test_resume_with_decimal_fields(
         self,
@@ -882,10 +892,13 @@ class TestResumeComprehensive:
             payload_store=payload_store,
         )
 
-        # Verify resume succeeded with Decimal precision preserved - should process row 1 (1 row)
+        # Verify resume succeeded with Decimal precision preserved.
+        # F2 (resume-fork-reemit): resume RunResult reports CUMULATIVE counters
+        # from the audit trail. 1 row pre-marked completed (t0) + 1 re-driven
+        # (r1) = 2 source rows reaching a terminal outcome. (Pre-F2: resume-only 1.)
         assert result.status == RunStatus.COMPLETED
-        assert result.rows_processed == 1, f"Expected 1 row processed (r1), got {result.rows_processed}"
-        assert result.rows_succeeded == 1
+        assert result.rows_processed == 2, f"Expected 2 cumulative rows processed (t0 + r1), got {result.rows_processed}"
+        assert result.rows_succeeded == 2
 
     def test_resume_with_array_fields(
         self,
@@ -1089,10 +1102,13 @@ class TestResumeComprehensive:
             payload_store=payload_store,
         )
 
-        # Verify resume succeeded with array types preserved - should process row 1 (1 row)
+        # Verify resume succeeded with array types preserved.
+        # F2 (resume-fork-reemit): resume RunResult reports CUMULATIVE counters
+        # from the audit trail. 1 row pre-marked completed (t0) + 1 re-driven
+        # (r1) = 2 source rows reaching a terminal outcome. (Pre-F2: resume-only 1.)
         assert result.status == RunStatus.COMPLETED
-        assert result.rows_processed == 1, f"Expected 1 row processed (r1), got {result.rows_processed}"
-        assert result.rows_succeeded == 1
+        assert result.rows_processed == 2, f"Expected 2 cumulative rows processed (t0 + r1), got {result.rows_processed}"
+        assert result.rows_succeeded == 2
 
     def test_resume_with_nested_object_fields(
         self,
@@ -1295,10 +1311,13 @@ class TestResumeComprehensive:
             payload_store=payload_store,
         )
 
-        # Verify resume succeeded with nested objects preserved - should process row 1 (1 row)
+        # Verify resume succeeded with nested objects preserved.
+        # F2 (resume-fork-reemit): resume RunResult reports CUMULATIVE counters
+        # from the audit trail. 1 row pre-marked completed (t0) + 1 re-driven
+        # (r1) = 2 source rows reaching a terminal outcome. (Pre-F2: resume-only 1.)
         assert result.status == RunStatus.COMPLETED
-        assert result.rows_processed == 1, f"Expected 1 row processed (r1), got {result.rows_processed}"
-        assert result.rows_succeeded == 1
+        assert result.rows_processed == 2, f"Expected 2 cumulative rows processed (t0 + r1), got {result.rows_processed}"
+        assert result.rows_succeeded == 2
 
     def test_resume_with_unsupported_type_crashes(
         self,

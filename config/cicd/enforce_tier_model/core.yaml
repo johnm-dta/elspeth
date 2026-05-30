@@ -357,10 +357,21 @@ allow_hits:
   judge_metadata_signature: 'hmac-sha256:v1:193717f572f1a3b3d144d3a5efaac356370ea0969e0a29140943b97738249b5a'
 - key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:create_row:fp=90984799b1de3e99
   owner: bugfix
-  reason: Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash
-    rejects
-  safety: Falls back to repr_hash which always succeeds; audit trail integrity maintained
-  expires: '2026-11-13'
+  reason: |-
+    Tier-3 boundary — quarantined row data may contain NaN/Infinity that stable_hash rejects
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:21:54.337070+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    This is a genuine Tier-3 boundary handler: when persisting quarantined rows (data that failed source validation and may contain NaN/Infinity), canonical_json legitimately raises ValueError/TypeError on non-canonical values, and the code does NOT silently swallow — it falls back to an explicit repr-based representation that records what was received. This preserves the audit trail (records the bad data rather than fabricating or dropping) and is gated on the quarantined branch, so non-quarantined rows still crash on canonical_json failure. R6's concern (silent swallow) is directly addressed: the except produces an explicit alternative payload, not a default. The decorator nudge does not apply — R6 is not in the suppressible set {R1, R5}.
+  file_fingerprint: 7a274ec60be159209411939cc6231221e15da34dc04a24b42f185b56b43e6f12
+  ast_path: 'body[19]/body[9]/body[5]/body[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:f690a02fc5e9503c2d34e5686d3a0158d4e4947292c0c119de737e66d32c0285'
 - key: core/landscape/data_flow_repository.py:R6:DataFlowRepository:record_validation_error:fp=79239e021b66fa02
   owner: architecture
   reason: |-

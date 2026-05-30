@@ -18,10 +18,21 @@ allow_hits:
   judge_metadata_signature: 'hmac-sha256:v1:0067848d011ff911679ba6e8bd706db6a05c889f9c6b99bb4d14604004e27d20'
 - key: web/catalog/routes.py:R1:get_schema:fp=bc80b0854f0cb34e
   owner: web-catalog
-  reason: Tier 3 boundary — plugin_type from URL path parameter, lookup in constant
-    dict
-  safety: Returns None on miss, handled by 404 response
-  expires: null
+  reason: |-
+    Tier 3 boundary — plugin_type from URL path parameter, lookup in constant dict
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:23:09.109585+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The finding is R1 on `_PLURAL_TO_SINGULAR.get(plugin_type)` where `plugin_type` is a URL path parameter — genuine Tier-3 external data from an HTTP request. The `.get()` is used precisely to detect absence (None branch raises HTTPException 404 with the valid set), which is the honest Tier-3 boundary pattern: validate at the border, surface the failure, no fabrication. The decorator nudge does not cleanly apply here because the subject is rooted at a scalar path parameter being looked up in a first-party constant dict, not at an external dict/payload being shape-guarded; the `.get()` is membership-testing the trusted dict, not defensively accessing untrusted structure. Suppression is site-specific and the rationale matches the code.
+  file_fingerprint: d9887afc32a294f12da02514d3a561e75b458194dbb953de81943993a3f511a5
+  ast_path: 'body[11]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:f1aabc4092afc22cf035fc0020531ed6123a3051e5e177af4206bbbda9d0af93'
 - key: web/auth/oidc.py:R1:JWKSTokenValidator:decode_token:fp=c10514f46a44024c
   owner: web-auth
   reason: Tier 3 boundary — JWT header kid field is optional per RFC 7515
@@ -102,10 +113,21 @@ allow_hits:
   expires: null
 - key: web/execution/progress.py:R8:ProgressBroadcaster:subscribe:fp=80dd3c1d05f93c94
   owner: web-execution
-  reason: Subscriber map creates the per-run queue→state mapping lazily on first subscription
-  safety: Mutation is guarded by the broadcaster lock and only initializes empty internal
-    state
-  expires: null
+  reason: |-
+    Subscriber map creates the per-run queue→state mapping lazily on first subscription
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:26:06.876430+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    R8 flags dict.setdefault() as hiding missing-key bugs, but here setdefault is being used for its legitimate purpose: lazy initialization of a nested per-run subscriber map on first subscription. There is no 'missing-key bug' to hide — the contract is precisely that the run_id key may or may not exist yet when a subscriber connects, and the empty dict is the correct initial value (not a fabricated default substituting for real data). This is internal first-party state (Tier-1-ish process state, not external data), the value being inserted is a fresh empty container, and the alternative (check-then-insert) would be strictly worse under the held lock. The rationale correctly identifies the lazy-initialization pattern that R8's remediation guidance does not apply to.
+  file_fingerprint: b157ae602fc7472e285702fb95aca1f511a658ad187e316ec5ae2f3b551322cf
+  ast_path: 'body[13]/body[3]/body[3]/body[0]/targets[0]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:f2f9154c38684c8872d529d57b4267be1172d733f989ca257c261211afb5a963'
 - key: web/execution/progress.py:R9:ProgressBroadcaster:unsubscribe:fp=d21d1c5a7f779ec1
   owner: web-execution
   reason: |-
@@ -567,12 +589,21 @@ allow_hits:
   judge_metadata_signature: 'hmac-sha256:v1:2fcde1f264452722d2f0b216a43b3e78f16a5f199332f7edcfee7b0d9437eb96'
 - key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=03f80783c2d49864
   owner: web-execution
-  reason: Initial terminal-status seed may fail accounting response validation after
-    auth/ownership succeeds; the WebSocket must report an explicit internal-error
-    close instead of sending a malformed terminal event.
-  safety: Closes with 1011 and returns immediately; programming and infrastructure
-    errors outside the validation/integrity union still propagate to the outer handler.
-  expires: null
+  reason: |-
+    Initial terminal-status seed may fail accounting response validation after auth/ownership succeeds; the WebSocket must report an explicit internal-error close instead of sending a malformed terminal event.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:26:14.133499+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The except block catches ValidationError/_RunStatusIntegrityError and converts them into an explicit WebSocket close with code 1011 (internal error) and a descriptive reason, then returns. This is not silent swallowing — it's translation of an internal validation failure into the protocol's explicit error signal, which is the documented R6 remediation (explicit error result). The rationale correctly identifies that sending a malformed terminal event would be worse than reporting an internal-error close, and the code matches that intent at both occurrences.
+  file_fingerprint: 0bd05e72174d53f98c0983fdea5cfc0c656c8b135385d34b6b16d1393cf41a39
+  ast_path: 'body[50]/body[9]/body[9]/body[0]/handlers[1]'
+  judge_metadata_signature: 'hmac-sha256:v1:a9f1a0023a74952c2106eeb9c2f6b742105d639e4da6ebd50ceaf6e92bdcdb60'
 - key: web/execution/routes.py:R6:create_execution_router:websocket_run_progress:fp=adb32a3f23e3de7b
   owner: web-execution
   reason: |-
@@ -1012,14 +1043,21 @@ allow_hits:
   judge_metadata_signature: 'hmac-sha256:v1:0acee739806a8467538282d64ce477823e0c78a9f6332e92be1fe3222ff7014c'
 - key: web/composer/implicit_decisions.py:R5:_flatten_options:fp=24bbd76d54ccfe33
   owner: composer-disclosures
-  reason: Recursive flattening of validated composer-options needs structural type
-    narrowing on each value to decide recurse-vs-leaf. The Mapping check is type-shape
-    narrowing on data that already passed upstream config validation, not Tier-3 boundary
-    handling.
-  safety: Non-Mapping values are routed to the leaf branch and deep-thawed; no values
-    are dropped or fabricated. The output preserves every key path from the input
-    options tree.
-  expires: '2026-08-20'
+  reason: |-
+    Recursive flattening of validated composer-options needs structural type narrowing on each value to decide recurse-vs-leaf. The Mapping check is type-shape narrowing on data that already passed upstream config validation, not Tier-3 boundary handling.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:23:32.722311+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The function flattens a Mapping[str, Any] where values are heterogeneous by design — config options can be nested mappings or leaf values, and the isinstance check is the legitimate way to discriminate the recursive case from the leaf case during tree traversal. This is structural dispatch on a polymorphic union, not defensive shape-guarding of untrusted data: the value's type genuinely varies and the code branches on it rather than hiding a bug. R5's concern (masking contract violations) doesn't apply because there is no narrower contract being violated — Any explicitly admits both branches.
+  file_fingerprint: f70f9423f7a7dba98adb17cd03f827b8b5f3d8ad3c420a7dfd01bb7db82200b7
+  ast_path: 'body[20]/body[1]/body[2]/test'
+  judge_metadata_signature: 'hmac-sha256:v1:9f63cd58243fcd2d6cc602ac952f27a7ea03a15c62879b75d2fd18ff8ee82214'
 - key: web/catalog/service.py:R1:CatalogServiceImpl:_extract_config_fields:fp=b8d3d99b772457b8
   owner: web-catalog
   reason: |-
@@ -1063,11 +1101,21 @@ allow_hits:
   expires: null
 - key: web/catalog/service.py:R1:CatalogServiceImpl:_fields_from_discriminated:fp=627b5114d5635ef7
   owner: web-catalog
-  reason: Tier 3 boundary — variant $defs entry may declare no 'required' list (no
-    mandatory fields)
-  safety: Default empty list; variant's required set is empty; intersection-required
-    handles correctly
-  expires: null
+  reason: |-
+    Tier 3 boundary — variant $defs entry may declare no 'required' list (no mandatory fields)
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:23:26.182232+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The flagged line is `variant.get("required", [])` on a JSON-Schema $defs entry. JSON Schema legitimately permits a variant object to omit the 'required' key entirely (meaning no mandatory fields), so absence is a valid schema shape, not a contract violation. The data originates from a Pydantic-generated JSON schema being interpreted as a JSON-Schema document — the shape of an individual $defs entry's 'required' field is not guaranteed by any first-party typed contract, making this a legitimate Tier-3-style shape guard at the boundary. The `.get("required", [])` correctly treats absent-required as empty-set (semantically equivalent in JSON Schema), which is meaning-preserving rather than fabrication. Sibling subscripts that ARE contractually required (schema['$defs'], schema['oneOf']) are kept as direct subscripts, showing the author distinguishes guaranteed from optional shapes deliberately.
+  file_fingerprint: 4f797831eae18523d70af12ea0128c081490d432372fc628ce85eb9a6ed4ceb4
+  ast_path: 'body[18]/body[16]/body[4]/body[3]/value/args[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:c815639148b0c7ea8f50abd203068322c69adb58ab049684f880cdeb29b74e7c'
 - key: web/catalog/service.py:R1:CatalogServiceImpl:_fields_from_discriminated:fp=b3f6fc4a8d272276
   owner: web-catalog
   reason: Tier 3 boundary — variant $defs entry may declare no 'required' list (no
@@ -1077,9 +1125,21 @@ allow_hits:
   expires: null
 - key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=0fcb6d233deaafbe
   owner: web-catalog
-  reason: Tier 3 boundary — JSON schema field 'default' is optional
-  safety: Returns None; ConfigFieldSummary.default accepts None
-  expires: null
+  reason: |-
+    Tier 3 boundary — JSON schema field 'default' is optional
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:23:17.567272+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.7
+  judge_rationale: |-
+    The finding is on `field_schema.get("default")` inside `_field_summary`, which processes a JSON Schema dict produced by Pydantic. JSON Schema legitimately omits the `default` keyword when no default exists — its absence is meaningful (no default) and recording it as `None` via `.get()` is the correct, non-fabricating treatment of an optional schema field at a Tier-3-shape boundary. The rule R1 concern (hiding missing-key bugs) does not apply because the key's absence is a documented schema property, not a contract violation. The function is a static method with no decoratable external `source_param` carrying this value (the dict is passed in already-shaped), so the decorator nudge does not fit cleanly; the per-line entry is appropriate. Duplicate-count is high but reflects multiple similar optional-field accesses in the same function, which the excerpt independently supports.
+  file_fingerprint: 4f797831eae18523d70af12ea0128c081490d432372fc628ce85eb9a6ed4ceb4
+  ast_path: 'body[18]/body[17]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:055206b3104a14c0edb2f0091e58e6540b0cbf4b5ee3e076f58ce0b5014d473e'
 - key: web/catalog/service.py:R1:CatalogServiceImpl:_field_summary:fp=d98fcb19a086f35c
   owner: web-catalog
   reason: Tier 3 boundary — JSON schema field 'default' is optional
@@ -1521,11 +1581,21 @@ allow_hits:
   expires: '2026-08-23'
 - key: web/composer/llm_response_parsing.py:R2:_response_field:fp=66a71df341185085
   owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
+  reason: |-
+    Tier 3 LiteLLM/provider metadata boundary; provider response objects may be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:24:25.734673+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The finding is on `getattr(value, field, None)` inside `_response_field`, a helper that normalizes Tier-3 LiteLLM/provider response objects whose shape varies across providers (mapping vs pydantic-like object vs custom). This is the externally-sourced, shape-unguaranteed case the policy explicitly carves out for shape-guarding (Plugin Ownership scope: 'an LLM provider's reply wrapped by a third-party SDK such as LiteLLM... is Tier-3'). The R2 getattr-with-default here is the legitimate boundary normalization, not a defensive masking of a first-party contract. Rule R2 is not in the decorator's suppressible set {R1, R5}, so the @trust_boundary nudge does not apply.
+  file_fingerprint: ea4d7d9fe07ed80a969613ac44502c8c0e803181d638d0b37631fbe3528b204d
+  ast_path: 'body[18]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:122dd5aed0d066c85e7d9d0b308de00945e44eafc974c204fec92ecef5e60d58'
 - key: web/composer/llm_response_parsing.py:R2:_json_safe_provider_artifact:fp=d613ce74e27d37d1
   owner: composer-audit
   reason: |-
@@ -1545,18 +1615,38 @@ allow_hits:
   judge_metadata_signature: 'hmac-sha256:v1:58a98657de78b731d936702d0c6cdd4505257b4ec4dda52d14046a66628f5e7a'
 - key: web/composer/llm_response_parsing.py:R2:_json_safe_provider_artifact:fp=a50249b4c425b80e
   owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
+  reason: |-
+    Tier 3 LiteLLM/provider metadata boundary; provider response objects may be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:23:41.043586+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The function _json_safe_provider_artifact serialises arbitrary provider artefacts from LiteLLM/provider response objects — genuine Tier-3 external data per policy (Plugin Ownership scope note explicitly cites LiteLLM wrappers as Tier-3). The getattr probes for model_dump/to_dict/dict are duck-typing the serialisation protocol of an externally-shaped object whose class varies by provider/SDK version; this is the legitimate Tier-3 boundary pattern of feature-detecting shape before relying on it, not redundant defensive guarding of a first-party contract. R2 is not in the decorator's suppressible set {R1, R5}, so @trust_boundary is not the correct remediation here. The value parameter is the Tier-3 root and the guard does not fabricate — it falls through to repr(value) recording what we actually got.
+  file_fingerprint: ea4d7d9fe07ed80a969613ac44502c8c0e803181d638d0b37631fbe3528b204d
+  ast_path: 'body[20]/body[6]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:b50edef3702868b7691882dc7d27f19dfd051fd9e95339103e24661d14d95631'
 - key: web/composer/llm_response_parsing.py:R2:_json_safe_provider_artifact:fp=c958b58e1cfbd5e2
   owner: composer-audit
-  reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
-    be mapping-shaped, object-shaped, absent, or provider-specific.
-  safety: Only bounded scalar or JSON-safe audit metadata is persisted; absent/malformed
-    optional fields remain None and no token counts or costs are fabricated.
-  expires: '2026-08-23'
+  reason: |-
+    Tier 3 LiteLLM/provider metadata boundary; provider response objects may be mapping-shaped, object-shaped, absent, or provider-specific.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:23:49.465728+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The function _json_safe_provider_artifact normalises arbitrary provider artifact objects (LiteLLM/provider SDK responses) into JSON-safe forms — this is genuinely Tier-3 external data whose shape is provider-specific and not guaranteed by any first-party contract. The getattr probes for model_dump/to_dict/dict are the standard duck-typed serialisation discovery pattern; AttributeError-by-default here would be wrong because the absence of these methods is expected, not a contract violation. R2 is not in the decorator's suppressible set ({R1, R5}), so the decorator nudge does not apply; a per-line allowlist is the correct instrument. The rationale, while boilerplate-shaped, accurately describes this site.
+  file_fingerprint: ea4d7d9fe07ed80a969613ac44502c8c0e803181d638d0b37631fbe3528b204d
+  ast_path: 'body[20]/body[8]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:a34b3a7552f0c8eb6d1243dc65f9531796a4a3098e59f051ae6aa4fc1ad4dc04'
 - key: web/composer/llm_response_parsing.py:R1:apply_anthropic_cache_markers:fp=37f7de34a9e33a02
   owner: composer-audit
   reason: Tier 3 LiteLLM/provider metadata boundary; provider response objects may
@@ -1694,11 +1784,21 @@ allow_hits:
   expires: null
 - key: web/sessions/routes/_helpers.py:R2:_litellm_error_detail:fp=6eff26e727be1d1a
   owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
+  reason: |-
+    HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:27:06.677431+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The getattr is on a LiteLLM-native exception object whose attribute surface is provider/SDK-controlled — not a first-party typed contract. Per the policy's explicit Plugin-Ownership scope note, an LLM provider's exception wrapped by a third-party SDK is Tier-3 external data even though our code holds the reference; shape-guarding ``status_code`` is the legitimate Tier-3 boundary pattern. The follow-up ``type(...) is int`` narrows to a validated shape and falls back to ``None`` (recording absence, not fabricating a default). The R2 concern (hiding a missing-attribute bug in our own contract) does not apply here because the contract is the SDK's, not ours.
+  file_fingerprint: 4d1ef2b55b3a6b2ade329c7d12d47340af54676a3c38db8e62370d3babe4a681
+  ast_path: 'body[94]/body[3]/orelse[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:32ab11443dcc4c1800b115c26bad2871feee0f3a8a59691fe63e60773806b344'
 - key: web/sessions/routes/_helpers.py:R5:_extract_runtime_model_snapshot:fp=c7a42ffc3485b7c0
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads,
@@ -1708,11 +1808,21 @@ allow_hits:
   expires: '2026-08-20'
 - key: web/sessions/routes/_helpers.py:R1:_extract_runtime_model_snapshot:fp=a1dd46422475f434
   owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
+  reason: |-
+    HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:26:54.593337+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The docstring documents that ``options.model`` and ``options.model_version`` are intentionally optional keys in the Tier-1 composition_state schema — absence is a meaningful state ('no runtime model pinned') distinct from a writer bug. The ``.get()`` here is not silent recovery: type anomalies on present values are raised as AuditIntegrityError, and absence is faithfully recorded as ``None`` rather than fabricated. R1's concern (hiding missing-key bugs) does not apply when absence is a contractually valid state and the code distinguishes absent-from-malformed. The decorator nudge doesn't apply: this is Tier-1 audit data, not a Tier-3 external parameter boundary.
+  file_fingerprint: 4d1ef2b55b3a6b2ade329c7d12d47340af54676a3c38db8e62370d3babe4a681
+  ast_path: 'body[97]/body[2]/body[3]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:efebcd5bb94051e3c2febc4169ba9c49750fc758c9f2405e19d02fe8129ef046'
 - key: web/sessions/routes/_helpers.py:R1:_extract_runtime_model_snapshot:fp=dc84631f2ee5050f
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads,
@@ -1936,11 +2046,21 @@ allow_hits:
   expires: null
 - key: web/sessions/routes/composer.py:R7:register_composer_routes:recompose:fp=65afef4550e989c5
   owner: web-sessions
-  reason: HTTP/session route boundary; persisted composer state, request payloads,
-    and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
-  safety: Malformed data returns structured HTTP errors or preserves the primary exception;
-    recovery catches are narrow and record class-name-only diagnostics.
-  expires: null
+  reason: |-
+    HTTP/session route boundary; persisted composer state, request payloads, and audit-drain fallbacks require explicit shape checks and narrow recovery catches.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:27:22.135269+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The R7 contextlib.suppress here is narrowly scoped to asyncio.CancelledError during a shielded best-effort publish/persist on the cancellation path — this is the documented offensive pattern for asyncio shielding, where re-cancellation of the shielded coroutine must not prevent the outer cancellation from propagating (the function still `raise`s on line 1044). The suppress is explicit about the exception type (not bare), targets a specific known-benign condition during cancellation cleanup, and the surrounding code shows the cancellation is properly re-raised. This is not silent error swallowing; it is the canonical idiom for asyncio.shield + cancellation handling. The rationale's mention of 'narrow recovery catches' fits this site, though the boilerplate duplication across the codebase is noted.
+  file_fingerprint: 693b78836d209c43e50e860887760f015d4816291909168fe2c70c582f9e37a9
+  ast_path: 'body[7]/body[7]/body[6]/body[15]/handlers[1]/body[1]/body[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:b12f979456e833955db9130dd5f348ef10e70e3b47e019a01d0290376719c75a'
 - key: web/sessions/routes/composer.py:R7:register_composer_routes:recompose:fp=b22f01dc72b4660b
   owner: web-sessions
   reason: HTTP/session route boundary; persisted composer state, request payloads,
@@ -2328,14 +2448,38 @@ allow_hits:
   expires: null
 - key: web/app.py:R1:create_app:fp=7ce3ee8e08561e45
   owner: web-app
-  reason: Tier 3 — os.environ.get() for optional WEB_CONCURRENCY env var
-  safety: Defaults to "1" when absent
-  expires: null
+  reason: |-
+    Tier 3 — os.environ.get() for optional WEB_CONCURRENCY env var
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:22:52.901805+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The flagged line reads os.environ.get("ELSPETH_ENV") — environment variables are a genuine Tier-3 external boundary (process environment, not first-party code). The .get() returns None when the var is absent, and the code compares against "test", correctly treating absence as 'not test' without fabricating a substitute value. This is the canonical legitimate use of dict.get on an external mapping: shape-safe read with explicit None handling. The decorator nudge does not apply — os.environ is not a function parameter, so @trust_boundary with source_param cannot scope this.
+  file_fingerprint: 953a3beca739d11580bfec92781086ab038849a168221e2df9ffd8deb686410d
+  ast_path: 'body[85]/body[21]/test/values[3]/left'
+  judge_metadata_signature: 'hmac-sha256:v1:ad660a42564f1b9d11a3cc378ac11b63b2cd9ccf6b154847858c73f35d27c26b'
 - key: web/app.py:R1:create_app:fp=f228499fcfff4222
   owner: web-app
-  reason: Tier 3 — os.environ.get() for optional ELSPETH_ENV
-  safety: Returns None when absent; only used for test guard
-  expires: null
+  reason: |-
+    Tier 3 — os.environ.get() for optional ELSPETH_ENV
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:23:00.497753+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The flagged call is os.environ.get("WEB_CONCURRENCY", "1") — reading an optional environment variable at a genuine Tier-3 boundary (process environment, external to ELSPETH). The default "1" is not fabrication: it encodes the documented semantics that absence of WEB_CONCURRENCY means single-worker, and the value flows into _parse_worker_count which validates it. The rationale's tier classification is slightly mislabelled (it says ELSPETH_ENV when the variable is WEB_CONCURRENCY), but the substance — Tier-3 env-var read with a documented default — matches the code. The decorator nudge does not apply: this is not a function parameter rooted in external data, it's a module-level env read inside create_app.
+  file_fingerprint: 953a3beca739d11580bfec92781086ab038849a168221e2df9ffd8deb686410d
+  ast_path: 'body[85]/body[50]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:ddc14ee0aa289b92da4454f73a65d8de86dfe4e404f7ed7994f859a52b9dff3e'
 - key: web/app.py:R2:create_app:_request_id:fp=318afae72ce2947e
   owner: web-app
   reason: 'Trust-boundary fallback. The exception handlers registered in
@@ -2971,13 +3115,21 @@ allow_hits:
   expires: '2026-08-23'
 - key: web/composer/tools/generation.py:R1:_source_schema_mode:fp=23513e8813c297f6
   owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping
-    at line 567). The ``mode`` key is optional; absence means the operator declared
-    a schema without a mode (likely a partial composer state) and the helper returns
-    None to signal 'mode-unknown' to the caller.
-  safety: Absent or non-string mode returns None at line 568; callers treat mode-
-    unknown as observed-CSV default.
-  expires: '2026-08-23'
+  reason: |-
+    Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping at line 567). The ``mode`` key is optional; absence means the operator declared a schema without a mode (likely a partial composer state) and the helper returns None to signal 'mode-unknown' to the caller.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:25:16.553147+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The helper operates on source.options['schema'], which is operator/LLM-authored composer state — Tier-3 external data whose shape is not contractually guaranteed (the preceding isinstance(schema, Mapping) guard at line 848 confirms the shape is untrusted). Within that Tier-3 mapping, 'mode' is genuinely optional, and the function honestly records absence by returning None rather than fabricating a default — consistent with the fabrication-decision test. The function is not @trust_boundary-decorated, but the parameter is a SourceSpec (a first-party typed contract), not the external dict itself; the externally-sourced value is reached via source.options.get('schema'), so source_param wouldn't cleanly apply here. The .get on the schema mapping is a legitimate Tier-3 optional-field read.
+  file_fingerprint: 1c81f485f1e3a87ea1560594b0c247664ba6dbd71244bb7011e60e111af57192
+  ast_path: 'body[53]/body[2]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:cb86abec81d6ba496cfceb3b2a79cf37aa18cc3ecbaac57cd5d8c8409fa58708'
 - key: web/composer/tools/generation.py:R5:_source_schema_mode:fp=a198571c1b9ad526
   owner: composer-tools-generation
   reason: Tier-3 type narrow on the LLM-authored ``mode`` value within ``schema.mode``.
@@ -3200,13 +3352,21 @@ allow_hits:
   expires: '2026-08-23'
 - key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=9c1695c48f0efa04
   owner: composer-tools-generation
-  reason: Tier-3 read of LLM-authored aggregation contract options. ``value_field``
-    is required for numeric aggregations but the helper handles absence gracefully
-    — a missing value_field means we abstain from the diagnostic (line 776 ``type(value_field)
-    is not str``).
-  safety: Missing or non-string value_field returns the helper to the next node without
-    emitting a diagnostic; no false positives.
-  expires: '2026-08-23'
+  reason: |-
+    Tier-3 read of LLM-authored aggregation contract options. ``value_field`` is required for numeric aggregations but the helper handles absence gracefully — a missing value_field means we abstain from the diagnostic (line 776 ``type(value_field) is not str``).
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:25:08.700062+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.7
+  judge_rationale: |-
+    The function reads aggregation contract options that originate from LLM-authored composition input — Tier-3 external data whose shape is not contractually guaranteed by an ELSPETH typed contract. The .get('value_field') is followed immediately by a strict type/non-empty check (``type(value_field) is not str or not value_field.strip()``) that abstains on absence or wrong shape rather than fabricating a default, which is the honest Tier-3 guard pattern. R1 (dict.get) is the flagged rule and the subject is rooted at options derived from LLM-authored node.options, so the suppression addresses exactly the pattern the rule targets. The decorator nudge does not cleanly apply here because ``options`` is not a direct function parameter but a value derived via get_aggregation_contract_options from state.nodes; the per-line allowlist is the appropriate granularity.
+  file_fingerprint: 1c81f485f1e3a87ea1560594b0c247664ba6dbd71244bb7011e60e111af57192
+  ast_path: 'body[60]/body[4]/body[2]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:de8d3212bbbc01ff256eb4a6206f4b264c3e22872560b166fb1d30e486cc7acc'
 - key: web/composer/tools/generation.py:R1:_numeric_aggregation_diagnostics_for_observed_csv:fp=f179b12ee165ade2
   owner: composer-tools-generation
   reason: Read of our own type-inference output. ``inferred_types`` is a ``Mapping[str,
@@ -3220,13 +3380,21 @@ allow_hits:
   expires: '2026-08-23'
 - key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=0945f207a98cbbff
   owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``source.options``. ``blob_ref`` is schema-
-    optional — present only when set_source_from_blob (or inline_blob in set_pipeline)
-    wired a blob into the source; for path-based sources it is absent. The function
-    abstains from blob-backed proof checks when absent.
-  safety: Absent blob_ref returns the diagnostic list unchanged; no fabricated blob
-    lookups.
-  expires: '2026-08-23'
+  reason: |-
+    Tier-3 walk of LLM-authored ``source.options``. ``blob_ref`` is schema- optional — present only when set_source_from_blob (or inline_blob in set_pipeline) wired a blob into the source; for path-based sources it is absent. The function abstains from blob-backed proof checks when absent.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:25:23.145534+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The code accesses `source.options` which is LLM-authored composer state — the options dict is shaped by tool calls from the composer model, and `blob_ref` is schema-optional (present only when set_source_from_blob wired a blob, absent for path-based sources). The `.get()` returning None is exactly the legitimate Tier-3 boundary pattern: absence is recorded as None, the function abstains (returns empty diagnostics) rather than fabricating. The rationale correctly identifies the schema-optional nature and the abstain-on-absent behaviour, and the surrounding comments distinguish this from the Tier-1 BlobToolRecord access below (which correctly uses direct subscript).
+  file_fingerprint: 1c81f485f1e3a87ea1560594b0c247664ba6dbd71244bb7011e60e111af57192
+  ast_path: 'body[61]/body[4]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:dc675539a33f1f366a1a847748f38fa11ba40501ee4c4af3ccd7b6866482354f'
 - key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=78003676a01b62e7
   owner: composer-tools-generation
   reason: Tier-3 walk of LLM-authored ``source.options.schema`` during proof diagnostics.
@@ -3254,21 +3422,38 @@ allow_hits:
   judge_metadata_signature: 'hmac-sha256:v1:acca56d2af020bdffa01e0ae136905be0878d18c5f402c5a8d78aafc331c9f52'
 - key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=f0e165ac927832cd
   owner: composer-tools-generation
-  reason: Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping).
-    ``mode`` may be absent or non-string; ``schema.get('mode') == 'fixed'`` is the
-    discriminator for the blocking-diagnostic branch.
-  safety: Absent or wrong-typed mode causes the equality check to fail; no false-
-    positive diagnostic.
-  expires: '2026-08-23'
+  reason: |-
+    Tier-3 walk of LLM-authored ``schema`` Mapping (already narrowed to Mapping). ``mode`` may be absent or non-string; ``schema.get('mode') == 'fixed'`` is the discriminator for the blocking-diagnostic branch.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:25:38.858654+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.7
+  judge_rationale: |-
+    The flagged `.get('mode')` is on `schema`, a value extracted from `source.options` where the LLM (composer model) authored the configuration. While `source.options` itself is a Mapping by contract, the inner `schema` value's contents are LLM-authored and shape-unguaranteed — the code has already narrowed `schema` to `Mapping` via `isinstance`, and now probes for an optional `mode` discriminator whose presence and type are not guaranteed. This is the Tier-3 boundary pattern: guard the shape of externally-sourced unstructured nested data. The rationale correctly identifies the trust tier and addresses R1 specifically (discriminator probe on absent/non-string key).
+  file_fingerprint: 1c81f485f1e3a87ea1560594b0c247664ba6dbd71244bb7011e60e111af57192
+  ast_path: 'body[61]/body[14]/body[1]/test/values[1]/left'
+  judge_metadata_signature: 'hmac-sha256:v1:347912881a555654d2e89917fd5b02d178649cd98414815677fc270f1441c91d'
 - key: web/composer/tools/generation.py:R1:compute_proof_diagnostics:fp=157afff4c5b89efd
   owner: composer-tools-generation
-  reason: 'Tier-3 walk of LLM-authored ``schema`` Mapping: ``fields`` is the declared
-    column list. ``schema.get(''fields'') or ()`` coerces an absent or falsy value
-    to an empty tuple so the downstream isinstance check at line 925 has a normalised
-    value to test.'
-  safety: Empty tuple cannot trigger the missing-columns diagnostic (no declared columns
-    ⇒ no omission); behavior is conservative.
-  expires: '2026-08-23'
+  reason: |-
+    Tier-3 walk of LLM-authored ``schema`` Mapping: ``fields`` is the declared column list. ``schema.get('fields') or ()`` coerces an absent or falsy value to an empty tuple so the downstream isinstance check at line 925 has a normalised value to test.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:25:32.057804+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.62
+  judge_rationale: |-
+    The excerpt's own comment establishes that source.options is Tier-1 but the value at 'schema' is LLM-authored unstructured data (Tier-3) — the schema mapping came from an LLM tool call, not a first-party typed contract. The surrounding code already shape-guards with isinstance(schema, Mapping) before any .get, and the flagged schema.get('fields') reads an optional declared-fields key from that untrusted mapping before the next isinstance check at line 1219 validates the shape. This is the legitimate Tier-3 boundary pattern: guard shape, then validate. The 'or ()' coerces a falsy/absent value to an empty tuple which still flows through the isinstance check, so no fabrication is smuggled into audit data. The function is not obviously a single-parameter trust_boundary candidate (schema is reached via source.options, not a direct external param), so the decorator nudge does not cleanly apply.
+  file_fingerprint: 1c81f485f1e3a87ea1560594b0c247664ba6dbd71244bb7011e60e111af57192
+  ast_path: 'body[61]/body[14]/body[1]/body[0]/value/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:9cdbb351a7aea0a9588f66edbd11c3f2c82d91f65b9857eaa11d2823f5e18e37'
 - key: web/composer/tools/generation.py:R5:compute_proof_diagnostics:fp=69025a61f1c28d9f
   owner: composer-tools-generation
   reason: |-
@@ -3369,10 +3554,25 @@ allow_hits:
   judge_metadata_signature: 'hmac-sha256:v1:e287af8ae75d2ed29c65814a29c856e3557696902c4f895fa13a13e6d9cc641c'
 - key: web/execution/service.py:R8:ExecutionServiceImpl:execute:fp=ae8955d9fc074acc
   owner: web-execution
-  reason: Session lock map creates per-session lock lazily on first execution. Fingerprint
-    shifted from ea064c190d972e82 by the F-17/F-21 pre-execute placeholder gate ImportFroms.
-  safety: Mutation is thread-safe; setdefault is atomic for dict
-  expires: null
+  reason: |-
+    Session lock map creates per-session lock lazily on first execution. Fingerprint shifted from ea064c190d972e82 by the F-17/F-21 pre-execute placeholder gate ImportFroms.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:26:37.921637+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    This is a legitimate use of setdefault() as the lazy-init idiom for a per-key lock map, not the bug-hiding pattern R8 targets. The code's intent is precisely 'create the lock if absent, else reuse the existing one' — atomic get-or-create on a dict the class owns. A direct access would be wrong here (KeyError on first call per session is not a bug to surface, it's the expected first-call state). The data is first-party process-local state (self._session_locks keyed by session_id), not external data, and the TOCTOU comment shows the author understood the concurrency contract.
+  file_fingerprint: 635cd2664ae42eef70e54cf0899269bf213cbdef2ce2f573eede4bcb7ceea177
+  ast_path: 'body[57]/body[7]/body[2]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:910c2206d1d5d88876252f31e012cc6d11577f4d0f377907a00e7d7f5e546a3e'
+  judge_excerpt_redactions:
+    - pattern: dotenv_secret_assignment
+      byte_count: 23
+      redacted_hash: e52cb5341e5b67f3
 - key: web/execution/service.py:R5:ExecutionServiceImpl:_execute_locked:fp=e0c1cd46e0b80ba5
   owner: web-execution
   reason: |-
@@ -3714,13 +3914,21 @@ allow_hits:
   judge_metadata_signature: 'hmac-sha256:v1:9334611a3ff259e402c64bbe5b9f331fbf34be11bd214359fe8470b7c01cce5c'
 - key: web/composer/service.py:R2:ComposerServiceImpl:_call_text_llm:fp=9475aed316c9be0b
   owner: composer-tools-rearchitect
-  reason: 'Service.py AST shift after merging refactor/composer-tools-rearchitect
-    (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4
-    + Steps 6-7). Pattern preserved: getattr() with default hides AttributeError:
-    provider_status_code=getattr(exc, "status_code", None)'
-  safety: Tier-3 LLM tool-argument boundary or scoped Exception/getattr usage in compose-loop
-    infrastructure; semantics unchanged from RC5.2
-  expires: null
+  reason: |-
+    Service.py AST shift after merging refactor/composer-tools-rearchitect (ToolContext call-site updates) into RC5.2 atop the compose-loop decomp (P1-P4 + Steps 6-7). Pattern preserved: getattr() with default hides AttributeError: provider_status_code=getattr(exc, "status_code", None)
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:24:53.841250+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The getattr() target is a LiteLLM exception object — a third-party SDK wrapping an external provider response. Per the Plugin Ownership scope clause, exceptions from external SDKs are Tier-3: status_code is not contractually guaranteed across LiteLLM exception variants or provider error paths. Shape-guarding with a None default here is the honest Tier-3 boundary pattern (recording absence as None, not fabricating), and the surrounding code correctly raises a typed _BadRequestLLMError with from exc to preserve the chain. The decorator nudge does not apply: this is R2 (not R1/R5), and the subject is an exception attribute, not a parameter-rooted external dict.
+  file_fingerprint: 88d09dc8455637de66e12071a4f1202037b067a4e3e5a7c1a5e767c66958b436
+  ast_path: 'body[93]/body[31]/body[2]/handlers[0]/body[0]/exc/keywords[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v1:b90c5d86aa78ae148db13b5606629c7ad254589013b1ce59d3fe8390a970c838'
 - key: web/composer/redaction.py:R5:_coerce_stringified_json_object:fp=4f5bfe819cd1532d
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint

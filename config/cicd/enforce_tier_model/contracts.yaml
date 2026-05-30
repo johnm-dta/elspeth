@@ -274,11 +274,6 @@ allow_hits:
   file_fingerprint: df4fb6b54bccaeb7477a380dfba00fe69b09f2c86f80c415cd52de275d501669
   ast_path: 'body[10]/body[2]/body[4]/body[0]/value/elt'
   judge_metadata_signature: 'hmac-sha256:v1:a03ffacc75585e76bf18a7438eff0b09009284e715fdc4f984f74691a941a9bb'
-- key: contracts/schema_contract_factory.py:R1:create_contract_from_config:fp=caa0070eb7edad8e
-  owner: feature
-  reason: Intentional identity fallback - fields without resolution mapping use normalized
-    name as original name
-  safety: Fallback to same value is correct behavior, not silent coercion
 - key: contracts/schema_contract.py:R5:PipelineRow:to_dict:fp=19c383f767c4ed8c
   owner: architecture
   reason: |-

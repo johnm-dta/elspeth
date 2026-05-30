@@ -166,11 +166,35 @@ allow_hits:
   judge_metadata_signature: 'hmac-sha256:v1:514e53000031b31a7322852a9fbef06654fd7980b7327ada3b53c8d0fda04984'
 - key: telemetry/manager.py:R6:TelemetryManager:close:fp=79190bde3fa222f5
   owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-08-15'
+  reason: |-
+    Silent recovery with explicit error handling path
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:22:39.120321+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.83
+  judge_rationale: |-
+    The flagged R6 is the `except queue.Full` block at line 586, which is not a silent swallow: it executes an explicit recovery action (drain one item and retry the put in a bounded loop), and the loop's failure mode is itself explicitly handled — `sentinel_sent` is checked and a logger.error is emitted if drain attempts exhausted. This is the documented shutdown-sentinel insertion protocol where `queue.Full` is an expected control-flow signal, not an error to propagate; raising here would defeat the critical sentinel-guarantee invariant described in the docstring. Telemetry close is also explicitly best-effort per the primacy order (audit first, telemetry best-effort), and the rule's remediation ('raise or return explicit error result') is satisfied by the explicit error path at line 600-601. Not a trust-boundary case, so no decorator applies.
+  file_fingerprint: 81c5a5b3595704279d03ecfaec9e0aa10ba62af64b6ebdc40f4d2b32730d8af1
+  ast_path: 'body[16]/body[11]/body[3]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:a3d9e51a26c93450b5ea88a0bb098ef02d553cdc80985784c247ce6a7a09068b'
 - key: telemetry/manager.py:R6:TelemetryManager:close:fp=c87058caa78a1776
   owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-08-15'
+  reason: |-
+    Silent recovery with explicit error handling path
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:22:46.325753+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The R6 finding is on the inner `except queue.Empty: pass` at line 596-598. This is not silent error swallowing in the harmful sense — it's handling a benign race between `put` (which raised Full) and the subsequent `get_nowait` (which found the queue had become empty). The control flow is correct: on Empty, the outer loop retries the put, and if the sentinel ultimately cannot be sent the code logs an explicit error at line 601 and the thread-join timeout at 606-607 surfaces the failure. This is genuine concurrency-primitive handling at a shutdown path, not defensive swallowing of unexpected exceptions. The decorator does not apply (not a Tier-3 boundary, rule is R6 not R1/R5).
+  file_fingerprint: 81c5a5b3595704279d03ecfaec9e0aa10ba62af64b6ebdc40f4d2b32730d8af1
+  ast_path: 'body[16]/body[11]/body[3]/body[0]/handlers[0]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:c82a17813b9d057a3ef0f0b4f4c3bee92201d7b48c424798b1fe4a6ebf7b67fa'

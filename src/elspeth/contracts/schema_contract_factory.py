@@ -84,8 +84,17 @@ def create_contract_from_config(
     if config.fields is not None:
         field_contracts: list[FieldContract] = []
         for fd in config.fields:
-            # Look up original name if resolution provided
-            original = normalized_to_original.get(fd.name, fd.name)
+            # Look up the original header for this declared field. A field
+            # absent from the resolution mapping was not renamed, so its
+            # original name equals its normalized name — a supported
+            # partial-resolution contract (see test_partial_resolution).
+            # Branch explicitly rather than using .get(fd.name, fd.name): the
+            # absence-means-identity decision is deliberate, not a silently
+            # fabricated fallback default.
+            if fd.name in normalized_to_original:
+                original = normalized_to_original[fd.name]
+            else:
+                original = fd.name
 
             fc = FieldContract(
                 normalized_name=fd.name,

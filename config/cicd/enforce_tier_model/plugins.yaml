@@ -569,9 +569,21 @@ allow_hits:
   expires: '2026-07-02'
 - key: plugins/infrastructure/batching/mixin.py:R6:BatchTransformMixin:_release_loop:fp=188d682d00e17ea1
   owner: architecture
-  reason: Silent recovery with explicit error handling path
-  safety: Code reviewed - legitimate pattern
-  expires: '2026-07-02'
+  reason: |-
+    Silent recovery with explicit error handling path
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:22:08.515451+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    The flagged R6 is on `except TimeoutError: continue` in a release loop where TimeoutError is the documented sentinel from `wait_for_next_release(timeout=1.0)` meaning 'no result ready, poll again'. This is not silent error swallowing — it is explicit control flow over a documented sentinel exception, with ShutdownError handled as the clean exit path and generic Exception handled by wrapping into an ExceptionResult and re-raising on Tier-1. The R6 remediation ('raise or return explicit error result') does not apply because the timeout is not an error condition. Rationale is boilerplate-shaped but the code excerpt independently justifies the suppression.
+  file_fingerprint: 8eddb1ccd779297da5905d11933667f86d6d6abcd49916bf078c19b2987e247b
+  ast_path: 'body[14]/body[17]/body[1]/body[2]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:80d9b8b085feb2a3958e1f965b892d661908350ece337d58b9e4e14ffe7c064e'
 - key: plugins/infrastructure/batching/mixin.py:R6:BatchTransformMixin:_release_loop:fp=24666a1e729638d7
   owner: architecture
   reason: Silent recovery with explicit error handling path
@@ -905,11 +917,21 @@ allow_hits:
       redacted_hash: 1d6dd02648d5202b
 - key: plugins/infrastructure/batching/mixin.py:R6:BatchTransformMixin:_complete_ticket:fp=9b67bbe4194832ff
   owner: web-execution
-  reason: Completing a worker result can race with timeout eviction or shutdown of
-    the batching buffer.
-  safety: Only KeyError and ShutdownError are discarded; the row was already timed
-    out or shutdown, so no success is fabricated and no waiter is stranded.
-  expires: null
+  reason: |-
+    Completing a worker result can race with timeout eviction or shutdown of the batching buffer.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:22:01.760668+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    The except clause catches two specific, named exceptions (KeyError, ShutdownError) that represent legitimate expected race conditions: a ticket evicted by timeout or a buffer shutdown. This is not a blanket silent-except — the narrow exception types encode the invariant that late completions after eviction/shutdown are expected and discardable. The discard is recorded via debug logging with token_id and state_id for traceability, and the alternative (re-raising) would crash a worker thread for a benign race the design explicitly tolerates. R6's concern is swallowing errors without explicit handling; here the handling IS the explicit policy for these two race conditions.
+  file_fingerprint: 8eddb1ccd779297da5905d11933667f86d6d6abcd49916bf078c19b2987e247b
+  ast_path: 'body[14]/body[16]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:bcb7d88e064224dc82a308bfabbe7757f3f389edfee02e41441504b6d400c9bb'
 - key: plugins/infrastructure/config_base.py:R1:_format_validation_error_cause:fp=06bc6e6d57f87e71
   owner: plugin-validation
   reason: 'Tier 3 boundary on Pydantic ValidationError.errors() output: the ''type''
@@ -1301,11 +1323,21 @@ allow_hits:
   judge_metadata_signature: 'hmac-sha256:v1:16f43beadcf27c14e2d896b65eb32b7831a8a08222e0cc5f5e0d0993a7ad803d'
 - key: plugins/transforms/web_scrape.py:R5:WebScrapeHTTPConfig:_validate_allowed_hosts:fp=922ac0bb4c76376b
   owner: architecture
-  reason: Pydantic field_validator wraps ipaddress.ip_network() on user-provided CIDR
-    strings — Tier 3 config boundary
-  safety: ValueError re-raised as Pydantic ValidationError; invalid config crashes
-    at load time, not at runtime
-  expires: null
+  reason: |-
+    Pydantic field_validator wraps ipaddress.ip_network() on user-provided CIDR strings — Tier 3 config boundary
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T06:22:30.285759+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    The isinstance check is inside a Pydantic field_validator for a config field typed as a union `str | list[str]` — this is a genuine Tier-3 config boundary where the validator must discriminate between the two legal shapes of the union to dispatch validation logic. R5's concern is isinstance masking contract violations; here isinstance is the standard mechanism for resolving a declared union type at the validation boundary, not hiding a bug. The rationale correctly identifies the tier and boundary, and the code raises ValueError on malformed input rather than silently coercing.
+  file_fingerprint: e2f2cf7b82497a65f3d27344ff8bae5db0676991664938aefdce1d08bf5b5d19
+  ast_path: 'body[27]/body[7]/body[0]/test'
+  judge_metadata_signature: 'hmac-sha256:v1:4e60bc3ebb7bece844ff3b3fade1171fc930c71533f6431557cb14849f1526b0'
 - key: plugins/transforms/web_scrape.py:R5:WebScrapeTransform:get_post_call_hints:fp=f919002b3beb8525
   owner: composer-jit-hints
   reason: Tier 3 boundary — config_snapshot is the LLM-supplied options dict passed

@@ -41,8 +41,9 @@ see §10).
   response-contract validation as the OpenRouter path — one parser, one set of
   validators, no divergent coercion.
 - The audit record honestly captures **which transport** produced a verdict
-  and **what shaped it** (transport + Claude Code CLI version), to a standard
-  that passes an IRAP-grade review of our own CI tooling.
+  (signed `judge_transport`) and, via the already-signed call timestamp, the
+  era of the `claude_code` preset that shaped it — to a standard that passes an
+  IRAP-grade review of our own CI tooling.
 - The auth/billing path is explicit, so the "cheaper" assumption is verifiable
   rather than silently false.
 
@@ -135,15 +136,19 @@ applies the IRAP-grade standard, not the Landscape standard.
   carried **inside the HMAC-signed payload** (operator decision). It is
   tamper-evident and bound to the verdict: "how the verdict was produced" is
   verdict metadata.
-- **Claude Code CLI version — signed.** Because the `claude_code` preset is an
-  Anthropic-controlled system prompt that drifts across CLI versions and is
-  **not** captured by `JUDGE_POLICY_HASH`, the signed payload also records the
-  Claude Code CLI version that produced an agent-transport verdict (captured
-  from the SDK `init` message if it surfaces it, else a `claude --version`
-  probe; the exact mechanism is a plan-time verification). This makes the audit
-  answer to "what shaped this verdict" complete: `policy_hash` (our appended
-  block) **+** `judge_transport` **+** CLI version. For OpenRouter entries this
-  field is `None` (no preset; honest absence, not a fabricated value).
+- **Preset-drift provenance = the existing signed timestamp.** The `claude_code`
+  preset is an Anthropic-controlled system prompt that drifts over time and is
+  **not** captured by `JUDGE_POLICY_HASH`. Rather than capture an exact preset
+  version (a probe mechanism we deliberately skip), we rely on
+  `judge_recorded_at` — the verdict's call time, **already** in the
+  HMAC-signed payload (`judge.py:581`). The timestamp **bounds the preset era**:
+  an auditor can reason about which `claude_code` prompt Anthropic shipped on
+  that date. This is intentionally IRAP-grade, not exact-version-grade — good
+  enough for our own tooling, and it adds no new field. So the audit answer to
+  "what shaped this verdict" is `policy_hash` (our appended block) **+**
+  `judge_transport` **+** the signed `judge_recorded_at` timestamp. No redundant
+  second timestamp is recorded — reusing the existing one avoids fabricating a
+  duplicate datum.
 - **`policy_hash` semantics unchanged.** It still hashes only
   `_STATIC_POLICY_BLOCK` (our appended instruction). Documented explicitly:
   under the agent transport the preset is an additional, separately-recorded
@@ -163,7 +168,8 @@ applies the IRAP-grade standard, not the Landscape standard.
 
 ## 5. The v2 signed-payload coupling (cross-feature dependency)
 
-`judge_transport` (and the CLI-version field) enter the **HMAC-signed payload**.
+`judge_transport` enters the **HMAC-signed payload** (the only new signed key —
+the timestamp provenance reuses the already-signed `judge_recorded_at`).
 Adding any key to that payload changes the signature shape of **every** entry —
 which is exactly the migration event the **scope-fingerprint v2** work
 (`docs/superpowers/specs/2026-05-31-judge-scope-fingerprint-design.md` /
@@ -171,13 +177,12 @@ which is exactly the migration event the **scope-fingerprint v2** work
 
 **These two features share the v2 payload revision.** Resolution:
 
-- `judge_transport` and the CLI-version field become part of the **v2 payload**
-  defined by the scope-fingerprint plan (Task 4 of that plan), not an
-  independent payload change.
+- `judge_transport` becomes part of the **v2 payload** defined by the
+  scope-fingerprint plan (Task 4 of that plan), not an independent payload
+  change.
 - The scope-fingerprint plan's v1→v2 batch-migrate (Task 10/12) **backfills
-  `judge_transport="openrouter"`** and CLI-version `None` for all 221 existing
-  entries — truthful, since every existing verdict was OpenRouter-produced with
-  no preset.
+  `judge_transport="openrouter"`** for all 221 existing entries — truthful,
+  since every existing verdict was OpenRouter-produced.
 - **Sequencing:** this transport feature lands **with or after** the
   scope-fingerprint v2 work, never independently, to avoid two uncoordinated
   changes to the signed payload. The scope-fingerprint plan gets a one-line
@@ -224,9 +229,9 @@ re-check deterministic regardless of an entry's origin transport.)
 
 - `core/judge.py`: factor a transport seam in `call_judge`; add the agent
   transport implementation (async-bridged `query` call + `ResultMessage`
-  extraction); add `judge_transport` + CLI-version fields to `JudgeResponse`;
-  reuse all shared validators.
-- `core/allowlist.py`: `judge_transport` (+ CLI-version) added to the v2 signed
+  extraction); add the `judge_transport` field to `JudgeResponse` (the call-time
+  timestamp already exists as `recorded_at`); reuse all shared validators.
+- `core/allowlist.py`: `judge_transport` added to the v2 signed
   payload in `compute_judge_metadata_signature`; the `AllowlistEntry` schema +
   loader + atomic validator carry the new fields. **Coordinated with the
   scope-fingerprint v2 tasks** (§5).
@@ -248,10 +253,11 @@ re-check deterministic regardless of an entry's origin transport.)
 - **Contract-parity test:** a fake agent transport and a fake OpenRouter
   transport returning the same model JSON must produce `JudgeResponse` objects
   that survive identical validation and differ only in `judge_transport` /
-  CLI-version / `model_id`.
+  `model_id`.
 - **Provenance test:** an agent-transport `JudgeResponse` written via `justify`
-  persists `judge_transport: claude_agent_sdk` + the CLI version, and the signed
-  signature verifies; tampering either field fails signature verification.
+  persists `judge_transport: claude_agent_sdk` and a signed `judge_recorded_at`
+  timestamp, and the signature verifies; tampering `judge_transport` fails
+  signature verification.
 - **Config-error test:** agent transport with the SDK absent raises
   `JudgeConfigurationError` with install guidance; with the SDK present but no
   auth, the error names the auth path.
@@ -266,6 +272,7 @@ re-check deterministic regardless of an entry's origin transport.)
 2. **Hashing the resolved preset prompt** (turning the preset into a fully
    hashed influence). Rejected as gold-plating for our own tooling: only
    feasible if the SDK surfaces the resolved system prompt, and the
-   transport+CLI-version provenance already meets the IRAP-grade bar.
+   `judge_transport` + signed-timestamp provenance already meets the IRAP-grade
+   bar.
 3. **Making agent the default transport.** Not now; OpenRouter remains default
    until the agent path has a track record.

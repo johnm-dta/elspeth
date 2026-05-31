@@ -25,11 +25,19 @@ import hmac
 import json
 import textwrap
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from elspeth_lints.core.allowlist import JudgeVerdict, _parse_allow_hits, load_allowlist
+from elspeth_lints.core.allowlist import (
+    AllowlistEntry,
+    JudgeVerdict,
+    _parse_allow_hits,
+    compute_judge_metadata_signature,
+    load_allowlist,
+    verify_entry_binding_against_finding,
+)
 from elspeth_lints.core.judge import JUDGE_POLICY_HASH
 from elspeth_lints.core.source_excerpt import RedactionRecord
 
@@ -1120,11 +1128,13 @@ def test_required_mode_source_root_load_is_silent(
 # ---------------------------------------------------------------------------
 # Additive v2 binding fields: scope_fingerprint + judge_signature_version
 #
-# These are pure plumbing — the atomic validator ignores them, so a
-# currently-valid post-judge (v1) entry stays valid when they are added.
 # Parse with ``source_root=None`` so signature verification and the
 # file_fingerprint live-source check are both skipped (both gate on
 # ``source_root``), letting a shape-only dummy signature suffice.
+#
+# NOTE: since Task 4, the atomic validator is version-aware — a v2 entry
+# binds via scope_fingerprint and must NOT carry the v1 file_fingerprint.
+# The round-trip below therefore uses the *valid* v2 shape (scope-only).
 # ---------------------------------------------------------------------------
 
 _VALID_FINGERPRINT = "0" * 64
@@ -1149,11 +1159,13 @@ def _valid_post_judge_entry() -> dict[str, object]:
 
 
 def test_scope_fingerprint_and_signature_version_round_trip() -> None:
-    """The two additive v2 fields parse onto the entry unchanged."""
+    """A valid v2 entry (scope-only binding) round-trips the additive fields."""
     scope_fp = "a" * 64
     entry = _valid_post_judge_entry()
+    del entry["file_fingerprint"]
     entry["scope_fingerprint"] = scope_fp
     entry["judge_signature_version"] = 2
+    entry["judge_metadata_signature"] = "hmac-sha256:v2:" + _VALID_FINGERPRINT
     data = {"allow_hits": [entry]}
 
     entries = _parse_allow_hits(data, source_file="x.yaml", source_root=None)
@@ -1161,6 +1173,7 @@ def test_scope_fingerprint_and_signature_version_round_trip() -> None:
     assert len(entries) == 1
     assert entries[0].scope_fingerprint == scope_fp
     assert entries[0].judge_signature_version == 2
+    assert entries[0].file_fingerprint is None
 
 
 def test_invalid_judge_signature_version_crashes() -> None:
@@ -1181,3 +1194,191 @@ def test_boolean_judge_signature_version_crashes() -> None:
 
     with pytest.raises(ValueError, match=r"not a boolean"):
         _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+
+# ---------------------------------------------------------------------------
+# Versioned signature payload (Task 4): v1 binds file_fingerprint, v2 binds
+# scope_fingerprint, and the version lives INSIDE the signed payload so a
+# v1<->v2 flip is unforgeable. These exercise ``compute_judge_metadata_signature``
+# directly with an injected test key (the real function, not the hand-rolled
+# v1-only ``_expected_judge_metadata_signature`` above).
+# ---------------------------------------------------------------------------
+
+_TEST_KEY = b"x" * 32
+_AWARE_DT = datetime(2026, 5, 23, tzinfo=UTC)
+
+
+def _sig(**overrides: object) -> str:
+    base: dict[str, object] = {
+        "key": "core/x.py:R6:C:m:fp=abc",
+        "ast_path": "body[0]/body[0]",
+        "judge_verdict": JudgeVerdict.ACCEPTED,
+        "judge_recorded_at": _AWARE_DT,
+        "judge_model": "anthropic/claude-opus",
+        "judge_rationale": "external call boundary",
+        "judge_policy_hash": "sha256:" + "0" * 64,
+        "hmac_key": _TEST_KEY,
+    }
+    base.update(overrides)
+    return compute_judge_metadata_signature(**base)  # type: ignore[arg-type]
+
+
+def test_v2_signature_binds_scope_fingerprint() -> None:
+    sig = _sig(signature_version=2, scope_fingerprint="a" * 64)
+    assert sig.startswith("hmac-sha256:v2:")
+
+
+def test_v1_signature_binds_file_fingerprint_and_keeps_v1_prefix() -> None:
+    sig = _sig(signature_version=1, file_fingerprint="b" * 64)
+    assert sig.startswith("hmac-sha256:v1:")
+
+
+def test_v1_and_v2_signatures_differ_for_same_logical_entry() -> None:
+    v1 = _sig(signature_version=1, file_fingerprint="b" * 64)
+    v2 = _sig(signature_version=2, scope_fingerprint="a" * 64)
+    assert not hmac.compare_digest(v1, v2)
+
+
+def test_v2_requires_scope_fingerprint() -> None:
+    with pytest.raises(ValueError, match="scope_fingerprint"):
+        _sig(signature_version=2, scope_fingerprint=None)
+
+
+def test_v1_requires_file_fingerprint() -> None:
+    with pytest.raises(ValueError, match="file_fingerprint"):
+        _sig(signature_version=1, file_fingerprint=None)
+
+
+def test_default_signature_version_is_v1() -> None:
+    """Omitting ``signature_version`` keeps the v1 prefix (load-bearing default).
+
+    Direct callers that predate the v2 migration (notably the justify write
+    path) omit the version argument; they must keep emitting v1 signatures.
+    """
+    sig = _sig(file_fingerprint="b" * 64)
+    assert sig.startswith("hmac-sha256:v1:")
+
+
+def test_unknown_signature_version_crashes() -> None:
+    with pytest.raises(ValueError, match="unknown signature_version"):
+        _sig(signature_version=3, file_fingerprint="b" * 64)
+
+
+# ---------------------------------------------------------------------------
+# Version-aware atomic validator (Task 4): invariant 8 dispatches on
+# ``judge_signature_version`` to require the correct binding field per
+# version and forbid the other; invariant 4 treats scope_fingerprint /
+# judge_signature_version as stray on a pre-judge entry. Parsed with
+# ``source_root=None`` so signature verification + file_fingerprint live-source
+# recompute are both skipped (a shape-only dummy signature suffices).
+# ---------------------------------------------------------------------------
+
+
+def test_v2_entry_with_scope_fingerprint_and_no_file_fingerprint_validates() -> None:
+    """A v2 post-judge entry binds via scope_fingerprint, not file_fingerprint."""
+    entry = _valid_post_judge_entry()
+    del entry["file_fingerprint"]
+    entry["judge_signature_version"] = 2
+    entry["scope_fingerprint"] = "a" * 64
+    entry["judge_metadata_signature"] = "hmac-sha256:v2:" + _VALID_FINGERPRINT
+    data = {"allow_hits": [entry]}
+
+    entries = _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+    assert len(entries) == 1
+    assert entries[0].judge_signature_version == 2
+    assert entries[0].scope_fingerprint == "a" * 64
+    assert entries[0].file_fingerprint is None
+
+
+def test_v2_entry_with_file_fingerprint_crashes() -> None:
+    """A v2 entry must NOT carry the v1 whole-file file_fingerprint."""
+    entry = _valid_post_judge_entry()
+    entry["judge_signature_version"] = 2
+    entry["scope_fingerprint"] = "a" * 64
+    entry["judge_metadata_signature"] = "hmac-sha256:v2:" + _VALID_FINGERPRINT
+    # file_fingerprint left present from the valid-entry template — corruption.
+    data = {"allow_hits": [entry]}
+
+    with pytest.raises(ValueError, match="must not carry"):
+        _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+
+def test_v2_entry_missing_scope_fingerprint_crashes() -> None:
+    """A v2 post-judge entry without scope_fingerprint is unbound."""
+    entry = _valid_post_judge_entry()
+    del entry["file_fingerprint"]
+    entry["judge_signature_version"] = 2
+    entry["judge_metadata_signature"] = "hmac-sha256:v2:" + _VALID_FINGERPRINT
+    data = {"allow_hits": [entry]}
+
+    with pytest.raises(ValueError, match=r"binding fields are missing.*scope_fingerprint"):
+        _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+
+def test_v1_entry_with_scope_fingerprint_crashes() -> None:
+    """A v1 (or absent-version) entry carrying scope_fingerprint is corruption."""
+    entry = _valid_post_judge_entry()
+    entry["scope_fingerprint"] = "a" * 64
+    # judge_signature_version absent -> treated as v1; file_fingerprint present.
+    data = {"allow_hits": [entry]}
+
+    with pytest.raises(ValueError, match="corruption"):
+        _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+
+def test_pre_judge_entry_with_stray_scope_fingerprint_crashes() -> None:
+    """A pre-judge entry must not carry scope_fingerprint (invariant 4)."""
+    entry = {
+        "key": "a:b:c:fp=1",
+        "owner": "test-agent",
+        "reason": "pre-judge era entry",
+        "safety": "low",
+        "scope_fingerprint": "a" * 64,
+    }
+    data = {"allow_hits": [entry]}
+
+    with pytest.raises(ValueError, match=r"scope_fingerprint.*pre-judge"):
+        _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+
+def test_pre_judge_entry_with_stray_signature_version_crashes() -> None:
+    """A pre-judge entry must not carry judge_signature_version (invariant 4)."""
+    entry = {
+        "key": "a:b:c:fp=1",
+        "owner": "test-agent",
+        "reason": "pre-judge era entry",
+        "safety": "low",
+        "judge_signature_version": 2,
+    }
+    data = {"allow_hits": [entry]}
+
+    with pytest.raises(ValueError, match=r"judge_signature_version.*pre-judge"):
+        _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+
+def test_v2_entry_at_match_time_raises_not_yet_wired() -> None:
+    """A v2 entry must crash (not silently pass) in the v1-only match verifier.
+
+    ``verify_entry_binding_against_finding`` only understands v1's
+    file_fingerprint binding; v2 scope_fingerprint match-time verification
+    is a later task. The interim guard is an explicit ``raise`` so it
+    survives ``python -O`` — a bare ``assert`` would be stripped under -O
+    and let a v2 entry pass with only the ast_path check, defeating the
+    crash-loud-on-unbound stance.
+    """
+    entry = AllowlistEntry(
+        key="core/x.py:R6:C:m:fp=abc",
+        owner="test-agent",
+        reason="tier-3 boundary",
+        safety="low",
+        expires=None,
+        ast_path="body[0]",
+        scope_fingerprint="a" * 64,
+        file_fingerprint=None,
+        judge_signature_version=2,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+    )
+
+    with pytest.raises(ValueError, match="not yet wired"):
+        verify_entry_binding_against_finding(entry, file_path="core/x.py", ast_path="body[0]")

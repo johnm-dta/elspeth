@@ -23,7 +23,9 @@ _JUDGE_METADATA_SIGNATURE_ENV_VAR = "ELSPETH_JUDGE_METADATA_HMAC_KEY"
 _JUDGE_METADATA_SIGNATURE_VERIFY_MODE_ENV_VAR = "ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE"
 _JUDGE_METADATA_SIGNATURE_VERIFY_REQUIRED = "required"
 _JUDGE_METADATA_SIGNATURE_VERIFY_SHAPE_ONLY_WHEN_KEY_MISSING = "shape-only-when-key-missing"
-_JUDGE_METADATA_SIGNATURE_PREFIX = "hmac-sha256:v1:"
+_JUDGE_METADATA_SIGNATURE_PREFIX_V1 = "hmac-sha256:v1:"
+_JUDGE_METADATA_SIGNATURE_PREFIX_V2 = "hmac-sha256:v2:"
+_JUDGE_METADATA_SIGNATURE_PREFIXES = (_JUDGE_METADATA_SIGNATURE_PREFIX_V1, _JUDGE_METADATA_SIGNATURE_PREFIX_V2)
 _MIN_JUDGE_METADATA_HMAC_KEY_BYTES = 32
 _MAX_ALLOWLIST_YAML_BYTES = 5 * 1024 * 1024
 _MIN_AUDIT_ANCHOR_ALNUM_CHARS = 2
@@ -118,12 +120,16 @@ class AllowlistEntry:
     distinguish overrides of ACCEPTED entries (harmless) from
     overrides of BLOCKED entries (the dangerous signal).
 
-    ``judge_metadata_signature`` is the v1 HMAC over the judge verdict,
-    model verdict, recorded_at timestamp, model id, model rationale,
-    source file fingerprint, AST path, excerpt-redaction records, and
-    entry key. It is verified on production source-root loads so in-place
-    edits to the judge quartet or its redaction audit trail do not remain
-    invisible.
+    ``judge_metadata_signature`` is the versioned HMAC over the judge
+    verdict, model verdict, recorded_at timestamp, model id, model
+    rationale, source fingerprint, AST path, excerpt-redaction records,
+    and entry key. The binding scheme is selected by
+    ``judge_signature_version`` and recorded inside the signed payload:
+    v1 binds the whole-file ``file_fingerprint``; v2 binds the enclosing-
+    scope ``scope_fingerprint``. A v1 entry carries ``file_fingerprint``
+    and no ``scope_fingerprint``; a v2 entry the reverse. It is verified
+    on production source-root loads so in-place edits to the judge quartet,
+    its binding, or its redaction audit trail do not remain invisible.
 
     ``audit_review`` is a post-judge human review record. It is nullable:
     absence means no later falsification has been recorded. Presence is
@@ -551,34 +557,60 @@ def _compute_file_fingerprint(source_path: Path) -> str:
 def compute_judge_metadata_signature(
     *,
     key: str,
-    file_fingerprint: str,
     ast_path: str,
     judge_verdict: JudgeVerdict,
     judge_recorded_at: datetime,
     judge_model: str,
     judge_rationale: str,
     judge_policy_hash: str,
+    signature_version: int = 1,
+    file_fingerprint: str | None = None,
+    scope_fingerprint: str | None = None,
     judge_model_verdict: JudgeVerdict | None = None,
     judge_confidence: float | None = None,
     judge_excerpt_redactions: tuple[RedactionRecord, ...] = (),
     hmac_key: bytes | None = None,
 ) -> str:
-    """Return the v1 HMAC binding for a post-judge allowlist entry.
+    """Return the versioned HMAC binding for a post-judge allowlist entry.
 
     The signature binds the audit-significant judge metadata cluster
-    (verdict/rationale/model/timestamp/policy hash) and excerpt-redaction records to
-    the same source identity primitives C8-3 already records (entry key,
-    file fingerprint, AST path). Operators may still edit administrative
-    fields such as owner/expiry, but changing what the judge supposedly
-    said, which source location it judged, or which secrets were scrubbed
+    (verdict/rationale/model/timestamp/policy hash) and excerpt-redaction
+    records to the source identity the entry was judged against. Two
+    binding schemes exist, selected by ``signature_version`` and recorded
+    *inside* the signed payload (``"version"``) so a v1<->v2 flip is itself
+    unforgeable:
+
+    * **v1** binds the whole-file ``file_fingerprint`` (the SHA-256 of the
+      source file the judge inspected). Prefix ``hmac-sha256:v1:``.
+    * **v2** binds the enclosing-scope ``scope_fingerprint`` (the AST
+      fingerprint of the scope the finding lives in). Prefix
+      ``hmac-sha256:v2:``.
+
+    ``signature_version`` defaults to ``1``: direct callers that omit it
+    (notably the ``justify`` write path) keep producing v1 signatures.
+    Operators may still edit administrative fields such as owner/expiry,
+    but changing what the judge supposedly said, which source location it
+    judged, which secrets were scrubbed, or which binding scheme was used
     requires re-running ``justify`` with the deployment-held HMAC key.
     """
     if hmac_key is None:
         hmac_key = _judge_metadata_hmac_key()
-    payload = {
-        "version": 1,
+    if signature_version == 2:
+        if scope_fingerprint is None:
+            raise ValueError("compute_judge_metadata_signature: scope_fingerprint is required for signature_version 2")
+        binding: dict[str, str] = {"scope_fingerprint": scope_fingerprint}
+        prefix = _JUDGE_METADATA_SIGNATURE_PREFIX_V2
+    elif signature_version == 1:
+        if file_fingerprint is None:
+            raise ValueError("compute_judge_metadata_signature: file_fingerprint is required for signature_version 1")
+        binding = {"file_fingerprint": file_fingerprint}
+        prefix = _JUDGE_METADATA_SIGNATURE_PREFIX_V1
+    else:
+        raise ValueError(f"compute_judge_metadata_signature: unknown signature_version {signature_version!r}")
+    payload: dict[str, Any] = {
+        "version": signature_version,
         "key": key,
-        "file_fingerprint": file_fingerprint,
+        **binding,
         "ast_path": ast_path,
         "judge_verdict": judge_verdict.value,
         "judge_model_verdict": judge_model_verdict.value if judge_model_verdict is not None else None,
@@ -599,7 +631,7 @@ def compute_judge_metadata_signature(
         payload["judge_confidence"] = judge_confidence
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     digest = hmac.new(hmac_key, canonical, hashlib.sha256).hexdigest()
-    return f"{_JUDGE_METADATA_SIGNATURE_PREFIX}{digest}"
+    return f"{prefix}{digest}"
 
 
 def _judge_metadata_hmac_key() -> bytes:
@@ -654,7 +686,15 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
         )
     _validate_judge_metadata_signature_shape(entry.judge_metadata_signature, context=context)
 
-    assert entry.file_fingerprint is not None
+    # The binding field required depends on the entry's signature version.
+    # Co-presence/forbidden-other was already enforced by invariant 8 in
+    # ``_validate_judge_metadata_atomic`` (runs before this in _parse_allow_hits),
+    # so exactly one of file_fingerprint/scope_fingerprint is present here.
+    version = entry.judge_signature_version if entry.judge_signature_version is not None else 1
+    if version == 2:
+        assert entry.scope_fingerprint is not None
+    else:
+        assert entry.file_fingerprint is not None
     assert entry.ast_path is not None
     assert entry.judge_verdict is not None
     assert entry.judge_recorded_at is not None
@@ -665,7 +705,6 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
         return
     expected = compute_judge_metadata_signature(
         key=entry.key,
-        file_fingerprint=entry.file_fingerprint,
         ast_path=entry.ast_path,
         judge_verdict=entry.judge_verdict,
         judge_model_verdict=entry.judge_model_verdict,
@@ -675,6 +714,9 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
         judge_policy_hash=entry.judge_policy_hash,
         judge_excerpt_redactions=entry.judge_excerpt_redactions,
         judge_confidence=entry.judge_confidence,
+        signature_version=version,
+        file_fingerprint=entry.file_fingerprint,
+        scope_fingerprint=entry.scope_fingerprint,
     )
     if not hmac.compare_digest(entry.judge_metadata_signature, expected):
         raise ValueError(
@@ -686,9 +728,12 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
 
 
 def _validate_judge_metadata_signature_shape(signature: str, *, context: str) -> None:
-    if not signature.startswith(_JUDGE_METADATA_SIGNATURE_PREFIX):
-        raise ValueError(f"{context}: judge_metadata_signature must start with {_JUDGE_METADATA_SIGNATURE_PREFIX!r}; got {signature!r}")
-    digest = signature.removeprefix(_JUDGE_METADATA_SIGNATURE_PREFIX)
+    if not signature.startswith(_JUDGE_METADATA_SIGNATURE_PREFIXES):
+        raise ValueError(
+            f"{context}: judge_metadata_signature must start with one of {_JUDGE_METADATA_SIGNATURE_PREFIXES}; got {signature!r}"
+        )
+    prefix = next(p for p in _JUDGE_METADATA_SIGNATURE_PREFIXES if signature.startswith(p))
+    digest = signature.removeprefix(prefix)
     if len(digest) != 64:
         raise ValueError(f"{context}: judge_metadata_signature digest must be 64 lowercase hex characters")
     try:
@@ -734,10 +779,26 @@ def _verify_file_fingerprint_at_load(entry: AllowlistEntry, *, source_root: Path
             f"different repository layout. Refusing to load."
         )
     live_fingerprint = _compute_file_fingerprint(source_path)
-    # ``entry.file_fingerprint`` is non-None here: invariant 8 in
-    # ``_validate_judge_metadata_atomic`` (binding co-presence) already
-    # enforced its presence for judge-gated entries before we got here.
-    assert entry.file_fingerprint is not None  # narrow for type-checker
+    # ``entry.file_fingerprint`` is non-None here *for a v1 entry*: invariant 8
+    # in ``_validate_judge_metadata_atomic`` (binding co-presence) enforced its
+    # presence for v1 judge-gated entries before we got here. A v2 entry binds
+    # via ``scope_fingerprint`` and carries no ``file_fingerprint``; its
+    # live-source recompute is a later task in the v1->v2 migration (the
+    # load-time-source-binding task). Until that lands, a v2 entry reaching
+    # this v1-only recompute crashes here by design (offensive:
+    # crash-loud-on-unbound beats silently skipping the binding check). This
+    # is an explicit ``raise`` rather than a bare ``assert`` so it carries an
+    # informative message and survives ``python -O`` (a stripped assert would
+    # let a v2 entry fall into the v1 hash compare against ``None``). No real
+    # v2 entry exists yet — justify still emits v1.
+    version = entry.judge_signature_version if entry.judge_signature_version is not None else 1
+    if version == 2:
+        raise ValueError(
+            f"{context}: v2 scope_fingerprint live-source verification is not yet wired "
+            "(scheduled for the load-time-source-binding task); a v2 judge-gated entry "
+            f"({entry.key!r}, {file_path!r}) must not reach this v1-only file_fingerprint recompute."
+        )
+    assert entry.file_fingerprint is not None  # v1: invariant 8 guarantees presence (mypy narrowing)
     if entry.file_fingerprint != live_fingerprint:
         raise ValueError(
             f"{context}: file_fingerprint mismatch for {file_path!r}: persisted "
@@ -769,9 +830,27 @@ def verify_entry_binding_against_finding(entry: AllowlistEntry, *, file_path: st
     """
     if entry.judge_verdict is None:
         return
-    # Co-presence is enforced at load (invariant 8); both fields are
-    # non-None here.
-    assert entry.file_fingerprint is not None
+    # Co-presence is enforced at load (invariant 8). For a v1 entry,
+    # file_fingerprint is non-None here. A v2 entry binds via
+    # scope_fingerprint and carries no file_fingerprint; wiring its
+    # match-time handling is a later task in the v1->v2 migration (the
+    # match-time-scope-verification task, which *introduces* v2 entries
+    # and its match-time tests). Until then a v2 entry reaching this
+    # v1-only verifier crashes by design (offensive: crash-loud beats
+    # silently matching an entry whose binding this verifier doesn't yet
+    # understand). This is an explicit ``raise`` rather than a bare
+    # ``assert`` so it carries an informative message and survives
+    # ``python -O`` (a stripped assert would let a v2 entry pass with only
+    # the ast_path check). No real v2 entry exists yet — justify still
+    # emits v1.
+    version = entry.judge_signature_version if entry.judge_signature_version is not None else 1
+    if version == 2:
+        raise ValueError(
+            f"{entry.key!r} ({file_path!r}): v2 scope_fingerprint match-time verification is "
+            "not yet wired (scheduled for the match-time-scope-verification task); a v2 "
+            "judge-gated entry must not reach this v1-only binding verifier."
+        )
+    assert entry.file_fingerprint is not None  # v1: invariant 8 guarantees presence (mypy narrowing)
     assert entry.ast_path is not None
     if entry.ast_path != ast_path:
         raise ValueError(
@@ -822,9 +901,11 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
        policy hash + rationale are also non-None — these fields are
        atomic; a partial write is corruption.
     4. ``judge_verdict is None`` implies every other ``judge_*`` field
+       and every binding field (``file_fingerprint``,
+       ``scope_fingerprint``, ``ast_path``, ``judge_signature_version``)
        is also None — a pre-judge-era entry MUST NOT carry stray model
-       metadata; that would be evidence of partial revert / merge
-       corruption.
+       metadata or binding fields; that would be evidence of partial
+       revert / merge corruption.
     5. ``judge_verdict`` and ``judge_model_verdict`` must never be
        ``BLOCKED``. ``BLOCKED`` is the in-memory runtime verdict the
        cicd-judge gate uses to reject a candidate suppression; by
@@ -844,25 +925,34 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
        verdict interpreted so later CLAUDE.md / policy drift cannot make
        old verdicts uninterpretable.
 
-    Invariant 8 (C8-3 binding co-presence): when ``judge_verdict`` is
-    set, ``file_fingerprint`` and ``ast_path`` must both be present.
-    These two fields bind the judge quartet to the source bytes + AST
-    node the judge actually inspected; without them the quartet is
-    transplantable (copy from a safe entry onto an entry keyed at
-    dangerous code; loader can't tell the difference). The live-source
-    recompute is performed by :func:`_verify_file_fingerprint_at_load`
-    in ``_parse_allow_hits`` (load-time, catches cross-file transplant
-    and source drift) and by :func:`verify_entry_binding_against_finding`
-    at match time (catches in-file AST-node transplant). Both
-    verifications require the fields' presence, which this invariant
-    guarantees.
+    Invariant 8 (C8-3 binding co-presence, version-aware): when
+    ``judge_verdict`` is set, ``ast_path`` and the version's source
+    fingerprint must both be present, and the *other* version's
+    fingerprint must be absent. The binding field is selected by
+    ``judge_signature_version``: v1 (or absent version) binds
+    ``file_fingerprint`` (whole-file SHA-256) and must not carry
+    ``scope_fingerprint``; v2 binds ``scope_fingerprint`` (enclosing-scope
+    AST fingerprint) and must not carry ``file_fingerprint``. These fields
+    bind the judge quartet to the source the judge actually inspected;
+    without them the quartet is transplantable (copy from a safe entry
+    onto an entry keyed at dangerous code; loader can't tell the
+    difference), and a stray cross-version fingerprint advertises a
+    binding the signed payload did not sign. The live-source recompute for
+    v1 is performed by :func:`_verify_file_fingerprint_at_load` in
+    ``_parse_allow_hits`` (load-time, catches cross-file transplant and
+    source drift) and by :func:`verify_entry_binding_against_finding` at
+    match time (catches in-file AST-node transplant); the v2 scope_fingerprint
+    live-source recompute is wired by a later task in this migration (until
+    then a v2 entry loaded with ``source_root`` crashes by design — see the
+    asserts in those functions). Both verifications require the fields'
+    presence, which this invariant guarantees.
 
     ``judge_metadata_signature`` is deliberately verified in
     ``_parse_allow_hits`` only when ``source_root`` is provided, because
     report-only loaders do not necessarily have access to the deployment
     HMAC key. Shape validation still treats it as part of the judge
     cluster: a pre-judge entry must not carry a stray signature, and a
-    present signature must have the v1 prefix + 64-hex digest shape.
+    present signature must have a v1 or v2 prefix + 64-hex digest shape.
     """
     # Invariant 5 (defense-in-depth vs _optional_judge_verdict): neither
     # judge_verdict nor judge_model_verdict may be BLOCKED on a persisted
@@ -906,6 +996,10 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
             stray.append("judge_policy_hash")
         if entry.file_fingerprint is not None:
             stray.append("file_fingerprint")
+        if entry.scope_fingerprint is not None:
+            stray.append("scope_fingerprint")
+        if entry.judge_signature_version is not None:
+            stray.append("judge_signature_version")
         if entry.ast_path is not None:
             stray.append("ast_path")
         if entry.judge_metadata_signature is not None:
@@ -943,26 +1037,49 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
         )
 
     # Invariant 8 (C8-3 binding co-presence): post-judge entries must
-    # carry both binding fields. Without them the quartet is
-    # transplantable — an attacker can copy the verdict + rationale +
-    # model + policy hash + recorded_at from a safe entry onto an entry
-    # keyed at dangerous code, and the gate has no way to detect the rebind.
-    # The load-time and match-time binding checks downstream both
-    # require these fields' presence, which this invariant guarantees.
+    # carry their version's binding field plus ast_path. Without them the
+    # quartet is transplantable — an attacker can copy the verdict +
+    # rationale + model + policy hash + recorded_at from a safe entry onto
+    # an entry keyed at dangerous code, and the gate has no way to detect
+    # the rebind. The binding field is version-specific: v1 (or absent
+    # version) binds the whole-file ``file_fingerprint``; v2 binds the
+    # enclosing-scope ``scope_fingerprint``. An entry must carry exactly
+    # the field its version signs and must NOT carry the other — a v1
+    # entry with a stray scope_fingerprint, or a v2 entry with a stray
+    # file_fingerprint, is corruption (the signed payload would bind one
+    # field while the entry advertises the other). The load-time and
+    # match-time binding checks downstream require these fields' presence,
+    # which this invariant guarantees.
+    version = entry.judge_signature_version if entry.judge_signature_version is not None else 1
     missing_binding: list[str] = []
-    if entry.file_fingerprint is None:
-        missing_binding.append("file_fingerprint")
     if entry.ast_path is None:
         missing_binding.append("ast_path")
+    if version == 2:
+        if entry.scope_fingerprint is None:
+            missing_binding.append("scope_fingerprint")
+        if entry.file_fingerprint is not None:
+            raise ValueError(
+                f"{context}: judge_signature_version is 2 but file_fingerprint is present; "
+                "v2 entries bind via scope_fingerprint and must not carry the v1 file_fingerprint."
+            )
+    else:
+        if entry.file_fingerprint is None:
+            missing_binding.append("file_fingerprint")
+        if entry.scope_fingerprint is not None:
+            raise ValueError(
+                f"{context}: judge_signature_version is absent/1 but scope_fingerprint is present; "
+                "v1 entries bind via file_fingerprint. A scope_fingerprint on a v1 entry is corruption."
+            )
     if missing_binding:
         raise ValueError(
             f"{context}: judge_verdict is set ({entry.judge_verdict.value!r}) but the "
             f"required binding fields are missing ({', '.join(missing_binding)}); "
-            "judge-gated entries must record file_fingerprint (the SHA-256 of the "
-            "source file the judge inspected) and ast_path (the AST address of the "
-            "finding the judge accepted) so the gate can detect quartet transplant "
-            "and source drift. An entry whose verdict cannot be bound to the code it "
-            "judged is audit-broken."
+            "judge-gated entries must record their version's source fingerprint "
+            "(v1: file_fingerprint, the SHA-256 of the source file; v2: "
+            "scope_fingerprint, the AST fingerprint of the enclosing scope) and "
+            "ast_path (the AST address of the finding the judge accepted) so the gate "
+            "can detect quartet transplant and source drift. An entry whose verdict "
+            "cannot be bound to the code it judged is audit-broken."
         )
 
     # Invariant 7: rationale must be non-empty after whitespace strip.

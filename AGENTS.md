@@ -169,6 +169,46 @@ These standards interact in non-obvious ways. The tier model's fabrication rule 
 
 ---
 
+## CICD Judge Gate — Allowlist Suppressions
+
+When the `trust_tier.tier_model` rule flags an upward import or a defensive
+pattern you believe is legitimate, the suppression goes through the **cicd-judge
+allowlist gate** (`config/cicd/enforce_tier_model/`). An LLM judge reviews the
+rationale; the resulting verdict and its source binding are HMAC-signed.
+
+**Source binding — v2 `scope_fingerprint`, not legacy v1 `file_fingerprint`.**
+New entries created by `justify` bind a v2 `scope_fingerprint` (the enclosing-scope
+AST fingerprint, signature prefix `hmac-sha256:v2:`), which only invalidates when
+the suppressed scope itself changes. The legacy v1 `file_fingerprint` (a whole-file
+hash) is still live on older entries but is being migrated away — it invalidates on
+*any* edit anywhere in the file, which is why editing a source file desyncs every
+signed v1 entry in it. Do not hand-edit judge metadata; production loads verify the
+signature.
+
+**`justify` and `migrate-judge-scope` are OPERATOR-ONLY.** Both write
+HMAC-signed metadata and need `ELSPETH_JUDGE_METADATA_HMAC_KEY`. The key is
+symmetric, so any key holder can forge a valid signature — therefore the key MUST
+NOT be in any autonomous agent's environment. An agent may *propose* a
+`justify` or a `migrate-judge-scope` (the v1→v2 re-sign) invocation; only an
+operator-held environment runs it and signs. This custody rule is the gate's
+entire security model — see the matching section in `CLAUDE.md` for the full
+rationale.
+
+**`--judge-transport {openrouter,agent}` selects the judging LLM** (default
+`openrouter`; accepted on both `justify` and `reaudit`). This is a separate axis
+from the HMAC custody rule — it governs *which LLM* serves the verdict, not who
+signs. The persisted/signed `judge_transport` value is `"openrouter"` or
+`"claude_agent_sdk"`, bound into the signed v2 payload (so a forged or edited
+transport label fails the load-time HMAC recompute). The `agent` transport (Claude
+Agent SDK) additionally needs Claude Code auth (CLI login / `ANTHROPIC_API_KEY` /
+Bedrock-Vertex-Azure) that an agent's environment does not hold — so an agent uses
+the default `openrouter`. `reaudit` is read-only (writes no signed metadata) and is
+agent-runnable with the agent's own OpenRouter key, but again only under
+`openrouter`. The `agent` transport cannot pin `temperature`, so prefer
+`openrouter` for reproducible re-checks regardless of an entry's origin transport.
+
+---
+
 <!-- filigree:instructions:v2.1.0:9dff6e6d -->
 ## Filigree Issue Tracker
 

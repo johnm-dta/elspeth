@@ -69,9 +69,9 @@ orientation, not a substitute (verdict enums and flags evolve).
 | Subcommand | Role | Writes to allowlist? |
 | ---------- | ---- | -------------------- |
 | `rotate` | Mechanical fingerprint reconciliation after an AST refactor. **No judge.** | Yes — entry fingerprints |
-| `justify` | Propose a new entry; the judge (Opus) returns `ACCEPTED`/`BLOCKED`; signs accepted entries. | Yes — new entry |
+| `justify` | Propose a new entry; the judge (Opus) returns `ACCEPTED`/`BLOCKED`; signs accepted entries. Accepts `--judge-transport {openrouter,agent}` (default `openrouter`). | Yes — new entry |
 | `audit-verdict` | Human post-review of a judge-**ACCEPTED** entry — confirm or reverse the judge. | Yes — review block |
-| `reaudit` | Re-run the judge across existing entries to detect decay. **Read-only on YAML**; emits a triage report. | No |
+| `reaudit` | Re-run the judge across existing entries to detect decay. **Read-only on YAML**; emits a triage report. Accepts `--judge-transport {openrouter,agent}` (default `openrouter`). | No |
 | `migrate-judge-scope` | **Operator-only** (signs; needs the HMAC key). Re-signs v1 (`file_fingerprint`) entries whose signature verifies and whose node still matches a live finding as v2 (`scope_fingerprint`) **without re-running the judge** — it deliberately skips the file_fingerprint byte-freshness gate, so byte-drifted-but-scope-stable entries are the target set, not "CI-green" ones. Gated on integrity (existing v1 signature must verify) + relevance (key still matches a live finding). | Yes — re-signed entries |
 | `check-judge-coverage` (C1) | CI gate: every new entry must carry signed judge metadata (pre-judge entries grandfathered, rotation-stable). | No |
 | `check-override-rate` (C3) | CI gate: rolling-30d operator-override rate must stay under `--max-rate` (workflow-pinned 0.10). | No |
@@ -87,6 +87,35 @@ An agent may *propose* a `justify` invocation; only an operator-held environment
 runs it and signs. Full rationale: CLAUDE.md § "CICD Judge Gate: HMAC Key
 Custody". During an audit you therefore *recommend* `justify`/`audit-verdict`
 commands for the operator to run — you do not run the signing path yourself.
+
+### `--judge-transport` — which LLM serves the verdict
+
+`justify` and `reaudit` both accept `--judge-transport {openrouter,agent}`
+(default `openrouter`; no behaviour change unless opted in). This selects the
+judging LLM and is a *separate axis* from HMAC custody — it governs which model
+produces the verdict, not who signs it.
+
+- **`openrouter`** (default) — OpenAI-compatible SDK pointed at OpenRouter,
+  `temperature=0`, reproducible. Persisted/signed `judge_transport`: `"openrouter"`.
+  Use this for any deterministic re-check (and it is the only transport an agent
+  can drive, since it runs on the agent's own OpenRouter key).
+- **`agent`** — Claude Agent SDK (`claude_code` system-prompt preset, no tools).
+  Needs the `[judge-agent]` extra and Claude Code auth (CLI login /
+  `ANTHROPIC_API_KEY` / Bedrock-Vertex-Azure) — operator-held credentials an
+  agent's environment does not carry. Persisted/signed `judge_transport`:
+  `"claude_agent_sdk"`. The "cheaper" assumption holds only on the
+  subscription/credit path; `ANTHROPIC_API_KEY` is per-token and may not beat
+  OpenRouter. The SDK cannot pin `temperature`, so agent-written verdicts are
+  less reproducible than the `openrouter` path.
+
+`judge_transport` is part of the **signed v2 payload** ("how the verdict was
+produced" — verdict metadata, tamper-evident with the verdict; a forged or edited
+transport label fails the load-time HMAC recompute). Consequence for the audit: a
+re-`justify` of the same entry under a different transport surfaces as a
+metadata-diff (the `judge_transport` value, and the verdict/rationale it
+produced, change). For decay-detection re-checks, keep `reaudit` on
+`--judge-transport openrouter` so re-runs stay deterministic regardless of the
+transport that originally wrote each entry.
 
 ### `justify` — propose a new entry (agent proposes, operator signs)
 

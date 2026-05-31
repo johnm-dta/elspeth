@@ -200,12 +200,35 @@ env ELSPETH_JUDGE_METADATA_HMAC_KEY=<32-plus-byte-secret> PYTHONPATH=elspeth-lin
 # fingerprint, signature prefix hmac-sha256:v2:); v1 file_fingerprint (whole-
 # file hash) is the still-live legacy scheme being migrated away. Do not
 # hand-edit judge metadata; production loads verify it.
+#
+# Judge transport: --judge-transport {openrouter,agent} (default openrouter; no
+# behavior change unless opted in) selects which LLM serves the verdict. This
+# flag is also accepted by reaudit (below).
+#   openrouter — OpenAI-compatible SDK pointed at OpenRouter, temperature=0,
+#     reproducible. Persisted/signed judge_transport value: "openrouter".
+#   agent      — Claude Agent SDK (claude_code system-prompt preset, no tools).
+#     Needs the [judge-agent] extra (uv pip install -e 'elspeth-lints/[judge-agent]')
+#     AND Claude Code auth: a logged-in Claude Code CLI / Claude-subscription or
+#     Agent-SDK credit pool, OR ANTHROPIC_API_KEY, OR Bedrock/Vertex/Azure.
+#     Persisted/signed judge_transport value: "claude_agent_sdk".
+# The "agent is cheaper" assumption rests on the subscription/credit path:
+# ANTHROPIC_API_KEY is per-token Anthropic billing and may NOT be cheaper than
+# OpenRouter. The agent transport cannot pin temperature, so agent-written
+# entries are less reproducible than the temperature=0 openrouter path — prefer
+# reaudit under --judge-transport openrouter to keep re-checks deterministic
+# regardless of an entry's origin transport. The signed v2 payload binds
+# judge_transport ("how the verdict was produced" — verdict metadata, tamper-
+# evident with the verdict); the claude_code preset's era is bounded by the
+# already-signed judge_recorded_at timestamp (no preset-version is captured).
 
 # Reaudit existing judged entries during allowlist renewal / decay sweeps
 env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli reaudit --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --format markdown --output /tmp/reaudit.md
 # If interrupted, resume with --resume <run_id> or inspect an incomplete report
 # with --render-incomplete <run_id>. When C3 override-rate fails, reaudit the
 # override-heavy directories before considering an ADR to change the threshold.
+# reaudit also accepts --judge-transport {openrouter,agent} (default openrouter);
+# keep it on openrouter for deterministic temperature=0 re-checks regardless of
+# the transport that originally wrote each entry.
 
 # Migrate signature-valid v1 (file_fingerprint) entries to v2 (scope_fingerprint)
 # — "signature-valid" means the existing signature still verifies AND the node
@@ -331,11 +354,24 @@ into the audit trail, indistinguishable from a real one. The HMAC stops a
 against a key-holding agent.
 
 Therefore: an agent may *propose* an `elspeth-lints justify` invocation; only an
-operator-held environment runs it and signs. CI verifies signatures with the key
-as a GitHub Actions secret (withheld from fork PRs by design — see the
+operator-held environment runs it and signs. The same custody rule covers
+`migrate-judge-scope` (v1→v2 re-sign): it writes signed metadata and so is
+operator-only — an agent may propose it, only an operator-held HMAC-key
+environment runs and signs. CI verifies signatures with the key as a GitHub
+Actions secret (withheld from fork PRs by design — see the
 `shape-only-when-key-missing` verify mode and its load-time warning). A future
 asymmetric scheme (agents can verify, not sign) would remove this surface
 structurally.
+
+The `--judge-transport` flag is a separate axis from the HMAC custody rule. Both
+`openrouter` and `agent` produce a verdict that an operator still signs; the flag
+governs *which LLM* serves the verdict, not who signs. The `agent` transport
+additionally needs Claude Code auth (CLI login / `ANTHROPIC_API_KEY` /
+Bedrock-Vertex-Azure) that an autonomous agent's environment does not hold, so an
+agent proposing a `justify` uses the default `openrouter`. `reaudit` is
+read-only (it writes no signed metadata) and is agent-runnable with the agent's
+own OpenRouter key — but again only under `openrouter`, since the `agent`
+transport's auth is not in an agent's environment.
 
 ## Git Safety
 

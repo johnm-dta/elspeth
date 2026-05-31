@@ -85,3 +85,32 @@ def test_entry_dict_roundtrip_preserves_v1_file_binding() -> None:
     assert restored.file_fingerprint == file_fp
     assert restored.scope_fingerprint is None
     assert restored.judge_signature_version is None
+
+
+def test_sidecar_round_trips_judge_transport() -> None:
+    """The additive judge_transport field survives the sidecar round trip."""
+    entry = AllowlistEntry(
+        key="web/x.py:R1:fn:fp=aa",
+        owner="alice",
+        reason="permitted boundary",
+        safety="contained",
+        expires=None,
+        file_fingerprint=None,
+        scope_fingerprint="a" * 64,
+        judge_signature_version=2,
+        judge_transport="claude_agent_sdk",
+        ast_path="Module.body[0]",
+        pattern=None,
+        source_file="test.yaml",
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime(2026, 5, 23, tzinfo=UTC),
+        judge_model="some-model",
+        judge_rationale="rationale",
+        judge_confidence=None,
+        judge_model_verdict=JudgeVerdict.ACCEPTED,
+        judge_policy_hash="policyhash",
+        judge_metadata_signature="hmac-sha256:v2:" + "0" * 64,
+    )
+
+    restored = _roundtrip(entry)
+    assert restored.judge_transport == "claude_agent_sdk"

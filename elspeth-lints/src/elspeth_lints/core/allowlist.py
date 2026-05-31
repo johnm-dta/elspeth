@@ -147,6 +147,7 @@ class AllowlistEntry:
     ast_path: str | None = None
     scope_fingerprint: str | None = None
     judge_signature_version: int | None = None
+    judge_transport: str | None = None
     pattern: str | None = None
     source_file: str = ""
     matched: bool = field(default=False, compare=False)
@@ -454,6 +455,7 @@ def _parse_allow_hits(
             ast_path=_optional_string(entry, "ast_path", context=ctx),
             scope_fingerprint=_optional_string(entry, "scope_fingerprint", context=ctx),
             judge_signature_version=_optional_signature_version(entry, "judge_signature_version", context=ctx),
+            judge_transport=_optional_string(entry, "judge_transport", context=ctx),
             pattern=_optional_string(entry, "pattern", context=ctx),
             source_file=source_file,
             judge_verdict=_optional_judge_verdict(entry, "judge_verdict", context=ctx, allow_blocked=False),

@@ -1217,6 +1217,18 @@ def test_scope_fingerprint_and_signature_version_round_trip() -> None:
     assert entries[0].file_fingerprint is None
 
 
+def test_entry_parses_judge_transport() -> None:
+    """The additive, unsigned judge_transport field parses off a valid entry."""
+    entry = _valid_post_judge_entry()
+    entry["judge_transport"] = "claude_agent_sdk"
+    data = {"allow_hits": [entry]}
+
+    entries = _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+    assert len(entries) == 1
+    assert entries[0].judge_transport == "claude_agent_sdk"
+
+
 def test_invalid_judge_signature_version_crashes() -> None:
     """A version other than 1 or 2 is corruption and crashes on load."""
     entry = _valid_post_judge_entry()

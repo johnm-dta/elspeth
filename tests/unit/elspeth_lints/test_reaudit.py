@@ -1223,6 +1223,7 @@ def test_render_json_report_is_valid_json_with_enum_strings() -> None:
         "ast_path",
         "scope_fingerprint",
         "judge_signature_version",
+        "judge_transport",
         "pattern",
         "source_file",
         "judge_verdict",

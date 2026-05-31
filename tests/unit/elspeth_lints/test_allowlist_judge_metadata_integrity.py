@@ -88,6 +88,7 @@ def _expected_judge_metadata_signature_v2(
     judge_rationale: str = "judge accepted the suppression",
     judge_policy_hash: str = JUDGE_POLICY_HASH,
     judge_excerpt_redactions: tuple[dict[str, int | str], ...] = (),
+    judge_transport: str = "openrouter",
 ) -> str:
     """Return the v2 judge-metadata HMAC, hand-built to pin v2 payload bytes.
 
@@ -103,6 +104,7 @@ def _expected_judge_metadata_signature_v2(
         "version": 2,
         "key": key,
         "scope_fingerprint": scope_fingerprint,
+        "judge_transport": judge_transport,
         "ast_path": ast_path,
         "judge_verdict": judge_verdict,
         "judge_model_verdict": judge_model_verdict,
@@ -1206,6 +1208,7 @@ def test_scope_fingerprint_and_signature_version_round_trip() -> None:
     del entry["file_fingerprint"]
     entry["scope_fingerprint"] = scope_fp
     entry["judge_signature_version"] = 2
+    entry["judge_transport"] = "openrouter"
     entry["judge_metadata_signature"] = "hmac-sha256:v2:" + _VALID_FINGERPRINT
     data = {"allow_hits": [entry]}
 
@@ -1218,8 +1221,19 @@ def test_scope_fingerprint_and_signature_version_round_trip() -> None:
 
 
 def test_entry_parses_judge_transport() -> None:
-    """The additive, unsigned judge_transport field parses off a valid entry."""
+    """The signed v2 judge_transport field parses off a valid v2 entry.
+
+    judge_transport is a v2-only signed binding field (Task 4). It parses off a
+    v2 entry; on a v1 entry it is corruption (see
+    ``test_v1_judge_entry_forbids_judge_transport``). ``source_root=None`` skips
+    the HMAC recompute, so the dummy v2 signature and the arbitrary transport
+    value both pass — the validator only checks presence here.
+    """
     entry = _valid_post_judge_entry()
+    del entry["file_fingerprint"]
+    entry["judge_signature_version"] = 2
+    entry["scope_fingerprint"] = "a" * 64
+    entry["judge_metadata_signature"] = "hmac-sha256:v2:" + _VALID_FINGERPRINT
     entry["judge_transport"] = "claude_agent_sdk"
     data = {"allow_hits": [entry]}
 
@@ -1358,6 +1372,26 @@ def test_v2_payload_bytes_match_independent_reimplementation() -> None:
     assert actual.startswith("hmac-sha256:v2:")
 
 
+def test_v2_signature_includes_judge_transport() -> None:
+    """The v2 payload binds ``judge_transport`` — two transports differ."""
+    a = _sig(signature_version=2, scope_fingerprint="a" * 64, judge_transport="openrouter")
+    b = _sig(signature_version=2, scope_fingerprint="a" * 64, judge_transport="claude_agent_sdk")
+    # Same logical entry, different transport => different signature (transport is bound).
+    assert not hmac.compare_digest(a, b)
+
+
+def test_v2_signature_default_transport_is_openrouter() -> None:
+    """Omitting ``judge_transport`` defaults to openrouter (the function default).
+
+    This is what keeps scope-fingerprint's transport-agnostic signing helpers
+    (which never pass ``judge_transport``) green and unchanged — exactly as the
+    ``signature_version=1`` default does for the version argument.
+    """
+    omitted = _sig(signature_version=2, scope_fingerprint="a" * 64)
+    explicit = _sig(signature_version=2, scope_fingerprint="a" * 64, judge_transport="openrouter")
+    assert hmac.compare_digest(omitted, explicit)
+
+
 # ---------------------------------------------------------------------------
 # Version-aware atomic validator (Task 4): invariant 8 dispatches on
 # ``judge_signature_version`` to require the correct binding field per
@@ -1374,6 +1408,7 @@ def test_v2_entry_with_scope_fingerprint_and_no_file_fingerprint_validates() -> 
     del entry["file_fingerprint"]
     entry["judge_signature_version"] = 2
     entry["scope_fingerprint"] = "a" * 64
+    entry["judge_transport"] = "openrouter"
     entry["judge_metadata_signature"] = "hmac-sha256:v2:" + _VALID_FINGERPRINT
     data = {"allow_hits": [entry]}
 
@@ -1451,6 +1486,55 @@ def test_pre_judge_entry_with_stray_signature_version_crashes() -> None:
         _parse_allow_hits(data, source_file="x.yaml", source_root=None)
 
 
+def test_v2_judge_entry_requires_judge_transport() -> None:
+    """A v2 post-judge entry without judge_transport is unbound (Task 4).
+
+    judge_transport is a signed v2 binding field; its absence on a v2 entry
+    means the persisted entry omits a value that was inside the signed payload,
+    so the entry cannot be re-verified. The atomic validator requires it.
+    """
+    entry = _valid_post_judge_entry()
+    del entry["file_fingerprint"]
+    entry["judge_signature_version"] = 2
+    entry["scope_fingerprint"] = "a" * 64
+    entry["judge_metadata_signature"] = "hmac-sha256:v2:" + _VALID_FINGERPRINT
+    # judge_transport intentionally absent.
+    data = {"allow_hits": [entry]}
+
+    with pytest.raises(ValueError, match=r"binding fields are missing.*judge_transport"):
+        _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+
+def test_v1_judge_entry_forbids_judge_transport() -> None:
+    """A v1 (or absent-version) entry carrying judge_transport is corruption.
+
+    judge_transport is a v2-only signed field; a v1 payload never bound it, so
+    its presence on a v1 entry is a partial revert / merge corruption.
+    """
+    entry = _valid_post_judge_entry()
+    # judge_signature_version absent -> treated as v1; file_fingerprint present.
+    entry["judge_transport"] = "openrouter"
+    data = {"allow_hits": [entry]}
+
+    with pytest.raises(ValueError, match=r"judge_transport.*v2-only"):
+        _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+
+def test_pre_judge_entry_with_stray_judge_transport_crashes() -> None:
+    """A pre-judge entry must not carry judge_transport (invariant 4)."""
+    entry = {
+        "key": "a:b:c:fp=1",
+        "owner": "test-agent",
+        "reason": "pre-judge era entry",
+        "safety": "low",
+        "judge_transport": "openrouter",
+    }
+    data = {"allow_hits": [entry]}
+
+    with pytest.raises(ValueError, match=r"judge_transport.*pre-judge"):
+        _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+
 def test_v2_entry_at_match_time_verifies_scope_fingerprint() -> None:
     """A v2 entry is verified at match time against the live scope_fingerprint.
 
@@ -1522,6 +1606,7 @@ def _write_v2_judge_gated_yaml(
         "    judge_rationale: judge accepted the suppression",
         "    judge_signature_version: 2",
         f"    scope_fingerprint: '{scope_fingerprint}'",
+        "    judge_transport: openrouter",
         f"    ast_path: '{ast_path}'",
         f"    judge_metadata_signature: '{signature}'",
     ]

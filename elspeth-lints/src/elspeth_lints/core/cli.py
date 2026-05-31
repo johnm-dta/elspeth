@@ -1466,6 +1466,7 @@ def _run_justify(args: argparse.Namespace) -> int:
             policy_hash=response.policy_hash,
             model_verdict=model_verdict,
             scope_fingerprint=scope_fingerprint,
+            judge_transport=response.judge_transport,
             ast_path=ast_path,
             excerpt_redactions=safe_excerpt.redactions,
         )
@@ -1922,6 +1923,7 @@ def _build_yaml_entry_text(
     judge_confidence: float | None,
     policy_hash: str,
     scope_fingerprint: str,
+    judge_transport: str,
     ast_path: str,
     excerpt_redactions: tuple[Any, ...] = (),  # tuple[RedactionRecord, ...]
     model_verdict: Any = None,  # JudgeVerdict | None; populated only on override
@@ -1968,6 +1970,7 @@ def _build_yaml_entry_text(
         key=key,
         signature_version=2,
         scope_fingerprint=scope_fingerprint,
+        judge_transport=judge_transport,
         ast_path=ast_path,
         judge_verdict=verdict,
         judge_model_verdict=model_verdict,
@@ -2012,6 +2015,7 @@ def _build_yaml_entry_text(
     # inline (the version is a bare int).
     lines.append("  judge_signature_version: 2")
     lines.append(f"  scope_fingerprint: {_yaml_inline_scalar(scope_fingerprint)}")
+    lines.append(f"  judge_transport: {_yaml_inline_scalar(judge_transport)}")
     lines.append(f"  ast_path: {_yaml_inline_scalar(ast_path)}")
     lines.append(f"  judge_metadata_signature: {_yaml_inline_scalar(judge_metadata_signature)}")
     # Excerpt-redaction audit record (closes elspeth-9bbb9df9a5 / C2-2).
@@ -3029,10 +3033,16 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
         # re-verifies. (verdict/model_verdict/recorded_at/model/rationale/
         # policy_hash/confidence/excerpt_redactions are unchanged audit data;
         # only the binding flips from file_fingerprint to scope_fingerprint.)
+        # Backfill judge_transport="openrouter": every existing corpus entry was
+        # OpenRouter-produced (the only transport before the agent-SDK work), so
+        # this is a truthful backfill, not fabrication. It must be bound into the
+        # re-signed v2 payload AND written to disk (below) for the reload to
+        # re-verify.
         v2_signature = compute_judge_metadata_signature(
             key=entry.key,
             signature_version=2,
             scope_fingerprint=scope_fingerprint,
+            judge_transport="openrouter",
             ast_path=ast_path,
             judge_verdict=entry.judge_verdict,
             judge_model_verdict=entry.judge_model_verdict,
@@ -3118,10 +3128,12 @@ def _rewrite_v1_entries_as_v2_in_yaml(target_yaml: Path, specs: list[_V2RewriteS
     block-scalar ``reason`` / ``safety`` / ``judge_rationale`` bodies —
     BYTE-IDENTICAL. The three binding mutations per entry are:
 
-    * the ``file_fingerprint:`` line is REPLACED in place by two lines —
-      ``judge_signature_version: 2`` then ``scope_fingerprint: …`` — matching
-      the canonical field order ``_build_yaml_entry_text`` emits for a fresh
-      v2 entry, so a migrated entry is indistinguishable from a justified one;
+    * the ``file_fingerprint:`` line is REPLACED in place by three lines —
+      ``judge_signature_version: 2`` then ``scope_fingerprint: …`` then
+      ``judge_transport: openrouter`` — matching the canonical field order
+      ``_build_yaml_entry_text`` emits for a fresh v2 entry, so a migrated
+      entry is indistinguishable from a justified one (``judge_transport`` is
+      backfilled openrouter, truthful for the OpenRouter-produced corpus);
     * the ``ast_path:`` line is rewritten to the live finding's ast_path (a
       binding field; in the no-drift case it is byte-identical, so the line
       does not actually change); and
@@ -3243,6 +3255,11 @@ def _rewrite_entry_binding_lines(
             saw_file_fingerprint = True
             rewritten.append("  judge_signature_version: 2\n")
             rewritten.append(f"  scope_fingerprint: {_yaml_inline_scalar(spec.scope_fingerprint)}\n")
+            # judge_transport is backfilled "openrouter" for every migrated
+            # entry (the corpus is OpenRouter-produced) and is positioned right
+            # after scope_fingerprint — the SAME field order ``_build_yaml_entry_text``
+            # emits — so a migrated entry is byte-congruent with a justified one.
+            rewritten.append(f"  judge_transport: {_yaml_inline_scalar('openrouter')}\n")
             continue
         if line.startswith("  ast_path:"):
             rewritten.append(f"  ast_path: {_yaml_inline_scalar(spec.ast_path)}\n")

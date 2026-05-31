@@ -568,6 +568,7 @@ def compute_judge_metadata_signature(
     signature_version: int = 1,
     file_fingerprint: str | None = None,
     scope_fingerprint: str | None = None,
+    judge_transport: str = "openrouter",
     judge_model_verdict: JudgeVerdict | None = None,
     judge_confidence: float | None = None,
     judge_excerpt_redactions: tuple[RedactionRecord, ...] = (),
@@ -601,7 +602,15 @@ def compute_judge_metadata_signature(
     if signature_version == 2:
         if scope_fingerprint is None:
             raise ValueError("compute_judge_metadata_signature: scope_fingerprint is required for signature_version 2")
-        binding: dict[str, str] = {"scope_fingerprint": scope_fingerprint}
+        # ``judge_transport`` is bound into the v2 payload ONLY — never the v1
+        # branch below. v1 is legacy (deleted in a later task) and its signed
+        # payload shape must not change. The function-parameter default
+        # ("openrouter") keeps direct unit callers that omit it green; the
+        # atomic validator enforces presence on persisted v2 entries.
+        binding: dict[str, str] = {
+            "scope_fingerprint": scope_fingerprint,
+            "judge_transport": judge_transport,
+        }
         prefix = _JUDGE_METADATA_SIGNATURE_PREFIX_V2
     elif signature_version == 1:
         if file_fingerprint is None:
@@ -720,6 +729,11 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
         signature_version=version,
         file_fingerprint=entry.file_fingerprint,
         scope_fingerprint=entry.scope_fingerprint,
+        # The v2 atomic validator guarantees ``judge_transport`` is present on
+        # valid v2 entries, so this fallback only ever applies to v1 entries —
+        # where the signer's v2 branch never reads it. Passing it
+        # unconditionally keeps the recompute call uniform across versions.
+        judge_transport=entry.judge_transport if entry.judge_transport is not None else "openrouter",
     )
     if not hmac.compare_digest(entry.judge_metadata_signature, expected):
         raise ValueError(
@@ -998,6 +1012,8 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
             stray.append("file_fingerprint")
         if entry.scope_fingerprint is not None:
             stray.append("scope_fingerprint")
+        if entry.judge_transport is not None:
+            stray.append("judge_transport")
         if entry.judge_signature_version is not None:
             stray.append("judge_signature_version")
         if entry.ast_path is not None:
@@ -1057,6 +1073,11 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
     if version == 2:
         if entry.scope_fingerprint is None:
             missing_binding.append("scope_fingerprint")
+        # ``judge_transport`` is a v2-only signed binding field (which transport
+        # produced the verdict). It is inside the signed v2 payload, so its
+        # absence means the entry cannot be re-verified — require it.
+        if entry.judge_transport is None:
+            missing_binding.append("judge_transport")
         if entry.file_fingerprint is not None:
             raise ValueError(
                 f"{context}: judge_signature_version is 2 but file_fingerprint is present; "
@@ -1069,6 +1090,14 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
             raise ValueError(
                 f"{context}: judge_signature_version is absent/1 but scope_fingerprint is present; "
                 "v1 entries bind via file_fingerprint. A scope_fingerprint on a v1 entry is corruption."
+            )
+        # ``judge_transport`` is signed into the v2 payload only; a v1 payload
+        # never bound it. Its presence on a v1 entry is a partial revert / merge
+        # corruption (the entry advertises a field its signature does not cover).
+        if entry.judge_transport is not None:
+            raise ValueError(
+                f"{context}: judge_signature_version is absent/1 but judge_transport is present; "
+                "judge_transport is a v2-only signed field. A judge_transport on a v1 entry is corruption."
             )
     if missing_binding:
         raise ValueError(

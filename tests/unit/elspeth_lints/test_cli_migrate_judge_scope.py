@@ -283,7 +283,14 @@ def _entry_binding_key_counts(yaml_text: str, *, entry_key: str) -> dict[str, in
             break
     if start is None:
         raise AssertionError(f"entry {entry_key!r} not found in YAML")
-    counts = {"file_fingerprint": 0, "scope_fingerprint": 0, "judge_signature_version": 0, "ast_path": 0, "judge_metadata_signature": 0}
+    counts = {
+        "file_fingerprint": 0,
+        "scope_fingerprint": 0,
+        "judge_transport": 0,
+        "judge_signature_version": 0,
+        "ast_path": 0,
+        "judge_metadata_signature": 0,
+    }
     for line in lines[start + 1 :]:
         if line.startswith("- "):
             break
@@ -363,6 +370,42 @@ def test_migrate_rewrites_valid_v1_entry_as_v2(tmp_path: Path) -> None:
         ast_path=finding.ast_path,
         scope_fingerprint=live_scope_fp,
     )
+
+
+def test_migrate_backfills_openrouter_transport(tmp_path: Path) -> None:
+    """migrate-judge-scope backfills judge_transport=openrouter (Task 4).
+
+    Every existing corpus entry was OpenRouter-produced, so backfilling
+    ``openrouter`` is truthful, not fabrication. The migrated YAML carries the
+    ``judge_transport: openrouter`` line (positioned after scope_fingerprint,
+    before ast_path — byte-congruent with a freshly-justified entry), the v2
+    signature binds it, and the entry reloads CLEAN with source_root.
+    """
+    root, _ = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    yaml_path, key = _write_valid_v1_entry(allowlist_dir, source_root=root)
+
+    assert _run_migrate(root, allowlist_dir) == 0
+
+    text = yaml_path.read_text(encoding="utf-8")
+    assert "  judge_transport: openrouter" in text
+
+    # Field order matches _build_yaml_entry_text: scope_fingerprint, then
+    # judge_transport, then ast_path.
+    lines = text.splitlines()
+    scope_idx = next(i for i, ln in enumerate(lines) if ln.startswith("  scope_fingerprint:"))
+    transport_idx = next(i for i, ln in enumerate(lines) if ln.startswith("  judge_transport:"))
+    ast_idx = next(i for i, ln in enumerate(lines) if ln.startswith("  ast_path:"))
+    assert scope_idx < transport_idx < ast_idx
+
+    # End-to-end: reload WITH source_root recomputes the HMAC over the stored
+    # transport and runs the atomic validator that REQUIRES judge_transport on
+    # v2 entries. Clean reload proves the migrate writer/signer field-sets agree.
+    allowlist = load_allowlist(allowlist_dir, valid_rule_ids=_valid_rule_ids(), source_root=root)
+    migrated = [e for e in allowlist.entries if e.key == key]
+    assert len(migrated) == 1
+    assert migrated[0].judge_transport == "openrouter"
+    assert migrated[0].judge_signature_version == 2
 
 
 # =====================================================================
@@ -459,9 +502,9 @@ def test_migrate_preserves_non_binding_fields_byte_identical(tmp_path: Path) -> 
     after_lines = after.splitlines()
 
     # Every non-binding line is byte-identical and in the same relative
-    # order. The ONLY differences are the three binding lines:
+    # order. The ONLY differences are the binding lines:
     #   removed: file_fingerprint
-    #   added:   judge_signature_version, scope_fingerprint
+    #   added:   judge_signature_version, scope_fingerprint, judge_transport
     #   changed: judge_metadata_signature (v1 -> v2 value)
     def non_binding(lines: list[str]) -> list[str]:
         kept: list[str] = []
@@ -470,6 +513,8 @@ def test_migrate_preserves_non_binding_fields_byte_identical(tmp_path: Path) -> 
             if stripped.startswith("file_fingerprint:"):
                 continue
             if stripped.startswith("scope_fingerprint:"):
+                continue
+            if stripped.startswith("judge_transport:"):
                 continue
             if stripped.startswith("judge_signature_version:"):
                 continue
@@ -485,6 +530,7 @@ def test_migrate_preserves_non_binding_fields_byte_identical(tmp_path: Path) -> 
     assert "  file_fingerprint:" not in after
     assert "  scope_fingerprint:" in after
     assert "  judge_signature_version: 2" in after
+    assert "  judge_transport: openrouter" in after
     assert "hmac-sha256:v1:" in before
     assert "hmac-sha256:v2:" in after
 
@@ -623,6 +669,8 @@ def test_migrate_does_not_corrupt_block_scalar_body_lines(tmp_path: Path) -> Non
                 continue
             if line.startswith("  scope_fingerprint:"):
                 continue
+            if line.startswith("  judge_transport:"):
+                continue
             if line.startswith("  judge_signature_version:"):
                 continue
             if line.startswith("  judge_metadata_signature:"):
@@ -637,6 +685,7 @@ def test_migrate_does_not_corrupt_block_scalar_body_lines(tmp_path: Path) -> Non
     # mint extra keys.
     counts = _entry_binding_key_counts(after, entry_key=key)
     assert counts["scope_fingerprint"] == 1
+    assert counts["judge_transport"] == 1
     assert counts["judge_signature_version"] == 1
     assert counts["ast_path"] == 1
     assert counts["judge_metadata_signature"] == 1

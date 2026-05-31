@@ -642,6 +642,65 @@ def test_justify_accepted_writes_entry_with_judge_metadata(tmp_path: Path) -> No
     assert entry.judge_recorded_at.tzinfo is not None
 
 
+def test_justify_writes_judge_transport(tmp_path: Path) -> None:
+    """justify emits + signs judge_transport; the v2 entry reloads clean (Task 4).
+
+    The OpenRouter transport produces ``judge_transport="openrouter"`` on the
+    JudgeResponse; justify threads it into the v2 binding, signs it into the
+    payload, and emits the ``judge_transport: openrouter`` YAML line. Reloading
+    WITH source_root recomputes the HMAC (now including judge_transport) and the
+    atomic validator requires the field — both must pass.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "payload is Tier-3 external data from upstream tool-call",
+        "--owner",
+        "test-agent-transport",
+    ]
+    with _mock_judge_call(verdict="ACCEPTED", rationale="genuine Tier-3 boundary"):
+        assert main(argv) == 0
+
+    target_yaml = allowlist_dir / "plugins.yaml"
+    text = target_yaml.read_text(encoding="utf-8")
+    assert "judge_transport: openrouter" in text
+    assert "judge_signature_version: 2" in text
+    assert "judge_metadata_signature: 'hmac-sha256:v2:" in text
+
+    # The judge_transport line is emitted between scope_fingerprint and ast_path
+    # (the canonical v2 binding field order, so migrated and justified entries
+    # are byte-congruent).
+    lines = text.splitlines()
+    scope_idx = next(i for i, ln in enumerate(lines) if ln.startswith("  scope_fingerprint:"))
+    transport_idx = next(i for i, ln in enumerate(lines) if ln.startswith("  judge_transport:"))
+    ast_idx = next(i for i, ln in enumerate(lines) if ln.startswith("  ast_path:"))
+    assert scope_idx < transport_idx < ast_idx
+
+    # End-to-end: reload WITH source_root recomputes the HMAC (now including
+    # judge_transport) and runs the atomic validator that REQUIRES it. Clean
+    # reload proves signer/verify/writer field-sets are consistent.
+    with patch.dict(
+        os.environ,
+        {"ELSPETH_JUDGE_METADATA_HMAC_KEY": "test-judge-metadata-hmac-key-2026-05-24"},
+        clear=False,
+    ):
+        loaded = load_allowlist(target_yaml, valid_rule_ids={"R1"}, source_root=root)
+    assert len(loaded.entries) == 1
+    assert loaded.entries[0].judge_transport == "openrouter"
+    assert loaded.entries[0].judge_signature_version == 2
+
+
 def test_justify_signed_confidence_round_trips_through_source_root_loader(tmp_path: Path) -> None:
     """The HMAC signs the exact confidence scalar persisted to YAML."""
     root, _target = _build_source_tree(tmp_path)
@@ -2750,5 +2809,6 @@ def test_build_yaml_entry_text_refuses_whitespace_only_rationale(blank_rationale
             judge_rationale=blank_rationale,
             judge_confidence=0.5,
             scope_fingerprint="0" * 64,
+            judge_transport="openrouter",
             ast_path="Module.body[0]",
         )

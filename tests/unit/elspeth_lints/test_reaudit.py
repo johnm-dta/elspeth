@@ -290,6 +290,7 @@ def _write_widget_lookup_entry_v2(
         "    original judge said the boundary was genuine",
         "  judge_signature_version: 2",
         f"  scope_fingerprint: '{scope_fingerprint}'",
+        "  judge_transport: openrouter",
         f"  ast_path: '{live_ast_path}'",
         f"  judge_metadata_signature: '{signature}'",
     ]
@@ -382,6 +383,7 @@ def _write_gadget_fetch_entry_v2(
         "    original judge said the boundary was genuine",
         "  judge_signature_version: 2",
         f"  scope_fingerprint: '{scope_fingerprint}'",
+        "  judge_transport: openrouter",
         f"  ast_path: '{live_ast_path}'",
         f"  judge_metadata_signature: '{signature}'",
     ]

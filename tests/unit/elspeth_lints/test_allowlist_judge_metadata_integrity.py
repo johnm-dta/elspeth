@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from elspeth_lints.core.allowlist import JudgeVerdict, load_allowlist
+from elspeth_lints.core.allowlist import JudgeVerdict, _parse_allow_hits, load_allowlist
 from elspeth_lints.core.judge import JUDGE_POLICY_HASH
 from elspeth_lints.core.source_excerpt import RedactionRecord
 
@@ -1115,3 +1115,69 @@ def test_required_mode_source_root_load_is_silent(
     load_allowlist(enforce_dir, valid_rule_ids={"R1", "R5"}, source_root=source_root)
 
     assert "DOWNGRADED" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Additive v2 binding fields: scope_fingerprint + judge_signature_version
+#
+# These are pure plumbing — the atomic validator ignores them, so a
+# currently-valid post-judge (v1) entry stays valid when they are added.
+# Parse with ``source_root=None`` so signature verification and the
+# file_fingerprint live-source check are both skipped (both gate on
+# ``source_root``), letting a shape-only dummy signature suffice.
+# ---------------------------------------------------------------------------
+
+_VALID_FINGERPRINT = "0" * 64
+
+
+def _valid_post_judge_entry() -> dict[str, object]:
+    """A complete, currently-valid post-judge (v1) allow_hits entry dict."""
+    return {
+        "key": "a:b:c:fp=1",
+        "owner": "test-agent",
+        "reason": "tier-3 boundary",
+        "safety": "low",
+        "judge_verdict": "ACCEPTED",
+        "judge_recorded_at": "2026-05-01T10:00:00+00:00",
+        "judge_model": "claude-opus-4-7",
+        "judge_policy_hash": "sha256:" + _VALID_FINGERPRINT,
+        "judge_rationale": "judge agrees",
+        "judge_metadata_signature": "hmac-sha256:v1:" + _VALID_FINGERPRINT,
+        "file_fingerprint": _VALID_FINGERPRINT,
+        "ast_path": "body[0]",
+    }
+
+
+def test_scope_fingerprint_and_signature_version_round_trip() -> None:
+    """The two additive v2 fields parse onto the entry unchanged."""
+    scope_fp = "a" * 64
+    entry = _valid_post_judge_entry()
+    entry["scope_fingerprint"] = scope_fp
+    entry["judge_signature_version"] = 2
+    data = {"allow_hits": [entry]}
+
+    entries = _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+    assert len(entries) == 1
+    assert entries[0].scope_fingerprint == scope_fp
+    assert entries[0].judge_signature_version == 2
+
+
+def test_invalid_judge_signature_version_crashes() -> None:
+    """A version other than 1 or 2 is corruption and crashes on load."""
+    entry = _valid_post_judge_entry()
+    entry["judge_signature_version"] = 3
+    data = {"allow_hits": [entry]}
+
+    with pytest.raises(ValueError, match=r"1 or 2"):
+        _parse_allow_hits(data, source_file="x.yaml", source_root=None)
+
+
+def test_boolean_judge_signature_version_crashes() -> None:
+    """A YAML bool must not be read as version 1 (bool is an int subclass)."""
+    entry = _valid_post_judge_entry()
+    entry["judge_signature_version"] = True
+    data = {"allow_hits": [entry]}
+
+    with pytest.raises(ValueError, match=r"not a boolean"):
+        _parse_allow_hits(data, source_file="x.yaml", source_root=None)

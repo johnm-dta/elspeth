@@ -139,6 +139,8 @@ class AllowlistEntry:
     expires: date | None
     file_fingerprint: str | None = None
     ast_path: str | None = None
+    scope_fingerprint: str | None = None
+    judge_signature_version: int | None = None
     pattern: str | None = None
     source_file: str = ""
     matched: bool = field(default=False, compare=False)
@@ -444,6 +446,8 @@ def _parse_allow_hits(
             expires=_optional_date_alias(entry, "expires", "expires_at", context=ctx),
             file_fingerprint=_optional_string(entry, "file_fingerprint", context=ctx),
             ast_path=_optional_string(entry, "ast_path", context=ctx),
+            scope_fingerprint=_optional_string(entry, "scope_fingerprint", context=ctx),
+            judge_signature_version=_optional_signature_version(entry, "judge_signature_version", context=ctx),
             pattern=_optional_string(entry, "pattern", context=ctx),
             source_file=source_file,
             judge_verdict=_optional_judge_verdict(entry, "judge_verdict", context=ctx, allow_blocked=False),
@@ -1156,6 +1160,20 @@ def _optional_int(data: dict[str, Any], key: str, *, context: str) -> int | None
     if isinstance(value, int):
         return value
     raise ValueError(f"{context}.{key} must be an integer, null, or absent")
+
+
+def _optional_signature_version(data: dict[str, Any], key: str, *, context: str) -> int | None:
+    """Parse the optional judge signature version (1 or 2).
+
+    Absent / null yield ``None`` (the pre-judge era and v1 legacy entries
+    written before the version field existed are treated as v1 at the
+    dispatch site). Any present value must be exactly 1 or 2 — an unknown
+    version is corruption and crashes on load per Tier-1 doctrine.
+    """
+    value = _optional_int(data, key, context=context)
+    if value is not None and value not in (1, 2):
+        raise ValueError(f"{context}.{key} must be 1 or 2; got {value!r}")
+    return value
 
 
 def _optional_nonneg_int(data: dict[str, Any], key: str, *, context: str) -> int | None:

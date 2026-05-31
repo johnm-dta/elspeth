@@ -809,47 +809,24 @@ def _verify_source_binding_at_load(entry: AllowlistEntry, *, source_root: Path, 
         )
 
 
-def verify_entry_binding_against_finding(entry: AllowlistEntry, *, file_path: str, ast_path: str) -> None:
-    """Assert a matched allowlist entry's persisted ``ast_path`` matches the live finding.
+def verify_entry_binding_against_finding(entry: AllowlistEntry, *, file_path: str, ast_path: str, scope_fingerprint: str) -> None:
+    """Assert a matched judge-gated entry still binds to the live finding.
 
-    Called from the rule's matcher (``_match_finding``) after a
-    canonical-key match: this is the C8-3 in-file transplant defence.
-    A hand-edited transplant could copy a quartet from a safe entry
-    onto an entry whose key matches a dangerous live finding (rebind
-    the key, paste the quartet). The persisted ``ast_path`` is the AST-
-    level address the judge actually inspected; it must equal the live
-    finding's ast_path. Mismatch ⇒ corruption or unannounced refactor
-    that landed without re-running ``justify``.
+    Checks ``ast_path`` (all versions — the C8-3 in-file transplant
+    defence) and, for v2 entries, ``scope_fingerprint`` (the enclosing-
+    scope content the judge actually inspected). The live
+    ``scope_fingerprint`` is the value the scanner stamped onto the
+    finding; an empty value means the finding was emitted by a
+    construction site that did not compute it, which for a v2 entry is a
+    defect (we must never accept a v2 binding on an unverifiable empty
+    value) and crashes here.
 
-    Entries without judge metadata (``judge_verdict is None``, the pre-
-    judge era shape) carry no binding fields and are not checked here —
-    they predate the judge gate and the only binding signal they have
-    is the canonical_key itself, which is what the caller already
-    matched against.
+    Pre-judge entries (``judge_verdict is None``) carry no binding fields
+    and are not checked — their only binding signal is the canonical_key
+    the caller already matched against.
     """
     if entry.judge_verdict is None:
         return
-    # Co-presence is enforced at load (invariant 8). For a v1 entry,
-    # file_fingerprint is non-None here. A v2 entry binds via
-    # scope_fingerprint and carries no file_fingerprint; wiring its
-    # match-time handling is a later task in the v1->v2 migration (the
-    # match-time-scope-verification task, which *introduces* v2 entries
-    # and its match-time tests). Until then a v2 entry reaching this
-    # v1-only verifier crashes by design (offensive: crash-loud beats
-    # silently matching an entry whose binding this verifier doesn't yet
-    # understand). This is an explicit ``raise`` rather than a bare
-    # ``assert`` so it carries an informative message and survives
-    # ``python -O`` (a stripped assert would let a v2 entry pass with only
-    # the ast_path check). No real v2 entry exists yet — justify still
-    # emits v1.
-    version = entry.judge_signature_version if entry.judge_signature_version is not None else 1
-    if version == 2:
-        raise ValueError(
-            f"{entry.key!r} ({file_path!r}): v2 scope_fingerprint match-time verification is "
-            "not yet wired (scheduled for the match-time-scope-verification task); a v2 "
-            "judge-gated entry must not reach this v1-only binding verifier."
-        )
-    assert entry.file_fingerprint is not None  # v1: invariant 8 guarantees presence (mypy narrowing)
     assert entry.ast_path is not None
     if entry.ast_path != ast_path:
         raise ValueError(
@@ -860,6 +837,22 @@ def verify_entry_binding_against_finding(entry: AllowlistEntry, *, file_path: st
             f"transplanted onto a different finding within the same file "
             f"(corruption / tampering). Entry key: {entry.key!r}."
         )
+    version = entry.judge_signature_version if entry.judge_signature_version is not None else 1
+    if version == 2:
+        assert entry.scope_fingerprint is not None  # invariant 8 (v2) guarantees presence
+        if not scope_fingerprint:
+            raise ValueError(
+                f"scope_fingerprint missing on the live finding for judge-gated v2 entry "
+                f"{entry.key!r} ({file_path!r}); the scanner must stamp scope_fingerprint on "
+                "every finding. An empty value cannot verify a v2 binding."
+            )
+        if entry.scope_fingerprint != scope_fingerprint:
+            raise ValueError(
+                f"scope_fingerprint mismatch on judge-gated entry for {file_path!r}: persisted "
+                f"{entry.scope_fingerprint!r} but the live enclosing scope hashes to "
+                f"{scope_fingerprint!r}. The function/class the judge inspected changed; "
+                f"re-justify is required. Entry key: {entry.key!r}."
+            )
 
 
 def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> None:
@@ -943,9 +936,11 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
     match time (catches in-file AST-node transplant). A v2 entry has no
     whole-file load-time recompute: :func:`_verify_source_binding_at_load`
     checks only that the bound source file exists, and the v2
-    scope_fingerprint is verified at match time — that match-time
-    verification is wired by a later task in this migration (until then a v2
-    entry crashes by design in :func:`verify_entry_binding_against_finding`).
+    scope_fingerprint is verified at match time by
+    :func:`verify_entry_binding_against_finding`, which compares the
+    persisted scope_fingerprint against the value the scanner stamped onto
+    the live finding (drift ⇒ re-justify; an empty live value ⇒ crash, since
+    an unverifiable binding must never silently pass).
     Both verifications require the fields' presence, which this invariant
     guarantees.
 

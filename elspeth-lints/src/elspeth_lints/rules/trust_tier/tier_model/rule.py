@@ -2251,6 +2251,7 @@ def _match_finding(allowlist: Allowlist, finding: Finding) -> AllowlistEntry | P
                 entry,
                 file_path=finding.file_path,
                 ast_path=finding.ast_path,
+                scope_fingerprint=finding.scope_fingerprint,
             )
             entry.matched = True
             return entry

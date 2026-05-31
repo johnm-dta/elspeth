@@ -425,7 +425,18 @@ def _allowlist_match(allowlist: Allowlist, finding: Finding) -> object | None:
                 f"trust-boundary finding {finding.canonical_key()} has no ast_path; "
                 "signed allowlist entries require binding to the inspected AST node."
             )
-        verify_entry_binding_against_finding(matched, file_path=finding.file_path, ast_path=finding.ast_path)
+        # trust_boundary findings are protocols.Finding, which has no scope_fingerprint
+        # field. They are v1-only today (no signed v2 trust_boundary entries on disk), so
+        # the v1 branch ignores this value. A FUTURE v2 trust_boundary entry would hit the
+        # "scope_fingerprint missing on the live finding" crash above — correct fail-closed
+        # behaviour and a clear signal to wire trust_boundary's scanner to stamp the field.
+        # Do NOT fabricate a value; the empty string is the honest "not computed" signal.
+        verify_entry_binding_against_finding(
+            matched,
+            file_path=finding.file_path,
+            ast_path=finding.ast_path,
+            scope_fingerprint=getattr(finding, "scope_fingerprint", ""),
+        )
     return matched
 
 

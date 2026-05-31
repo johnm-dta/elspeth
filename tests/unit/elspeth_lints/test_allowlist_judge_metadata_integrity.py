@@ -1357,15 +1357,16 @@ def test_pre_judge_entry_with_stray_signature_version_crashes() -> None:
         _parse_allow_hits(data, source_file="x.yaml", source_root=None)
 
 
-def test_v2_entry_at_match_time_raises_not_yet_wired() -> None:
-    """A v2 entry must crash (not silently pass) in the v1-only match verifier.
+def test_v2_entry_at_match_time_verifies_scope_fingerprint() -> None:
+    """A v2 entry is verified at match time against the live scope_fingerprint.
 
-    ``verify_entry_binding_against_finding`` only understands v1's
-    file_fingerprint binding; v2 scope_fingerprint match-time verification
-    is a later task. The interim guard is an explicit ``raise`` so it
-    survives ``python -O`` — a bare ``assert`` would be stripped under -O
-    and let a v2 entry pass with only the ast_path check, defeating the
-    crash-loud-on-unbound stance.
+    ``verify_entry_binding_against_finding`` compares the persisted
+    enclosing-scope ``scope_fingerprint`` the judge inspected against the
+    value the scanner stamped on the live finding. A match passes; a drift
+    crashes (the function/class the judge inspected changed, re-justify is
+    required). The dedicated v1/v2 match-binding matrix lives in
+    ``test_allowlist_match_binding.py``; this case guards the v2 path from
+    the judge-metadata-integrity surface.
     """
     entry = AllowlistEntry(
         key="core/x.py:R6:C:m:fp=abc",
@@ -1380,8 +1381,12 @@ def test_v2_entry_at_match_time_raises_not_yet_wired() -> None:
         judge_verdict=JudgeVerdict.ACCEPTED,
     )
 
-    with pytest.raises(ValueError, match="not yet wired"):
-        verify_entry_binding_against_finding(entry, file_path="core/x.py", ast_path="body[0]")
+    # Matching live scope_fingerprint: no raise.
+    verify_entry_binding_against_finding(entry, file_path="core/x.py", ast_path="body[0]", scope_fingerprint="a" * 64)
+
+    # Drifted live scope_fingerprint: crash-loud.
+    with pytest.raises(ValueError, match="scope_fingerprint"):
+        verify_entry_binding_against_finding(entry, file_path="core/x.py", ast_path="body[0]", scope_fingerprint="b" * 64)
 
 
 # ---------------------------------------------------------------------------

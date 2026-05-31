@@ -39,6 +39,7 @@ forwards inline; cache-hit accounting comes back on
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -961,10 +962,234 @@ def _call_openrouter(request: JudgeRequest, model_id: str, max_tokens: int) -> _
 
 
 def _call_agent_sdk(request: JudgeRequest, model_id: str, max_tokens: int) -> _TransportResult:
-    # Placeholder until Task 2 lands the Claude Agent SDK transport. Keeping
-    # it here (rather than omitting the registry key) keeps the registry
-    # exhaustive over the valid transports and ``call_judge``'s lookup total.
-    raise JudgeConfigurationError("The Claude Agent SDK transport is not yet available; use the OpenRouter transport.")
+    """Claude Agent SDK transport: a no-tools, single-shot query.
+
+    The system prompt is the ``claude_code`` preset with our static policy
+    block appended (design §4.2): the preset is the one intentional
+    Anthropic-side influence; its era is bounded by the signed ``recorded_at``
+    timestamp. No tools are allowed and no project settings are loaded
+    (``setting_sources=[]``), so the judge sees only the excerpt in the prompt
+    — identical to the OpenRouter path. The assistant emits the verdict JSON
+    per the policy block's output schema; that text feeds the shared
+    ``_parse_judge_payload`` through ``call_judge``.
+
+    Determinism caveat (design §7): the SDK does not expose ``temperature``, so
+    agent verdicts are less reproducible than the temperature=0 OpenRouter
+    path. The signed ``judge_transport`` lets reaudit attribute a divergence on
+    an agent-written entry to transport noise rather than source drift.
+
+    ``model_id`` here is an Agent-SDK model id (unprefixed), NOT an OpenRouter
+    slug — ``call_judge`` resolves the per-transport default before we are
+    reached (see ``DEFAULT_AGENT_JUDGE_MODEL``).
+
+    ``max_tokens`` is accepted for transport-contract uniformity but is NOT
+    wired into ``ClaudeAgentOptions``: the SDK exposes no per-call output-token
+    cap (confirmed against claude-agent-sdk==0.2.87 — ``ClaudeAgentOptions``
+    has ``max_thinking_tokens`` and ``max_budget_usd`` but no completion-token
+    limit). One consequence: there is no agent equivalent of the OpenRouter
+    path's ``finish_reason == "length"`` guard, so a truncated agent response
+    degrades to a generic ``_parse_judge_payload`` JSON error rather than the
+    actionable "increase max_tokens" message. Acceptable degradation;
+    documented so it is not mistaken for missed wiring.
+
+    ``asyncio.run`` below assumes no running event loop. That holds for the
+    synchronous justify / reaudit CLI callers today; if a future async caller
+    invokes ``call_judge``, this bridge raises ``RuntimeError`` and must be
+    revisited.
+
+    SDK-shape provenance: every symbol used below was introspected against
+    claude-agent-sdk==0.2.87 (2026-05-31) and confirmed from the installed
+    package source, EXCEPT the inner keys of the ``usage`` dict
+    (``input_tokens`` / ``cache_read_input_tokens``). The SDK forwards
+    ``ResultMessage.usage`` opaquely from the Claude Code CLI, which mirrors
+    the Anthropic Messages API ``usage`` object; those inner key names are
+    therefore Anthropic-API convention (doc-derived), not pinned by the SDK
+    Python source. See ``_agent_cache_accounting``.
+    """
+    # Lazy import (inside the function, mirroring ``_call_openrouter``): keeps
+    # ``claude_agent_sdk`` out of module scope so importing this module — and
+    # type-checking it — does not require the optional ``judge-agent`` extra.
+    try:
+        import claude_agent_sdk as sdk
+    except ImportError as exc:
+        raise JudgeConfigurationError(
+            "The claude-agent-sdk is required for --judge-transport agent. "
+            "Install with:\n\n    uv pip install -e 'elspeth-lints/[judge-agent]'\n\n"
+            "(from the repo root), or use --judge-transport openrouter."
+        ) from exc
+
+    # system_prompt is the claude_code preset + our appended policy block. The
+    # SystemPromptPreset typed-dict shape ({"type": "preset", "preset":
+    # "claude_code", "append": str}) is confirmed against the installed SDK.
+    options = sdk.ClaudeAgentOptions(
+        system_prompt={"type": "preset", "preset": "claude_code", "append": _STATIC_POLICY_BLOCK},
+        allowed_tools=[],
+        disallowed_tools=["Bash", "Read", "Write", "Edit", "Grep", "Glob", "WebSearch", "WebFetch"],
+        setting_sources=[],
+        permission_mode="bypassPermissions",
+        model=model_id,
+    )
+    prompt_text = "\n\n".join(block["text"] for block in _build_user_message_blocks(request))
+
+    try:
+        return asyncio.run(_drain_agent_query(sdk, prompt_text, options, model_id))
+    except JudgeConfigurationError:
+        raise
+    except JudgeContractError:
+        raise
+    except Exception as exc:  # SDK transport/auth surface — map by type below.
+        # Auth / CLI-not-found is operator-actionable configuration; everything
+        # else after configuration is a transport failure. The auth-error
+        # discriminator uses the real SDK exception classes (see
+        # ``_is_agent_auth_error``); in-band auth failures (AssistantMessage.error)
+        # are mapped inside ``_drain_agent_query`` and re-raised as
+        # JudgeConfigurationError, which the first except arm above passes through.
+        if _is_agent_auth_error(exc):
+            raise JudgeConfigurationError(
+                "The Claude Agent SDK could not authenticate. The agent transport "
+                "uses an installed + logged-in Claude Code CLI (subscription / "
+                "Agent-SDK credit pool) OR ANTHROPIC_API_KEY OR Bedrock/Vertex/Azure. "
+                "Log in with the Claude Code CLI, or set ANTHROPIC_API_KEY, then re-run. "
+                "(Note: ANTHROPIC_API_KEY is per-token Anthropic billing and may not "
+                "be cheaper than OpenRouter.)"
+            ) from exc
+        raise JudgeTransportError(f"{type(exc).__name__}: {exc}") from exc
+
+
+# In-band auth/billing error literals carried on ``AssistantMessage.error``
+# (confirmed field against claude-agent-sdk==0.2.87). A real auth failure can
+# arrive WITHOUT raising — as a message whose ``error`` is one of these — so we
+# map these to the operator-actionable JudgeConfigurationError rather than
+# letting the call degrade to a generic "no assistant text" contract error.
+_AGENT_AUTH_INBAND_ERRORS: frozenset[str] = frozenset({"authentication_failed", "billing_error"})
+
+
+async def _drain_agent_query(sdk: Any, prompt_text: str, options: Any, requested_model: str) -> _TransportResult:
+    """Drain the async query stream into a ``_TransportResult``.
+
+    Accumulate assistant text blocks; capture the terminal ``ResultMessage``
+    for usage + served-model accounting. An in-band ``AssistantMessage.error``
+    auth/billing literal short-circuits to ``JudgeConfigurationError`` (the
+    operator-actionable path) before we treat empty text as a contract error.
+    """
+    text_parts: list[str] = []
+    result_message: Any = None
+    async for message in sdk.query(prompt=prompt_text, options=options):
+        if isinstance(message, sdk.AssistantMessage):
+            inband_error = message.error
+            if inband_error in _AGENT_AUTH_INBAND_ERRORS:
+                raise JudgeConfigurationError(
+                    "The Claude Agent SDK could not authenticate "
+                    f"(in-band error: {inband_error!r}). The agent transport uses an "
+                    "installed + logged-in Claude Code CLI (subscription / Agent-SDK "
+                    "credit pool) OR ANTHROPIC_API_KEY OR Bedrock/Vertex/Azure. Log in "
+                    "with the Claude Code CLI, or set ANTHROPIC_API_KEY, then re-run."
+                )
+            for block in message.content:
+                if isinstance(block, sdk.TextBlock):
+                    text_parts.append(block.text)
+        elif isinstance(message, sdk.ResultMessage):
+            result_message = message
+
+    if result_message is None:
+        raise JudgeContractError("agent transport produced no ResultMessage; cannot account usage.")
+    raw_text = "".join(text_parts)
+    if not raw_text.strip():
+        raise JudgeContractError("agent transport produced no assistant text; cannot extract a verdict.")
+
+    served_model_id = _agent_served_model(result_message, requested_model)
+    prompt_tokens_total, prompt_tokens_cached = _agent_cache_accounting(result_message)
+    return _TransportResult(
+        raw_text=raw_text,
+        served_model_id=served_model_id,
+        prompt_tokens_total=prompt_tokens_total,
+        prompt_tokens_cached=prompt_tokens_cached,
+    )
+
+
+def _agent_served_model(result_message: Any, requested_model: str) -> str:
+    """Served model id from ``ResultMessage.model_usage`` (record what was served).
+
+    ``model_usage`` (``dict | None``; the CLI emits it as ``modelUsage``) is
+    keyed by served model name. We take the single key when there is exactly
+    one; fall back to the requested id only when the field is empty or absent
+    (mirrors the OpenRouter served-vs-requested rule, C1-1). More than one key
+    is an unexpected shape for a single-shot judge call — crash rather than
+    fabricate a served id.
+    """
+    model_usage = result_message.model_usage
+    if model_usage is None:
+        return requested_model
+    keys = list(model_usage)
+    if not keys:
+        return requested_model
+    if len(keys) != 1:
+        raise JudgeContractError(
+            f"agent ResultMessage.model_usage has {len(keys)} models {keys!r}; "
+            "a single-shot judge call must resolve to exactly one served model."
+        )
+    served = keys[0]
+    if not isinstance(served, str):
+        raise JudgeContractError(f"agent ResultMessage.model_usage key must be a str model name; got {type(served).__name__}")
+    return served
+
+
+def _agent_cache_accounting(result_message: Any) -> tuple[int, int | None]:
+    """Map the SDK ``usage`` dict onto ``(prompt_tokens_total, prompt_tokens_cached)``.
+
+    ``input_tokens`` -> total; ``cache_read_input_tokens`` -> cached subset.
+    Preserve ``None`` (provider didn't report a cached count) vs ``0`` (caching
+    on, no hit). The total is required on a completed call.
+
+    ``ResultMessage.usage`` is ``dict | None``; ``None`` on a completed call is
+    a contract violation (we cannot account usage). Subscript / ``.get`` here
+    are Tier-3 boundary reads on a genuinely external SDK response dict
+    forwarded raw from the Claude Code CLI — NOT a forbidden defensive ``.get``
+    on our own typed data.
+
+    DOC-DERIVED KEY NAMES: ``input_tokens`` / ``cache_read_input_tokens`` are
+    Anthropic Messages API convention. The SDK does not pin them (it forwards
+    ``usage`` opaquely from the CLI), so a future CLI/API rename would surface
+    here as a ``KeyError`` (total) or a silent ``None`` (cached). The KeyError
+    is loud and correct; the cached-None degradation is acceptable (we record
+    absence, not a fabricated 0).
+    """
+    usage = result_message.usage
+    if usage is None:
+        raise JudgeContractError("agent ResultMessage.usage is None on a completed call; cannot account usage.")
+    total = usage["input_tokens"]
+    if not isinstance(total, int):
+        raise JudgeContractError(f"agent usage.input_tokens must be int; got {type(total).__name__}")
+    cached = usage.get("cache_read_input_tokens")
+    if cached is None:
+        return total, None
+    if not isinstance(cached, int):
+        raise JudgeContractError(f"agent usage.cache_read_input_tokens must be int or None; got {type(cached).__name__}")
+    return total, cached
+
+
+def _is_agent_auth_error(exc: Exception) -> bool:
+    """Whether an SDK exception is an operator-actionable auth/config failure.
+
+    Confirmed against claude-agent-sdk==0.2.87: the SDK has NO
+    ``AuthenticationError`` class (the plan's doc-derived stand-in name). Auth /
+    CLI-availability failures surface as ``CLINotFoundError`` (the Claude Code
+    CLI is not installed) — the one unambiguously operator-actionable
+    *configuration* signal. ``ProcessError`` / ``CLIConnectionError`` /
+    ``CLIJSONDecodeError`` are runtime transport failures that may or may not be
+    auth-related; we do NOT confidently classify those as config (they map to
+    ``JudgeTransportError`` instead) to avoid telling the operator to fix their
+    credentials when the real fault is transient. In-band authentication
+    failures (``AssistantMessage.error``) are handled separately in
+    ``_drain_agent_query``.
+
+    Match by class NAME (not ``isinstance`` against an imported symbol) so this
+    discriminator does not re-import the optional SDK and works against the
+    fake module injected in tests, whose ``CLINotFoundError`` is a distinct
+    class object.
+    """
+    auth_names = {"CLINotFoundError"}
+    return any(cls.__name__ in auth_names for cls in type(exc).__mro__)
 
 
 _TRANSPORTS: dict[str, Callable[[JudgeRequest, str, int], _TransportResult]] = {

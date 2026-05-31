@@ -207,6 +207,94 @@ def _render_v1_entry_lines(root: Path, rel_path: str, *, rationale: str = _JUDGE
     return lines, key
 
 
+def _render_v1_entry_lines_with_bodies(
+    root: Path,
+    rel_path: str,
+    *,
+    reason_body: list[str],
+    rationale_body: list[str],
+) -> tuple[list[str], str]:
+    """Render a VALID v1 entry with caller-supplied multi-line block scalars.
+
+    ``reason_body`` (an UNSIGNED field) and ``rationale_body`` (a SIGNED
+    field) are emitted as 4-space-indented block-scalar (``|-``) body lines.
+    The signature is computed over the rationale joined by newlines, exactly
+    as the production loader reconstructs it, so the entry is genuinely valid.
+    Used to plant body lines that strip to binding-field prefixes (the C1
+    corruption hazard).
+    """
+    finding = _live_finding_for_file(root, rel_path)
+    key = finding.canonical_key
+    if callable(key):
+        key = key()
+    file_fp = hashlib.sha256((root / rel_path).read_bytes()).hexdigest()
+    ast_path = finding.ast_path
+    rationale = "\n".join(rationale_body)
+    signature = compute_judge_metadata_signature(
+        key=key,
+        signature_version=1,
+        file_fingerprint=file_fp,
+        ast_path=ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime.fromisoformat(_JUDGE_RECORDED_AT),
+        judge_model=_JUDGE_MODEL,
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        judge_rationale=rationale,
+        hmac_key=_FIXTURE_HMAC_KEY.encode("utf-8"),
+    )
+    lines = [f"- key: {key}", "  owner: test-owner", "  reason: |-"]
+    lines.extend(f"    {body_line}" for body_line in reason_body)
+    lines.extend(
+        [
+            "  safety: |-",
+            "    Suppression gated by cicd-judge; see judge_rationale below.",
+            "  expires: '2030-01-01'",
+            "  judge_verdict: ACCEPTED",
+            f"  judge_recorded_at: '{_JUDGE_RECORDED_AT}'",
+            f"  judge_model: {_JUDGE_MODEL}",
+            f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'",
+            "  judge_rationale: |-",
+        ]
+    )
+    lines.extend(f"    {body_line}" for body_line in rationale_body)
+    lines.extend(
+        [
+            f"  file_fingerprint: '{file_fp}'",
+            f"  ast_path: '{ast_path}'",
+            f"  judge_metadata_signature: '{signature}'",
+        ]
+    )
+    return lines, key
+
+
+def _entry_binding_key_counts(yaml_text: str, *, entry_key: str) -> dict[str, int]:
+    """Count occurrences of each binding key WITHIN one entry's line range.
+
+    Locates the entry by its ``- key:`` line and counts indent-exact
+    (2-space) binding-field lines until the next ``- `` entry boundary or a
+    new top-level key. Used to assert the surgery never injects a duplicate
+    binding key into the entry.
+    """
+    lines = yaml_text.splitlines()
+    start = None
+    for idx, line in enumerate(lines):
+        if line.rstrip("\r") == f"- key: {entry_key}":
+            start = idx
+            break
+    if start is None:
+        raise AssertionError(f"entry {entry_key!r} not found in YAML")
+    counts = {"file_fingerprint": 0, "scope_fingerprint": 0, "judge_signature_version": 0, "ast_path": 0, "judge_metadata_signature": 0}
+    for line in lines[start + 1 :]:
+        if line.startswith("- "):
+            break
+        if line and not line.startswith(" "):
+            break  # new top-level key
+        for field in counts:
+            if line.startswith(f"  {field}:"):
+                counts[field] += 1
+    return counts
+
+
 def _run_migrate(root: Path, allowlist_dir: Path, *, dry_run: bool = False) -> int:
     argv = [
         "migrate-judge-scope",
@@ -478,3 +566,210 @@ def test_migrate_tampered_entry_leaves_earlier_valid_entry_unwritten(tmp_path: P
     assert "hmac-sha256:v2:" not in after
     # The widget entry specifically is untouched (still v1-bound).
     assert "file_fingerprint:" in after
+
+
+# =====================================================================
+# Test 7 — block-scalar body lines that strip to binding prefixes (C1)
+# =====================================================================
+
+
+def test_migrate_does_not_corrupt_block_scalar_body_lines(tmp_path: Path) -> None:
+    """A body line that strips to a binding prefix must NOT be rewritten.
+
+    This is the C1 regression: ``str.strip()``-based matching is
+    indentation-blind, so a 4-space-indented block-scalar BODY line inside
+    ``reason`` (unsigned) or ``judge_rationale`` (signed) that strips to
+    ``ast_path:`` / ``file_fingerprint:`` would be misidentified as a binding
+    line and rewritten — destroying audit text and injecting a duplicate YAML
+    key (which PyYAML accepts last-wins, so it reloads silently when the
+    collision lands in an unsigned field). Indent-exact matching on the
+    writer's 2-space prefix fixes it.
+    """
+    root, _ = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    reason_body = [
+        "payload is Tier-3 external data from upstream tool-call",
+        "ast_path: discussed in PR #42 (this is prose, not a binding field)",
+    ]
+    rationale_body = [
+        "original judge said the boundary was genuine",
+        "file_fingerprint: was the wrong word to use here, but it is prose",
+    ]
+    entry_lines, key = _render_v1_entry_lines_with_bodies(
+        root,
+        "plugins/widget.py",
+        reason_body=reason_body,
+        rationale_body=rationale_body,
+    )
+    yaml_path = allowlist_dir / "plugins.yaml"
+    yaml_path.write_text("\n".join(["allow_hits:", *entry_lines]) + "\n", encoding="utf-8")
+    before = yaml_path.read_text(encoding="utf-8")
+
+    exit_code = _run_migrate(root, allowlist_dir)
+    assert exit_code == 0
+    after = yaml_path.read_text(encoding="utf-8")
+
+    # The block-scalar body lines are byte-identical (prose untouched).
+    assert "    ast_path: discussed in PR #42 (this is prose, not a binding field)" in after
+    assert "    file_fingerprint: was the wrong word to use here, but it is prose" in after
+
+    # The reason/safety/rationale bodies are byte-identical to before (the
+    # only changed lines are the three real binding lines at 2-space indent).
+    def non_binding(text: str) -> list[str]:
+        kept: list[str] = []
+        for line in text.splitlines():
+            if line.startswith("  file_fingerprint:"):
+                continue
+            if line.startswith("  scope_fingerprint:"):
+                continue
+            if line.startswith("  judge_signature_version:"):
+                continue
+            if line.startswith("  judge_metadata_signature:"):
+                continue
+            kept.append(line)
+        return kept
+
+    assert non_binding(before) == non_binding(after)
+
+    # NO duplicate binding keys were injected into the entry. The real
+    # binding fields each appear exactly once; the prose collisions did not
+    # mint extra keys.
+    counts = _entry_binding_key_counts(after, entry_key=key)
+    assert counts["scope_fingerprint"] == 1
+    assert counts["judge_signature_version"] == 1
+    assert counts["ast_path"] == 1
+    assert counts["judge_metadata_signature"] == 1
+    assert counts["file_fingerprint"] == 0
+
+    # And it reloads CLEAN with source_root (HMAC + binding gates pass): the
+    # signed rationale was preserved byte-identical, so the v2 signature the
+    # migration computed over the loaded fields re-verifies.
+    allowlist = load_allowlist(allowlist_dir, valid_rule_ids=_valid_rule_ids(), source_root=root)
+    migrated = [e for e in allowlist.entries if e.key == key]
+    assert len(migrated) == 1
+    assert migrated[0].judge_signature_version == 2
+    # The reason body (including the colliding prose line) survived intact.
+    assert "ast_path: discussed in PR #42" in migrated[0].reason
+
+
+# =====================================================================
+# Test 8 — key-absent fails closed (exit 2, no write)
+# =====================================================================
+
+
+def test_migrate_fails_closed_when_hmac_key_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the operator HMAC key the command must refuse (exit 2, no write).
+
+    Fail-closed is load-bearing: the integrity gate's HMAC recompute and the
+    re-sign both require the key. A keyless run must not silently no-op the
+    integrity check or write anything.
+    """
+    root, _ = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    yaml_path, _ = _write_valid_v1_entry(allowlist_dir, source_root=root)
+    before = yaml_path.read_text(encoding="utf-8")
+
+    monkeypatch.delenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", raising=False)
+
+    exit_code = _run_migrate(root, allowlist_dir)
+    assert exit_code == 2
+
+    after = yaml_path.read_text(encoding="utf-8")
+    assert after == before  # nothing written
+    assert "judge_signature_version: 2" not in after
+
+
+# =====================================================================
+# Test 9 — CRLF input is normalized to LF (the toolchain is LF-only)
+# =====================================================================
+
+
+def test_migrate_normalizes_crlf_input_to_lf(tmp_path: Path) -> None:
+    """A CRLF-terminated YAML migrates successfully and lands as LF on disk.
+
+    The allowlist toolchain is LF-only by construction: ``atomic_update_text``
+    reads via ``Path.read_text`` (universal newlines), so a CRLF input file is
+    normalized to LF on read before the surgery runs, and the canonical writer
+    emits LF unconditionally. There is no CRLF "preservation" to test — the
+    honest contract is CRLF→LF normalization. This pins that a CRLF input is
+    exercised end to end (migrates, reloads clean) and that the result is LF.
+    """
+    root, _ = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    entry_lines, key = _render_v1_entry_lines(root, "plugins/widget.py")
+    yaml_path = allowlist_dir / "plugins.yaml"
+    # Write the input with CRLF endings.
+    crlf_text = "\r\n".join(["allow_hits:", *entry_lines]) + "\r\n"
+    yaml_path.write_bytes(crlf_text.encode("utf-8"))
+
+    exit_code = _run_migrate(root, allowlist_dir)
+    assert exit_code == 0
+
+    raw = yaml_path.read_bytes()
+    # Migration happened.
+    assert b"judge_signature_version: 2" in raw
+    assert b"hmac-sha256:v2:" in raw
+    # Result is LF on disk — no CRLF survives (the toolchain is LF-only).
+    assert b"\r\n" not in raw
+    assert b"\r" not in raw
+
+    # Reloads clean with source_root (HMAC + binding gates pass).
+    allowlist = load_allowlist(allowlist_dir, valid_rule_ids=_valid_rule_ids(), source_root=root)
+    migrated = [e for e in allowlist.entries if e.key == key]
+    assert len(migrated) == 1
+    assert migrated[0].judge_signature_version == 2
+
+
+# =====================================================================
+# Test 10 — per-file mix: one migrates, one stale-refused (I1)
+# =====================================================================
+
+
+def test_migrate_mixed_file_migrates_valid_and_refuses_stale(tmp_path: Path) -> None:
+    """In one YAML file: a valid entry migrates, a stale entry is refused.
+
+    Exercises the per-file batch write path with a heterogeneous file. The
+    valid widget entry migrates to v2; the gadget entry is stale (its source
+    node was removed so no live finding matches) and is refused / left v1.
+    Exit is non-zero (a refusal occurred) but the valid entry IS migrated —
+    the per-file atomic write applies only the resolved specs.
+    """
+    root = tmp_path / "src_root"
+    (root / "plugins").mkdir(parents=True)
+    (root / "plugins" / "widget.py").write_text(_SYNTHETIC_SOURCE, encoding="utf-8")
+    (root / "plugins" / "gadget.py").write_text(_GADGET_SOURCE, encoding="utf-8")
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    widget_lines, widget_key = _render_v1_entry_lines(root, "plugins/widget.py")
+    gadget_lines, gadget_key = _render_v1_entry_lines(root, "plugins/gadget.py")
+    yaml_path = allowlist_dir / "plugins.yaml"
+    yaml_path.write_text("\n".join(["allow_hits:", *widget_lines, *gadget_lines]) + "\n", encoding="utf-8")
+
+    # Drift gadget.py so its entry goes stale (R1 finding disappears), while
+    # widget.py stays valid.
+    (root / "plugins" / "gadget.py").write_text(
+        '"""Gadget.fetch removed — its R1 finding is gone."""\n\n\nclass Gadget:\n    def describe(self) -> str:\n        return "no dict.get"\n',
+        encoding="utf-8",
+    )
+
+    exit_code = _run_migrate(root, allowlist_dir)
+    assert exit_code != 0  # a refusal occurred
+
+    # Load WITHOUT source_root: the stale gadget entry is still v1-bound to the
+    # ORIGINAL gadget.py bytes, which no longer match the drifted source, so a
+    # source_root load would (correctly) crash on its file_fingerprint gate.
+    # We only need to inspect the persisted fields here.
+    allowlist = load_allowlist(allowlist_dir, valid_rule_ids=_valid_rule_ids(), source_root=None)
+    by_key = {e.key: e for e in allowlist.entries}
+    # Widget migrated to v2.
+    assert by_key[widget_key].judge_signature_version == 2
+    assert by_key[widget_key].scope_fingerprint is not None
+    assert by_key[widget_key].file_fingerprint is None
+    # Gadget left untouched as v1 (stale → re-justify, not migrated).
+    assert by_key[gadget_key].judge_signature_version in (None, 1)
+    assert by_key[gadget_key].file_fingerprint is not None
+    assert by_key[gadget_key].scope_fingerprint is None

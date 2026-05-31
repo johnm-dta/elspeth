@@ -10,6 +10,7 @@ import re
 import secrets
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -2952,8 +2953,15 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
             )
             return 1
 
-    # ---- Pass 2: relevance gate + re-sign + write ---------------------------
+    # ---- Pass 2: relevance gate + re-sign, then ONE atomic write per file ---
     # Reached only when every selected v1 entry's existing signature verified.
+    # We resolve every entry's v2 rewrite spec first and group the specs by
+    # their source YAML file; the actual writes happen in a final per-file
+    # pass below, each under a single atomic_update_text. This gives per-file
+    # atomicity: a mid-run crash cannot leave one YAML file half-rewritten
+    # (worst case is a later file left untouched — a valid idempotent state a
+    # re-run resumes from), and it scans/writes each file exactly once.
+    specs_by_yaml: dict[Path, list[_V2RewriteSpec]] = {}
     for entry in v1_entries:
         # ---- Relevance gate ----------------------------------------------
         # Re-locate the suppressed finding by canonical key in a fresh scan of
@@ -3036,13 +3044,20 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
             judge_excerpt_redactions=entry.judge_excerpt_redactions,
         )
         target_yaml = allowlist_dir / entry.source_file
-        _rewrite_v1_entry_as_v2_in_yaml(
-            target_yaml,
-            entry_key=entry.key,
-            scope_fingerprint=scope_fingerprint,
-            ast_path=ast_path,
-            v2_signature=v2_signature,
+        specs_by_yaml.setdefault(target_yaml, []).append(
+            _V2RewriteSpec(
+                entry_key=entry.key,
+                scope_fingerprint=scope_fingerprint,
+                ast_path=ast_path,
+                v2_signature=v2_signature,
+            )
         )
+
+    # Final write pass: one atomic write per source YAML file. Skipped under
+    # --dry-run (specs_by_yaml stays empty: the dry-run branch ``continue``s
+    # before any spec is appended).
+    for target_yaml, specs in specs_by_yaml.items():
+        _rewrite_v1_entries_as_v2_in_yaml(target_yaml, specs)
 
     _emit_migrate_report(args=args, migrated=migrated, refused=refused)
 
@@ -3058,39 +3073,50 @@ def _emit_migrate_report(
     migrated: list[str],
     refused: list[tuple[str, str]],
 ) -> None:
-    """Write the migrate-judge-scope summary to stdout.
+    """Write the migrate-judge-scope summary.
 
     ``migrated`` lists the keys that were re-signed as v2 (or, under
-    ``--dry-run``, would be). ``refused`` lists ``(key, reason)`` pairs for
-    relevance-gate refusals (already-stale entries needing re-justify). The
-    integrity-gate tampering path reports to stderr and stops the run before
-    this is reached, so the only refusals surfaced here are stale entries.
+    ``--dry-run``, would be) — the success surface, written to stdout.
+    ``refused`` lists ``(key, reason)`` pairs for relevance-gate refusals
+    (already-stale entries needing re-justify). Refusals are actionable
+    NON-success output and the command exits non-zero on any refusal, so
+    they go to STDERR — otherwise ``2>/dev/null`` would hide the very lines
+    that explain why the run failed. (The integrity-gate tampering path
+    already reports to stderr and stops the run before this is reached, so
+    the only refusals surfaced here are stale entries.)
     """
     verb = "WOULD migrate" if args.dry_run else "migrated"
     sys.stdout.write(f"migrate-judge-scope (owner={args.owner}, dry_run={args.dry_run})\n")
     sys.stdout.write(f"  {verb}: {len(migrated)} entr{'y' if len(migrated) == 1 else 'ies'}\n")
     for key in migrated:
         sys.stdout.write(f"    + {key}\n")
-    sys.stdout.write(f"  refused / re-justify required: {len(refused)} entr{'y' if len(refused) == 1 else 'ies'}\n")
-    for key, reason in refused:
-        sys.stdout.write(f"    - {key}: {reason}\n")
+    refused_summary = f"  refused / re-justify required: {len(refused)} entr{'y' if len(refused) == 1 else 'ies'}\n"
+    sys.stdout.write(refused_summary)
+    if refused:
+        sys.stderr.write(refused_summary)
+        for key, reason in refused:
+            sys.stderr.write(f"    - {key}: {reason}\n")
 
 
-def _rewrite_v1_entry_as_v2_in_yaml(
-    target_yaml: Path,
-    *,
-    entry_key: str,
-    scope_fingerprint: str,
-    ast_path: str,
-    v2_signature: str,
-) -> None:
-    """Rewrite one v1 allow_hits entry's binding lines to the v2 scheme, in place.
+@dataclass(frozen=True)
+class _V2RewriteSpec:
+    """One entry's v1→v2 binding rewrite, resolved before any file write."""
+
+    entry_key: str
+    scope_fingerprint: str
+    ast_path: str
+    v2_signature: str
+
+
+def _rewrite_v1_entries_as_v2_in_yaml(target_yaml: Path, specs: list[_V2RewriteSpec]) -> None:
+    """Rewrite a batch of v1 allow_hits entries' binding lines to v2, in one write.
 
     Byte-preserving line surgery (the established pattern in this file — see
-    ``_upsert_audit_review_in_yaml``): we locate the entry by its ``- key:``
+    ``_upsert_audit_review_in_yaml``): we locate each entry by its ``- key:``
     line and operate ONLY on its line range, leaving every other byte of the
     file — and every non-binding line of the entry, including multi-line
-    block-scalar rationale — untouched. The three binding mutations are:
+    block-scalar ``reason`` / ``safety`` / ``judge_rationale`` bodies —
+    BYTE-IDENTICAL. The three binding mutations per entry are:
 
     * the ``file_fingerprint:`` line is REPLACED in place by two lines —
       ``judge_signature_version: 2`` then ``scope_fingerprint: …`` — matching
@@ -3102,11 +3128,28 @@ def _rewrite_v1_entry_as_v2_in_yaml(
     * the ``judge_metadata_signature:`` line's value is replaced with the
       recomputed v2 signature.
 
-    New scalar values go through ``_yaml_inline_scalar`` so quoting matches
-    the writer exactly. The whole read→edit→write runs under
-    ``atomic_update_text`` so concurrent invocations cannot compute updates
-    from the same stale YAML.
+    Binding lines are matched on the writer's EXACT 2-space indent
+    (``line.startswith("  file_fingerprint:")``), NOT on ``str.strip()``.
+    Strip-based matching is indentation-blind: a 4-space-indented block-scalar
+    BODY line inside a ``reason`` / ``safety`` / ``judge_rationale`` field
+    (operator/LLM free text) that happens to strip to ``ast_path:`` or
+    ``file_fingerprint:`` would be misidentified as a binding line and
+    rewritten — destroying audit text and/or injecting a duplicate YAML key
+    (PyYAML accepts duplicate keys last-wins, so the corruption reloads
+    silently when it lands in an unsigned field). ``_build_yaml_entry_text``
+    emits binding fields at exactly 2 spaces and block-scalar bodies at 4
+    spaces, so the indent-exact prefix is an unambiguous discriminator.
+
+    All ``specs`` for ``target_yaml`` are applied to ONE in-memory copy and
+    written ONCE under ``atomic_update_text``: the file is migrated wholly or
+    not at all (per-file atomicity — a crash mid-run cannot leave a single
+    YAML file half-rewritten; the worst case is a later file untouched, which
+    is a valid idempotent state a re-run resumes from). New scalar values go
+    through ``_yaml_inline_scalar`` so quoting matches the writer exactly.
     """
+    specs_by_key = {spec.entry_key: spec for spec in specs}
+    if len(specs_by_key) != len(specs):
+        raise ValueError(f"{target_yaml}: duplicate entry keys in rewrite batch")
 
     def rewrite_in(current: str | None) -> str:
         if current is None:
@@ -3131,56 +3174,93 @@ def _rewrite_v1_entry_as_v2_in_yaml(
             block_end = idx
             break
 
-        key_line = f"- key: {entry_key}"
-        matching_ranges = [
-            (entry_start, entry_end)
-            for entry_start, entry_end in _allow_hit_entry_ranges(lines, start=header_index + 1, end=block_end)
-            if lines[entry_start].rstrip("\r\n") == key_line
-        ]
-        if not matching_ranges:
-            raise ValueError(f"{target_yaml}: no allow_hits entry found for key {entry_key!r}")
-        if len(matching_ranges) > 1:
-            raise ValueError(f"{target_yaml}: duplicate allow_hits entries found for key {entry_key!r}")
-
-        entry_start, entry_end = matching_ranges[0]
-        entry_lines = lines[entry_start:entry_end]
-
-        # The line ending used by this entry; preserve it so we don't switch
-        # the file between \n and \r\n mid-stream.
-        sample = entry_lines[0]
-        newline = "\r\n" if sample.endswith("\r\n") else "\n"
-
-        rewritten: list[str] = []
-        saw_file_fingerprint = False
-        saw_signature = False
-        for line in entry_lines:
-            stripped = line.strip()
-            if stripped.startswith("file_fingerprint:"):
-                saw_file_fingerprint = True
-                rewritten.append(f"  judge_signature_version: 2{newline}")
-                rewritten.append(f"  scope_fingerprint: {_yaml_inline_scalar(scope_fingerprint)}{newline}")
+        # Resolve every spec's entry range up front, against the SAME source
+        # snapshot, so we can splice them all in one pass without index drift.
+        entry_ranges = _allow_hit_entry_ranges(lines, start=header_index + 1, end=block_end)
+        range_by_key: dict[str, tuple[int, int]] = {}
+        for entry_start, entry_end in entry_ranges:
+            key_line = lines[entry_start].rstrip("\r\n")
+            if not key_line.startswith("- key: "):
                 continue
-            if stripped.startswith("ast_path:"):
-                rewritten.append(f"  ast_path: {_yaml_inline_scalar(ast_path)}{newline}")
+            entry_key = key_line.removeprefix("- key: ")
+            if entry_key not in specs_by_key:
                 continue
-            if stripped.startswith("judge_metadata_signature:"):
-                saw_signature = True
-                rewritten.append(f"  judge_metadata_signature: {_yaml_inline_scalar(v2_signature)}{newline}")
-                continue
-            rewritten.append(line)
+            if entry_key in range_by_key:
+                raise ValueError(f"{target_yaml}: duplicate allow_hits entries found for key {entry_key!r}")
+            range_by_key[entry_key] = (entry_start, entry_end)
 
-        if not saw_file_fingerprint:
-            raise ValueError(
-                f"{target_yaml}: entry {entry_key!r} has no file_fingerprint line; "
-                "migrate-judge-scope only rewrites v1 (file_fingerprint-bound) entries."
+        for entry_key in specs_by_key:
+            if entry_key not in range_by_key:
+                raise ValueError(f"{target_yaml}: no allow_hits entry found for key {entry_key!r}")
+
+        # Splice from the bottom up so earlier ranges keep their indices while
+        # later ranges are replaced.
+        ordered = sorted(range_by_key.items(), key=lambda item: item[1][0])
+        result_lines = list(lines)
+        for entry_key, (entry_start, entry_end) in reversed(ordered):
+            spec = specs_by_key[entry_key]
+            rewritten = _rewrite_entry_binding_lines(
+                target_yaml=target_yaml,
+                entry_key=entry_key,
+                entry_lines=lines[entry_start:entry_end],
+                spec=spec,
             )
-        if not saw_signature:
-            raise ValueError(f"{target_yaml}: entry {entry_key!r} has no judge_metadata_signature line to re-sign.")
+            result_lines[entry_start:entry_end] = rewritten
 
-        new_lines = [*lines[:entry_start], *rewritten, *lines[entry_end:]]
-        return "".join(new_lines)
+        return "".join(result_lines)
 
     atomic_update_text(target_yaml, rewrite_in, encoding="utf-8", create_parent=False)
+
+
+def _rewrite_entry_binding_lines(
+    *,
+    target_yaml: Path,
+    entry_key: str,
+    entry_lines: list[str],
+    spec: _V2RewriteSpec,
+) -> list[str]:
+    """Return ``entry_lines`` with its v1 binding lines rewritten to v2.
+
+    Matching is indent-exact on the writer's 2-space prefix (see
+    ``_rewrite_v1_entries_as_v2_in_yaml``'s docstring for why strip-based
+    matching is a corruption hazard). Every non-binding line — including
+    4-space-indented block-scalar bodies — is passed through unchanged.
+
+    Rewritten binding lines emit ``\\n``: the allowlist toolchain is LF-only
+    end to end. ``atomic_update_text`` reads via ``Path.read_text`` (universal
+    newlines), so this callback only ever sees LF-normalised text — a CRLF
+    input file is normalised to LF on read before we get here — and the
+    canonical writer ``_build_yaml_entry_text`` emits LF unconditionally. So
+    there is no line ending to "sample and preserve"; the file is LF by
+    construction. (Do NOT re-add CRLF sampling: it would be dead code — the
+    callback can never observe a ``\\r``.)
+    """
+    rewritten: list[str] = []
+    saw_file_fingerprint = False
+    saw_signature = False
+    for line in entry_lines:
+        if line.startswith("  file_fingerprint:"):
+            saw_file_fingerprint = True
+            rewritten.append("  judge_signature_version: 2\n")
+            rewritten.append(f"  scope_fingerprint: {_yaml_inline_scalar(spec.scope_fingerprint)}\n")
+            continue
+        if line.startswith("  ast_path:"):
+            rewritten.append(f"  ast_path: {_yaml_inline_scalar(spec.ast_path)}\n")
+            continue
+        if line.startswith("  judge_metadata_signature:"):
+            saw_signature = True
+            rewritten.append(f"  judge_metadata_signature: {_yaml_inline_scalar(spec.v2_signature)}\n")
+            continue
+        rewritten.append(line)
+
+    if not saw_file_fingerprint:
+        raise ValueError(
+            f"{target_yaml}: entry {entry_key!r} has no file_fingerprint line; "
+            "migrate-judge-scope only rewrites v1 (file_fingerprint-bound) entries."
+        )
+    if not saw_signature:
+        raise ValueError(f"{target_yaml}: entry {entry_key!r} has no judge_metadata_signature line to re-sign.")
+    return rewritten
 
 
 def _write_report(report: Any, args: argparse.Namespace) -> None:

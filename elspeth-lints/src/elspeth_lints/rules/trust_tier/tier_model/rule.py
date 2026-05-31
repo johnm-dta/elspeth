@@ -50,6 +50,10 @@ from elspeth_lints.core.protocols import (
 )
 from elspeth_lints.core.protocols import RuleContext, RuleMetadata, RuleScope, Severity
 from elspeth_lints.rules.trust_tier.tier_model.metadata import RULE_ID, RULE_METADATA
+from elspeth_lints.rules.trust_tier.tier_model.scope_fingerprint import (
+    compute_scope_fingerprint,
+    enclosing_scope_node,
+)
 from elspeth_lints.rules.trust_tier.tier_model.trust_boundary_suppress import (
     BoundaryFinding,
     BoundaryMetadata,
@@ -87,6 +91,15 @@ class Finding:
     judged against. For layer-import findings (which have no AST subject)
     we synthesise a stable address of the form ``import:<module>`` so
     every Finding instance carries a non-empty ast_path.
+
+    ``scope_fingerprint`` is the v2 binding primitive — the 64-char hex
+    fingerprint of the innermost enclosing scope (FunctionDef /
+    AsyncFunctionDef / ClassDef, or the whole module at module level) of
+    the finding's subject node. It replaces the whole-file
+    ``file_fingerprint`` for judge-gated entries, so editing an unrelated
+    scope in the same file no longer invalidates an entry's signature. It
+    is computed *forward* by the visitor from the live ``node_stack``
+    (never reverse-resolved from ``ast_path``) and verified at match time.
     """
 
     rule_id: str
@@ -98,6 +111,7 @@ class Finding:
     code_snippet: str
     message: str
     ast_path: str = ""
+    scope_fingerprint: str = ""
 
     @property
     def canonical_key(self) -> str:
@@ -524,6 +538,23 @@ class TierModelVisitor(ast.NodeVisitor):
             return None
         return self.node_stack[-(depth + 1)]
 
+    def _scope_fingerprint_for_current_node(self) -> str:
+        """Return the enclosing-scope fingerprint for the node being visited.
+
+        ``self.node_stack`` holds every ancestor of the current node,
+        outermost-first (the module is index 0). Reversed it is innermost-
+        first, the shape ``enclosing_scope_node`` expects. When there is no
+        enclosing def/class the module root (``node_stack[0]``) is the
+        fallback target.
+        """
+        ancestors = list(reversed(self.node_stack))
+        scope = enclosing_scope_node(ancestors)
+        if scope is not None:
+            return compute_scope_fingerprint(scope)
+        module = self.node_stack[0]
+        assert isinstance(module, ast.Module)  # node_stack[0] is always the module root
+        return compute_scope_fingerprint(None, module=module)
+
     def _get_code_snippet(self, lineno: int) -> str:
         """Get the source line for a given line number."""
         if 1 <= lineno <= len(self.source_lines):
@@ -632,6 +663,7 @@ class TierModelVisitor(ast.NodeVisitor):
                 code_snippet=self._get_code_snippet(node.lineno),
                 message=message,
                 ast_path="/".join(self.path_stack) or "<module-root>",
+                scope_fingerprint=self._scope_fingerprint_for_current_node(),
             )
         )
 
@@ -658,6 +690,7 @@ class TierModelVisitor(ast.NodeVisitor):
                     f"test_ref={metadata.test_ref!r}; suppresses={suppresses!r}"
                 ),
                 ast_path="/".join(self.path_stack) or "<module-root>",
+                scope_fingerprint=self._scope_fingerprint_for_current_node(),
             )
         )
 
@@ -680,6 +713,12 @@ class TierModelVisitor(ast.NodeVisitor):
                 code_snippet=self._get_code_snippet(node.lineno),
                 message=diagnostic.message,
                 ast_path="/".join(self.path_stack) or "<module-root>",
+                # When this fires the FunctionDef is already on node_stack, so
+                # the stamped scope is the function's OWN scope, not an
+                # enclosing one. R_TB_MALFORMED is a fix-don't-suppress
+                # diagnostic and is never judge-gated, so the exact value is
+                # don't-care — only the non-empty invariant is load-bearing.
+                scope_fingerprint=self._scope_fingerprint_for_current_node(),
             )
         )
 
@@ -1504,6 +1543,14 @@ def scan_layer_imports_file(
     violations: list[Finding] = []
     tc_findings: list[Finding] = []
 
+    # Layer-import findings have no AST subject (the imported module IS the
+    # address) and are never judge-gated — layer-import suppressions use
+    # per-file rules / TC warnings, not signed entries. The whole module is
+    # the natural scope, so stamp the module fingerprint rather than leave
+    # the field empty; this keeps the non-empty invariant uniform and avoids
+    # a future reader mistaking these sites for a missed AST-subject one.
+    module_scope_fingerprint = compute_scope_fingerprint(None, module=tree)
+
     for node in ast.walk(tree):
         # Collect (module_name, line, col) targets from import nodes
         targets: list[tuple[str, int, int]] = []
@@ -1541,6 +1588,7 @@ def scan_layer_imports_file(
                         code_snippet=snippet,
                         message=f"TYPE_CHECKING import: {from_name} annotates with {to_name} ({module_name})",
                         ast_path=import_ast_path,
+                        scope_fingerprint=module_scope_fingerprint,
                     )
                 )
             else:
@@ -1559,6 +1607,7 @@ def scan_layer_imports_file(
                         code_snippet=snippet,
                         message=f"Upward import: {from_name} imports from {to_name} ({module_name})",
                         ast_path=import_ast_path,
+                        scope_fingerprint=module_scope_fingerprint,
                     )
                 )
 

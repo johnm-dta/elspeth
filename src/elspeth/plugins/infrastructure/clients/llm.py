@@ -164,10 +164,11 @@ _CONTENT_POLICY_PATTERNS = (
     "content policy",
     "safety system",
 )
-_CONTEXT_LENGTH_PATTERNS = (
-    "context_length_exceeded",
-    "context length",
-    "maximum context",
+CONTEXT_LENGTH_PATTERNS = (
+    "context_length_exceeded",  # OpenAI / Azure OpenAI canonical code
+    "context length",  # OpenAI / Azure verbose wording ("maximum context length is X")
+    "maximum context",  # Catches "maximum context length", "exceeds maximum context"
+    "prompt is too long",  # Anthropic via OpenRouter ("prompt is too long: N tokens > M maximum")
 )
 
 
@@ -177,7 +178,7 @@ def _classify_llm_error(exception: Exception) -> str:
 
     if any(pattern in error_str for pattern in _CONTENT_POLICY_PATTERNS):
         return "content_policy"
-    if any(pattern in error_str for pattern in _CONTEXT_LENGTH_PATTERNS):
+    if any(pattern in error_str for pattern in CONTEXT_LENGTH_PATTERNS):
         return "context_length"
 
     # Match explicit rate-limit indicators only; do not match arbitrary "rate" substrings.
@@ -261,7 +262,7 @@ class AuditedLLMClient(AuditedClientBase):
     def __init__(
         self,
         execution: CallRecorder,
-        state_id: str,
+        state_id: str | None,
         run_id: str,
         telemetry_emit: TelemetryEmitCallback,
         underlying_client: Any,  # openai.OpenAI or openai.AzureOpenAI
@@ -269,6 +270,7 @@ class AuditedLLMClient(AuditedClientBase):
         provider: str = "openai",
         limiter: RateLimiter | NoOpLimiter | None = None,
         token_id: str | None = None,
+        operation_id: str | None = None,
     ) -> None:
         """Initialize audited LLM client.
 
@@ -281,8 +283,9 @@ class AuditedLLMClient(AuditedClientBase):
             provider: Provider name for audit trail (default: "openai")
             limiter: Optional rate limiter for throttling requests
             token_id: Optional token identity for telemetry correlation
+            operation_id: Optional operation parent for runtime preflight calls
         """
-        super().__init__(execution, state_id, run_id, telemetry_emit, limiter=limiter, token_id=token_id)
+        super().__init__(execution, state_id, run_id, telemetry_emit, operation_id=operation_id, limiter=limiter, token_id=token_id)
         self._client = underlying_client
         self._provider = provider
 
@@ -293,6 +296,7 @@ class AuditedLLMClient(AuditedClientBase):
         *,
         temperature: float = 0.0,
         max_tokens: int | None = None,
+        resolved_prompt_template_hash: str | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """Make chat completion call with automatic audit recording.
@@ -302,6 +306,15 @@ class AuditedLLMClient(AuditedClientBase):
             messages: List of message dicts with "role" and "content"
             temperature: Sampling temperature (default: 0.0 for determinism)
             max_tokens: Maximum tokens to generate (optional)
+            resolved_prompt_template_hash: Phase 5b Task 9 cross-DB anchor.
+                When the LLM transform is downstream of a resolved
+                interpretation event, the runtime reads the SHA-256 from
+                ``options.resolved_prompt_template_hash`` on the node config
+                and forwards it here. Persisted to
+                ``calls.resolved_prompt_template_hash`` on every call this
+                method records (SUCCESS or ERROR), making the cross-DB
+                hash join discoverable from any LLM-call audit row.
+                ``None`` for non-interpretation LLM transforms.
             **kwargs: Additional arguments passed to the underlying client
 
         Returns:
@@ -352,8 +365,7 @@ class AuditedLLMClient(AuditedClientBase):
             # Classify error for retry decision
             is_retryable = error_class in {"rate_limit", "server", "network"}
 
-            self._execution.record_call(
-                state_id=self._state_id,
+            self._record_call(
                 call_index=call_index,
                 call_type=CallType.LLM,
                 status=CallStatus.ERROR,
@@ -364,6 +376,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=is_retryable,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
 
             # Telemetry emitted AFTER successful Landscape recording (even for call errors)
@@ -377,8 +390,8 @@ class AuditedLLMClient(AuditedClientBase):
                         provider=self._provider,
                         status=CallStatus.ERROR,
                         latency_ms=latency_ms,
-                        state_id=self._state_id,  # Transform context
-                        operation_id=None,  # Not in source/sink context
+                        state_id=self._telemetry_state_id(),
+                        operation_id=self._telemetry_operation_id(),
                         token_id=self._telemetry_token_id(),
                         request_hash=stable_hash(request_data),
                         response_hash=None,  # No response on error
@@ -398,7 +411,8 @@ class AuditedLLMClient(AuditedClientBase):
                     error=str(tel_err),
                     error_type=type(tel_err).__name__,
                     run_id=self._run_id,
-                    state_id=self._state_id,
+                    state_id=self._telemetry_state_id(),
+                    operation_id=self._telemetry_operation_id(),
                     call_type="llm",
                     exc_info=True,
                 )
@@ -432,8 +446,7 @@ class AuditedLLMClient(AuditedClientBase):
             # The LLM call happened — record it before re-raising so the
             # audit trail reflects the consumed tokens even though we can't
             # fully serialize the response.
-            self._execution.record_call(
-                state_id=self._state_id,
+            self._record_call(
                 call_index=call_index,
                 call_type=CallType.LLM,
                 status=CallStatus.ERROR,
@@ -444,6 +457,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
             raise LLMClientError(
                 f"Failed to serialize LLM response: {dump_exc}",
@@ -455,8 +469,7 @@ class AuditedLLMClient(AuditedClientBase):
         except ValueError as model_exc:
             error_msg = f"{model_exc}. Provider returned malformed data at Tier 3 boundary."
             response_payload = RawCallPayload(raw_response)
-            self._execution.record_call(
-                state_id=self._state_id,
+            self._record_call(
                 call_index=call_index,
                 call_type=CallType.LLM,
                 status=CallStatus.ERROR,
@@ -468,6 +481,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
 
             response_data = response_payload.to_dict()
@@ -480,8 +494,8 @@ class AuditedLLMClient(AuditedClientBase):
                         provider=self._provider,
                         status=CallStatus.ERROR,
                         latency_ms=latency_ms,
-                        state_id=self._state_id,
-                        operation_id=None,
+                        state_id=self._telemetry_state_id(),
+                        operation_id=self._telemetry_operation_id(),
                         token_id=self._telemetry_token_id(),
                         request_hash=stable_hash(request_data),
                         response_hash=stable_hash(response_data),
@@ -500,7 +514,8 @@ class AuditedLLMClient(AuditedClientBase):
                     error=str(tel_err),
                     error_type=type(tel_err).__name__,
                     run_id=self._run_id,
-                    state_id=self._state_id,
+                    state_id=self._telemetry_state_id(),
+                    operation_id=self._telemetry_operation_id(),
                     call_type="llm",
                     exc_info=True,
                 )
@@ -516,8 +531,7 @@ class AuditedLLMClient(AuditedClientBase):
                 usage=usage,
                 raw_response=raw_response,
             )
-            self._execution.record_call(
-                state_id=self._state_id,
+            self._record_call(
                 call_index=call_index,
                 call_type=CallType.LLM,
                 status=CallStatus.ERROR,
@@ -529,6 +543,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
             raise LLMClientError(error_msg, retryable=False)
 
@@ -546,8 +561,7 @@ class AuditedLLMClient(AuditedClientBase):
                     usage=usage,
                     raw_response=raw_response,
                 )
-                self._execution.record_call(
-                    state_id=self._state_id,
+                self._record_call(
                     call_index=call_index,
                     call_type=CallType.LLM,
                     status=CallStatus.ERROR,
@@ -559,6 +573,7 @@ class AuditedLLMClient(AuditedClientBase):
                         retryable=False,
                     ),
                     latency_ms=latency_ms,
+                    resolved_prompt_template_hash=resolved_prompt_template_hash,
                 )
                 raise LLMClientError(error_msg, retryable=False)
 
@@ -573,8 +588,7 @@ class AuditedLLMClient(AuditedClientBase):
                 usage=usage,
                 raw_response=raw_response,
             )
-            self._execution.record_call(
-                state_id=self._state_id,
+            self._record_call(
                 call_index=call_index,
                 call_type=CallType.LLM,
                 status=CallStatus.ERROR,
@@ -586,6 +600,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
 
             # Telemetry emitted AFTER successful Landscape recording (even for null-content errors)
@@ -600,8 +615,8 @@ class AuditedLLMClient(AuditedClientBase):
                         provider=self._provider,
                         status=CallStatus.ERROR,
                         latency_ms=latency_ms,
-                        state_id=self._state_id,
-                        operation_id=None,
+                        state_id=self._telemetry_state_id(),
+                        operation_id=self._telemetry_operation_id(),
                         token_id=self._telemetry_token_id(),
                         request_hash=stable_hash(request_data),
                         response_hash=stable_hash(response_data),
@@ -621,7 +636,8 @@ class AuditedLLMClient(AuditedClientBase):
                     error=str(tel_err),
                     error_type=type(tel_err).__name__,
                     run_id=self._run_id,
-                    state_id=self._state_id,
+                    state_id=self._telemetry_state_id(),
+                    operation_id=self._telemetry_operation_id(),
                     call_type="llm",
                     exc_info=True,
                 )
@@ -637,8 +653,7 @@ class AuditedLLMClient(AuditedClientBase):
                 f"LLM response content is {type(content).__name__}, expected str. Provider returned malformed data at Tier 3 boundary."
             )
             response_payload = RawCallPayload(raw_response)
-            self._execution.record_call(
-                state_id=self._state_id,
+            self._record_call(
                 call_index=call_index,
                 call_type=CallType.LLM,
                 status=CallStatus.ERROR,
@@ -650,6 +665,7 @@ class AuditedLLMClient(AuditedClientBase):
                     retryable=False,
                 ),
                 latency_ms=latency_ms,
+                resolved_prompt_template_hash=resolved_prompt_template_hash,
             )
             raise LLMClientError(error_msg, retryable=False)
 
@@ -661,14 +677,14 @@ class AuditedLLMClient(AuditedClientBase):
         )
         response_data = response_dto.to_dict()
 
-        self._execution.record_call(
-            state_id=self._state_id,
+        self._record_call(
             call_index=call_index,
             call_type=CallType.LLM,
             status=CallStatus.SUCCESS,
             request_data=request_dto,
             response_data=response_dto,
             latency_ms=latency_ms,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
         # Telemetry emitted AFTER successful Landscape recording
@@ -683,8 +699,8 @@ class AuditedLLMClient(AuditedClientBase):
                     provider=self._provider,
                     status=CallStatus.SUCCESS,
                     latency_ms=latency_ms,
-                    state_id=self._state_id,  # Transform context
-                    operation_id=None,  # Not in source/sink context
+                    state_id=self._telemetry_state_id(),
+                    operation_id=self._telemetry_operation_id(),
                     token_id=self._telemetry_token_id(),
                     request_hash=stable_hash(request_data),
                     response_hash=stable_hash(response_data),
@@ -705,7 +721,8 @@ class AuditedLLMClient(AuditedClientBase):
                 error=str(tel_err),
                 error_type=type(tel_err).__name__,
                 run_id=self._run_id,
-                state_id=self._state_id,
+                state_id=self._telemetry_state_id(),
+                operation_id=self._telemetry_operation_id(),
                 call_type="llm",
                 exc_info=True,
             )

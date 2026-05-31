@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
@@ -12,6 +13,7 @@ from tests.invariants.test_pass_through_invariants import _probe_instantiate
 
 class _SingleRowEcho(BaseTransform):
     name = "single_row_echo"
+    determinism = Determinism.DETERMINISTIC
     input_schema = None
     output_schema = None
 
@@ -24,6 +26,7 @@ class _SingleRowEcho(BaseTransform):
 
 class _BatchEcho(BaseTransform):
     name = "batch_echo"
+    determinism = Determinism.DETERMINISTIC
     input_schema = None
     output_schema = None
     is_batch_aware = True
@@ -37,6 +40,7 @@ class _BatchEcho(BaseTransform):
 
 class _CustomExecution(BaseTransform):
     name = "custom_execution"
+    determinism = Determinism.DETERMINISTIC
     input_schema = None
     output_schema = None
 
@@ -56,6 +60,7 @@ class _CustomExecution(BaseTransform):
 
 class _PositionalOnlyInit(BaseTransform):
     name = "positional_only_init"
+    determinism = Determinism.DETERMINISTIC
     input_schema = None
     output_schema = None
     passes_through_input = True

@@ -1,0 +1,12 @@
+[
+  {
+    "column": 11,
+    "file_path": "src/elspeth/mcp/types.py",
+    "fingerprint": "src/elspeth/mcp/types.py:is_terminal_attribute:is_terminal:2:11",
+    "line": 2,
+    "message": "is_terminal_attribute: is_terminal in record.is_terminal",
+    "rule_id": "is_terminal_attribute",
+    "severity": "error",
+    "suggestion": "Replace ADR-019 migration-sensitive symbols and brittle strings with the two-axis outcome/path contract."
+  }
+]

@@ -33,6 +33,7 @@ from hypothesis import strategies as st
 
 from elspeth.contracts import TokenInfo
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.config import CoalesceSettings
@@ -157,6 +158,44 @@ def make_mock_executor(clock: MockClock | None = None) -> _TestCoalesceExecutor:
         clock=clock or MockClock(start=0.0),
         data_flow=mock_data_flow,
     )
+
+
+class TestCoalesceAuditCleanupFailures:
+    def test_merge_failure_cleanup_audit_error_leaves_pending_for_recovery(self) -> None:
+        executor = make_mock_executor()
+        assert executor._data_flow is not None
+        executor._data_flow.record_token_outcome.side_effect = AuditIntegrityError("token outcome write failed")
+        settings = CoalesceSettings(
+            name="test_coalesce",
+            branches=["branch_a", "branch_b"],
+            policy="require_all",
+            merge="union",
+            union_collision_policy="fail",
+        )
+        executor.register_coalesce(settings, node_id=NodeID("node-001"))
+
+        token_a = make_token(
+            token_id="token-a",
+            row_id="row-001",
+            branch_name="branch_a",
+            row_data={"shared": "a"},
+        )
+        token_b = make_token(
+            token_id="token-b",
+            row_id="row-001",
+            branch_name="branch_b",
+            row_data={"shared": "b"},
+        )
+
+        held = executor.accept(token_a, "test_coalesce")
+        assert held.held is True
+
+        with pytest.raises(AuditIntegrityError, match="token outcome write failed"):
+            executor.accept(token_b, "test_coalesce")
+
+        key = ("test_coalesce", "row-001")
+        assert key in executor._pending
+        assert key not in executor._completed_keys
 
 
 # =============================================================================

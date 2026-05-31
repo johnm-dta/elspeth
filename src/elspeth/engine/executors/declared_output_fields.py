@@ -123,6 +123,7 @@ class DeclaredOutputFieldsContract(DeclarationContract):
 
     name: ClassVar[str] = "declared_output_fields"
     payload_schema: ClassVar[type] = DeclaredOutputFieldsPayload
+    violation_class: ClassVar[type[DeclaredOutputFieldsViolation]] = DeclaredOutputFieldsViolation
 
     def applies_to(self, plugin: Any) -> bool:
         typed_plugin = require_declared_output_fields_plugin(plugin)

@@ -1,90 +1,63 @@
 # Token Outcome Test Strategy
 
-This strategy ensures every token path is covered and every outcome is
-recorded correctly. Use a test pyramid: many fast unit tests, fewer
-integration tests, and a small number of end-to-end checks.
+Current as of 2026-05-20.
 
-## Test pyramid targets
+Tests should prove the two-axis token outcome contract, not the retired
+single-axis `RowOutcome` model.
 
-- Unit: ~70 percent
-- Integration: ~20 percent
-- End-to-end: ~10 percent
+## Invariants
 
-## Outcome invariants (must hold)
+1. Every token has exactly one completed outcome after terminal run completion.
+2. Non-terminal rows are limited to `(outcome IS NULL, path='buffered',
+   completed=0)`.
+3. Completed rows use a legal `(outcome, path)` pair.
+4. Pair-specific required fields are present.
+5. Pair-specific forbidden fields are absent.
+6. Completed sink states and success outcomes with sinks agree.
+7. Fork, expand, coalesce, and batch-consumed paths preserve parent/child or
+   batch evidence.
 
-1. Exactly one terminal outcome per token.
-2. BUFFERED may repeat, but must be followed by a terminal outcome.
-3. Required fields present for each outcome type.
-4. COMPLETED implies completed sink node_state.
-5. Completed sink node_state implies COMPLETED outcome.
-6. Fork/expand children must have token_parents entries.
+## Unit Tests
 
-## Unit tests (fast, isolated)
+Use unit tests for producer-specific rules:
 
-Focus on outcome recording paths in isolation.
+- `TerminalOutcome` / `TerminalPath` legal-pair coverage in
+  `src/elspeth/contracts/enums.py`.
+- `TokenOutcome` field constraints in `src/elspeth/contracts/audit.py`.
+- Data-flow repository writes for parent, child, batch, and buffered outcomes.
+- Processor branches for gate, transform-error, filter/drop, batch, and
+  coalesce paths.
+- Sink executor branches for normal success, failsink fallback, and discard.
 
-Suggested coverage:
-- RowProcessor:
-  - QUARANTINED on error_sink == discard
-  - ROUTED on error sink
-  - FORKED and child creation
-  - EXPANDED on multi-row output
-  - CONSUMED_IN_BATCH and BUFFERED for aggregation modes
-  - FAILED on retry exhaustion
-- CoalesceExecutor:
-  - COALESCED recorded for consumed tokens on merge
-  - FAILED recorded on quorum_not_met / incomplete_branches
-  - Late arrival recorded as FAILED (via processor path)
-- Recorder:
-  - Multiple BUFFERED allowed, terminal unique enforced
+## Integration Tests
 
-Existing tests to extend:
-- `tests/engine/test_processor_outcomes.py`
-- `tests/engine/test_coalesce_executor_audit_gaps.py`
+Use minimal pipelines that exercise the full config-to-runtime path:
 
-## Integration tests (pipeline-level)
+- Default source -> transform -> sink success.
+- Gate route to named sink and gate discard.
+- Transform `on_error` to sink and discard/failure paths.
+- Filter/drop path.
+- Fork plus coalesce.
+- Batch buffer, batch consumed, and flush.
+- Source quarantine.
 
-Use minimal pipeline configurations that exercise full paths end to end.
-After each run, execute the audit sweep from
-`docs/contracts/token-outcomes/02-audit-sweep.md`.
+After each run, execute the relevant sweep queries from
+[Audit Sweep](02-audit-sweep.md).
 
-Recommended scenarios:
-- Gate route to named sink (ROUTED)
-- Fork to two branches with coalesce (FORKED + COALESCED)
-- Aggregation passthrough (BUFFERED then COMPLETED)
-- Aggregation transform mode (CONSUMED_IN_BATCH + EXPANDED children)
-- Transform error to error sink (ROUTED) and discard (QUARANTINED)
-- Source quarantine (QUARANTINED with sink_name)
+## Property Tests
 
-## Property-based tests (invariant hunting)
+Use Hypothesis for invariant hunting:
 
-Use Hypothesis to generate varied token flows and assert invariants.
-Focus on the invariants above rather than specific examples.
+- Generate small DAG paths with fork, expand, batch, and coalesce operations.
+- Assert legal pair coverage and required/forbidden fields.
+- Assert parent/delegation paths produce corresponding child or batch evidence.
+- Keep PR profiles bounded; use wider profiles in nightly or explicit audit
+  sweeps.
 
-Suggested properties:
-- For any sequence of fork/coalesce/expand operations, each token has
-  exactly one terminal outcome by the end of the run.
-- BUFFERED tokens always resolve to terminal after flush.
-- Required fields are present for each outcome.
+## CI Scheduling
 
-Implementation approach:
-- Use in-memory LandscapeDB.
-- Drive RowProcessor and CoalesceExecutor directly.
-- Generate small DAG scenarios with randomized order of branch arrivals.
-- Keep max examples low on PR (fast), higher in nightly runs.
-
-## End-to-end checks (few, critical)
-
-Run a small number of full pipelines that include:
-- External calls mocked
-- Aggregation + coalesce
-- Error routing
-
-These should be stable and minimal. Their goal is to detect systemic
-regressions, not every edge case.
-
-## CI scheduling
-
-- PR: unit + integration + small property-based sample
-- Main: full unit + integration + expanded property-based sample
-- Nightly: stress property-based (higher examples) + any E2E
+- PR: focused unit tests, representative integration tests, bounded property
+  profile.
+- Main: broader unit and integration test sweep.
+- Nightly or release gate: expanded property profile and end-to-end examples
+  with audit sweep checks.

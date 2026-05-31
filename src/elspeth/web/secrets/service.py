@@ -7,6 +7,7 @@ import time
 
 import structlog
 
+from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.secrets import (
     CreateSecretResult,
     FingerprintKeyMissingError,
@@ -138,14 +139,14 @@ class WebSecretService:
 
     # -- Resolution methods ------------------------------------------------
 
-    def list_refs(self, user_id: str, *, auth_provider_type: str) -> list[SecretInventoryItem]:
+    def list_refs(self, user_id: str, *, auth_provider_type: AuthProviderType) -> list[SecretInventoryItem]:
         """Merge user and server inventories; user scope wins on name clash."""
         user_items = {item.name: item for item in self._user_store.list_secrets(user_id=user_id, auth_provider_type=auth_provider_type)}
         server_items = {item.name: item for item in self._server_store.list_secrets()}
         merged = {**server_items, **user_items}  # user scope wins
         return sorted(merged.values(), key=lambda x: x.name)
 
-    def has_ref(self, user_id: str, name: str, *, auth_provider_type: str) -> bool:
+    def has_ref(self, user_id: str, name: str, *, auth_provider_type: AuthProviderType) -> bool:
         """Check whether *name* is resolvable in either scope.
 
         User scope shadows server scope by name: if the user has stored a
@@ -157,7 +158,7 @@ class WebSecretService:
             return self._user_store.has_secret(name, user_id=user_id, auth_provider_type=auth_provider_type)
         return self._server_store.has_secret(name)
 
-    def resolve(self, user_id: str, name: str, *, auth_provider_type: str) -> ResolvedSecret | None:
+    def resolve(self, user_id: str, name: str, *, auth_provider_type: AuthProviderType) -> ResolvedSecret | None:
         """Resolve a secret, trying user scope first then server.
 
         Returns None for any condition that makes the ref unresolvable —
@@ -218,7 +219,7 @@ class WebSecretService:
         user_id: str,
         name: str,
         *,
-        auth_provider_type: str,
+        auth_provider_type: AuthProviderType,
     ) -> bool:
         """Typed-error variant of :meth:`has_ref` for the HTTP validate route.
 
@@ -264,7 +265,7 @@ class WebSecretService:
 
     # -- REST API helpers (not part of WebSecretResolver) --------------------
 
-    def set_user_secret(self, user_id: str, name: str, value: str, *, auth_provider_type: str) -> CreateSecretResult:
+    def set_user_secret(self, user_id: str, name: str, value: str, *, auth_provider_type: AuthProviderType) -> CreateSecretResult:
         """Create or update a user-scoped secret.
 
         Returns a ``CreateSecretResult`` describing the persisted state.
@@ -286,7 +287,7 @@ class WebSecretService:
             fingerprint=fingerprint,
         )
 
-    def delete_user_secret(self, user_id: str, name: str, *, auth_provider_type: str) -> bool:
+    def delete_user_secret(self, user_id: str, name: str, *, auth_provider_type: AuthProviderType) -> bool:
         """Delete a user-scoped secret. Returns True if deleted."""
         return self._user_store.delete_secret(name, user_id=user_id, auth_provider_type=auth_provider_type)
 
@@ -304,7 +305,7 @@ class ScopedSecretResolver:
     is deployment-level (the same for all requests to a given server).
     """
 
-    def __init__(self, service: WebSecretService, auth_provider_type: str) -> None:
+    def __init__(self, service: WebSecretService, auth_provider_type: AuthProviderType) -> None:
         self._service = service
         self._auth_provider_type = auth_provider_type
 

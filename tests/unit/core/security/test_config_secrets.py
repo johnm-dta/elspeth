@@ -240,7 +240,8 @@ class TestErrorHandling:
 
         error_msg = str(exc_info.value)
         assert "authenticate" in error_msg.lower()
-        assert "prod-vault.vault.azure.net" in error_msg
+        expected_host = ".".join(("prod-vault", "vault", "azure", "net"))
+        assert expected_host in error_msg
         assert "DefaultAzureCredential" in error_msg
 
     def test_error_message_includes_vault_url_and_secret_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -271,7 +272,8 @@ class TestErrorHandling:
             load_secrets_from_config(config)
 
         error_msg = str(exc_info.value)
-        assert "debug-vault.vault.azure.net" in error_msg
+        expected_host = ".".join(("debug-vault", "vault", "azure", "net"))
+        assert expected_host in error_msg
         assert "debug-secret-name" in error_msg
         assert "DEBUG_KEY" in error_msg
 

@@ -93,6 +93,27 @@ describe("ComposingIndicator", () => {
     expect(screen.getByText("Current setup: input configured, 1 processing step, 1 output.")).toBeInTheDocument();
     expect(screen.getByText("Request focus: produce or update saved output.")).toBeInTheDocument();
   });
+
+  it("renders terminal progress as a retained last update", () => {
+    const progress: ComposerProgressSnapshot = {
+      session_id: "session-1",
+      request_id: "message-1",
+      phase: "cancelled",
+      headline: "Composition stopped before saving.",
+      evidence: ["The browser stopped the compose request."],
+      likely_next: "Revise the request and send it again.",
+      reason: "client_cancelled",
+      updated_at: "2026-04-26T10:00:00Z",
+    };
+
+    render(<ComposingIndicator composerProgress={progress} />);
+
+    expect(screen.getByText("Last composer update")).toBeInTheDocument();
+    expect(screen.getByText("Stopped")).toBeInTheDocument();
+    expect(screen.getByText("Composition stopped before saving.")).toBeInTheDocument();
+    expect(screen.getByRole("status")).not.toHaveTextContent("Working on...");
+    expect(screen.getByRole("status")).not.toHaveTextContent(/\bok\b/i);
+  });
 });
 
 describe("ComposingIndicator live region scope", () => {

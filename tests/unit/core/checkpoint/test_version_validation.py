@@ -63,7 +63,7 @@ class TestCheckpointVersionValidation:
         assert isinstance(state, AggregationCheckpointState)
 
         # Verify version field
-        assert state.version == "4.0", f"Expected version '4.0', got {state.version!r}"
+        assert state.version == "5.0", f"Expected version '5.0', got {state.version!r}"
         # Verify wire format includes _version key
         state_dict = state.to_dict()
         assert "_version" in state_dict, "Checkpoint wire format must include _version field (Bug #12 fix)"
@@ -98,12 +98,15 @@ class TestCheckpointVersionValidation:
         with pytest.raises(AuditIntegrityError) as exc_info:
             executor.restore_from_checkpoint(incompatible_state)
 
-        # Verify error message is clear
+        # Verify error message is clear and includes operator recovery
+        # guidance consistent with the project DB migration policy
+        # (delete-and-rerun; no migration scripts).
         error_msg = str(exc_info.value)
-        assert "Incompatible checkpoint version" in error_msg
+        assert "Incompatible aggregation checkpoint version" in error_msg
         assert "1.1" in error_msg
-        assert "4.0" in error_msg
-        assert "Cannot resume" in error_msg
+        assert "5.0" in error_msg
+        assert "delete the audit" in error_msg
+        assert "fresh run" in error_msg
 
     def test_restore_fails_without_version(self) -> None:
         """Verify restore fails if checkpoint lacks version field.
@@ -168,7 +171,7 @@ class TestCheckpointVersionValidation:
         contract_version = contract.version_hash()
         valid_state = AggregationCheckpointState.from_dict(
             {
-                "_version": "4.0",
+                "_version": "5.0",
                 "test_node": {
                     "tokens": [
                         {
@@ -187,6 +190,8 @@ class TestCheckpointVersionValidation:
                     "elapsed_age_seconds": 0.0,
                     "count_fire_offset": None,
                     "condition_fire_offset": None,
+                    "accepted_count_total": 1,
+                    "completed_flush_count": 0,
                 },
             }
         )

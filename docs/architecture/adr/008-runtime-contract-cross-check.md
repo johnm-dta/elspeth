@@ -51,6 +51,23 @@ Without the registration: a transform with `on_error="quarantine_sink"` would ca
 
 `NodeStateGuard.__exit__` (L2 engine) now populates the new `ExecutionError.context` field (L0 contract) from `PluginContractViolation.to_audit_dict()` when the raised exception is a `PluginContractViolation` or subclass. The `isinstance` check is a Tier-2/Tier-1 boundary discriminator — not defensive programming — and it benefits every `PluginContractViolation` subclass that defines `to_audit_dict()`, not just the pass-through case. The full 9-key structured payload (transform, transform_node_id, run_id, row_id, token_id, static_contract, runtime_observed, divergence_set, exception_type) reaches the Landscape and is queryable via `json_extract(error_data, '$.context.<key>')`.
 
+**Amendment 2026-04-20** (commit `0764ab9fe`, landed during ADR-010 H2
+implementation). The `NodeStateGuard.__exit__` discriminator was widened
+from `isinstance(exc_val, PluginContractViolation)` to
+`isinstance(exc_val, AuditEvidenceBase)` so audit-evidence contribution
+becomes contract-orthogonal: future Tier-1 exceptions (e.g.,
+checkpoint-integrity violations) can supply structured context without
+inheriting `PluginContractViolation`. `AuditEvidenceBase` is the new
+nominal ABC introduced by ADR-010 §Decision 1; every existing
+`PluginContractViolation` subclass (including `PassThroughContractViolation`)
+inherits it via the established class chain, so this widening is a strict
+superset of the original wording's behaviour. This amendment also covers
+the matching wording in §Neutral Consequences below. **Amendment
+2026-05-20** (commit `075508b1d`) further closed the legacy lineage:
+`PassThroughContractViolation` now inherits `DeclarationContractViolation`
+directly rather than `PluginContractViolation`, but still reaches the
+discriminator via `AuditEvidenceBase` — no regression.
+
 ### Tier placement for cross-check data
 
 The cross-check crosses trust tiers. Each tier is explicit per CLAUDE.md's Three-Tier Trust Model:
@@ -114,9 +131,18 @@ Future ADRs may extend the pattern. This ADR establishes the architectural templ
 
 ### Alternative 3: Do not register in TIER_1_ERRORS — let `on_error` route the violation
 
-**Description:** `PassThroughContractViolation` remains a subclass of `PluginContractViolation` (which is not a TIER_1 error); `on_error` routing absorbs it like any other plugin error.
+**Description:** `PassThroughContractViolation` is treated as an ordinary plugin error (not TIER_1-registered); `on_error` routing absorbs it like any other plugin error.
 
 **Rejected because:** A pass-through-annotation lie is a framework contract violation, not a row-level data error. The static validator was told the transform emits a superset of input; runtime observed otherwise. Routing the row to `on_error` would record a misleading audit entry (implying this was a row-data problem) and continue the pipeline with a mis-annotated transform — future rows would keep producing silently wrong results. TIER_1 registration is the only mechanism that enforces the crash.
+
+**Amendment 2026-05-20** (commit `075508b1d`). The original wording stated
+that `PassThroughContractViolation` "remains a subclass of
+`PluginContractViolation` (which is not a TIER_1 error)" — this was a
+transitional fact at the time of ADR-008 and is no longer accurate.
+`PassThroughContractViolation` now inherits `DeclarationContractViolation`
+(itself a TIER_1 class) under ADR-010's declaration-trust framework. The
+TIER_1 registration is still load-bearing for the rejection rationale; the
+parent-class change does not weaken it.
 
 ### Alternative 4: Cross-check across ALL declarations (`creates_tokens`, schema modes, etc.)
 

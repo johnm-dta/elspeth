@@ -336,6 +336,7 @@ def _make_exporter(
     *,
     signing_key: bytes | None = None,
     run: Run | None = None,
+    run_attribution: tuple[str, str] | None = None,
     secret_resolutions: list[Any] | None = None,
     nodes: list[Any] | None = None,
     edges: list[Any] | None = None,
@@ -363,6 +364,7 @@ def _make_exporter(
 
     # run_lifecycle repository
     object.__setattr__(factory.run_lifecycle, "get_run", Mock(return_value=run if run is not None else _RUN))
+    object.__setattr__(factory.run_lifecycle, "get_run_attribution", Mock(return_value=run_attribution))
     object.__setattr__(factory.run_lifecycle, "get_secret_resolutions_for_run", Mock(return_value=secret_resolutions or []))
 
     # data_flow repository
@@ -472,6 +474,18 @@ class TestExportRunUnsigned:
         exporter = _make_exporter()
         records = list(exporter.export_run("run-1"))
         assert records[0]["settings"] == {"key": "value"}
+
+    def test_run_record_contains_web_attribution_when_present(self) -> None:
+        exporter = _make_exporter(run_attribution=("alice", "local"))
+        records = list(exporter.export_run("run-1"))
+        assert records[0]["initiated_by_user_id"] == "alice"
+        assert records[0]["auth_provider_type"] == "local"
+
+    def test_run_record_contains_null_web_attribution_when_absent(self) -> None:
+        exporter = _make_exporter()
+        records = list(exporter.export_run("run-1"))
+        assert records[0]["initiated_by_user_id"] is None
+        assert records[0]["auth_provider_type"] is None
 
     def test_run_record_has_timestamps(self) -> None:
         exporter = _make_exporter()

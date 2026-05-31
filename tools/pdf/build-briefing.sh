@@ -36,9 +36,9 @@ source "$SCRIPT_DIR/lib.sh"
 # ─────────────────────────────────────────────────────────────
 # Defaults — can be overridden via env or flag.
 # ─────────────────────────────────────────────────────────────
-DEFAULT_SOURCE="$PROJECT_ROOT/notes/composer-briefing-2026-05-03.md"
+DEFAULT_SOURCE="$PROJECT_ROOT/docs/composer/evidence/composer-briefing-2026-05-03.md"
 DEFAULT_METADATA="$SCRIPT_DIR/briefing-metadata.yaml"
-DEFAULT_OUTPUT="$PROJECT_ROOT/docs/assets/composer-briefing-2026-05-03.pdf"
+DEFAULT_OUTPUT="$PROJECT_ROOT/tools/pdf/out/composer-briefing-2026-05-03.pdf"
 
 SOURCE="${ELSPETH_BRIEFING_SOURCE:-$DEFAULT_SOURCE}"
 METADATA="${ELSPETH_BRIEFING_METADATA:-$DEFAULT_METADATA}"

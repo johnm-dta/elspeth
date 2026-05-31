@@ -1,0 +1,98 @@
+# Direction-aware redaction-policy label gate (spec §4.4.5, Task 18).
+#
+# When a PR modifies any redaction-touching file, this workflow:
+#   1. computes a snapshot diff vs the pull request base branch;
+#   2. classifies the diff as 'weaken' (sensitive_path_count decreased)
+#      or 'strengthen' (otherwise); and
+#   3. asserts the PR carries the correct direction label, with a
+#      rationale section when weakening.
+#
+# Closes rev-2 BLOCKER_B and rev-1 B4 / W9 / M10. Spec rev-5 §4.4.5
+# promoted this label gate from secondary to primary control because
+# CODEOWNERS cannot exist on a personal-account repo (no
+# '@elspeth/security' team).
+#
+# Workflow logic lives in two extracted Python scripts so the
+# four-combination test suite
+# (tests/unit/web/composer/test_label_gate_direction.py) exercises the
+# real implementation via subprocess rather than a re-implementation.
+name: composer-redaction-gate
+
+on:
+  pull_request:
+    branches: [main, master, "RC*"]
+
+jobs:
+  redaction-gate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Compute snapshot diff vs base branch
+        id: diff
+        run: |
+          set -euo pipefail
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          BASE_REMOTE="origin/${BASE_REF}"
+          git fetch origin "$BASE_REF"
+          REDACTION_PATHS=(
+            "src/elspeth/web/composer/redaction.py"
+            "src/elspeth/web/composer/redaction_telemetry.py"
+            "src/elspeth/web/composer/tools/"
+            "tests/unit/web/composer/redaction_policy_snapshot.json"
+            "tests/unit/web/composer/test_adequacy_guard.py"
+            "tests/unit/web/composer/test_walk_model_schema.py"
+          )
+          if ! git diff --name-only "$BASE_REMOTE" HEAD -- "${REDACTION_PATHS[@]}" | grep -q .; then
+            echo "snapshot_changed=false" >> "$GITHUB_OUTPUT"
+            echo "direction=none" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Composer redaction gate"
+              echo ""
+              echo "No redaction-sensitive files changed; gate not applicable."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          SNAPSHOT_PATH="tests/unit/web/composer/redaction_policy_snapshot.json"
+          if git diff --quiet "$BASE_REMOTE" HEAD -- "$SNAPSHOT_PATH"; then
+            echo "snapshot_changed=false" >> "$GITHUB_OUTPUT"
+            echo "direction=none" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Composer redaction gate"
+              echo ""
+              echo "Redaction-sensitive files changed, but the snapshot did not change."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "snapshot_changed=true" >> "$GITHUB_OUTPUT"
+            BASE_TMP="$(mktemp)"
+            HEAD_TMP="$(mktemp)"
+            if git cat-file -e "${BASE_REMOTE}:${SNAPSHOT_PATH}"; then
+              git show "${BASE_REMOTE}:${SNAPSHOT_PATH}" > "$BASE_TMP"
+            else
+              printf '{}' > "$BASE_TMP"
+            fi
+            cp "$SNAPSHOT_PATH" "$HEAD_TMP"
+            python3 scripts/cicd/check_redaction_direction.py \
+              --base-snapshot "$BASE_TMP" \
+              --head-snapshot "$HEAD_TMP" \
+              --output-file "$GITHUB_OUTPUT"
+            {
+              echo "## Composer redaction gate"
+              echo ""
+              echo "Redaction snapshot changed; enforcing direction label."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Assert correct direction label on snapshot change
+        if: steps.diff.outputs.snapshot_changed == 'true'
+        env:
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          DIRECTION: ${{ steps.diff.outputs.direction }}
+        run: |
+          python3 scripts/cicd/assert_redaction_label.py \
+            --direction "$DIRECTION" \
+            --pr-labels-json "$PR_LABELS" \
+            --pr-body "$PR_BODY"

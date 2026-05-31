@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import asc, delete, desc, select
 
 from elspeth.contracts import Checkpoint
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError
 from elspeth.core.canonical import compute_full_topology_hash, stable_hash
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import checkpoints_table, tokens_table
+
+logger = logging.getLogger(__name__)
+
+_LARGE_AGGREGATION_CHECKPOINT_BYTES = 1_000_000
+_MAX_CHECKPOINT_STATE_BYTES = 10_000_000
 
 if TYPE_CHECKING:
     from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
@@ -35,6 +41,41 @@ class CheckpointCorruptionError(Exception):
     """
 
     pass
+
+
+def _validate_checkpoint_state_json_size(
+    *,
+    state_name: Literal["aggregation", "coalesce"],
+    serialized: str,
+    total_rows: int | None = None,
+    node_count: int | None = None,
+    pending_joins: int | None = None,
+) -> None:
+    """Validate serialized checkpoint state at the single persistence boundary."""
+    serialized_bytes = len(serialized.encode("utf-8"))
+    size_mb = serialized_bytes / 1_000_000
+
+    if state_name == "aggregation" and serialized_bytes > _LARGE_AGGREGATION_CHECKPOINT_BYTES:
+        logger.warning(
+            "Large checkpoint: %.1fMB for %d buffered rows across %d nodes",
+            size_mb,
+            total_rows or 0,
+            node_count or 0,
+        )
+
+    if serialized_bytes <= _MAX_CHECKPOINT_STATE_BYTES:
+        return
+
+    if state_name == "aggregation":
+        raise OrchestrationInvariantError(
+            f"Checkpoint size {size_mb:.1f}MB exceeds 10MB limit. "
+            f"Buffer contains {total_rows or 0} total rows across {node_count or 0} nodes. "
+            f"Solutions: (1) Reduce aggregation count trigger to <5000 rows, "
+            f"(2) Reduce row_data payload size, or (3) Implement checkpoint retention "
+            f"policy"
+        )
+
+    raise RuntimeError(f"Coalesce checkpoint size {size_mb:.1f}MB exceeds 10MB limit. Pending joins: {pending_joins or 0}.")
 
 
 class CheckpointManager:
@@ -102,6 +143,16 @@ class CheckpointManager:
                     f"'{token_row.run_id}' but checkpoint targets run '{run_id}'. "
                     f"Cross-run checkpoint contamination is audit corruption."
                 )
+            existing_sequence = conn.execute(
+                select(checkpoints_table.c.checkpoint_id)
+                .where((checkpoints_table.c.run_id == run_id) & (checkpoints_table.c.sequence_number == sequence_number))
+                .limit(1)
+            ).fetchone()
+            if existing_sequence is not None:
+                raise OrchestrationInvariantError(
+                    f"Duplicate checkpoint sequence_number={sequence_number} for run '{run_id}' "
+                    f"would make resume ordering ambiguous; existing checkpoint={existing_sequence.checkpoint_id}"
+                )
 
             # Generate IDs and timestamps within transaction boundary
             checkpoint_id = f"cp-{uuid.uuid4().hex}"
@@ -113,8 +164,24 @@ class CheckpointManager:
             # - NaN/Infinity rejection per CLAUDE.md audit integrity requirements
             # Note: We don't use canonical_json because it normalizes floats to integers,
             # breaking round-trip for aggregation state
-            agg_json = checkpoint_dumps(aggregation_state.to_dict()) if aggregation_state is not None else None
-            coalesce_json = checkpoint_dumps(coalesce_state.to_dict()) if coalesce_state is not None else None
+            agg_json: str | None = None
+            if aggregation_state is not None:
+                agg_json = checkpoint_dumps(aggregation_state.to_dict())
+                _validate_checkpoint_state_json_size(
+                    state_name="aggregation",
+                    serialized=agg_json,
+                    total_rows=sum(len(node.tokens) for node in aggregation_state.nodes.values()),
+                    node_count=len(aggregation_state.nodes),
+                )
+
+            coalesce_json: str | None = None
+            if coalesce_state is not None:
+                coalesce_json = checkpoint_dumps(coalesce_state.to_dict())
+                _validate_checkpoint_state_json_size(
+                    state_name="coalesce",
+                    serialized=coalesce_json,
+                    pending_joins=len(coalesce_state.pending),
+                )
 
             # Compute topology hashes inside transaction
             # This ensures hash matches graph state at exact moment of checkpoint creation
@@ -244,7 +311,10 @@ class CheckpointManager:
     def delete_checkpoints(self, run_id: str) -> int:
         """Delete all checkpoints for a completed run.
 
-        Called after successful run completion to clean up.
+        Called after successful run completion to clean up. Checkpoints are deletable
+        progress state — node_states.resume_checkpoint_id is a marker-only id (no FK),
+        so the resume-provenance fact endures on node_states even after its checkpoint
+        row is purged here.
 
         Args:
             run_id: The run to clean up

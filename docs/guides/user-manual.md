@@ -13,7 +13,8 @@ This manual covers day-to-day usage of the ELSPETH CLI for running auditable pip
 7. [Managing Storage](#managing-storage)
 8. [Resuming Failed Runs](#resuming-failed-runs)
 9. [Health Checks](#health-checks)
-10. [Examples](#examples)
+10. [Examples](#examples-walkthrough)
+11. [Web Composer: Guided Mode](#web-composer-guided-mode)
 
 ---
 
@@ -148,6 +149,7 @@ TRANSFORMS:
   json_explode         - Explode a JSON array field into multiple rows.
   keyword_filter       - Filter rows containing blocked content patterns.
   passthrough          - Pass rows through unchanged.
+  report_assemble      - Assemble a batch of text rows into one report row with pagination metadata.
   truncate             - Truncate string fields to specified maximum lengths.
   type_coerce          - Perform explicit, strict, per-field type normalization.
   value_transform      - Apply expressions to compute new or modified field values.
@@ -456,6 +458,151 @@ For more complex scenarios, see the configuration reference:
 - **Fork/Join Patterns** - Parallel processing with coalesce
 
 See [Configuration Reference](../reference/configuration.md) for the complete settings documentation.
+
+---
+
+## Web Composer: Guided Mode
+
+The Web Composer is a browser-based authoring surface for building ELSPETH
+pipelines without hand-editing YAML. Start it with:
+
+```bash
+elspeth web
+```
+
+Then open the URL printed on the console (typically <http://localhost:8765>).
+
+When you create a new session, the composer starts in **Guided Mode** — a
+structured wizard for first-time pipeline authors. If you would rather author
+freely from the start (or you are an experienced operator who already knows
+what plugins and options you want), every guided turn exposes an
+**"Exit to freeform"** button that hands you over to the freeform composer with
+whatever partial pipeline state you have built so far. Existing sessions resume
+in whichever mode they were last in.
+
+### What guided mode is for
+
+Guided mode walks you through three steps in order:
+
+1. **Source** — choose where the data comes from.
+2. **Sink** — choose where the results go, and declare which fields you need
+   in the output.
+3. **Transforms** — pick the chain of processing steps that bridges the source
+   to the sink.
+
+Between Step 2 and Step 3 there is a deterministic **recipe pre-match** step:
+the server inspects your (source, sink) topology and the required output
+fields, and if any registered recipe fits the shape you have described, it
+offers that recipe instead of asking an LLM to invent a transform chain. This
+keeps simple, well-known pipelines (for example: "CSV in, classify each row
+with an LLM, write JSONL out") deterministic and cheap to build.
+
+### When to use guided mode versus freeform
+
+- **Use guided mode** if you are new to ELSPETH, if you want a recipe-first
+  authoring experience, or if you want the wizard to validate each step as
+  you go.
+- **Use freeform mode** if you already know which plugins you want to wire
+  together, or if your pipeline does not match any of the patterns guided mode
+  supports (multi-source pipelines, custom branching topologies, exotic
+  aggregations, etc.). Press **"Exit to freeform"** at any guided turn to
+  switch.
+
+Both modes target the same runtime, the same validators, and the same audit
+trail. Switching modes never discards pipeline state — only the authoring
+surface changes.
+
+### The closed turn protocol
+
+Both you and the assistant LLM operate inside a closed protocol: you answer
+only by clicking widgets the wizard offers, and the LLM can only emit one of
+six structured turn types. **The LLM is read-only with respect to pipeline
+state** — pipeline mutations happen server-side only, in response to your
+clicks. You can think of the LLM as a navigator, not a driver.
+
+The six turn types are:
+
+| Turn type | When it appears |
+|---|---|
+| `inspect_and_confirm` | Step 1, after you attach a blob: shows the columns and samples the source detected, and lets you correct them before continuing. |
+| `single_select` | Step 1 / Step 2 / Step 3: pick exactly one option from a set of chips (for example: pick the source plugin, pick the sink plugin, or resolve a clarifying question). |
+| `multi_select_with_custom` | Step 2: pick the output fields, with the observed columns from Step 1 pre-populated; you can also add custom field names. |
+| `schema_form` | Step 1 / Step 2: a form auto-generated from the chosen plugin's option schema (for example: file path, encoding, table name). |
+| `propose_chain` | Step 3: the LLM has proposed a sequence of transform steps with per-step rationale; accept it, edit a single step, or reject. |
+| `recipe_offer` | Step 2.5: the server has matched your (source, sink) shape to a registered recipe and is offering it; accept it (filling in any required slots like `classifier_template`, `model`, `api_key_secret`) or choose "Build manually" to proceed to Step 3. |
+
+### How the recipe pre-match works
+
+After Step 2 completes, the server looks at the pipeline shape (which source
+plugin you chose, which sink plugin you chose, how many sinks, and which
+output fields you said were required) and walks the registered recipe table.
+For example: a CSV source plus a JSON sink plus a required `classifier_keyword`
+field matches the `classify-rows-llm-jsonl` recipe.
+
+If a recipe matches, you see a **`recipe_offer`** turn. You then either:
+
+- **Apply the recipe**, filling in any required slots that the recipe needs
+  (commonly `classifier_template`, `model`, `api_key_secret`). The slots are
+  pre-validated against the recipe's contract before the recipe is committed.
+- **Build manually**, which skips the recipe and advances to Step 3, where
+  the LLM proposes a chain from scratch.
+
+If no recipe matches, the wizard skips Step 2.5 and goes straight to Step 3.
+
+### Step 3 — the chain proposer
+
+Once you reach Step 3, the LLM looks at the (source, sink) shape, the
+required output fields, and the recipe table, and emits a `propose_chain`
+turn. Each step in the chain has a one-line rationale explaining why it is
+there. You can:
+
+- **Accept the full chain** — the wizard commits every step and moves to
+  completion.
+- **Edit step N** — the wizard locks every other step and re-asks the LLM
+  for just that step.
+- **Reject** — the LLM either emits a `single_select` clarification ("I'm
+  trying to bridge X to Y; do you want approach A or approach B?") or
+  escalates to the advisor for a stronger reviewer model.
+
+If the LLM cannot produce a valid chain after one repair attempt plus an
+optional advisor consultation, the wizard **auto-drops to freeform mode**
+with the partial pipeline state preserved and a `solver_exhausted` reason
+recorded in the chat history. From there you finish the pipeline by hand.
+
+### Completion and execution
+
+When the wizard runs out of guided steps, you see a **completion summary**
+showing the final pipeline shape. From the summary you can:
+
+- **Save and exit** — keep the pipeline as it is; the session is saved.
+- **Drop to freeform to keep editing** — switch to freeform mode with the
+  completed pipeline pre-loaded, and continue authoring there.
+
+Once the pipeline is saved you can validate it, preview the YAML, and execute
+it directly from the composer. The composer's `/validate` and `/execute`
+endpoints use the same runtime assembly and graph validation contracts as
+`elspeth validate` and `elspeth run` — there is no separate UI-only validator.
+
+### What guided mode does not cover
+
+Guided mode is intentionally narrow. It does not (yet) cover:
+
+- Pipelines with multiple sources.
+- Pipelines with branching topologies (forks, gates with multiple downstream
+  paths, fork+coalesce patterns).
+- Aggregation transforms that span more than a single row.
+- Custom plugin authoring.
+
+For any of these, exit to freeform when guided mode reaches a step it cannot
+represent. The chat history and the partial pipeline state both carry over.
+
+### See also
+
+- The full technical design of guided mode (server architecture, turn-protocol
+  contract, audit and telemetry, testing strategy) is documented at
+  `docs/superpowers/specs/2026-05-11-composer-guided-mode-design.md`.
+- For freeform composer authoring, plugin discovery, and tool contracts, see
+  the composer skill at `src/elspeth/web/composer/skills/pipeline_composer.md`.
 
 ---
 

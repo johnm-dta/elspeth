@@ -2,12 +2,14 @@ per_file_rules:
 - pattern: mcp/server.py
   rules:
   - R1
-  reason: MCP tool arguments are external client data (Tier 3) - defensive access is correct
+  reason: MCP tool arguments are external client data (Tier 3) - defensive access
+    is correct
   expires: null
 - pattern: mcp/analyzers/*
   rules:
   - R1
-  reason: Analyzer submodule functions process Tier 3 MCP data - defensive access is correct
+  reason: Analyzer submodule functions process Tier 3 MCP data - defensive access
+    is correct
   expires: null
 - pattern: mcp/server.py
   rules:
@@ -16,15 +18,23 @@ per_file_rules:
   expires: null
   max_hits: 8
 allow_hits:
-- key: mcp/server.py:R6:_find_audit_databases:fp=d1b9da6750fcbc5b
+- key: mcp/server.py:R6:_find_audit_databases:fp=badb2efd50be18f6
   owner: architecture
   reason: Silent recovery with explicit error handling path
-- key: mcp/server.py:R6:_prompt_for_database:fp=4bf1b74c95450844
+  safety: Filesystem discovery helper; OSError/PermissionError on individual entries
+    are expected and skipped without affecting the audit trail
+- key: mcp/server.py:R6:_prompt_for_database:fp=250dc301eb3eda7c
   owner: architecture
   reason: Silent recovery with explicit error handling path
-- key: mcp/server.py:R6:_prompt_for_database:fp=db88995ea304163f
+  safety: Interactive prompt helper; KeyboardInterrupt / EOFError handled to allow
+    clean cancellation without poisoning subsequent operations
+- key: mcp/server.py:R6:_prompt_for_database:fp=dbbeb81e161a9a1d
   owner: architecture
   reason: Silent recovery with explicit error handling path
-- key: mcp/server.py:R6:_prompt_for_database:fp=ca7cd80408f8d4f3
+  safety: Interactive prompt helper; KeyboardInterrupt / EOFError handled to allow
+    clean cancellation without poisoning subsequent operations
+- key: mcp/server.py:R6:_prompt_for_database:fp=b20406c8a83aad1b
   owner: architecture
   reason: Silent recovery with explicit error handling path
+  safety: Interactive prompt helper; KeyboardInterrupt / EOFError handled to allow
+    clean cancellation without poisoning subsequent operations

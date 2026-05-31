@@ -1,7 +1,7 @@
 """Node detail panel widget for displaying node state information."""
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -101,6 +101,25 @@ def _validate_artifact(data: dict[str, Any]) -> ArtifactDisplay:
     }
 
 
+def _parse_json_object(field_name: str, value: Any, state_id: str) -> dict[str, object]:
+    """Parse a JSON audit field that must contain an object."""
+    if not isinstance(value, str):
+        raise TypeError(f"{field_name} must be str, got {type(value).__name__} - audit integrity violation in state {state_id}")
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise TypeError(f"{field_name} must parse to dict, got {type(parsed).__name__} - audit integrity violation in state {state_id}")
+    return cast(dict[str, object], parsed)
+
+
+def _format_json_value(value: Any) -> str:
+    """Render a JSON-compatible value compactly for operator display."""
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True)
+    return str(value)
+
+
 class NodeDetailPanel:
     """Panel displaying detailed information about a selected node.
 
@@ -145,51 +164,41 @@ class NodeDetailPanel:
 
         # Identity - node_id is required, others are optional
         lines.append("Identity:")
-        state_id = self._state.get("state_id")
+        state_id = self._state["state_id"] if "state_id" in self._state else None
         lines.append(f"  State ID:  {state_id if state_id is not None else 'N/A'}")
         lines.append(f"  Node ID:   {self._state['node_id']}")  # Required
-        token_id = self._state.get("token_id")
+        token_id = self._state["token_id"] if "token_id" in self._state else None
         lines.append(f"  Token ID:  {token_id if token_id is not None else 'N/A'}")
         lines.append("")
 
         # Status - all optional (may not have execution state yet)
-        status = self._state.get("status")
+        status = self._state["status"] if "status" in self._state else None
         lines.append("Status:")
         lines.append(f"  Status:     {status if status is not None else 'N/A'}")
-        started_at = self._state.get("started_at")
+        started_at = self._state["started_at"] if "started_at" in self._state else None
         lines.append(f"  Started:    {started_at if started_at is not None else 'N/A'}")
-        completed_at = self._state.get("completed_at")
+        completed_at = self._state["completed_at"] if "completed_at" in self._state else None
         lines.append(f"  Completed:  {completed_at if completed_at is not None else 'N/A'}")
-        duration = self._state.get("duration_ms")
+        duration = self._state["duration_ms"] if "duration_ms" in self._state else None
         if duration is not None:
             lines.append(f"  Duration:   {duration} ms")
         lines.append("")
 
         # Hashes - optional
         lines.append("Data Hashes:")
-        input_hash = self._state.get("input_hash")
-        output_hash = self._state.get("output_hash")
+        input_hash = self._state["input_hash"] if "input_hash" in self._state else None
+        output_hash = self._state["output_hash"] if "output_hash" in self._state else None
         lines.append(f"  Input:   {input_hash if input_hash is not None else '(none)'}")
         lines.append(f"  Output:  {output_hash if output_hash is not None else '(none)'}")
         lines.append("")
 
         # Error (if present) - optional field
         # error_json is Tier 1 (our audit data) - if malformed, that's a bug
-        error_json = self._state.get("error_json")
-        if error_json is not None:
+        audit_context = self._state["state_id"] if "state_id" in self._state else self._state["node_id"]
+        if "error_json" in self._state and self._state["error_json"] is not None:
+            error_json = self._state["error_json"]
             lines.append("Error:")
-            # error_json MUST be a string (schema contract)
-            if not isinstance(error_json, str):
-                raise TypeError(
-                    f"error_json must be str, got {type(error_json).__name__} - "
-                    f"audit integrity violation in state {self._state['state_id']}"
-                )
-            error = json.loads(error_json)  # Let JSONDecodeError crash - it's our data
-            if not isinstance(error, dict):
-                raise TypeError(
-                    f"error_json must parse to dict, got {type(error).__name__} - "
-                    f"audit integrity violation in state {self._state['state_id']}"
-                )
+            error = _parse_json_object("error_json", error_json, audit_context)
 
             # Discriminated union: determine error variant by field presence
             # ExecutionError has "type" + "exception"
@@ -197,50 +206,81 @@ class NodeDetailPanel:
             # TransformErrorReason has "reason"
             if "type" in error and "exception" in error:
                 # ExecutionError variant
-                validated = _validate_execution_error(error)
+                validated = _validate_execution_error(cast(dict[str, Any], error))
                 lines.append(f"  Type:    {validated['type']}")
                 lines.append(f"  Message: {validated['exception']}")
-                if validated.get("phase"):
+                if "phase" in validated and validated["phase"]:
                     lines.append(f"  Phase:   {validated['phase']}")
             elif "failure_reason" in error:
                 # CoalesceFailureReason variant
-                validated_coalesce = _validate_coalesce_error(error)
+                validated_coalesce = _validate_coalesce_error(cast(dict[str, Any], error))
                 lines.append(f"  Failure: {validated_coalesce['failure_reason']}")
                 lines.append(f"  Policy:  {validated_coalesce['merge_policy']}")
                 lines.append(f"  Expected branches: {', '.join(validated_coalesce['expected_branches'])}")
                 lines.append(f"  Arrived branches:  {', '.join(validated_coalesce['branches_arrived']) or '(none)'}")
-                if validated_coalesce.get("timeout_ms") is not None:
+                if "timeout_ms" in validated_coalesce and validated_coalesce["timeout_ms"] is not None:
                     lines.append(f"  Timeout: {validated_coalesce['timeout_ms']} ms")
-                if validated_coalesce.get("select_branch"):
+                if "select_branch" in validated_coalesce and validated_coalesce["select_branch"]:
                     lines.append(f"  Select branch: {validated_coalesce['select_branch']}")
             elif "reason" in error:
                 # TransformErrorReason variant
-                validated_transform = _validate_transform_error(error)
+                validated_transform = _validate_transform_error(cast(dict[str, Any], error))
                 lines.append(f"  Reason:  {validated_transform['reason']}")
                 # Display message from either 'error' or 'message' field
-                msg = validated_transform.get("error") or validated_transform.get("message")
+                error_message = validated_transform["error"] if "error" in validated_transform else None
+                fallback_message = validated_transform["message"] if "message" in validated_transform else None
+                msg = error_message or fallback_message
                 if msg:
                     lines.append(f"  Message: {msg}")
-                if validated_transform.get("field"):
+                if "field" in validated_transform and validated_transform["field"]:
                     lines.append(f"  Field:   {validated_transform['field']}")
             else:
                 # Unknown error format - this is a bug in our recording code
                 raise ValueError(
                     f"error_json has unknown format (no 'type'+'exception' or 'reason') - "
-                    f"audit integrity violation in state {self._state['state_id']}: "
+                    f"audit integrity violation in state {audit_context}: "
                     f"keys={list(error.keys())}"
                 )
             lines.append("")
 
+        # Success reason (if present) - optional field
+        # success_reason_json is Tier 1 (our audit data) - if malformed, crash
+        if "success_reason_json" in self._state:
+            success_reason_json = self._state["success_reason_json"]
+            lines.append("Success Reason:")
+            success_reason = _parse_json_object("success_reason_json", success_reason_json, audit_context)
+            lines.append(f"  Action: {success_reason['action']}")
+            for key, label in (
+                ("fields_modified", "Fields modified"),
+                ("fields_added", "Fields added"),
+                ("fields_removed", "Fields removed"),
+                ("validation_warnings", "Validation warnings"),
+                ("queries_completed", "Queries completed"),
+                ("metadata", "Metadata"),
+            ):
+                if key in success_reason:
+                    lines.append(f"  {label}: {_format_json_value(success_reason[key])}")
+            lines.append("")
+
+        # Context after (if present) - optional field
+        # context_after_json is Tier 1 (our audit data) - if malformed, crash
+        if "context_after_json" in self._state:
+            context_after_json = self._state["context_after_json"]
+            lines.append("Context After:")
+            context_after = _parse_json_object("context_after_json", context_after_json, audit_context)
+            for line in json.dumps(context_after, indent=2, sort_keys=True).splitlines():
+                lines.append(f"  {line}")
+            lines.append("")
+
         # Artifact (if sink) - optional field
         # artifact is Tier 1 (our audit data) - if malformed, that's a bug
-        artifact = self._state.get("artifact")
-        if artifact is not None:
+        if "artifact" in self._state and self._state["artifact"] is not None:
+            artifact = self._state["artifact"]
             lines.append("Artifact:")
             # artifact MUST be a dict (schema contract)
             if not isinstance(artifact, dict):
                 raise TypeError(
-                    f"artifact must be dict, got {type(artifact).__name__} - audit integrity violation in state {self._state['state_id']}"
+                    f"artifact must be dict, got {type(artifact).__name__} - audit integrity violation in state {audit_context}"
                 )
             # Validate and access fields directly (Tier 1 - crash on missing)
             validated_artifact = _validate_artifact(artifact)

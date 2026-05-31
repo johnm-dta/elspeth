@@ -1965,7 +1965,7 @@ def _expand_template_files(
 
     Returns:
         New dict with files loaded and paths recorded:
-        - template_file → template (content) + template_source (path)
+        - template_file → prompt_template (content) + prompt_template_source (path)
         - lookup_file → lookup (content) + lookup_source (path)
         - system_prompt_file → system_prompt (content) + system_prompt_source (path)
 
@@ -1976,13 +1976,13 @@ def _expand_template_files(
 
     # Handle template_file
     if "template_file" in result:
-        if "template" in result:
-            raise TemplateFileError("Cannot specify both 'template' and 'template_file'")
+        if "prompt_template" in result:
+            raise TemplateFileError("Cannot specify both 'prompt_template' and 'template_file'")
         template_file = result.pop("template_file")
         template_path = _resolve_template_path(template_file, settings_path, "Template file")
 
-        result["template"] = template_path.read_text(encoding="utf-8")
-        result["template_source"] = template_file
+        result["prompt_template"] = template_path.read_text(encoding="utf-8")
+        result["prompt_template_source"] = template_file
 
     # Handle lookup_file
     if "lookup_file" in result:

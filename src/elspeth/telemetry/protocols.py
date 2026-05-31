@@ -22,12 +22,12 @@ class ExporterProtocol(Protocol):
         1. Discovery: elspeth_get_exporters hook returns exporter classes
         2. Instantiation: TelemetryManager creates instances
         3. Configuration: configure() called with exporter-specific settings
-        4. Operation: export() called for each event (must not raise)
+        4. Operation: export() called for each event (must not raise for handled transport failures)
         5. Shutdown: flush() then close() called at pipeline end
 
     Error handling:
         - configure() MUST raise TelemetryExporterError on invalid config
-        - export() MUST NOT raise - log errors and continue
+        - export() MUST NOT raise for handled transport failures - return False so TelemetryManager can account for them
         - close() MUST be idempotent - safe to call multiple times
     """
 
@@ -59,12 +59,13 @@ class ExporterProtocol(Protocol):
         """
         ...
 
-    def export(self, event: "TelemetryEvent") -> None:
+    def export(self, event: "TelemetryEvent") -> bool | None:
         """Export a single telemetry event.
 
-        Called for each event emitted by the pipeline. This method MUST NOT
-        raise exceptions - telemetry failures should not crash the pipeline.
-        Errors should be logged internally.
+        Called for each event emitted by the pipeline. Handled transport
+        failures should be logged internally and reported by returning False;
+        they should not raise and crash pipeline code. Programming errors may
+        still raise so the telemetry manager can fail closed on corrupt code.
 
         Implementations may buffer events for batch export. Use flush() to
         ensure all buffered events are sent.
@@ -80,11 +81,12 @@ class ExporterProtocol(Protocol):
         """
         ...
 
-    def flush(self) -> None:
+    def flush(self) -> bool | None:
         """Flush any buffered events to the destination.
 
         Called periodically and at pipeline shutdown to ensure events
-        are delivered. Should be a no-op if no buffering is used.
+        are delivered. Return False for a handled transport failure. Should be
+        a no-op if no buffering is used.
         """
         ...
 

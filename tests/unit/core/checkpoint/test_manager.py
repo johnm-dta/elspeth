@@ -13,7 +13,12 @@ from elspeth.contracts.coalesce_checkpoint import (
     CoalescePendingCheckpoint,
     CoalesceTokenCheckpoint,
 )
-from elspeth.core.checkpoint.manager import CheckpointManager, IncompatibleCheckpointError
+from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.core.checkpoint.manager import (
+    CheckpointManager,
+    IncompatibleCheckpointError,
+    _validate_checkpoint_state_json_size,
+)
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table, tokens_table
 from tests.fixtures.factories import make_graph_linear
@@ -47,6 +52,8 @@ def _insert_checkpoint_prereqs(
             settings_json="{}",
             canonical_version="sha256-rfc8785-v1",
             status=RunStatus.RUNNING,
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
         )
     )
     conn.execute(
@@ -105,6 +112,27 @@ def test_create_checkpoint_rejects_missing_node_in_graph(checkpoint_manager: Che
         )
 
 
+def test_validate_checkpoint_state_json_size_rejects_large_aggregation_state() -> None:
+    """Serialized aggregation-size guard lives at the manager boundary."""
+    with pytest.raises(OrchestrationInvariantError, match="exceeds 10MB limit"):
+        _validate_checkpoint_state_json_size(
+            state_name="aggregation",
+            serialized="x" * 10_000_001,
+            total_rows=7,
+            node_count=2,
+        )
+
+
+def test_validate_checkpoint_state_json_size_rejects_large_coalesce_state() -> None:
+    """Serialized coalesce-size guard lives at the manager boundary."""
+    with pytest.raises(RuntimeError, match=r"Coalesce checkpoint size .* exceeds 10MB limit"):
+        _validate_checkpoint_state_json_size(
+            state_name="coalesce",
+            serialized="x" * 10_000_001,
+            pending_joins=3,
+        )
+
+
 def test_get_checkpoints_returns_ascending_sequence_order(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
     with db.connection() as conn:
         _insert_checkpoint_prereqs(conn)
@@ -116,6 +144,18 @@ def test_get_checkpoints_returns_ascending_sequence_order(db: LandscapeDB, check
 
     checkpoints = checkpoint_manager.get_checkpoints("run-001")
     assert [cp.sequence_number for cp in checkpoints] == [1, 3, 5]
+
+
+def test_create_checkpoint_rejects_duplicate_sequence_for_run(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
+    """Duplicate per-run checkpoint sequence numbers would make resume order ambiguous."""
+    with db.connection() as conn:
+        _insert_checkpoint_prereqs(conn)
+
+    graph = make_graph_linear("node-001")
+    checkpoint_manager.create_checkpoint("run-001", "tok-001", "node-001", 1, graph)
+
+    with pytest.raises(OrchestrationInvariantError, match="Duplicate checkpoint sequence_number"):
+        checkpoint_manager.create_checkpoint("run-001", "tok-001", "node-001", 1, graph)
 
 
 def test_create_checkpoint_round_trips_coalesce_state(db: LandscapeDB, checkpoint_manager: CheckpointManager) -> None:
@@ -221,6 +261,8 @@ def test_create_checkpoint_rejects_cross_run_token(db: LandscapeDB, checkpoint_m
                 settings_json="{}",
                 canonical_version="sha256-rfc8785-v1",
                 status=RunStatus.RUNNING,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
             )
         )
         conn.execute(

@@ -1,0 +1,72 @@
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Australia/Canberra"
+    labels:
+      - "dependencies"
+      - "python"
+    groups:
+      python-runtime:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:30"
+      timezone: "Australia/Canberra"
+    labels:
+      - "dependencies"
+      - "javascript"
+    groups:
+      root-node-tools:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directory: "/src/elspeth/web/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "10:00"
+      timezone: "Australia/Canberra"
+    labels:
+      - "dependencies"
+      - "frontend"
+    groups:
+      frontend:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "10:30"
+      timezone: "Australia/Canberra"
+    labels:
+      - "dependencies"
+      - "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "11:00"
+      timezone: "Australia/Canberra"
+    labels:
+      - "dependencies"
+      - "docker"

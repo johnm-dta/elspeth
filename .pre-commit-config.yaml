@@ -1,8 +1,17 @@
-# Hooks scan the FULL codebase (pass_filenames: false), not just staged files.
-# This ensures ALL files pass the same checks as CI, not just files you edited.
-# The types: [python] filter acts as a trigger gate — hooks only run when at
-# least one Python file is staged, but then check the entire scope.
+# Pre-commit is the fast changed-file gate; PR CI is the full-codebase gate.
+# Incremental hooks receive the filenames selected by pre-commit. Whole-repo
+# policy checks are enforced by CI and run locally only when their rule,
+# allowlist, or policy metadata changes.
+# The repo-local no-stash dispatcher invokes `pre-commit run --files <staged>`;
+# do not replace it with `--all-files`, which collapses this contract.
 # Hooks are CHECK-ONLY — they do NOT auto-fix or modify files.
+#
+# Hook stages installed by `pre-commit install`.  Includes commit-msg for the
+# telemetry-backfill cohort-attribution check.  Fresh clones must run
+# `pre-commit install` once; the default_install_hook_types directive below
+# makes that single command install BOTH stages (pre-commit and commit-msg)
+# without requiring a separate `--hook-type commit-msg` flag.
+default_install_hook_types: [pre-commit, commit-msg]
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
@@ -20,14 +29,11 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.4
     hooks:
-      # Linter - scans full codebase, check only (no --fix)
+      # Linter - changed files only, check only (no --fix)
       - id: ruff
-        args: [src/, tests/, scripts/, examples/]
-        pass_filenames: false
-      # Formatter - scans full codebase, check only (no reformat)
+      # Formatter - changed files only, check only (no reformat)
       - id: ruff-format
-        args: [--check, src/, tests/, scripts/, examples/]
-        pass_filenames: false
+        args: [--check]
 
   - repo: local
     hooks:
@@ -40,74 +46,161 @@ repos:
         name: Secret-pattern scan (refuses commit if credential-shaped strings detected)
         entry: scripts/git-hooks/pre-commit-secret-scan.sh
         language: system
-        # pass_filenames: false because the local .git/hooks/pre-commit invokes
-        # `pre-commit run --all-files` (see header in that file: avoids the
-        # stash/unstash mechanism that has caused unstaged-work loss).  All
-        # other hooks compensate via pass_filenames: false + fixed-directory
-        # scanning.  This script is designed for staged-files-only operation;
-        # with no args it falls back to
-        # `git diff --cached --name-only --diff-filter=AM`, which is exactly
-        # the scope we want — newly-added/modified content per commit, not the
-        # whole repo (which would force per-line allow markers on every
-        # documented placeholder URL).
+        # pass_filenames: false because the script scans staged content itself.
+        # This keeps the secret gate tied to the commit, even when the no-stash
+        # dispatcher passes the staged path list to the rest of pre-commit.
+        # With no args it falls back to `git diff --cached --name-only
+        # --diff-filter=AM`, which is exactly the scope we want: newly-added or
+        # modified content per commit, not the whole repo.
         pass_filenames: false
         always_run: true
 
       - id: mypy
         name: mypy
-        entry: .venv/bin/mypy src/elspeth
+        entry: .venv/bin/mypy
         language: system
         types: [python]
+        files: ^(src/elspeth/|elspeth-lints/src/).*\.py$
+
+      - id: elspeth-lints-no-new-bespoke-enforcers
+        name: elspeth-lints forbids new bespoke CI enforcers
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules meta.no-new-bespoke-cicd-enforcer --root .
+        language: system
+        files: ^(scripts/cicd/enforce_.*\.py|config/cicd/lint_migration_status\.yaml|elspeth-lints/src/elspeth_lints/rules/meta_no_new_bespoke_cicd_enforcer/)
         pass_filenames: false
 
-      - id: enforce-tier-model
-        name: Enforce Tier Model
-        entry: .venv/bin/python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model --exclude "**/__pycache__/*" --exclude "web/frontend/node_modules"
+      - id: elspeth-lints-options-metadata
+        name: elspeth-lints plugin options metadata
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules plugin_contract.options_metadata --root .
+        language: system
+        files: ^(config/cicd/enforce_options_metadata/|elspeth-lints/src/elspeth_lints/rules/plugin_contract/options_metadata/)
+        pass_filenames: false
+
+      - id: elspeth-lints-plugin-contract
+        name: elspeth-lints plugin contract
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules plugin_contract.component_type,plugin_contract.plugin_hashes --root src/elspeth
+        language: system
+        files: ^(config/cicd/enforce_component_type/|elspeth-lints/src/elspeth_lints/rules/plugin_contract/(component_type|plugin_hashes)/)
+        pass_filenames: false
+
+      - id: elspeth-lints-freeze-guards
+        name: elspeth-lints freeze guards
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules immutability.freeze_guards --root src/elspeth
+        language: system
+        files: ^(config/cicd/enforce_freeze_guards/|elspeth-lints/src/elspeth_lints/rules/immutability/freeze_guards/)
+        pass_filenames: false
+
+      - id: elspeth-lints-frozen-annotations-incremental
+        name: elspeth-lints frozen annotations (changed files)
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules immutability.frozen_annotations --root src/elspeth --files
         language: system
         types: [python]
+        files: ^src/elspeth/.*\.py$
+
+      - id: elspeth-lints-audit-evidence
+        name: elspeth-lints audit-evidence
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules audit_evidence.nominal_base,audit_evidence.tier_1_decoration,audit_evidence.guard_symmetry,audit_evidence.gve_attribution --root src/elspeth
+        language: system
+        files: ^(config/cicd/enforce_audit_evidence_nominal/|config/cicd/enforce_tier_1_decoration/|config/cicd/enforce_guard_symmetry/|config/cicd/enforce_gve_attribution/|elspeth-lints/src/elspeth_lints/rules/audit_evidence/)
+        pass_filenames: false
+
+      - id: elspeth-lints-composer-policy
+        name: elspeth-lints composer policy
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules 'composer/*' --root src/elspeth
+        language: system
+        files: ^(config/cicd/enforce_composer_(catch_order|exception_channel)/|elspeth-lints/src/elspeth_lints/rules/composer/)
+        pass_filenames: false
+
+      - id: elspeth-lints-composer-incremental
+        name: elspeth-lints composer (changed files)
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules 'composer/*' --root src/elspeth --files
+        language: system
+        types: [python]
+        files: ^src/elspeth/web/.*\.py$
+
+      - id: elspeth-lints-contract-manifest
+        name: elspeth-lints contract manifest
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules manifest.contract_manifest --root src/elspeth
+        language: system
+        files: ^(config/cicd/enforce_contract_manifest/|elspeth-lints/src/elspeth_lints/rules/manifest/contract_manifest/)
+        pass_filenames: false
+
+      - id: elspeth-lints-manifest-inventory
+        name: elspeth-lints manifest inventory
+        entry: env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules manifest.symbol_inventory,manifest.test_to_source_mapping --root .
+        language: system
+        files: ^(config/cicd/(symbol_inventory|test_to_source_mapping)/|elspeth-lints/src/elspeth_lints/rules/manifest/(symbol_inventory|test_to_source_mapping)/)
+        pass_filenames: false
+
+      - id: elspeth-lints-trust-tier
+        name: elspeth-lints trust-tier
+        entry: env PYTHONPATH=elspeth-lints/src ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=shape-only-when-key-missing .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth
+        language: system
+        # Verify mode mirrors CI's fork-PR treatment (ci.yaml). The mode is
+        # ADAPTIVE: with the operator's ELSPETH_JUDGE_METADATA_HMAC_KEY present
+        # in the shell env, the load does FULL judge-metadata signature
+        # verification; with the key absent (keyless agents, or an operator
+        # shell without the key after the .env O1 removal) it DOWNGRADES to
+        # shape-only and prints a prominent load-time warning rather than
+        # hard-failing the commit. Without this, the default `required` mode
+        # makes the now-firing hook raise on EVERY keyless local commit that
+        # touches the allowlist. Required-mode signature enforcement that blocks
+        # merge remains CI's job (HMAC key as a GitHub Actions secret).
+        # NO `types:` filter. pre-commit ANDs `types` with `files`; adding
+        # `types: [python]` here made the intersection near-empty — allowlist
+        # YAMLs under config/cicd/enforce_tier_model/ matched `files` but were
+        # excluded as non-python, so the gate Skipped on the most common way
+        # tier_model state changes. This is a whole-repo policy gate
+        # (pass_filenames: false, scans --root src/elspeth regardless of which
+        # file triggered it); the `files` regex is purely the trigger condition
+        # and matches every sibling policy gate above (freeze-guards,
+        # audit-evidence, composer-policy, plugin-contract). Per the header
+        # contract, src/elspeth/*.py edits are intentionally CI-covered, not a
+        # local trigger here. See issue elspeth-d3877f9262.
+        files: ^(config/cicd/enforce_tier_model/|elspeth-lints/src/elspeth_lints/rules/trust_tier/)
         pass_filenames: false
 
       - id: check-contracts
         name: Check Contracts
         entry: .venv/bin/python -m scripts.check_contracts
         language: system
-        types: [python]
+        files: ^(src/elspeth/core/config\.py|src/elspeth/contracts/config/|scripts/check_contracts\.py|tests/unit/core/test_config_alignment\.py)$
         pass_filenames: false
 
-      - id: enforce-frozen-annotations
-        name: Enforce Frozen Annotations
-        entry: .venv/bin/python scripts/cicd/enforce_frozen_annotations.py check --root src/elspeth --allowlist config/cicd/enforce_frozen_annotations
+      - id: check-slot-type-cross-language
+        name: SlotType / guided.ts mirror consistency check
+        entry: .venv/bin/python scripts/cicd/check_slot_type_cross_language.py
         language: system
-        types: [python]
         pass_filenames: false
+        # Run when either the Python Literal definition or its TypeScript mirror changes.
+        files: ^(src/elspeth/web/composer/recipes\.py|src/elspeth/web/frontend/src/types/guided\.ts)$
 
-      - id: enforce-plugin-hashes
-        name: Enforce Plugin Hashes
-        entry: .venv/bin/python -m scripts.cicd.enforce_plugin_hashes check --root src/elspeth
+      # Composer skill tool-inventory generator drift gate.
+      # The Foundation-knowledge bullets in pipeline_composer.md are derived
+      # from _REGISTERED_TOOLS + the two named carve-outs. Adding a new tool
+      # declaration must be matched by re-running
+      # `scripts/cicd/generate_skill_inventory.py --write`; this hook fails
+      # the commit if the skill block drifts from the generator output.
+      # See elspeth-6c9972ccbf Step 6 / falsification recovery.
+      - id: generate-skill-inventory-check
+        name: composer skill tool-inventory drift check
+        entry: .venv/bin/python scripts/cicd/generate_skill_inventory.py --check
         language: system
-        types: [python]
         pass_filenames: false
+        files: ^(src/elspeth/web/composer/(skills/pipeline_composer\.md|tools/(declarations|_registry|_dispatch|blobs|generation|outputs|recipes|secrets|sessions|sources|transforms)\.py)|scripts/cicd/generate_skill_inventory\.py)$
 
-      - id: enforce-composer-exception-channel
-        name: Composer exception-channel discipline
-        entry: .venv/bin/python scripts/cicd/enforce_composer_exception_channel.py check --root src/elspeth --allowlist config/cicd/enforce_composer_exception_channel
-        language: system
-        types: [python]
-        pass_filenames: false
-        files: ^src/elspeth/web/composer/tools\.py$
-
-      - id: enforce-composer-catch-order
-        name: Composer catch-order discipline
-        entry: .venv/bin/python scripts/cicd/enforce_composer_catch_order.py check --root src/elspeth --allowlist config/cicd/enforce_composer_catch_order
-        language: system
-        types: [python]
-        pass_filenames: false
-        files: ^src/elspeth/web/.*\.py$
-
-      - id: enforce-contract-manifest
-        name: Enforce Declaration Contract Manifest
-        entry: .venv/bin/python scripts/cicd/enforce_contract_manifest.py check --allowlist config/cicd/enforce_contract_manifest
-        language: system
-        types: [python]
-        pass_filenames: false
-        files: ^(src/elspeth/|scripts/cicd/enforce_contract_manifest\.py|config/cicd/enforce_contract_manifest/)
+      # Telemetry-backfill cohort-attribution trailer enforcement.
+      # Runs at commit-msg stage; rejects commits that touch a cohort directory
+      # without the matching `telemetry-backfill: <cohort-token>` trailer.  See
+      # docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md
+      # §"Cohort attribution via commit trailers (A4 — load-bearing)".
+      - id: telemetry-backfill-trailer
+        name: telemetry-backfill cohort-attribution trailer check
+        entry: .githooks/commit-msg-telemetry-backfill
+        language: script
+        stages: [commit-msg]
+        # pre-commit passes the commit-msg path as the trailing argument
+        # automatically for commit-msg stage hooks; pass_filenames must NOT
+        # be set to false here (the framework's commit-msg stage passes the
+        # message file path as the sole positional argument).
+        always_run: true

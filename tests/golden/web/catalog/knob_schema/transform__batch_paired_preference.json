@@ -1,0 +1,59 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Field that identifies paired evaluation items",
+        "kind": "text",
+        "label": "Pair Field",
+        "name": "pair_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Field that identifies the prompt/model/treatment variant",
+        "kind": "text",
+        "label": "Variant Field",
+        "name": "variant_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Numeric score field to compare within each pair",
+        "kind": "text",
+        "label": "Score Field",
+        "name": "score_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Optional baseline variant. When omitted, the first-seen variant is the baseline.",
+        "kind": "json-value",
+        "label": "Baseline Variant",
+        "name": "baseline_variant",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "batch_paired_preference"
+}

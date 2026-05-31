@@ -6,7 +6,7 @@ from typing import Any, TypedDict
 
 import pytest
 
-from elspeth.contracts import TransformResult
+from elspeth.contracts import Determinism, TransformResult
 from elspeth.contracts.data import PluginSchema as _PermissiveSchema
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
@@ -82,6 +82,7 @@ class _DummyTransformConfig(TransformDataConfig):
 
 class _DummyTransform(BaseTransform):
     name = "dummy_declared_required"
+    determinism = Determinism.DETERMINISTIC
     config_model = _DummyTransformConfig
     input_schema = _PermissiveSchema
     output_schema = _PermissiveSchema
@@ -96,6 +97,7 @@ class _DummyTransform(BaseTransform):
 
 
 class _DummyBatchTransform(_DummyTransform):
+    determinism = Determinism.DETERMINISTIC
     is_batch_aware = True
 
 
@@ -110,6 +112,7 @@ class _SecondaryPreEmissionViolation(DeclarationContractViolation):
 class _SecondaryPreEmissionContract(DeclarationContract):
     name = "secondary_declared_required_test"
     payload_schema: type = _SecondaryPayload
+    violation_class: type[_SecondaryPreEmissionViolation] = _SecondaryPreEmissionViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return bool(plugin.declared_input_fields)

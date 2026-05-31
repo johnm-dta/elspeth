@@ -44,18 +44,21 @@ per_file_rules:
   reason: TransformProtocol dispatch on config.transforms
   expires: null
   max_hits: 1
+- pattern: engine/orchestrator/cleanup.py
+  rules:
+  - R5
+  reason: Tier-1 re-raise guard — record_cleanup_error() uses isinstance(error,
+    TIER_1_ERRORS) to bypass the cleanup-warning downgrade and propagate
+    FrameworkBugError/AuditIntegrityError immediately. Relocated from the core.py
+    R5 pattern when _cleanup_plugins was extracted to its own module.
+  expires: null
+  max_hits: 1
 - pattern: engine/orchestrator/core.py
   rules:
   - R5
   reason: Protocol dispatch for batch-aware transforms and re-raise guards
   expires: null
-  max_hits: 3
-- pattern: engine/orchestrator/types.py
-  rules:
-  - R5
-  reason: Construction-time immutability enforcement for RunResult and AggregationFlushResult
-  expires: null
-  max_hits: 1
+  max_hits: 2
 - pattern: engine/processor.py
   rules:
   - R5
@@ -80,12 +83,6 @@ per_file_rules:
   expires: null
   max_hits: 2
 allow_hits:
-- key: engine/dependency_resolver.py:R5:_load_depends_on:fp=f936e7a8efffb70d
-  owner: architecture
-  reason: 'Tier 3 boundary: raw operator-authored YAML for cycle detection must be a mapping before key
-    access proceeds.'
-  safety: Raises ValueError with file path and observed top-level type on malformed input; no coercion
-  expires: null
 - key: engine/dependency_resolver.py:R1:_load_depends_on:fp=0ecc84f5b6b35d41
   owner: architecture
   reason: 'Tier 3 boundary: depends_on is optional in operator-authored YAML, so .get() preserves the
@@ -93,96 +90,23 @@ allow_hits:
   safety: Missing depends_on yields []; malformed present values are still validated immediately by subsequent
     type checks
   expires: null
-- key: engine/dependency_resolver.py:R5:_load_depends_on:fp=264c3e80726cfebb
-  owner: architecture
-  reason: 'Tier 3 validation: depends_on from raw operator YAML must be a list before entry-level validation
-    and contract normalization run.'
-  safety: Raises ValueError with file path and observed type on malformed input; no coercion
-  expires: null
-- key: engine/dependency_resolver.py:R5:_load_depends_on:fp=e35844f983fac115
-  owner: architecture
-  reason: 'Tier 3 validation: each depends_on entry from raw operator YAML must be a mapping before DependencyConfig.model_validate()
-    can enforce the schema.'
-  safety: Raises ValueError with entry index and observed type on malformed input; no coercion
-  expires: null
-- key: engine/coalesce_executor.py:R5:CoalesceExecutor:_execute_merge:fp=2116f4bed916112f
-  owner: architecture
-  reason: "AuditIntegrityError check prevents writing FAILED records to a compromised database \u2014\
-    \ leaving node states as pending is more honest than corrupting further"
-  safety: Re-raises immediately; no writes to the untrustworthy database
-  expires: null
-- key: engine/coalesce_executor.py:R4:CoalesceExecutor:_execute_merge:fp=1bfc473915d635ef
-  owner: architecture
-  reason: "Best-effort cleanup of OPEN branch node_states after merge failure \u2014 broad catch prevents\
-    \ cleanup failure from masking original merge exception"
-  safety: Logs error with state_id and cleanup exception details; always re-raises the original error
-  expires: null
-- key: engine/executors/sink.py:R4:SinkExecutor:_best_effort_cleanup:fp=1b066df6010227f2
-  owner: architecture
-  reason: "Best-effort cleanup of OPEN node_states before system error crash \u2014 broad catch prevents\
-    \ cleanup failure from masking original FrameworkBugError/AuditIntegrityError"
-  safety: Logs warning with cleanup exception details; always re-raises the original system error
-  expires: null
-- key: engine/executors/sink.py:R4:SinkExecutor:write:fp=7484e4d5a8bb7618
-  owner: architecture
-  reason: Cleanup of OPEN pre-phase states after begin_node_state failure must not mask original error
-  safety: Logs warning with cleanup exception details; always re-raises the original error
-  expires: null
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=8ae24dda2209d609
-  owner: bugfix
-  reason: "Offensive isinstance \u2014 validates sink.write() returns SinkWriteResult, not a bare ArtifactDescriptor\
-    \ or other type"
-  safety: Crashes immediately with PluginContractViolation identifying the buggy sink plugin
-  expires: null
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=333193edcab82132
-  owner: bugfix
-  reason: "Offensive isinstance \u2014 validates plugin return type to crash with PluginContractViolation\
-    \ instead of opaque AttributeError"
-  safety: Crashes immediately with clear error identifying the buggy sink plugin
-  expires: null
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=6bf4f058589b3c6f
-  owner: bugfix
-  reason: "Offensive isinstance \u2014 validates failsink.write() returns SinkWriteResult, crashing with\
-    \ PluginContractViolation identifying the buggy failsink plugin instead of propagating an opaque AttributeError\
-    \ from the downstream artifact access"
-  safety: Crashes immediately with PluginContractViolation naming the failsink and observed return type;
-    no silent coercion
-  expires: null
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=00755313e7e139d5
-  owner: bugfix
-  reason: "Offensive isinstance \u2014 validates the artifact attached to the failsink's SinkWriteResult\
-    \ is an ArtifactDescriptor, crashing with PluginContractViolation identifying the buggy failsink plugin\
-    \ instead of propagating an opaque AttributeError from later artifact_path access"
-  safety: Crashes immediately with PluginContractViolation naming the failsink and observed artifact type;
-    no silent coercion
-  expires: null
-- key: engine/processor.py:TC:_module_:fp=873d5f90adf363e0
-  owner: architecture
-  reason: "TYPE_CHECKING import of TelemetryManager \u2014 RowProcessor emits telemetry events"
-  safety: "No runtime coupling \u2014 annotation-only import behind TYPE_CHECKING guard"
-  expires: null
 - key: engine/commencement.py:R5:evaluate_commencement_gates:fp=18ca009ccd49b5e0
   owner: architecture
-  reason: "Offensive isinstance check \u2014 gate results must be bool before recording in audit trail.\
-    \ Non-boolean results from expression evaluation are a config bug, not data to coerce."
-  safety: Crashes with CommencementGateFailedError explaining the type mismatch; no coercion
-  expires: null
-- key: engine/orchestrator/core.py:TC:_module_:fp=aea9837d6932e65d
-  owner: architecture
-  reason: "TYPE_CHECKING import of TelemetryManager \u2014 Orchestrator accepts telemetry manager for\
-    \ span emission"
-  safety: "No runtime coupling \u2014 annotation-only import behind TYPE_CHECKING guard"
-  expires: null
-- key: engine/executors/state_guard.py:R5:NodeStateGuard:_extract_audit_evidence_context:fp=86d1554e15f3f1f6
-  owner: architecture
-  reason: 'ADR-010 Decision 1 nominal isinstance check -- discriminates AuditEvidenceBase subclasses so
-    NodeStateGuard can populate ExecutionError.context from to_audit_dict(). Nominal inheritance (not
-    structural Protocol) is deliberate: see ADR-010 Alternative 3 for the accidental-match spoofing rationale.
-    The exception always propagates; only structured audit context is conditionally added.'
-  safety: The isinstance predicate only controls whether context is captured; the exception always propagates
-    and the state is always completed as FAILED. Missing context is a degradation (less audit detail),
-    not a correctness bug.
-  expires: null
+  reason: |-
+    Offensive isinstance check — gate results must be bool before recording in audit trail. Non-boolean results from expression evaluation are a config bug, not data to coerce.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:23:45.721939+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    This is a textbook offensive isinstance check: the code detects an invalid state (gate expression returned a non-bool) and raises a meaningful CommencementGateFailedError with full context, rather than coercing via bool(result) or silently accepting truthy values. The check enforces an invariant before recording to the audit trail, which aligns with the auditability standard — non-bool results indicate a config/expression bug that must surface explicitly. R5's defensive-shape-guard concern doesn't apply here because the isinstance is used to assert-and-raise, not to branch into a silent recovery path.
+  file_fingerprint: 298390c2cc60a7174ffe5cefb8248e36a17a76292c4b0dda594199440e20e107
+  ast_path: 'body[13]/body[4]/body[0]/body[2]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v1:6d4318a3e6f0038b8c3cd4e78b31ac16f66332abb67ec436ce1421c96fb72cfb'
 - key: engine/executors/state_guard.py:R5:NodeStateGuard:_extract_audit_evidence_context:fp=81df711769fff87f
   owner: architecture
   reason: Audit evidence is contractually required to serialize to a mapping before canonical_json() can
@@ -199,81 +123,69 @@ allow_hits:
   expires: null
 - key: engine/executors/declaration_dispatch.py:R6:_dispatch:fp=15d9ff75661bacf0
   owner: architecture
-  reason: "ADR-010 \xA7Semantics amendment (2026-04-20, comment #417 on H2) \u2014 the audit-complete\
-    \ dispatcher MUST catch DeclarationContractViolation, attach the authoritative contract_name via C4\
-    \ closure, and continue iterating so every applicable contract's method runs. This is not silent swallowing:\
-    \ the collected violations are raised as the original (N=1 reference equality) or as AggregateDeclarationContractViolation\
-    \ (N>=2) at loop end. Catch-and-collect IS the audit-complete invariant."
-  safety: "Every caught violation is either re-raised via the N=1 reference-equality fast path OR wrapped\
-    \ in AggregateDeclarationContractViolation and raised from the dispatcher boundary. No silent drops.\
-    \ See N3 \xA7Acceptance + comment"
-  expires: null
-- key: engine/executors/declaration_dispatch.py:R6:_dispatch:fp=eaaceb67467655f7
-  owner: architecture
-  reason: "ADR-010 \xA7Semantics amendment (2026-04-20) \u2014 catches PluginContractViolation so PassThroughContractViolation\
-    \ (which inherits PluginContractViolation, not DeclarationContractViolation, per ADR-010 \xA7Consequences\
-    \ line 96-97) is subject to audit-complete aggregation rather than short-circuiting the dispatcher\
-    \ loop. Without this catch, a pass-through violation would shadow every later contract on the same\
-    \ row \u2014 regressing the audit-complete posture. Both caught classes are registered in TIER_1_ERRORS;\
-    \ the aggregate is also TIER_1_ERRORS, preserving Tier-1 propagation."
-  safety: The caught PluginContractViolation is appended to violations list and raised (singleton or aggregate)
-    at loop end; no silent drops. AggregateDeclarationContractViolation is a Tier-1 class, preserving
-    the propagation guarantee.
-  expires: null
+  reason: |-
+    ADR-010 §Semantics amendment (2026-04-20, comment #417 on H2) — the audit-complete dispatcher MUST catch DeclarationContractViolation, attach the authoritative contract_name via C4 closure, and continue iterating so every applicable contract's method runs. This is not silent swallowing: the collected violations are raised as the original (N=1 reference equality) or as AggregateDeclarationContractViolation (N>=2) at loop end. Catch-and-collect IS the audit-complete invariant.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:23:53.283011+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    The except clause catches a specific typed exception (DeclarationContractViolation), enriches it with the authoritative contract_name, and appends to a violations list that is then re-raised at loop end — either as the original instance (N=1, reference-equality preserved) or as an AggregateDeclarationContractViolation (N>=2). This is not silent swallowing: every violation surfaces, and the post-condition documented in the docstring (audit-complete: every applicable contract runs exactly once) is the legitimate offensive-programming pattern. R6 (broad/silent exception handling) is misapplied here because the catch is narrow, the exceptions are reraised, and the collect-then-raise idiom is required by the audit-complete invariant. Decorator nudge does not apply: no external parameter, R6 not in {R1,R5}.
+  file_fingerprint: aca0e2136a1a552e962c27c38196782a4edbee023dc0a7fea9bcf100a1ebb982
+  ast_path: 'body[9]/body[2]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:59fa7f92c01a91598197581e1d7c831c65c71188aa8bd68b4874827a07948d75'
 - key: engine/_best_effort.py:R4:best_effort:fp=c48026df1d344433
   owner: architecture
-  reason: "best_effort() is the canonical post-audit ceremony helper for the engine
-    layer. Its single broad-except is the entire reason this helper exists \u2014 it
-    collapses 14 previously-scattered ``try/except Exception:`` blocks across
-    processor.py and orchestrator/core.py into one reviewable surface. Per the
-    helper's docstring, it MUST run after the primary audit-load-bearing event has
-    been recorded; failures of the ceremony body are logged but never replace the
-    in-flight event. CLAUDE.md logging-telemetry-policy: logger is the recovery
-    path of last resort when telemetry/ceremony itself is the failing system."
-  safety: "Failures are logged with structured context (operation label + caller-
-    supplied kwargs) and exception class at warning level; reserved log fields
-    override caller context so duplicate keyword failures cannot mask the ceremony
-    failure. Raw exception strings are deliberately not logged. The in-flight
-    exception (if any) continues to propagate unchanged. Burndown: filigree
-    elspeth-550362f760 (closed), elspeth-17fbac339f."
-  expires: null
+  reason: |-
+    best_effort() is the canonical post-audit ceremony helper for the engine layer. Its single broad-except is the entire reason this helper exists — it collapses 14 previously-scattered ``try/except Exception:`` blocks across processor.py and orchestrator/core.py into one reviewable surface. Per the helper's docstring, it MUST run after the primary audit-load-bearing event has been recorded; failures of the ceremony body are logged but never replace the in-flight event. CLAUDE.md logging-telemetry-policy: logger is the recovery path of last resort when telemetry/ceremony itself is the failing system.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:23:23.510357+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    This is the canonical post-audit ceremony helper, and the broad-except is the helper's entire reason for existing — it consolidates scattered ceremony try/except blocks into one reviewable surface. The docstring makes the invariant explicit: it runs only after an audit-load-bearing event is recorded, and ceremony failure must not replace the in-flight event. Per CLAUDE.md's primacy order, logger is the correct last-resort channel when the ceremony/telemetry path itself is the failure, and the inner suppress(Exception) around the warning is consistent with that. The suppression is site-specific, narrowly scoped to a documented secondary-path helper, and the rationale matches the code.
+  file_fingerprint: c4781ee9c34a6aef9f0b2f834f77400c34e20c8febe7fffb6397e997c656db51
+  ast_path: 'body[7]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:1c1ede25e21cda7e71cc57fafd764632af8f0ceaafaf3fe2f32bc436a674cb36'
 - key: engine/_best_effort.py:R7:best_effort:fp=437c71e49d86fee5
   owner: architecture
-  reason: "best_effort() is already the logger-of-last-resort boundary for post-audit
-    ceremony. If the logger backend or structlog processor itself fails while
-    reporting a ceremony failure, that secondary logger failure must not replace
-    the original audit-load-bearing event."
-  safety: "The suppress wraps only the _slog.warning call after the ceremony
-    exception has already been caught and normalized to structured fields. It does
-    not hide primary pipeline work, does not log raw exception text, and is covered
-    by tests/unit/engine/test_best_effort.py::test_best_effort_suppresses_logger_failures."
-  expires: null
-- key: engine/orchestrator/core.py:R4:Orchestrator:_cleanup_plugins:run_hook:fp=64aa6bffa9e759d1
+  reason: |-
+    best_effort() is already the logger-of-last-resort boundary for post-audit ceremony. If the logger backend or structlog processor itself fails while reporting a ceremony failure, that secondary logger failure must not replace the original audit-load-bearing event.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:23:30.560516+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    This is the logger-of-last-resort inside an already-explicit best-effort ceremony boundary. The outer except has already captured a ceremony failure after the primary audit event was recorded; the inner suppress(Exception) guards the warning emission itself, so that a structlog/processor failure cannot mask the preserved original event. Per the telemetry primacy order, logging is the last-resort channel, and a failure to log must not propagate above ceremony scope. The suppression is narrowly scoped to a single _slog.warning call with structured context, not a broad swallow of engine logic.
+  file_fingerprint: c4781ee9c34a6aef9f0b2f834f77400c34e20c8febe7fffb6397e997c656db51
+  ast_path: 'body[7]/body[1]/handlers[0]/body[1]'
+  judge_metadata_signature: 'hmac-sha256:v1:7b2b11fc01e1f239723a1ff9951941b8adff3b06f9410b0d8e1d49e8d9d61708'
+- key: engine/orchestrator/cleanup.py:R4:cleanup_plugins:run_hook:fp=3f14e10c45af58b3
   owner: architecture
-  reason: "Plugin cleanup MUST attempt every hook even when individual hooks fail \u2014
-    the broad catch is required by contract (close()/on_complete() are best-effort
-    by lifecycle design). The nested run_hook helper collapses what was previously
-    6 separate try/except blocks into one. record_cleanup_error() re-raises Tier-1
-    errors (FrameworkBugError, AuditIntegrityError) before downgrading anything to
-    a cleanup warning. Non-Tier-1 failures are appended to cleanup_errors and
-    folded into a single RuntimeError chained from the pending exception (if any)
-    after every hook has been attempted."
-  safety: "Tier-1 errors (TIER_1_ERRORS tuple) bypass the catch entirely and
-    propagate. Other exceptions are collected and surface as RuntimeError after
-    all hooks attempted, with cause chained to the pending exception so the audit
-    trail preserves both. No silent drops. Burndown: filigree elspeth-550362f760
-    (closed)."
-  expires: null
-- key: engine/orchestrator/core.py:R6:Orchestrator:_handle_quarantine_row:fp=caf0857946e52341
-  owner: bugfix
-  reason: "Tier-3 quarantine boundary \u2014 quarantined row data may contain NaN/Infinity
-    rejected by stable_hash. Coercion at the source/quarantine boundary is the one
-    Tier-3 location where canonical hashing must accept non-canonical floats. The
-    catch is narrow (ValueError, TypeError) and the fallback (repr_hash) is itself
-    deterministic on the row contents \u2014 the audit trail records which hashing path
-    was used, so an auditor can always tell whether stable_hash or repr_hash produced
-    the recorded value."
-  safety: "Narrow catch on (ValueError, TypeError) only \u2014 anything else propagates.
-    repr_hash is deterministic and recorded as the fallback path; the quarantine
-    audit row carries which hash path produced the value."
-  expires: null
+  reason: |-
+    Plugin cleanup MUST attempt every hook even when individual hooks fail — the broad catch is required by contract (close()/on_complete() are best-effort by lifecycle design). The nested run_hook helper collapses what was previously 6 separate try/except blocks into one. record_cleanup_error() re-raises Tier-1 errors (FrameworkBugError, AuditIntegrityError) before downgrading anything to a cleanup warning. Non-Tier-1 failures are appended to cleanup_errors and folded into a single RuntimeError chained from the pending exception (if any) after every hook has been attempted.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:24:47.103912+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    Plugin cleanup is a legitimate use case for broad exception handling: best-effort lifecycle hooks must all be attempted even if individual ones fail. The code correctly re-raises Tier-1 errors (FrameworkBugError, AuditIntegrityError) via record_cleanup_error before collecting non-Tier-1 failures into a RuntimeError chained from the pending exception. This is offensive programming applied correctly — failures are surfaced via aggregated RuntimeError, not silently swallowed, and the audit-critical Tier-1 errors propagate immediately. The rule R4 (broad catch) is structurally required here by the lifecycle contract, and the single collapsed catch site is the minimal suppression surface.
+  file_fingerprint: 28afa0115b76f4e3a133baf831d1635543fd07aa6d0a637a7935c0ecad7ae1ab
+  ast_path: 'body[10]/body[5]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:4f25aad1de4565b0215c88223734f75a04c9ceae2e80f4d0cc0581fee2eb850c'

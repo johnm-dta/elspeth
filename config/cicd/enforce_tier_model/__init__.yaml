@@ -1,6 +1,18 @@
 allow_hits:
 - key: __init__.py:R6:_module_:fp=1669d46742317730
   owner: core
-  reason: Standard importlib.metadata version fallback — PackageNotFoundError means package not installed in editable mode
-  safety: Sets version to "unknown"; no silent data loss
-  expires: null
+  reason: |-
+    Standard importlib.metadata version fallback — PackageNotFoundError means package not installed in editable mode
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-28'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-30T04:15:44.166780+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    This is a legitimate trust boundary at module import: importlib.metadata is querying an external system (the Python package installation database), and PackageNotFoundError is a specific, narrow exception indicating the package is not installed in editable/installed mode. The fallback value 'UNKNOWN-dev-uninstalled' is honest — it records absence rather than fabricating a plausible-looking version string, which aligns with the 'record what we didn't get' principle. The except clause catches one specific exception type (not a bare except), and the dev-only context is genuine: production installs via wheel/sdist always populate metadata. This is offensive programming around a real external boundary, not defensive suppression of a code bug.
+  file_fingerprint: 0660925b916b12b99ee7801ff18010e4a872e60a71c7f316170f55dc9644627e
+  ast_path: 'body[2]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v1:24cb93e404d1491b8653e600793ffbb74b03850e9485fbb3f42d8f0f0acd3ed6'

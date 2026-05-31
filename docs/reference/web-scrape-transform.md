@@ -19,6 +19,7 @@ transforms:
         abuse_contact: compliance@example.com
         scraping_reason: "Compliance monitoring"
         timeout: 30
+        allowed_hosts: public_only  # public_only | allow_private | CIDR list
 
       strip_elements:
         - script
@@ -34,6 +35,7 @@ transforms:
 | `{fingerprint_field}` | str | SHA-256 fingerprint |
 | `fetch_status` | int | HTTP status code |
 | `fetch_url_final` | str | Final URL after redirects |
+| `fetch_url_final_ip` | str | Final resolved IP after redirects |
 
 ## Text Extraction And Line Splitting
 
@@ -59,6 +61,7 @@ hardcodes the fix; the plugin owns it.
 ## Security
 
 - SSRF prevention (blocks private IPs, loopback, cloud metadata)
+- Configurable host policy via `http.allowed_hosts`
 - Scheme whitelist (http/https only)
 - SSL certificate verification (always enabled)
 

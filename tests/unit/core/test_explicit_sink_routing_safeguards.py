@@ -19,7 +19,7 @@ from typing import Any, cast
 
 import pytest
 
-from elspeth.contracts import RunStatus, SinkProtocol, SourceProtocol, TransformProtocol
+from elspeth.contracts import Determinism, RunStatus, SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.core.config import SourceSettings, TransformSettings
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -92,6 +92,7 @@ class _OnSuccessTracingTransform(BaseTransform):
     """Transform used to verify on_success wiring end-to-end."""
 
     name = "on_success_tracer"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 

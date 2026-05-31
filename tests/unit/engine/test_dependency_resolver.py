@@ -11,6 +11,7 @@ from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import DependencyFailedError
 from elspeth.core.dependency_config import DependencyConfig
 from elspeth.engine.dependency_resolver import _hash_settings_file, _load_depends_on, detect_cycles, resolve_dependencies
+from tests.fixtures.audit_hashing import assert_prefixed_canonical_sha256
 
 
 class TestLoadDependsOnValidation:
@@ -337,12 +338,18 @@ class TestResolveDependencies:
 class TestHashSettingsFile:
     """End-to-end tests for _hash_settings_file with real YAML."""
 
-    def test_produces_sha256_prefixed_hash(self, tmp_path: Path) -> None:
+    def test_hash_binds_to_canonical_yaml_payload(self, tmp_path: Path) -> None:
         settings = tmp_path / "pipeline.yaml"
         settings.write_text("plugins:\n  source:\n    path: data.csv\n")
         result = _hash_settings_file(settings)
-        assert result.startswith("sha256:")
-        assert len(result) == len("sha256:") + 64  # SHA-256 hex
+        expected_payload = {
+            "plugins": {
+                "source": {
+                    "path": "data.csv",
+                },
+            },
+        }
+        assert_prefixed_canonical_sha256(result, expected_payload)
 
     def test_same_content_same_hash(self, tmp_path: Path) -> None:
         a = tmp_path / "a.yaml"

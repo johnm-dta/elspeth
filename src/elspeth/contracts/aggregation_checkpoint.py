@@ -148,21 +148,29 @@ class AggregationNodeCheckpoint:
 
     Attributes:
         tokens: Buffered tokens awaiting aggregation flush.
-        batch_id: Active batch identity (non-optional — must exist if tokens buffered).
+        batch_id: Active batch identity. Required when ``tokens`` is non-empty;
+            may be ``None`` when ``tokens`` is empty (post-flush snapshots that
+            only persist the durable counters).
         elapsed_age_seconds: Seconds since first accept for timeout preservation.
         count_fire_offset: Trigger fire-time offset for count trigger, or ``None``.
         condition_fire_offset: Trigger fire-time offset for condition trigger, or ``None``.
+        accepted_count_total: Total rows accepted into this aggregation across
+            all completed and in-progress batches. Drives ``rows_seen_total`` on
+            :class:`AggregationBatchContext`.
+        completed_flush_count: Number of successfully completed flushes. Drives
+            ``flush_index`` (= ``completed_flush_count + 1`` for the next flush).
     """
 
     tokens: tuple[AggregationTokenCheckpoint, ...]
-    batch_id: str
+    batch_id: str | None
     elapsed_age_seconds: float
     count_fire_offset: float | None
     condition_fire_offset: float | None
+    accepted_count_total: int
+    completed_flush_count: int
 
     def __post_init__(self) -> None:
-        if not self.batch_id:
-            raise ValueError("AggregationNodeCheckpoint.batch_id must not be empty")
+        # Value-level guards first (apply regardless of tokens/counter-only shape).
         if self.elapsed_age_seconds < 0 or not math.isfinite(self.elapsed_age_seconds):
             raise ValueError(
                 f"AggregationNodeCheckpoint.elapsed_age_seconds must be non-negative and finite, got {self.elapsed_age_seconds}"
@@ -173,6 +181,51 @@ class AggregationNodeCheckpoint:
             raise ValueError(
                 f"AggregationNodeCheckpoint.condition_fire_offset must be non-negative and finite, got {self.condition_fire_offset}"
             )
+        # Structural pairing: batch_id is required when tokens are buffered;
+        # absence is only allowed for "counters only" snapshots taken after a
+        # successful flush.
+        if self.tokens:
+            if not self.batch_id:
+                raise ValueError("AggregationNodeCheckpoint.batch_id must be set when tokens are buffered")
+        else:
+            if self.batch_id is not None and not self.batch_id:
+                # Empty string is never a valid batch_id, even with no tokens.
+                raise ValueError("AggregationNodeCheckpoint.batch_id must be a non-empty string when set")
+            # Counter-only invariant (Tier 1: crash on bad data, not after-the-fact
+            # inference at restore). When tokens is empty, there is no active batch
+            # and therefore no in-flight trigger fire-state to preserve. Restoring a
+            # non-None fire offset against batch_count=0 would install a stale
+            # _count_fire_time on TriggerEvaluator and could mis-fire the next batch.
+            if self.count_fire_offset is not None:
+                raise ValueError(
+                    "AggregationNodeCheckpoint.count_fire_offset must be None when tokens is empty "
+                    f"(counter-only node), got {self.count_fire_offset}"
+                )
+            if self.condition_fire_offset is not None:
+                raise ValueError(
+                    "AggregationNodeCheckpoint.condition_fire_offset must be None when tokens is empty "
+                    f"(counter-only node), got {self.condition_fire_offset}"
+                )
+            if self.elapsed_age_seconds != 0.0:
+                raise ValueError(
+                    "AggregationNodeCheckpoint.elapsed_age_seconds must be 0.0 when tokens is empty "
+                    f"(counter-only node), got {self.elapsed_age_seconds}"
+                )
+        # Reject bool and non-int (bool is an int subclass in Python).
+        if isinstance(self.accepted_count_total, bool) or not isinstance(self.accepted_count_total, int):
+            raise TypeError(
+                f"AggregationNodeCheckpoint.accepted_count_total must be int, got "
+                f"{type(self.accepted_count_total).__name__}: {self.accepted_count_total!r}"
+            )
+        if self.accepted_count_total < 0:
+            raise ValueError(f"AggregationNodeCheckpoint.accepted_count_total must be non-negative, got {self.accepted_count_total}")
+        if isinstance(self.completed_flush_count, bool) or not isinstance(self.completed_flush_count, int):
+            raise TypeError(
+                f"AggregationNodeCheckpoint.completed_flush_count must be int, got "
+                f"{type(self.completed_flush_count).__name__}: {self.completed_flush_count!r}"
+            )
+        if self.completed_flush_count < 0:
+            raise ValueError(f"AggregationNodeCheckpoint.completed_flush_count must be non-negative, got {self.completed_flush_count}")
         freeze_fields(self, "tokens")
 
     def to_dict(self) -> dict[str, Any]:
@@ -183,6 +236,8 @@ class AggregationNodeCheckpoint:
             "elapsed_age_seconds": self.elapsed_age_seconds,
             "count_fire_offset": self.count_fire_offset,
             "condition_fire_offset": self.condition_fire_offset,
+            "accepted_count_total": self.accepted_count_total,
+            "completed_flush_count": self.completed_flush_count,
         }
 
     @classmethod
@@ -202,6 +257,8 @@ class AggregationNodeCheckpoint:
             "elapsed_age_seconds",
             "count_fire_offset",
             "condition_fire_offset",
+            "accepted_count_total",
+            "completed_flush_count",
         }
         missing = required_fields - set(data.keys())
         if missing:
@@ -216,10 +273,19 @@ class AggregationNodeCheckpoint:
             )
 
         batch_id = data["batch_id"]
-        if batch_id is None:
+        if tokens_data and batch_id is None:
             raise AuditIntegrityError(
-                f"Corrupted aggregation node checkpoint '{node_id}': 'batch_id' is None. Checkpoint entries with tokens must include a batch_id."
+                f"Corrupted aggregation node checkpoint '{node_id}': 'batch_id' is None. "
+                f"Checkpoint entries with tokens must include a batch_id."
             )
+
+        # Tier 1 type guards for the new int counters — reject bool and non-int.
+        for field_name in ("accepted_count_total", "completed_flush_count"):
+            value = data[field_name]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise AuditIntegrityError(
+                    f"Corrupted aggregation node checkpoint '{node_id}': '{field_name}' must be int, got {type(value).__name__}: {value!r}"
+                )
 
         tokens = tuple(AggregationTokenCheckpoint.from_dict(t) for t in tokens_data)
 
@@ -229,6 +295,8 @@ class AggregationNodeCheckpoint:
             elapsed_age_seconds=data["elapsed_age_seconds"],
             count_fire_offset=data["count_fire_offset"],
             condition_fire_offset=data["condition_fire_offset"],
+            accepted_count_total=data["accepted_count_total"],
+            completed_flush_count=data["completed_flush_count"],
         )
 
 
@@ -239,7 +307,7 @@ class AggregationCheckpointState:
     Wire format (preserved for ``checkpoint_dumps`` compatibility)::
 
         {
-            "_version": "4.0",
+            "_version": "5.0",
             "node_id_1": { ... node checkpoint ... },
             "node_id_2": { ... node checkpoint ... },
         }

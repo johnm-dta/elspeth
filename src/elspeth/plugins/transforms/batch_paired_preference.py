@@ -9,8 +9,10 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import TransformErrorReason
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -112,10 +114,27 @@ class BatchPairedPreference(BaseTransform):
     """Compare paired variant scores over an aggregation batch."""
 
     name = "batch_paired_preference"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:a7da02055c68dba8"
+    source_file_hash: str | None = "sha256:48862b640e0de744"
     config_model = BatchPairedPreferenceConfig
     is_batch_aware = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Compares paired variant scores and emits win/loss/tie preference metrics.",
+                composer_hints=(
+                    "Use batch_paired_preference under aggregations with a trigger; it compares variants within pair_field groups.",
+                    "pair_field, variant_field, and score_field must be three distinct fields.",
+                    "baseline_variant defaults to the first-seen variant; incomplete pairs are counted but not compared.",
+                    "Output is paired preference metrics, not the original rows.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

@@ -1,0 +1,12 @@
+[
+  {
+    "column": 1,
+    "file_path": "bad.py",
+    "fingerprint": "e7fdc74dc20423e4",
+    "line": 4,
+    "message": "@trust_boundary tier must be the literal integer 3, got 2 (int).",
+    "rule_id": "TBT1",
+    "severity": "error",
+    "suggestion": "@trust_boundary only applies to tier=3 (external-data) boundaries. Tier-1 (audit/landscape) and Tier-2 (post-source pipeline) invariants must crash on anomaly per the data manifesto, not suppress lint findings. Either change tier=3 or remove the decorator."
+  }
+]

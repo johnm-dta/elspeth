@@ -8,8 +8,10 @@ from typing import Any, cast
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -74,9 +76,13 @@ class _PerLabelStats:
     fn: int
     tn: int
     support: int
-    precision: float
-    recall: float
-    f1: float
+    # None marks a metric that is UNDEFINED for this label (a 0/0 ratio — e.g. a label
+    # that was never predicted has undefined precision). None is honest absence, not a
+    # fabricated 0.0: an auditor can distinguish "model predicted this label and was
+    # always wrong" (0.0) from "model never predicted this label" (None).
+    precision: float | None
+    recall: float | None
+    f1: float | None
 
     def to_row(self) -> dict[str, object]:
         return {
@@ -131,13 +137,40 @@ class BatchClassifierMetricsConfig(TransformDataConfig):
 
 
 class BatchClassifierMetrics(BaseTransform):
-    """Compute classifier confusion matrix and F-score metrics over a batch."""
+    """Compute classifier confusion matrix and F-score metrics over a batch.
+
+    Phase 6A B6 — opts into Phase 6B's narrative-mode result rendering via
+    ``capability_tags = ("narrative-summary",)``. The frontend reads this tag
+    on the catalog response and, when set, renders the run result as a
+    narrative panel (consuming any Phase 5b interpretation events as an
+    overlay) rather than the default tabular preview. The wire contract for
+    the tag is: the transform's output schema must include a ``summary`` field
+    that the narrative renderer surfaces.
+    """
 
     name = "batch_classifier_metrics"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:4eb57aba8182b96d"
+    source_file_hash: str | None = "sha256:128c9eca5770883f"
     config_model = BatchClassifierMetricsConfig
     is_batch_aware = True
+    capability_tags: tuple[str, ...] = ("narrative-summary",)
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Computes classifier accuracy, confusion counts, and precision/recall/F1 metrics for a batch.",
+                composer_hints=(
+                    "Use batch_classifier_metrics under aggregations with a trigger; it emits metric summary rows.",
+                    "actual_field and predicted_field must be distinct scalar label fields.",
+                    "Set positive_label only for binary metrics; macro, micro, and weighted metrics are always computed.",
+                    "Output is classifier metrics, not per-row predictions; downstream fields should reference the metric keys.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:
@@ -242,14 +275,52 @@ class BatchClassifierMetrics(BaseTransform):
         return labels
 
     @staticmethod
-    def _safe_ratio(numerator: int | float, denominator: int | float) -> float:
+    def _safe_ratio(numerator: int | float, denominator: int | float) -> float | None:
+        # A 0/0 ratio is UNDEFINED, not zero. Returning None preserves that distinction
+        # (fabrication test: a downstream consumer can tell "real 0" from "no data");
+        # returning 0.0 would fabricate a value the data does not support.
         if denominator == 0:
-            return 0.0
+            return None
         return float(numerator / denominator)
 
     @classmethod
-    def _f1(cls, precision: float, recall: float) -> float:
+    def _f1(cls, precision: float | None, recall: float | None) -> float | None:
+        # F1 is undefined when either component is undefined, or when precision+recall
+        # is 0 (both zero -> _safe_ratio returns None).
+        if precision is None or recall is None:
+            return None
         return cls._safe_ratio(2 * precision * recall, precision + recall)
+
+    @staticmethod
+    def _mean_defined(values: list[float | None]) -> float | None:
+        """Unweighted mean over the DEFINED (non-None) values, or None if all undefined.
+
+        Macro averages exclude labels whose per-label metric is undefined rather than
+        treating them as 0.0 — averaging in a fabricated 0.0 would understate the metric
+        and assert a value the data never supported.
+        """
+        defined = [v for v in values if v is not None]
+        if not defined:
+            return None
+        return sum(defined) / len(defined)
+
+    @staticmethod
+    def _weighted_mean_defined(value_weight_pairs: list[tuple[float | None, int]]) -> float | None:
+        """Support-weighted mean over DEFINED values, or None if no defined contributor.
+
+        A label with an undefined metric contributes neither to the numerator nor the
+        denominator, so the weighting stays honest for the labels that do have a value.
+        """
+        numerator = 0.0
+        denominator = 0
+        for value, weight in value_weight_pairs:
+            if value is None:
+                continue
+            numerator += value * weight
+            denominator += weight
+        if denominator == 0:
+            return None
+        return numerator / denominator
 
     def _per_label_metrics(
         self,
@@ -324,10 +395,13 @@ class BatchClassifierMetrics(BaseTransform):
         accuracy = self._safe_ratio(correct, count)
         per_label = self._per_label_metrics(labels=labels, pairs=pairs, confusion=confusion)
 
-        macro_precision = sum(entry.precision for entry in per_label) / len(per_label)
-        macro_recall = sum(entry.recall for entry in per_label) / len(per_label)
-        macro_f1 = sum(entry.f1 for entry in per_label) / len(per_label)
-        weighted_f1 = sum(entry.f1 * entry.support for entry in per_label) / count
+        # Macro = unweighted mean over labels with DEFINED metrics; weighted = mean over
+        # defined per-label f1 weighted by support. Undefined (None) per-label values are
+        # excluded rather than counted as 0.0 (see _mean_defined / _weighted_mean_defined).
+        macro_precision = self._mean_defined([entry.precision for entry in per_label])
+        macro_recall = self._mean_defined([entry.recall for entry in per_label])
+        macro_f1 = self._mean_defined([entry.f1 for entry in per_label])
+        weighted_f1 = self._weighted_mean_defined([(entry.f1, entry.support) for entry in per_label])
 
         micro_tp = sum(entry.tp for entry in per_label)
         micro_fp = sum(entry.fp for entry in per_label)

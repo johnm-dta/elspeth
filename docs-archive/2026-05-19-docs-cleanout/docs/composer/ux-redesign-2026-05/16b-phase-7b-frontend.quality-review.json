@@ -1,0 +1,229 @@
+{
+  "review_meta": {
+    "plan": "16b-phase-7b-frontend.md",
+    "reviewer_lens": "QA / test strategy / production readiness",
+    "reviewed_at": "2026-05-17",
+    "verdict": "GO-WITH-CHANGES"
+  },
+  "verdict_rationale": "Four blocking issues prevent this plan from being executed as-written. None require architectural redesign; all are surgical fixes to the plan text (wrong vocabulary strings, missing vocabulary entries, missing parity test, and preserving discriminated-schema regression coverage in Task 5). The overall TDD shape is sound and the component-level test coverage for new code is good.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "BLOCKING",
+      "category": "Vocabulary drift — wrong flag name",
+      "summary": "`emits_provenance` in the plan's auditCharacteristics table does not match the backend's authoritative `VALID_AUDIT_CHARACTERISTICS` vocabulary, which uses `provenance`.",
+      "evidence": [
+        "16a-phase-7a-backend.md:1190 — backend vocabulary: `\"provenance\"`",
+        "16a-phase-7a-backend.md:2323 — 16a review history explicitly records: \"Corrected test fixture `emits_provenance` → `provenance` to match 08-catalog-reshape.md authoritative vocabulary\"",
+        "16b-phase-7b-frontend.md:563 — plan ships `flag: \"emits_provenance\"` in the AUDIT_CHARACTERISTICS array",
+        "16b-phase-7b-frontend.md:407 — auditCharacteristics.test.ts asserts `lookupAuditCharacteristic(\"emits_provenance\")` (wrong flag string)"
+      ],
+      "impact": "Any backend plugin that declares `\"provenance\"` in `audit_characteristics` (the correct name) will render as an unknown-flag grey chip instead of the defined icon. The closed-vocabulary guarantee is silently broken: the backend validates against `VALID_AUDIT_CHARACTERISTICS` which has `\"provenance\"`; the frontend renders under `\"emits_provenance\"` which is not in that set. These are two different strings at runtime.",
+      "fix": "In the AUDIT_CHARACTERISTICS array (plan Task 2 Step 3): change `flag: \"emits_provenance\"` to `flag: \"provenance\"`. In auditCharacteristics.test.ts (plan Task 2 Step 1): change `lookupAuditCharacteristic(\"emits_provenance\")` to `lookupAuditCharacteristic(\"provenance\")`. The user-facing label (`\"extra provenance\"`) is independent of the flag string and can stay or change per the author's judgment."
+    },
+    {
+      "id": "F2",
+      "severity": "BLOCKING",
+      "category": "Vocabulary gap — two flags missing from frontend metadata table",
+      "summary": "The backend's 13-member `VALID_AUDIT_CHARACTERISTICS` includes `\"retention\"` and `\"network\"`. The plan's `AUDIT_CHARACTERISTICS` array ships only 11 entries, missing both.",
+      "evidence": [
+        "16a-phase-7a-backend.md:1181-1197 — VALID_AUDIT_CHARACTERISTICS is 13 members: io_read, io_write, external_call, deterministic, seeded, non_deterministic, provenance, retention, quarantine, coerce, signed, network, credentials",
+        "16b-phase-7b-frontend.md:485-589 — plan ships 11 entries: deterministic, seeded, io_read, io_write, external_call, non_deterministic, quarantine, coerce, emits_provenance (wrong), signed, credentials — retention and network are absent",
+        "16b-phase-7b-frontend.md:406-411 — auditCharacteristics.test.ts it() description says 'exposes provenance / retention / quarantine / coerce / signed' but the body never asserts `lookupAuditCharacteristic(\"retention\")`; the test will pass with `retention` absent"
+      ],
+      "impact": "Plugins that declare `\"retention\"` or `\"network\"` in `audit_characteristics` will render as unknown-flag grey chips. The test at line 406 has a misleading description — it claims to test `retention` but does not assert it, so this gap will not be caught by CI. The closed-vocabulary guarantee is broken silently.",
+      "fix": "Add metadata entries for `\"retention\"` and `\"network\"` to the AUDIT_CHARACTERISTICS array (plan Task 2 Step 3). Add explicit assertions to the auditCharacteristics.test.ts for both flags (plan Task 2 Step 1). Fix the it() description at plan line 406 to accurately describe what is asserted."
+    },
+    {
+      "id": "F3",
+      "severity": "BLOCKING",
+      "category": "No parity test — frontend vocabulary vs backend vocabulary",
+      "summary": "No test asserts that `KNOWN_AUDIT_FLAGS` is a superset of the backend's 13-member `VALID_AUDIT_CHARACTERISTICS`. Drift between the two vocabularies will silently produce unknown-flag chips at runtime without any CI gate.",
+      "evidence": [
+        "16b-phase-7b-frontend.md:418-433 — Task 2 test suite; no test checks that all 13 backend flags have a corresponding entry in AUDIT_CHARACTERISTICS",
+        "16a-phase-7a-backend.md:1278 — backend CI gate: `test_all_plugin_audit_characteristics_are_valid` asserts every declared flag is in VALID_AUDIT_CHARACTERISTICS; the frontend has no equivalent gate in this plan",
+        "16b-phase-7b-frontend.md:459-462 — plan acknowledges forward-compatibility (`lookupAuditCharacteristic` returns null for unknown flags) but provides no assertion that the known flags cover the backend's current closed set"
+      ],
+      "impact": "F1 and F2 would have been caught by this test. Without it, future flag additions on the backend produce silent rendering degradation rather than a failing build. The plan explicitly defers the 16c `FilterChipStrip` consumer to 16c, making the auditCharacteristics.test.ts the only gate — it needs to be strong.",
+      "fix": "Add one test to auditCharacteristics.test.ts (plan Task 2 Step 1) asserting that each member of a locally declared VALID_AUDIT_CHARACTERISTICS_EXPECTED constant (matching the 13-member backend set) is present in KNOWN_AUDIT_FLAGS. This test is frontend-only (no import of backend code) and operates against the locally declared expected set, making it a static contract check. Example: `const BACKEND_VOCAB = [\"io_read\",\"io_write\",\"external_call\",\"deterministic\",\"seeded\",\"non_deterministic\",\"provenance\",\"retention\",\"quarantine\",\"coerce\",\"signed\",\"network\",\"credentials\"]; for (const f of BACKEND_VOCAB) { expect(KNOWN_AUDIT_FLAGS).toContain(f); }`"
+    },
+    {
+      "id": "F4",
+      "severity": "BLOCKING",
+      "category": "Regression coverage drop — discriminated-schema and error-state tests deleted",
+      "summary": "Task 5 Step 1 says 'Replace PluginCard.test.tsx content with the new layout expectations.' The existing test file contains 7 discriminated-union tests, 3 error/loading-state tests, and 1 flat-schema test that pin schemas that survive unchanged into the rewritten PluginCard.tsx. Replacing the whole file deletes these regression guards.",
+      "evidence": [
+        "src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx:1-9 — file header documents this is a regression guard for bug elspeth-dcf12c061b; the discriminated-union schema rendering tests are explicitly maintained for that purpose",
+        "src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx:115-292 — 8 discriminated-union tests covering: one-section-per-variant, required-badge scoping, fallback-to-def-name, variant-prefix-default, non-local-$ref skipping, dangling-$ref drop, no-properties variant",
+        "src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx:294-341 — 3 error/loading tests: schemaError banner + Retry, aria-live spinner, onExpand-exactly-once-per-expand",
+        "16b-phase-7b-frontend.md:899-1004 — the replacement test block covers only 10 tests; `resolveVariants`, `isDiscriminated`, `renderFields` helpers are unchanged in the rewritten PluginCard.tsx but their tests are gone",
+        "16b-phase-7b-frontend.md:875-877 — 'The complete test file (rewriting the existing one)' — the plan's language confirms full replacement"
+      ],
+      "impact": "The rewritten PluginCard.tsx retains `resolveVariants`, `isDiscriminated`, `renderFields`, `schemaError`, loading-spinner, and `onRetrySchema` code paths verbatim (compare plan lines 1093-1244 to existing PluginCard.tsx). All production code for the discriminated-schema paths survives but its regression guards do not. Any future refactor of those helpers will have no vitest coverage.",
+      "fix": "Change Task 5 Step 1 to say: 'Preserve the existing discriminated-union describe block, the flat-schema describe block, and the error/loading-state describe block. Remove only the `describe(\"PluginCard — Use in pipeline action\")` block (4 tests) and the nested-interactive structural-invariant test. Rewrite the collapsed-header describe to cover the new layout (trust-tier badge, audit strip, prose, no Use-in-pipeline button). Add the new Phase-7B-specific assertions listed below.' The plan's 10 new tests can coexist with the retained 11 tests."
+    },
+    {
+      "id": "F5",
+      "severity": "MAJOR",
+      "category": "CatalogDrawer.tsx prop-deletion gap — no tsc check after Task 5",
+      "summary": "CatalogDrawer.tsx:359 passes `onCloseDrawer={onClose}` to PluginCard. Task 5 removes `onCloseDrawer` from the PluginCard props interface. The plan's only `tsc --noEmit` check is in Task 1 (before the prop is removed); there is no `tsc --noEmit` step in Task 5.",
+      "evidence": [
+        "src/elspeth/web/frontend/src/components/catalog/CatalogDrawer.tsx:359 — `onCloseDrawer={onClose}` passed to PluginCard",
+        "16b-phase-7b-frontend.md:1021-1086 — rewritten PluginCard interface (lines 1079-1086) does not include `onCloseDrawer`",
+        "16b-phase-7b-frontend.md:326-335 — Task 1 runs `tsc --noEmit` but this is before Task 5 removes the prop",
+        "16b-phase-7b-frontend.md:1265-1275 — Task 5 Step 5 runs catalog and chat suite regression but does NOT include `tsc --noEmit`"
+      ],
+      "impact": "TypeScript will report an error on the `onCloseDrawer` prop in CatalogDrawer.tsx when the type is removed from PluginCard. Without a `tsc` check in Task 5, this is caught only if the implementer happens to run a full type-check. The plan currently implies the regression sweep in Task 5 Step 5 is sufficient; it is not — vitest does not enforce prop-type correctness across component boundaries.",
+      "fix": "Add `npx tsc --noEmit` to Task 5 Step 5 (after the vitest regression sweep). Update the commit checklist to remove the `onCloseDrawer={onClose}` prop from CatalogDrawer.tsx:359 in the same Task 5 commit."
+    },
+    {
+      "id": "F6",
+      "severity": "MAJOR",
+      "category": "Dead CSS — `plugin-card-use-btn` rules become orphaned",
+      "summary": "App.css contains CSS rules for `.plugin-card-use-btn`, `.plugin-card:hover .plugin-card-use-btn`, `.plugin-card:focus-within .plugin-card-use-btn`, and responsive overrides. Task 5 removes the button; the CSS rules become dead code but are not scheduled for deletion.",
+      "evidence": [
+        "src/elspeth/web/frontend/src/App.css:3373-3389 — four rule blocks for `.plugin-card-use-btn`",
+        "16b-phase-7b-frontend.md:68-78 — 'Out of scope' section punts all CSS changes to a follow-up pass, but does not distinguish between NEW CSS (legitimately deferred styling) and DEAD CSS (no-legacy-code violation)",
+        "CLAUDE.md 'No Legacy Code Policy' — dead code must be deleted; 'No version checks, feature flags for old behaviour, adapter/wrapper/proxy shims [...] Delete the old code completely'"
+      ],
+      "impact": "CLAUDE.md's No Legacy Code Policy prohibits leaving dead code. The `plugin-card-use-btn` rules are not new CSS to be styled — they are CSS for a button that no longer exists. Deferring them as part of 'CSS styling for the new class names' conflates two different things.",
+      "fix": "Remove the `plugin-card-use-btn` CSS rules from App.css in the same Task 5 commit (not in the CSS-styling follow-up). The new class names (`plugin-card-audit-strip`, `trust-tier-badge-*`, etc.) are legitimately deferred; the `plugin-card-use-btn` rules are dead and must go now."
+    },
+    {
+      "id": "F7",
+      "severity": "MAJOR",
+      "category": "Disclosure button aria-label change breaks existing vitest tests silently",
+      "summary": "The existing PluginCard.test.tsx uses `getByRole('button', { name: '{plugin.name} plugin details' })` throughout. The rewritten PluginCard.tsx uses `aria-label={\\`Schema for ${plugin.name}\\`}`. The plan's Task 5 Step 1 replacement test uses the new label — but only in one test. The retained schema/error-state tests (F4) will fail because they still use the old label.",
+      "evidence": [
+        "src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx:105,125,172,193,220,264,307,335 — all use `getByRole('button', { name: '${name} plugin details' })`",
+        "16b-phase-7b-frontend.md:1204 — rewritten PluginCard.tsx: `aria-label={\\`Schema for ${plugin.name}\\`}`",
+        "16b-phase-7b-frontend.md:983-988 — Task 5 replacement tests use `getByRole('button', { name: /schema/i })`"
+      ],
+      "impact": "If F4 is fixed (retained schema/error tests), those retained tests will fail immediately on the aria-label mismatch. This is a secondary consequence of F4 and the label change combined — the plan does not acknowledge it. The fix for F4 must also update the retained tests to use the new aria-label.",
+      "fix": "When retaining the discriminated-union, flat-schema, and error-state test blocks (per F4 fix), update all `getByRole('button', { name: '${name} plugin details' })` queries to `getByRole('button', { name: /schema/i })` or the exact new aria-label pattern `Schema for ${name}`. Document this as part of Task 5 Step 1."
+    },
+    {
+      "id": "F8",
+      "severity": "MINOR",
+      "category": "Tooltip test uses title attribute — accessibility note",
+      "summary": "AuditCharacteristicIcon and TrustTierBadge surface tooltips via the HTML `title` attribute. The plan tests for this (Task 3 Step 1, Task 4 Step 1) and the implementation uses `title`. The `title` attribute is not reliably accessible on touch devices and is not announced by all screen readers without hover.",
+      "evidence": [
+        "16b-phase-7b-frontend.md:655-661 — AuditCharacteristicIcon tooltip test: `expect(el.closest('[title]')?.getAttribute('title')).toMatch(/sink/i)`",
+        "16b-phase-7b-frontend.md:781-785 — TrustTierBadge tooltip test: same title-attribute pattern",
+        "16b-phase-7b-frontend.md:659 — plan comment: 'Tooltip via title for keyboard / screen-reader access without pulling in a tooltip library'"
+      ],
+      "impact": "The plan acknowledges this is a deliberate trade-off to avoid a tooltip library dependency. Acceptable for the current demo-bar context. The test correctly verifies the title attribute is present. The concern is informational: `title` is announced on focus by some screen readers but not all, and never on touch. No block on 16b — flag for a follow-up accessible tooltip component.",
+      "fix": "Informational. If accessibility compliance is a future requirement, replace `title` with a proper ARIA describedby tooltip pattern. No action required before 16b ships."
+    },
+    {
+      "id": "F9",
+      "severity": "MINOR",
+      "category": "capability_tags: type declared, no render coverage",
+      "summary": "`capability_tags: string[]` is declared on PluginSummary (Task 1) but nothing in PluginCard.tsx renders it, and no Task 5 test asserts its visual presence or absence.",
+      "evidence": [
+        "16b-phase-7b-frontend.md:284 — `capability_tags: string[]` in PluginSummary interface",
+        "16b-phase-7b-frontend.md:916-921 — makePlugin() factory sets `capability_tags: ['csv', 'file']` but no Task 5 test queries for rendered tag text",
+        "16b-phase-7b-frontend.md:82-98 — out-of-scope note does not mention capability_tags as deferred to 16c; FilterChipStrip (16c) is the intended consumer"
+      ],
+      "impact": "No render gap — 16c is the planned consumer. The concern is that the plan does not document this deferral explicitly, which could cause a 16c implementer to assume 16b renders tags. No blocking issue; add a comment in the PluginCard rewrite noting that `capability_tags` is not rendered here and is consumed by FilterChipStrip in 16c.",
+      "fix": "Add a comment in the rewritten PluginCard.tsx near the unused `capability_tags` field noting it is consumed by 16c's FilterChipStrip. No test change required."
+    },
+    {
+      "id": "F10",
+      "severity": "MINOR",
+      "category": "initialExpanded test-only prop not noted in public interface docs",
+      "summary": "The plan introduces `initialExpanded?: boolean` on PluginCardProps as a test-only escape hatch. The comment in the interface says 'Test-only' but there is no mechanism to prevent production use.",
+      "evidence": [
+        "16b-phase-7b-frontend.md:1085 — `/** Test-only: start in the expanded state to assert schema rendering. */`",
+        "16b-phase-7b-frontend.md:991-1003 — only consumer in tests is the schema-render assertion; no production consumer exists"
+      ],
+      "impact": "Low risk — the prop is optional with a false default. Minor concern is that test-only props on production components are a code smell. An alternative (clicking the disclosure in the test instead of using initialExpanded) was mentioned in plan line 1007-1009. The plan defers this choice to the implementer.",
+      "fix": "Informational. Either approach (initialExpanded prop or click-disclosure) is acceptable for the current test. If the team prefers no test-only props on production interfaces, use the click-the-disclosure pattern instead."
+    }
+  ],
+  "test_strategy_assessment": {
+    "overall_shape": "TDD — each task follows write-failing-test, implement, verify-passes, commit",
+    "task_coverage": [
+      {
+        "task": "Task 1 — PluginSummary type extension",
+        "test_type": "type-level vitest (expectTypeOf)",
+        "test_file": "src/elspeth/web/frontend/src/types/index.test.ts",
+        "command": "cd src/elspeth/web/frontend && npx vitest run src/types/index.test.ts",
+        "status": "OK — covers null defaults, DataTrustTier union, InlineChatSourceEntry shape"
+      },
+      {
+        "task": "Task 2 — auditCharacteristics.ts metadata table",
+        "test_type": "unit vitest",
+        "test_file": "src/elspeth/web/frontend/src/components/catalog/auditCharacteristics.test.ts",
+        "command": "cd src/elspeth/web/frontend && npx vitest run src/components/catalog/auditCharacteristics.test.ts",
+        "status": "GAPS — missing retention and network assertions; emits_provenance is wrong flag; no parity test against backend vocabulary. See F1, F2, F3."
+      },
+      {
+        "task": "Task 3 — AuditCharacteristicIcon component",
+        "test_type": "unit vitest (testing-library)",
+        "test_file": "src/elspeth/web/frontend/src/components/catalog/AuditCharacteristicIcon.test.tsx",
+        "command": "cd src/elspeth/web/frontend && npx vitest run src/components/catalog/AuditCharacteristicIcon.test.tsx",
+        "status": "OK — covers known flag render, tone classes, tooltip, unknown-flag fallback"
+      },
+      {
+        "task": "Task 4 — TrustTierBadge component",
+        "test_type": "unit vitest (testing-library)",
+        "test_file": "src/elspeth/web/frontend/src/components/catalog/TrustTierBadge.test.tsx",
+        "command": "cd src/elspeth/web/frontend && npx vitest run src/components/catalog/TrustTierBadge.test.tsx",
+        "status": "OK — covers all 3 tiers, null case, tooltips, per-tier CSS class"
+      },
+      {
+        "task": "Task 5 — PluginCard rewrite",
+        "test_type": "unit vitest (testing-library)",
+        "test_file": "src/elspeth/web/frontend/src/components/catalog/PluginCard.test.tsx",
+        "command": "cd src/elspeth/web/frontend && npx vitest run src/components/catalog/PluginCard.test.tsx",
+        "status": "BLOCKING GAPS — plan's full file replacement deletes discriminated-union regression guard and error/loading-state tests. Aria-label change breaks retained tests. No tsc check after prop removal. See F4, F5, F7."
+      }
+    ],
+    "playwright_e2e": {
+      "status": "DEFERRED TO 16c",
+      "notes": "No new Playwright tests are introduced in 16b. The plan correctly defers E2E smoke to 16c Task 5. Existing Playwright specs that reference the catalog (phase-3b-modals.spec.ts, llm-provider-schema.spec.ts) test drawer open/close and are not affected by the card layout rewrite — they do not assert card-internal structure. compose-happy-path.spec.ts is fixme'd. No blocking Playwright regression risk from 16b changes.",
+      "demo_day_risk": "The canonical demo flow (5 government pages + LLM rating) drives the composer chat, not the catalog drawer. The catalog is an optional reference affordance. PluginCard rewrite does not intersect the demo's critical path unless the demo operator opens the catalog drawer. The PluginCard changes are additive (new layout) minus one button; opening the drawer will show the new card design. If the demo does open the catalog, the risk is unstyled new class names (CSS deferred per plan scope). Rated LOW: the demo does not depend on catalog drawer functioning."
+    },
+    "final_regression_sweep": {
+      "command": "cd src/elspeth/web/frontend && npx vitest run src/components/catalog/ src/components/chat/",
+      "location": "Task 5 Step 5",
+      "status": "Present — covers catalog suite and ChatInput PREFILL_CHAT_INPUT_EVENT import"
+    }
+  },
+  "edge_case_coverage": {
+    "plugin_with_data_trust_tier_null": "COVERED — TrustTierBadge Task 4 test line 774; PluginCard Task 5 test makes this implicit via makePlugin defaults",
+    "plugin_with_empty_audit_characteristics": "PARTIALLY COVERED — PluginCard render code guards on `plugin.audit_characteristics.length > 0` (plan line 1170) but no explicit Task 5 test for the empty-array case (audit strip should be absent)",
+    "plugin_with_capability_tags_empty": "NOT TESTED — capability_tags is not rendered in PluginCard (see F9); empty array is not a rendering concern here",
+    "plugin_with_one_determinism_derived_characteristic": "COVERED — Task 2 tests all 6 derived flags; AuditCharacteristicIcon tests cover the rendering path",
+    "plugin_with_one_author_declared_characteristic": "PARTIAL — quarantine, coerce, signed, credentials covered; provenance (wrong name, F1), retention (missing, F2), network (missing, F2) are not",
+    "plugin_with_usage_when_to_use_null": "COVERED — PluginCard Task 5 test line 966-975 (all-null prose falls back to PROSE_FALLBACK message)",
+    "partial_null_prose": "NOT TESTED — no test for the case where only some prose fields are null (e.g., usage_when_to_use is set but example_use is null). ProseSection returns null for null body, which is correct, but this path has no assertion",
+    "example_use_set_but_usage_fields_null": "NOT TESTED — allFallback guard (plan line 1151-1154) only triggers when ALL three prose fields are null; if example_use is non-null but usage fields are null, the card skips the fallback but renders incomplete prose sections"
+  },
+  "security_scan": {
+    "patterns_checked": ["eval/exec", "dangerouslySetInnerHTML", "raw SQL", "hardcoded secrets", "user input in file paths", "shell=True"],
+    "findings": "None. The plan is pure React rendering of system-owned catalog data (Tier 1 per plan line 105). No user-controlled input is rendered as HTML. Plugin names, descriptions, and metadata are system data."
+  },
+  "production_readiness": {
+    "error_handling": "PRESENT — schemaError state, Retry button, loading spinner, unknown-flag fallback chip all covered",
+    "logging": "NOT APPLICABLE — per CLAUDE.md logging-telemetry-policy, row-level/render decisions do not belong in slog; no logging needed for UI rendering paths",
+    "configuration": "NOT APPLICABLE — purely client-side rendering components",
+    "graceful_degradation": "PRESENT — unknown flags degrade to grey chip; null prose degrades to fallback message; null tier renders 'tier unspecified'",
+    "rollback_plan": "NOT MENTIONED — acceptable for demo-bar context; the 'No Legacy Code' policy means there is no backward-compatible shim anyway"
+  },
+  "blocking_issues_summary": [
+    "F1: `emits_provenance` in auditCharacteristics.ts does not match backend's `provenance` — vocabulary mismatch will produce silent rendering failure",
+    "F2: `retention` and `network` missing from auditCharacteristics.ts — two of 13 backend vocabulary members have no frontend renderer",
+    "F3: No parity test asserting KNOWN_AUDIT_FLAGS covers all 13 backend vocabulary members — F1 and F2 would have been caught by this",
+    "F4: Task 5 full file replacement deletes 11 discriminated-schema and error-state regression guard tests that protect unchanged production code paths"
+  ],
+  "warnings_summary": [
+    "F5: CatalogDrawer.tsx:359 `onCloseDrawer={onClose}` will become a TypeScript error after Task 5 prop removal; no tsc check in Task 5",
+    "F6: App.css dead CSS for `.plugin-card-use-btn` violates CLAUDE.md No Legacy Code Policy; must be deleted in Task 5 commit, not deferred to CSS follow-up",
+    "F7: Aria-label change (`{name} plugin details` → `Schema for {name}`) will break retained test queries if F4 is fixed without updating the query strings",
+    "F8: `title` attribute tooltip not reliably accessible on touch/all screen readers — informational, acceptable for demo bar",
+    "F9: `capability_tags` declared but not rendered in PluginCard; 16c consumer not documented in plan scope section",
+    "F10: `initialExpanded` test-only prop on production interface — informational, acceptable alternative exists"
+  ]
+}

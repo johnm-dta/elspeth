@@ -1,0 +1,79 @@
+{
+  "review_target": "docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-4-frontend.md",
+  "review_revision": "rev-4",
+  "reviewer": "plan-review-architecture",
+  "date": "2026-05-14",
+  "verdict": "APPROVED",
+  "blocking_count": 0,
+  "warning_count": 0,
+  "info_count": 2,
+
+  "rev3_findings_disposition": [
+    {
+      "id": "F-01",
+      "rev3_severity": "BLOCKING",
+      "rev4_status": "CLOSED",
+      "analysis": "Task 0 Step 2 now reads: 'Do not add try/except, getattr, or any runtime fallback around _max_tool_calls_per_turn; WebSettings.composer_max_tool_calls_per_turn is unconditionally present with its Pydantic field default.' This is unambiguous. The ambiguous phrase 'with the existing fallback value 16' is gone. The current service.py:4234-4237 still contains the try/except (as expected — the plan is the guide for Task 0, not yet implemented), but the wording no longer permits carrying it forward. No other field in the Step 2 list has defensive wording; all are direct attribute assignments or constructor calls without conditional fallbacks."
+    },
+    {
+      "id": "W-01",
+      "rev3_severity": "WARNING",
+      "rev4_status": "CLOSED",
+      "analysis": "The parallel editorRevision counter is gone. Task 2 line 289 explicitly says 'Do not invent a separate editor revision/edit counter.' Task 3 Step 2 uses compositionState.version: snapshot at compose-start into a local request variable, store as recoveryStartedCompositionVersion, compare on Apply. compositionState.version is already the project's authoritative change counter (sessionStore.ts:305-308 and 473-476 use it for exactly this purpose). The proposed snapshot/compare pattern uses the existing machinery correctly."
+    },
+    {
+      "id": "W-02",
+      "rev3_severity": "WARNING",
+      "rev4_status": "CLOSED",
+      "analysis": "Task 9 Step 0 was added, running the same three-path backend suite (tests/unit/web/composer/, tests/property/web/composer/, tests/integration/pipeline/test_composer_llm_eval_characterization.py) before the frontend gate. The duplication of the Task 0 Step 5 command is intentional gating, not DRY sloppiness — Task 0 runs it to verify the refactor, Task 9 re-runs it at PR-open time to verify no subsequent task introduced drift. The two invocations serve different purposes in the workflow and are separated by six intermediate tasks."
+    },
+    {
+      "id": "W-03",
+      "rev3_severity": "WARNING",
+      "rev4_status": "CLOSED",
+      "analysis": "Step 4 is now a standalone doc-only commit before the Step 7 service refactor commit. The commit command in Step 4 stages only the Phase 3 plan document. Step 7's git add line stages only service.py and the new test file — the docs file is absent. Commit ordering is correct: Step 4 precedes Step 7."
+    },
+    {
+      "id": "W-04",
+      "rev3_severity": "WARNING",
+      "rev4_status": "UNCHANGED — ACCEPTABLE",
+      "analysis": "Phase 4A+4B remain in one PR per the overview's one-PR-per-phase policy. No change needed or made. Remains acceptable as before."
+    }
+  ],
+
+  "new_concerns": [
+    {
+      "id": "I-04",
+      "severity": "INFO",
+      "category": "race_condition_assessment",
+      "title": "recoveryStartedCompositionVersion snapshot is race-free with the AbortController flow",
+      "description": "The plan (Task 3 Step 2, line 353) says to snapshot compositionState?.version at the start of sendMessage()/retryMessage() into a local request variable. The AbortController in useComposer fires synchronously via setTimeout and calls controller.abort(), which causes the fetch to reject with a DOMException (AbortError), not an ApiError carrying recovery fields. The sessionStore catch block at lines 342-344 checks isAbortError(err) before ever reaching recovery-field dispatch. An aborted request therefore cannot set recoveryStartedCompositionVersion — the snapshot is taken before the abort can fire, but the recovery path is unreachable on abort. No race condition exists between the snapshot and the AbortController flow.",
+      "required_fix": "No change. Informational confirmation that the snapshot timing is sound."
+    },
+    {
+      "id": "I-05",
+      "severity": "INFO",
+      "category": "audit_framing",
+      "title": "applyRecoveredState / discardRecovery 'non-audited at user-action layer' framing is correct",
+      "description": "Task 3 Step 2 line 368 says: 'applyRecoveredState() is local frontend state recovery only... discardRecovery() is also intentionally local-only and non-audited at the user-action layer.' CLAUDE.md's audit primacy doctrine applies to the SDA engine's Landscape (persisted, crash-on-failure). Frontend UI-layer state transitions are not pipeline operations and have no SDA output — they drive no downstream processing, emit no row state transitions, and generate no composition_states rows. The already-persisted composition_states row and transcript rows remain intact regardless of whether the user applies or discards. There is no auditability gap: the audit-of-record is the failed-turn's persisted rows, not the user's subsequent UI choice. 'Non-audited at the user-action layer' is the correct framing.",
+      "required_fix": "No change. Informational confirmation that the audit framing is architecturally sound."
+    }
+  ],
+
+  "clearedRecoveryState_assessment": {
+    "shape_collision": "No collision. The helper returns {recoveryError: null, recoveryStartedCompositionVersion: null}. These are two new fields not yet in the store interface — they parallel clearedGuidedState()'s shape (Pick<SessionState, four guided fields>). The helper will need a matching Pick<SessionState, 'recoveryError' | 'recoveryStartedCompositionVersion'> return type annotation when implemented, following the same pattern as clearedGuidedState at lines 89-99.",
+    "site_coverage": "The plan names four sites: createSession(), archiveSession() when active, selectSession(), and forkFromMessage(). All four are verified in the current code as the complete set of session-context transitions that spread clearedGuidedState(). No fifth site exists. The four named sites are correct and complete."
+  },
+
+  "done_when_consistency": {
+    "item_4_backend_regression": "Consistent with Task 9 Step 0 and the W-02 fix. The overview's done conditions for individual phases do not enumerate backend regression explicitly — they delegate to the phase plan. No inconsistency.",
+    "item_9_no_feature_flag": "Consistent with Task 7 Step 2 ('Do not add a feature flag for Phase 4') and the overview's prohibition on feature flags for shipped phases. No inconsistency."
+  },
+
+  "summary": {
+    "blocking_issues": 0,
+    "warnings": 0,
+    "informational": 2,
+    "verdict_rationale": "All five rev-3 findings are genuinely closed. F-01's wording is now unambiguous and leaves no room for defensive interpretation. W-01's parallel counter is gone and the correct compositionState.version snapshot pattern is specified. W-02's backend regression step is added at the right gate point. W-03's commit sequencing is correct. W-04 is unchanged and acceptable. The two new delta-introduced concerns (snapshot race, audit framing) are both non-issues on inspection. The plan is clear to implement."
+  }
+}

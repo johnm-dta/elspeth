@@ -23,6 +23,7 @@ source:
 sinks:
   output:
     plugin: json
+    on_write_failure: discard
     options:
       path: /app/output/smoke-test-output.json
       schema:

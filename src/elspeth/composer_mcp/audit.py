@@ -101,9 +101,8 @@ class JsonlEventRecorder(ComposerToolRecorder):
         self._buffer_lock = threading.Lock()
         # Tracks the session_id we have most recently flushed records to.
         # Once non-None, only changes if a load_session swaps to a different
-        # session_id. Never reverts to None (delete_session does NOT clear
-        # session_id_ref in server.py — the deleted session_id remains the
-        # active scope until a load/new_session replaces it).
+        # session_id. delete_session keeps session_id_ref set until its
+        # destructive success record is fsynced, then clears the active scope.
         self._flushed_session_id: str | None = None
 
     def record(self, invocation: ComposerToolInvocation) -> None:

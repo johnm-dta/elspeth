@@ -19,6 +19,7 @@ Covers:
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
 from uuid import uuid4
 
 import pytest
@@ -26,8 +27,10 @@ import pytest
 from elspeth.web.composer.source_inspection import (
     SourceInspectionFacts,
     derive_extra_column_risk,
+    derive_required_header_mismatch_risk,
     facts_to_dict,
     inspect_blob_content,
+    inspect_csv_source_content,
 )
 
 # --------------------------------------------------------------------------
@@ -145,8 +148,18 @@ class TestCsvInspection:
             filename="x.csv",
             mime_type="text/csv",
         )
-        assert "https://example.com" in f.url_candidates
-        assert "https://example.org" in f.url_candidates
+        assert f.url_candidates == ("https://example.com", "https://example.org")
+
+    def test_url_candidates_redact_query_values(self) -> None:
+        f = inspect_blob_content(
+            content=b"name,site\nA,https://example.com/download?sig=SECRET_TOKEN&x=1\n",
+            filename="x.csv",
+            mime_type="text/csv",
+        )
+        serialized = facts_to_dict(f)
+
+        assert serialized["url_candidates"] == ["https://example.com/download?<redacted>"]
+        assert "SECRET_TOKEN" not in repr(serialized)
 
     def test_headerless_warning(self) -> None:
         f = inspect_blob_content(
@@ -193,6 +206,21 @@ class TestCsvInspection:
         body = b"a,b,c\n1,2,3\n4,5,6\n"
         f = inspect_blob_content(content=body, filename="x.csv", mime_type="text/csv")
         assert not any("csv_jagged_rows" in w for w in f.warnings), f.warnings
+
+    def test_csv_source_content_with_columns_treats_first_record_as_data(self) -> None:
+        body = b"https://example.com/a\nhttps://example.com/b\n"
+        f = inspect_csv_source_content(
+            content=body,
+            filename="urls.txt",
+            mime_type="text/plain",
+            delimiter=",",
+            skip_rows=0,
+            columns=("url",),
+        )
+        assert f.source_kind == "csv"
+        assert f.observed_headers == ("url",)
+        assert f.sample_row_count == 2
+        assert f.url_candidates == ("https://example.com/a", "https://example.com/b")
 
     def test_replacement_chars_in_csv_emit_warning(self) -> None:
         """Non-UTF-8 bytes get replaced with U+FFFD on decode; surface the
@@ -294,7 +322,7 @@ class TestTextInspection:
             filename="x.txt",
             mime_type="text/plain",
         )
-        assert "https://a.example" in f.url_candidates
+        assert f.url_candidates == ("https://a.example",)
         assert any("URL(s)" in w for w in f.warnings)
 
     def test_plain_text_no_url_no_warning(self) -> None:
@@ -490,6 +518,15 @@ class TestDeriveExtraColumnRisk:
         declared = ("id: int", "name: str", "price: float")
         assert derive_extra_column_risk(f, declared) == ()
 
+    def test_structured_declared_fields_no_risk(self) -> None:
+        f = self._facts_with_headers(("id", "name", "price"))
+        declared = (
+            MappingProxyType({"name": "id", "field_type": "str"}),
+            MappingProxyType({"name": "name", "field_type": "str"}),
+            MappingProxyType({"name": "price", "field_type": "float"}),
+        )
+        assert derive_extra_column_risk(f, declared) == ()
+
     def test_missing_column_returned(self) -> None:
         f = self._facts_with_headers(("id", "name", "price", "extra"))
         declared = ("id: int", "name: str", "price: float")
@@ -504,6 +541,47 @@ class TestDeriveExtraColumnRisk:
         f = inspect_blob_content(content=b"plain text\n", filename="x.txt", mime_type="text/plain")
         # text source has no observed_headers
         assert derive_extra_column_risk(f, ("text: str",)) == ()
+
+
+class TestDeriveRequiredHeaderMismatchRisk:
+    def test_required_declared_fields_with_no_header_overlap_returned(self) -> None:
+        f = inspect_csv_source_content(
+            content=b"https://example.com/a\nhttps://example.com/b\n",
+            filename="urls.txt",
+            mime_type="text/plain",
+            delimiter=",",
+            skip_rows=0,
+        )
+        assert derive_required_header_mismatch_risk(f, ("url: str",)) == ("url",)
+
+    def test_header_overlap_suppresses_risk(self) -> None:
+        f = inspect_blob_content(content=b"URL\nhttps://example.com/a\n", filename="x.csv", mime_type="text/csv")
+        assert derive_required_header_mismatch_risk(f, ("url: str",)) == ()
+
+    def test_normalized_header_overlap_suppresses_risk(self) -> None:
+        f = inspect_blob_content(content=b"Customer ID\n123\n", filename="x.csv", mime_type="text/csv")
+        assert derive_required_header_mismatch_risk(f, ("customer_id: str",)) == ()
+
+    def test_field_mapping_overlap_suppresses_risk(self) -> None:
+        f = inspect_blob_content(content=b"External ID\n123\n", filename="x.csv", mime_type="text/csv")
+        assert (
+            derive_required_header_mismatch_risk(
+                f,
+                ("customer_id: str",),
+                field_mapping={"external_id": "customer_id"},
+            )
+            == ()
+        )
+
+    def test_optional_declared_fields_do_not_require_header_overlap(self) -> None:
+        f = inspect_csv_source_content(
+            content=b"https://example.com/a\nhttps://example.com/b\n",
+            filename="urls.txt",
+            mime_type="text/plain",
+            delimiter=",",
+            skip_rows=0,
+        )
+        assert derive_required_header_mismatch_risk(f, ("url: str?",)) == ()
 
 
 # --------------------------------------------------------------------------

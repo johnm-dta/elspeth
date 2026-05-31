@@ -7,8 +7,7 @@
 // Auto-layout using dagre (@dagrejs/dagre) for hierarchical top-to-bottom.
 //
 // ARIA: container has aria-label describing the pipeline structure.
-// "Pipeline graph with N components. Use the Spec tab for keyboard-accessible
-// detail."
+// "Pipeline graph with N components."
 //
 // Empty state when no nodes.
 // ============================================================================
@@ -47,6 +46,14 @@ const EDGE_LABEL_MAP: Record<string, string> = {
 
 type MiniMapNodeKind = keyof typeof BADGE_COLORS;
 
+interface SelectedComponentConfig {
+  id: string;
+  typeLabel: MiniMapNodeKind;
+  plugin: string | null;
+  connections: Record<string, unknown>;
+  options: Record<string, unknown>;
+}
+
 function readThemeColor(cssVariableName: string, fallbackVariableName: string): string {
   if (typeof document === "undefined" || typeof getComputedStyle !== "function") {
     return `var(${fallbackVariableName})`;
@@ -79,6 +86,201 @@ function buildMiniMapNodeKindById(
   }
 
   return kindById;
+}
+
+function withoutNullishFields(
+  fields: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => value !== null && value !== undefined),
+  );
+}
+
+function selectedComponentConfig(
+  compositionState: CompositionState | null,
+  selectedNodeId: string | null,
+): SelectedComponentConfig | null {
+  if (!compositionState || !selectedNodeId) {
+    return null;
+  }
+
+  if (selectedNodeId === "source" && compositionState.source) {
+    return {
+      id: "source",
+      typeLabel: "source",
+      plugin: compositionState.source.plugin,
+      connections: withoutNullishFields({
+        on_success: compositionState.source.on_success,
+        on_validation_failure: compositionState.source.on_validation_failure,
+      }),
+      options: compositionState.source.options,
+    };
+  }
+
+  const node = compositionState.nodes.find((candidate) => candidate.id === selectedNodeId);
+  if (node) {
+    return {
+      id: node.id,
+      typeLabel: node.node_type,
+      plugin: node.plugin,
+      connections: withoutNullishFields({
+        input: node.input,
+        on_success: node.on_success,
+        on_error: node.on_error,
+        condition: node.condition,
+        routes: node.routes,
+        fork_to: node.fork_to,
+        branches: node.branches,
+        policy: node.policy,
+        merge: node.merge,
+      }),
+      options: node.options,
+    };
+  }
+
+  const output = compositionState.outputs.find(
+    (candidate) => candidate.name === selectedNodeId,
+  );
+  if (output) {
+    return {
+      id: output.name,
+      typeLabel: "sink",
+      plugin: output.plugin,
+      connections: {},
+      options: output.options,
+    };
+  }
+
+  return null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function ConfigValue({ value }: { value: unknown }): JSX.Element {
+  if (value === null) {
+    return <span className="graph-config-empty-value">not set</span>;
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return <span className="graph-config-empty-value">empty list</span>;
+    }
+    return (
+      <ul className="graph-config-list">
+        {value.map((item, index) => (
+          <li key={index}>
+            <ConfigValue value={item} />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  if (isRecord(value)) {
+    const entries = Object.entries(value);
+    if (entries.length === 0) {
+      return <span className="graph-config-empty-value">empty object</span>;
+    }
+    return (
+      <dl className="graph-config-nested">
+        {entries.map(([key, nestedValue]) => (
+          <div key={key}>
+            <dt>{key}</dt>
+            <dd>
+              <ConfigValue value={nestedValue} />
+            </dd>
+          </div>
+        ))}
+      </dl>
+    );
+  }
+  if (typeof value === "boolean") {
+    return <span>{value ? "true" : "false"}</span>;
+  }
+  return <span>{String(value)}</span>;
+}
+
+function ConfigRows({
+  values,
+  emptyText,
+}: {
+  values: Record<string, unknown>;
+  emptyText: string;
+}): JSX.Element {
+  const entries = Object.entries(values);
+  if (entries.length === 0) {
+    return <p className="graph-config-empty-value">{emptyText}</p>;
+  }
+  return (
+    <dl className="graph-config-rows">
+      {entries.map(([key, value]) => (
+        <div key={key}>
+          <dt>{key}</dt>
+          <dd>
+            <ConfigValue value={value} />
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function NodeConfigPanel({
+  config,
+  onClose,
+}: {
+  config: SelectedComponentConfig;
+  onClose: () => void;
+}): JSX.Element {
+  return (
+    <aside
+      className="graph-config-panel"
+      role="complementary"
+      aria-label={`${config.id} configuration`}
+    >
+      <header className="graph-config-panel-header">
+        <div>
+          <span
+            className="graph-node-badge"
+            style={{
+              backgroundColor: BADGE_BACKGROUNDS[config.typeLabel],
+              color: BADGE_COLORS[config.typeLabel],
+            }}
+          >
+            {config.typeLabel}
+          </span>
+          <h3>{config.id} config</h3>
+          {config.plugin && (
+            <p className="graph-config-plugin">{config.plugin}</p>
+          )}
+        </div>
+        <button
+          type="button"
+          className="graph-config-close"
+          onClick={onClose}
+          aria-label="Close node configuration"
+        >
+          x
+        </button>
+      </header>
+
+      <section className="graph-config-section">
+        <h4>Connections</h4>
+        <ConfigRows
+          values={config.connections}
+          emptyText="No explicit connections configured."
+        />
+      </section>
+
+      <section className="graph-config-section">
+        <h4>Plugin options</h4>
+        <ConfigRows
+          values={config.options}
+          emptyText="No plugin options configured."
+        />
+      </section>
+    </aside>
+  );
 }
 
 // ── Dagre layout ─────────────────────────────────────────────────────────────
@@ -122,11 +324,22 @@ function layoutGraph(
 
 export function GraphView() {
   const compositionState = useSessionStore((s) => s.compositionState);
+  const pendingProposalCount = useSessionStore(
+    (s) =>
+      s.compositionProposals.filter(
+        (proposal) =>
+          proposal.status === "pending" && proposal.affects.includes("graph"),
+      ).length,
+  );
   const selectedNodeId = useSessionStore((s) => s.selectedNodeId);
   const selectNode = useSessionStore((s) => s.selectNode);
   const { resolvedTheme } = useTheme();
 
   const validationResult = useExecutionStore((s) => s.validationResult);
+  const selectedConfig = useMemo(
+    () => selectedComponentConfig(compositionState, selectedNodeId),
+    [compositionState, selectedNodeId],
+  );
 
   const miniMapNodeKindById = useMemo(
     () => buildMiniMapNodeKindById(compositionState),
@@ -563,42 +776,61 @@ export function GraphView() {
   }
 
   const nodeCount = nodes.length;
-  const ariaLabel = `Pipeline graph with ${nodeCount} component${nodeCount !== 1 ? "s" : ""} (source, transforms, sinks). Use the Spec tab for keyboard-accessible detail.`;
+  const ariaLabel = `Pipeline graph with ${nodeCount} component${nodeCount !== 1 ? "s" : ""} (source, transforms, sinks).`;
 
   return (
     <div
-      style={{ width: "100%", height: "100%" }}
-      aria-label={ariaLabel}
-      aria-roledescription="Pipeline DAG diagram"
-      role="img"
+      className="graph-view-shell"
     >
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable={true}
-        onNodeClick={onNodeClick}
-        onPaneClick={onPaneClick}
-        colorMode={resolvedTheme}
-        onInit={handleInit}
-        fitViewOptions={{ padding: 0.15, maxZoom: 1.5, minZoom: 0.3 }}
-        proOptions={{ hideAttribution: true }}
+      <div
+        className="graph-view-canvas"
+        aria-label={ariaLabel}
+        aria-roledescription="Pipeline DAG diagram"
+        role="img"
       >
-        <Background gap={16} size={1} color="var(--color-border)" />
-        <Controls showInteractive={false} />
-        {nodes.length > 5 && (
-          <MiniMap
-            bgColor="var(--color-surface)"
-            nodeColor={getMiniMapNodeColor}
-            nodeStrokeColor={getMiniMapNodeStrokeColor}
-            nodeStrokeWidth={3}
-            zoomable
-            pannable
-            style={{ bottom: 8, right: 8, width: 120, height: 80 }}
-          />
+        {pendingProposalCount > 0 && (
+          <div
+            role="status"
+            className="pending-overlay-pill"
+            aria-label={`${pendingProposalCount} pending graph proposal${pendingProposalCount === 1 ? "" : "s"}`}
+          >
+            pending #{pendingProposalCount}
+          </div>
         )}
-      </ReactFlow>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable={true}
+          onNodeClick={onNodeClick}
+          onPaneClick={onPaneClick}
+          colorMode={resolvedTheme}
+          onInit={handleInit}
+          fitViewOptions={{ padding: 0.15, maxZoom: 1.5, minZoom: 0.3 }}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background gap={16} size={1} color="var(--color-canvas-grid)" />
+          <Controls showInteractive={false} />
+          {nodes.length > 5 && (
+            <MiniMap
+              bgColor="var(--color-surface)"
+              nodeColor={getMiniMapNodeColor}
+              nodeStrokeColor={getMiniMapNodeStrokeColor}
+              nodeStrokeWidth={3}
+              zoomable
+              pannable
+              style={{ bottom: 8, right: 8, width: 120, height: 80 }}
+            />
+          )}
+        </ReactFlow>
+      </div>
+      {selectedConfig && (
+        <NodeConfigPanel
+          config={selectedConfig}
+          onClose={() => selectNode(null)}
+        />
+      )}
     </div>
   );
 }

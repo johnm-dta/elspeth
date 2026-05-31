@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
+from pydantic import BaseModel
+
+from elspeth.contracts.enums import AuditCharacteristic, DerivedAuditCharacteristics, Determinism
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
 from elspeth.plugins.infrastructure.discovery import get_plugin_description
 from elspeth.plugins.infrastructure.manager import PluginManager, PluginNotFoundError
+from elspeth.web.catalog.knob_schema import (
+    KnobSchema,
+    lower_discriminated_to_knob_schema,
+    lower_model_to_knob_schema,
+    validate_knob_schema,
+)
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginKind,
@@ -29,6 +39,143 @@ _DEFS_REF_PREFIX = "#/$defs/"
 # transforms. Batch-aware transform schemas must not advertise this option
 # until a batch pre-emission dispatch site exists.
 _DECLARED_INPUT_FIELDS_OPTION = "required_input_fields"
+
+# Map Determinism enum values to the AuditCharacteristic flag they
+# imply. The catalog surfaces these as visual cues on the plugin card so
+# a compliance-focused user (Linda persona) can see at a glance which
+# audit traits apply without reading the technical description.
+#
+# Subscript access ([determinism]) is deliberate: if a future seventh
+# Determinism value is added to contracts/enums.py without updating this
+# table, the KeyError surfaces immediately at catalog-build time rather
+# than silently returning None and dropping the inferred flag.
+#
+# The closed vocabulary of audit-characteristic strings is the
+# AuditCharacteristic enum itself (defined in contracts/enums.py).  A typo
+# at a plugin's `audit_characteristics` declaration site (e.g. attempting
+# `frozenset({"io-read"})` as a bare string) fails mypy rather than
+# silently disappearing from the rendered catalog card.
+_DETERMINISM_TO_AUDIT_FLAG: dict[Determinism, AuditCharacteristic] = {
+    Determinism.IO_READ: AuditCharacteristic.IO_READ,
+    Determinism.IO_WRITE: AuditCharacteristic.IO_WRITE,
+    Determinism.EXTERNAL_CALL: AuditCharacteristic.EXTERNAL_CALL,
+    Determinism.DETERMINISTIC: AuditCharacteristic.DETERMINISTIC,
+    Determinism.SEEDED: AuditCharacteristic.SEEDED,
+    Determinism.NON_DETERMINISTIC: AuditCharacteristic.NON_DETERMINISTIC,
+}
+
+# Default Determinism value per plugin kind — mirrors the class-level
+# `determinism = Determinism.<X>` declared on BaseSource / BaseTransform /
+# BaseSink (`plugins/infrastructure/base.py`).
+#
+# Used by `_derive_audit_characteristics` to suppress emission of the
+# determinism-derived AuditCharacteristic flag when the plugin's declared
+# value EQUALS the kind default. The predicate is value-equality, not
+# inheritance-detection — every concrete plugin redeclares `determinism`
+# explicitly under the ADR-010 declaration-trust framework's
+# `__init_subclass__` guard, so "inherited the default" never literally
+# occurs at runtime. The suppression is therefore about display
+# redundancy, not authorial intent:
+#
+#   "Every Source has Determinism.IO_READ" is an architectural fact,
+#   not a per-plugin signal. Showing the io_read chip on every Source
+#   card adds visual noise without distinguishing CSV from Dataverse.
+#   A non-default value (e.g. NullSource → DETERMINISTIC, DataverseSource
+#   → EXTERNAL_CALL) does distinguish — the chip's presence then
+#   communicates "this Source deviates from the kind norm in a
+#   reproducibility-relevant way."
+#
+# A plugin author who explicitly redeclares the kind default still gets
+# suppression — the chip would teach the user nothing they couldn't
+# infer from the kind. Surfacing authorial intent (the *act* of
+# declaring) belongs in source-code review, not on the catalog card.
+#
+# Subscript access is deliberate: a future PluginKind addition or
+# Determinism rebase on the base classes that drifts from this table
+# fails fast at catalog-build time instead of silently mis-suppressing.
+_KIND_DEFAULT_DETERMINISM: dict[PluginKind, Determinism] = {
+    "source": Determinism.IO_READ,
+    "transform": Determinism.DETERMINISTIC,
+    "sink": Determinism.IO_WRITE,
+}
+
+
+def _derive_audit_characteristics(plugin_cls: PluginClass, *, plugin_kind: PluginKind) -> DerivedAuditCharacteristics:
+    """Compose declared + inferred audit characteristics for a plugin.
+
+    The declared set comes from the plugin class's `audit_characteristics`
+    attribute (defaulting to `frozenset()` on the base). The inferred set
+    is derived from `determinism` *only when the subclass overrode the
+    kind default*. A plugin that inherits its kind's default determinism
+    contributes no inferred flag, because surfacing it on every card of
+    that kind teaches the user nothing per-plugin — the architectural
+    fact (every Source reads I/O, every Sink writes I/O, every Transform
+    defaults to deterministic) belongs in category-level documentation,
+    not in a flag repeated 6+ times.
+
+    Quarantine behaviour is **author-declared, not inferred.** The
+    source-quarantine signal lives in `_on_validation_failure`, which is
+    set per-instance in `__init__` from runtime config — it does not
+    exist on the class object. Reading `plugin_cls._on_validation_failure`
+    here would AttributeError at catalog-build time. Sources whose
+    runtime configuration supports non-discard quarantine routing
+    declare `"quarantine"` in their `audit_characteristics` frozenset
+    (the CSV canonical example does this).
+
+    Direct attribute access (`plugin_cls.audit_characteristics`,
+    `plugin_cls.determinism`) is correct here: the bases and protocols
+    declare these with sensible defaults, so every plugin reachable via
+    the catalog has them. A plugin without these attributes would be a
+    malformed system plugin (Tier 1 bug); crash via AttributeError is
+    the correct response, not defensive fallback.
+
+    Cross-reference (do not unify):
+    ``elspeth.web.audit_readiness.service._build_plugin_trust_row`` also
+    reads ``determinism`` from every plugin in a composition, but for a
+    *different* purpose: it classifies each plugin as boundary-vs-internal
+    for the readiness panel's plugin-trust row. The two surfaces
+    deliberately diverge on kind-default determinism:
+
+      - **This function** suppresses the determinism-derived audit-
+        characteristic flag when a plugin uses its kind's default,
+        because surfacing "every Source reads I/O" on every Source card
+        teaches the user nothing per-plugin (architectural facts
+        belong in category-level documentation, not in a repeated chip).
+
+      - **``_build_plugin_trust_row``** does NOT suppress: every Source
+        and every Sink is unconditionally boundary, because writing
+        data out of the pipeline (or reading external data in) crosses
+        a Tier-3 trust boundary regardless of whether the destination
+        is a local file or a remote service. The readiness panel's
+        compliance question ("which components cross a trust boundary
+        on this run?") is structurally different from the catalog
+        card's UX question ("what does this plugin teach the operator
+        that they don't already know from its kind?").
+
+    The deliberate widening of sink classification (csv/json sinks are
+    now boundary, where the deleted ``trust.py`` excluded them) is
+    captured in ADR-021. Extracting a shared
+    ``BoundaryDerivation`` helper would conflate "compose display
+    chips" with "classify trust crossings" — two operations that
+    happen to read the same input but answer different questions.
+    """
+    declared: frozenset[AuditCharacteristic] = plugin_cls.audit_characteristics
+    determinism = plugin_cls.determinism
+
+    inferred: frozenset[AuditCharacteristic] = frozenset()
+    if determinism is not _KIND_DEFAULT_DETERMINISM[plugin_kind]:
+        # Author overrode the kind default — emit the corresponding flag.
+        # Subscript raises KeyError if a future Determinism value is added
+        # to contracts/enums.py without updating _DETERMINISM_TO_AUDIT_FLAG;
+        # that crash is correct (silent None would drop the flag with no
+        # test failure and no audit-trail signal).
+        inferred = frozenset({_DETERMINISM_TO_AUDIT_FLAG[determinism]})
+
+    # Sort for stable wire-format ordering; the response model exposes
+    # this as a tuple[AuditCharacteristic, ...] which serialises to a
+    # flat list of flag strings on the wire (StrEnum members serialise
+    # as their str value).
+    return tuple(sorted(declared | inferred))
 
 
 class CatalogServiceImpl:
@@ -53,6 +200,10 @@ class CatalogServiceImpl:
         self._source_classes = plugin_manager.get_sources()
         self._transform_classes = plugin_manager.get_transforms()
         self._sink_classes = plugin_manager.get_sinks()
+        self._schema_cache: dict[tuple[PluginKind, str], PluginSchemaInfo] = {}
+        self._populate_schema_cache("source", self._source_classes)
+        self._populate_schema_cache("transform", self._transform_classes)
+        self._populate_schema_cache("sink", self._sink_classes)
 
     def list_sources(self) -> list[PluginSummary]:
         return [self._to_summary(cls, "source") for cls in self._source_classes]
@@ -64,11 +215,54 @@ class CatalogServiceImpl:
         return [self._to_summary(cls, "sink") for cls in self._sink_classes]
 
     def get_schema(self, plugin_type: PluginKind, name: str) -> PluginSchemaInfo:
-        plugin_cls = self._get_plugin_class(plugin_type, name)
+        if plugin_type not in _VALID_TYPES:
+            raise ValueError(f"Unknown plugin type: {plugin_type}. Must be one of: {sorted(_VALID_TYPES)}")
 
+        key = (plugin_type, name)
+        if key in self._schema_cache:
+            return self._schema_cache[key]
+
+        available = self._available_names(plugin_type)
+        raise ValueError(f"Unknown {plugin_type} plugin: {name}. Available: {available}")
+
+    def post_call_hints(
+        self,
+        *,
+        plugin_type: PluginKind,
+        plugin_name: str,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Dispatch postscript-hint resolution to the plugin's classmethod.
+
+        ``_get_plugin_class`` raises ``ValueError`` for unknown plugins;
+        we let that propagate so callers see the same error shape as
+        ``get_schema``.
+        """
+        plugin_cls = self._get_plugin_class(plugin_type, plugin_name)
+        return plugin_cls.get_post_call_hints(
+            tool_name=tool_name,
+            config_snapshot=config_snapshot,
+        )
+
+    # -- Private helpers --
+
+    def _populate_schema_cache(self, plugin_type: PluginKind, classes: Sequence[PluginClass]) -> None:
+        for plugin_cls in classes:
+            name: str = plugin_cls.name
+            self._schema_cache[(plugin_type, name)] = self._build_schema_info(plugin_type, name, plugin_cls)
+
+    def _build_schema_info(
+        self,
+        plugin_type: PluginKind,
+        name: str,
+        plugin_cls: PluginClass,
+    ) -> PluginSchemaInfo:
         # Plugins own schema emission — single-model plugins use the default
         # on the plugin base, discriminated-union plugins override.
         json_schema = self._catalog_schema(plugin_cls, plugin_type)
+        knob_schema = self._knob_schema(plugin_cls, plugin_type=plugin_type, name=name)
+        validate_knob_schema(knob_schema, plugin_kind=plugin_type, plugin_name=name)
 
         # Full docstring for schema view (not just first line)
         description = (plugin_cls.__doc__ or "").strip()
@@ -80,9 +274,50 @@ class CatalogServiceImpl:
             plugin_type=plugin_type,
             description=description,
             json_schema=json_schema,
+            knob_schema=cast(dict[str, Any], knob_schema),
+            composer_hints=self._discovery_composer_hints(plugin_cls),
         )
 
-    # -- Private helpers --
+    def _discovery_composer_hints(self, plugin_cls: PluginClass) -> tuple[str, ...]:
+        """Pull discovery-time composer_hints from a plugin's assistance hook.
+
+        Calls ``plugin_cls.get_agent_assistance(issue_code=None)`` and
+        returns ``assistance.composer_hints`` when populated, else an
+        empty tuple. The hook is part of the plugin contract (defined on
+        BaseTransform, BaseSink, BaseSource — see
+        ``plugins/infrastructure/base.py``); any plugin that doesn't
+        override it returns ``None`` here, which the catalog renders as
+        empty hints. Advisory coaching only — not part of any audit
+        hash; see ``contracts/plugin_assistance.py`` for the discipline.
+        """
+        assistance = plugin_cls.get_agent_assistance(issue_code=None)
+        if assistance is None:
+            return ()
+        return assistance.composer_hints
+
+    def _knob_schema(self, plugin_cls: PluginClass, *, plugin_type: PluginKind, name: str) -> KnobSchema:
+        try:
+            discriminated_variants = cast(Any, plugin_cls).discriminated_variants
+        except AttributeError:
+            config_model = plugin_cls.get_config_model()
+            if config_model is None:
+                return {"fields": []}
+            return lower_model_to_knob_schema(
+                cast(type[BaseModel], config_model),
+                plugin_kind=plugin_type,
+                plugin_name=name,
+            )
+        if not callable(discriminated_variants):
+            return lower_discriminated_to_knob_schema(
+                plugin_cls,
+                plugin_kind=plugin_type,
+                plugin_name=name,
+            )
+        return lower_discriminated_to_knob_schema(
+            plugin_cls,
+            plugin_kind=plugin_type,
+            plugin_name=name,
+        )
 
     def _get_plugin_class(self, plugin_type: PluginKind, name: str) -> PluginClass:
         """Look up a plugin class by (type, name) with a descriptive error.
@@ -114,16 +349,40 @@ class CatalogServiceImpl:
             raise ValueError(f"Unknown {plugin_type} plugin: {name}. Available: {available}") from exc
 
     def _to_summary(self, plugin_cls: PluginClass, plugin_type: PluginKind) -> PluginSummary:
-        """Convert a plugin class to a PluginSummary."""
+        """Convert a plugin class to a PluginSummary.
+
+        Phase 7A: also emits reference-content fields. Audit
+        characteristics are the *derived* set: declared chars from
+        `audit_characteristics` composed with the flag derived from
+        `determinism`. The frontend reads audit_characteristics as a
+        flat list of flag strings.
+        """
         name: str = plugin_cls.name
         description = get_plugin_description(plugin_cls)
         schema = self._catalog_schema(plugin_cls, plugin_type)
         config_fields = self._extract_config_fields(schema)
+
+        # Direct attribute access: the bases and protocols declare every
+        # Phase-7A field with a default. A plugin missing them would be
+        # a malformed system plugin (Tier 1 bug); crash is correct.
+        usage_when_to_use = plugin_cls.usage_when_to_use
+        usage_when_not_to_use = plugin_cls.usage_when_not_to_use
+        example_use = plugin_cls.example_use
+        capability_tags = plugin_cls.capability_tags
+
+        audit_characteristics = _derive_audit_characteristics(plugin_cls, plugin_kind=plugin_type)
+
         return PluginSummary(
             name=name,
             description=description,
             plugin_type=plugin_type,
             config_fields=config_fields,
+            usage_when_to_use=usage_when_to_use,
+            usage_when_not_to_use=usage_when_not_to_use,
+            example_use=example_use,
+            capability_tags=capability_tags,
+            audit_characteristics=audit_characteristics,
+            composer_hints=self._discovery_composer_hints(plugin_cls),
         )
 
     def _catalog_schema(self, plugin_cls: PluginClass, plugin_type: PluginKind) -> dict[str, Any]:

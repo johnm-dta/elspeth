@@ -107,6 +107,7 @@ coverage.xml
 .venv
 .node_modules
 node_modules/
+*.tsbuildinfo
 env/
 venv/
 ENV/
@@ -122,6 +123,9 @@ venv.bak/
 
 # mkdocs documentation
 /site
+
+# Generated PDFs from tools/pdf build scripts
+tools/pdf/out/
 
 # mypy
 .mypy_cache/
@@ -223,7 +227,9 @@ examples/large_scale_test/input.csv
 examples/retention_purge/payloads/
 landscape.db-shm
 landscape.db-wal
-.elspeth/
+.elspeth/*
+!.elspeth/rotations.log
+.judge-metrics/
 
 # pre-commit cache
 .pre-commit-cache/
@@ -231,9 +237,7 @@ landscape.db-wal
 # Tool-specific local config and caches
 .codex/
 
-# Filigree issue tracker
-.filigree/
-.mcp.json
+
 
 # Deployment artifacts
 deploy/
@@ -245,9 +249,47 @@ deploy/
 # Temporary
 .codex
 
-# Build-artefact PDFs from tools/pdf/ (regeneratable; exceed
-# the pre-commit large-file threshold).
+# Build-artefact PDFs (regeneratable; exceed the pre-commit
+# large-file threshold). Narrow scope to PDF outputs only — the
+# `docs/release/pdf/` pipeline source (build.sh, *.typ, README,
+# Makefile, etc.) IS tracked so the pipeline is reproducible from
+# a fresh checkout.
 docs/assets/*.pdf
 .claude/scheduled_tasks.lock
 *.db-shm
 *.db-wal
+
+# Reaudit sweep sidecars — ephemeral per-run JSONL state written by
+# `elspeth-lints reaudit` for crash recovery. Lives at
+# `<allowlist_dir>/.reaudit-state/` (i.e. inside `config/cicd/*/`
+# directories that ARE tracked). The sidecars themselves must never be
+# committed — they are operator-local run state and contain per-entry
+# divergence outcomes that have no audit-trail value outside the
+# operator's machine. See `elspeth_lints/core/reaudit_sidecar.py` for
+# the full data-model rationale.
+**/.reaudit-state/
+
+# atomic_write_text lock files — persistent `.<name>.lock` siblings
+# next to managed allowlist YAMLs (the flock idiom; unlinking inside
+# the lock races on re-acquire so they stay on disk between runs).
+# Operators see them as untracked after the first `justify` /
+# `rotate` invocation; they must never be committed. See
+# `elspeth_lints/core/atomic_io.py` for the locking rationale.
+config/cicd/**/.*.lock
+
+# Release PDF pipeline source is intentionally tracked; generated
+# outputs and bulky font source trees are not.
+docs/release/*
+!docs/release/pdf/output/
+
+
+## Internal tooling
+# Filigree issue tracker
+.filigree/
+.mcp.json
+
+# Clarion
+clarion
+clarion.yaml
+.clarion
+docs/audit/triage/

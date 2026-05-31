@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretBytes, field_validator, model_validator
 
+from elspeth.contracts.auth import AuthProviderType
+from elspeth.core.config import PayloadStoreSettings
 from elspeth.web.validation import (
     SERVER_SECRET_RESERVED_PREFIX,
     is_reserved_server_secret_name,
@@ -14,8 +16,15 @@ from elspeth.web.validation import (
 )
 
 _LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES = 32
 _DEFAULT_COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS = 300.0
 _DEFAULT_COMPOSER_TRANSPORT_HEADROOM_SECONDS = 30.0
+# Mechanical link to core retention default: if
+# core/config.py:PayloadStoreSettings.retention_days changes, this value
+# tracks it automatically. Prevents the silent divergence called out in
+# docs/composer/ux-redesign-2026-05/14a-phase-2a-backend.md
+# §"Retention default divergence guard".
+_DEFAULT_PAYLOAD_STORE_RETENTION_DAYS: int = PayloadStoreSettings.model_fields["retention_days"].default
 
 
 class WebSettings(BaseModel):
@@ -33,13 +42,17 @@ class WebSettings(BaseModel):
 
     host: str = "127.0.0.1"
     port: int = Field(default=8451, ge=1, le=65535)
-    auth_provider: Literal["local", "oidc", "entra"] = "local"
+    auth_provider: AuthProviderType = "local"
     registration_mode: Literal["open", "email_verified", "closed"] = "open"
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
     data_dir: Path = Field(default=Path("data"), validate_default=True)
+    # Phase 4A: cache directory for the tutorial-seed run cache. Defaults
+    # to ``data_dir / "tutorial_cache"`` after ``data_dir`` is normalized.
+    tutorial_cache_dir: Path | None = Field(default=None)
     composer_model: str = "gpt-5.5"
     composer_max_composition_turns: int = Field(..., ge=1)
     composer_max_discovery_turns: int = Field(..., ge=1)
+    composer_max_tool_calls_per_turn: int = Field(default=16, ge=1)
     composer_timeout_seconds: float = Field(..., gt=0)
     composer_transport_idle_ceiling_seconds: float = Field(
         default=_DEFAULT_COMPOSER_TRANSPORT_IDLE_CEILING_SECONDS,
@@ -76,6 +89,35 @@ class WebSettings(BaseModel):
     composer_advisor_max_prompt_tokens: int = Field(default=4000, ge=1)
     composer_advisor_max_completion_tokens: int = Field(default=1500, ge=1)
     composer_advisor_timeout_seconds: float = Field(default=60.0, gt=0)
+    # Phase 5b Task 5 — interpretation-event rate limits (F-30/F-31).
+    #
+    # Both limits are read at compose-loop initialisation and passed to
+    # ``_check_interpretation_rate_limits`` as keyword arguments; changing
+    # them requires a service restart (not a per-request reload). The
+    # per-day window is UTC midnight, not a sliding 24-hour window —
+    # simpler for operators to reason about and produces predictable
+    # reset behaviour. See ``web/composer/tools.py`` for the helper that
+    # consumes these values.
+    composer_interpretation_rate_limit_per_term: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Max times the composer LLM may surface the same (session, user_term, "
+            "composition_state_id) tuple for user review. Exceeding this cap "
+            "raises ToolArgumentError; the compose loop falls back to "
+            "AUTO_INTERPRETED_NO_SURFACES."
+        ),
+    )
+    composer_interpretation_rate_limit_per_session_day: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "Max request_interpretation_review invocations per session per UTC day. "
+            "Window resets at UTC midnight (not a sliding 24-hour window). "
+            "Exceeding this cap raises ToolArgumentError; the compose loop falls "
+            "back to AUTO_INTERPRETED_NO_SURFACES."
+        ),
+    )
     auth_rate_limit_per_minute: int = Field(default=20, ge=1)
     secret_key: str = (
         "change-me-in-production"  # Security rule S3 (seam-contracts.md): Sub-2 startup guard enforces non-default in production
@@ -95,6 +137,19 @@ class WebSettings(BaseModel):
     landscape_url: str | None = None
     landscape_passphrase: str | None = None
     payload_store_path: Path | None = None
+    payload_store_retention_days: int = Field(
+        default=_DEFAULT_PAYLOAD_STORE_RETENTION_DAYS,
+        ge=1,
+        description=(
+            "Payload retention in days surfaced by the audit-readiness "
+            "panel. Mirrors the core default sourced from "
+            "src/elspeth/core/config.py:PayloadStoreSettings.retention_days "
+            "via _DEFAULT_PAYLOAD_STORE_RETENTION_DAYS (mechanical link, "
+            "not a hand-copied literal). The panel row is informational "
+            "only in Phase 2A — there is no user-stated requirement to "
+            "compare against yet."
+        ),
+    )
 
     # OIDC / Entra-specific (optional)
     oidc_issuer: str | None = None
@@ -124,6 +179,71 @@ class WebSettings(BaseModel):
     # Session database (sessions, messages, composition states, runs)
     # Separate from landscape_url (audit DB)
     session_db_url: str | None = None
+
+    # Phase 6A — shareable-review token signing.
+    #
+    # The HMAC key backs the ``ShareTokenSigner`` primitive at
+    # ``web/shareable_reviews/signer.py``. Required (Field(...)): the web
+    # service refuses to start without it — there is no test-friendly
+    # default because rotation/recovery is "re-issue all links," and a
+    # silent dev-mode default would let a misconfigured staging deploy
+    # ship outstanding links signed with the well-known dev key. Pair the
+    # operator-action runbook entry at
+    # ``docs/guides/sharing-pipelines.md`` (Task 12 of plan 19a) with the
+    # generation step ``openssl rand -base64 32``.
+    #
+    # 32-byte minimum matches HMAC-SHA256's digest (output) size — the
+    # natural entropy floor for a tag of this hash, and the byte count
+    # produced by the documented operator recipe ``openssl rand -base64 32``
+    # after base64 decode. (HMAC-SHA256's *block* size is 64 bytes; the
+    # floor here is the digest size, not the block size.) Longer keys
+    # are accepted as opaque key material.
+    #
+    # Rotating this key invalidates EVERY outstanding shareable link.
+    # There is no dual-key acceptance window in v1 — key rotation tooling
+    # is out of scope.
+    #
+    # ``SecretBytes`` masks the value in ``repr()`` so tracebacks, debug
+    # logs, and REPL inspection do not exfiltrate the HMAC key. Pydantic v2's
+    # default repr otherwise prints every field value in plaintext.
+    #
+    # ``strict=True`` forbids the lax ``str → bytes`` utf-8 coercion. Without
+    # this, a 31-character string containing a 2-byte codepoint
+    # (``'a' * 30 + 'ñ'``) silently passes the 32-byte floor with only 31
+    # characters of entropy. Strict mode rejects non-bytes inputs at the
+    # boundary.
+    #
+    # Consumer site (web/app.py:276) unwraps with ``.get_secret_value()``
+    # when constructing the ``ShareTokenSigner`` primitive — the signer's
+    # constructor signature is unchanged (still ``bytes``).
+    shareable_link_signing_key: SecretBytes = Field(
+        ...,
+        strict=True,
+        description=(
+            "HMAC-SHA256 key for shareable-review tokens. Required — the "
+            "service refuses to start without it. Rotating invalidates "
+            "ALL outstanding shareable links. Generate with "
+            "``openssl rand -base64 32`` and store as utf-8 bytes. "
+            "Wrapped in ``SecretBytes``: ``repr()`` shows a mask; call "
+            "``.get_secret_value()`` to obtain the raw bytes."
+        ),
+    )
+
+    # Phase 6A — shareable-review token lifetime.
+    #
+    # Stamps ``expires_at = now() + this delta`` on every newly minted
+    # signed token. The signer verifies expiry on resolve (see
+    # ``ShareTokenSigner.verify``). Default is 30 days; operators may
+    # lower or raise as appropriate to their review cadence.
+    shareable_link_lifetime_seconds: int = Field(
+        default=30 * 24 * 3600,
+        gt=0,
+        description=(
+            "Lifetime (in seconds) for shareable-review tokens. Default: "
+            "30 days. The service stamps expires_at = now() + this delta "
+            "when creating a token."
+        ),
+    )
 
     @field_validator(
         "oidc_issuer",
@@ -166,14 +286,73 @@ class WebSettings(BaseModel):
             raise ValueError("must not be blank")
         return v
 
-    @field_validator("data_dir", "payload_store_path", mode="before")
+    @field_validator("shareable_link_signing_key", mode="before")
+    @classmethod
+    def _decode_signing_key_from_string(cls, v: object) -> object:
+        """Explicit base64 decoding for str inputs.
+
+        Env-var ingestion (``ELSPETH_WEB__SHAREABLE_LINK_SIGNING_KEY``)
+        delivers the key as a ``str``. With ``strict=True`` on the field,
+        Pydantic would reject the str outright; without it, Pydantic would
+        silently utf-8-encode the str — and that is the bug: a 31-character
+        string containing a 2-byte codepoint
+        (``'a' * 30 + 'ñ'``) encodes to 32 utf-8 bytes and slips past the
+        byte-length floor with only 31 characters of entropy.
+
+        The documented operator recipe is ``openssl rand -base64 32`` (44-char
+        base64 string, 32 raw bytes of entropy). We decode str as base64
+        explicitly here — same encoding the operator used to generate the
+        key. Invalid base64 raises ``ValueError`` (no fall-back to utf-8
+        coercion). Bytes pass through unchanged; strict mode then rejects any
+        remaining non-bytes types.
+
+        Multibyte-utf-8 ambiguity is foreclosed at the boundary by requiring
+        base64 — the only way to express N raw bytes through a string medium
+        without character-vs-byte conflation.
+        """
+        if isinstance(v, str):
+            import base64
+            import binascii
+
+            try:
+                return base64.b64decode(v, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError(
+                    "shareable_link_signing_key string inputs must be base64-encoded (e.g. ``openssl rand -base64 32``). Decoding failed."
+                ) from exc
+        return v
+
+    @field_validator("shareable_link_signing_key")
+    @classmethod
+    def _signing_key_min_length(cls, v: SecretBytes) -> SecretBytes:
+        """Phase 6A — reject signing keys shorter than HMAC-SHA256's digest size.
+
+        32 bytes is the minimum — the digest (output) size of HMAC-SHA256
+        and the natural entropy floor for a tag produced by this hash.
+        ``openssl rand -base64 32`` produces 44 utf-8 characters that
+        base64-decode to exactly 32 raw bytes — the floor.
+        Shorter keys reduce the effective entropy of the HMAC tag and make
+        brute-force token forgery easier; pre-release ELSPETH refuses to start
+        a service with such a key.
+
+        The floor is on raw byte length. The ``mode="before"`` companion
+        validator above performs explicit base64 decoding for str inputs, so
+        this byte count equals the operator-supplied raw byte count —
+        multibyte-utf-8 ambiguity is foreclosed at the boundary, not papered
+        over here.
+        """
+        if len(v.get_secret_value()) < 32:
+            raise ValueError("shareable_link_signing_key must be at least 32 bytes")
+        return v
+
+    @field_validator("data_dir", "payload_store_path", "tutorial_cache_dir", mode="before")
     @classmethod
     def _reject_blank_path_strings(cls, v: object) -> object:
         if isinstance(v, str) and not v.strip():
             raise ValueError("must not be blank")
         return v
 
-    @field_validator("data_dir", "payload_store_path")
+    @field_validator("data_dir", "payload_store_path", "tutorial_cache_dir")
     @classmethod
     def _normalize_paths(cls, v: Path | None) -> Path | None:
         if v is None:
@@ -190,6 +369,13 @@ class WebSettings(BaseModel):
         # lifetime regardless of later os.chdir calls.
         return v.expanduser().resolve()
 
+    @model_validator(mode="after")
+    def _default_tutorial_cache_dir(self) -> WebSettings:
+        """Resolve the tutorial cache directory under the validated data_dir."""
+        if self.tutorial_cache_dir is None:
+            object.__setattr__(self, "tutorial_cache_dir", self.data_dir / "tutorial_cache")
+        return self
+
     @field_validator("server_secret_allowlist")
     @classmethod
     def _validate_server_secret_allowlist(cls, v: tuple[str, ...]) -> tuple[str, ...]:
@@ -202,7 +388,21 @@ class WebSettings(BaseModel):
     @model_validator(mode="after")
     def _validate_auth_fields(self) -> WebSettings:
         """Enforce that OIDC/Entra providers have their required fields."""
-        if self.auth_provider == "oidc":
+        if self.auth_provider == "local":
+            configured = [
+                name
+                for name, val in (
+                    ("oidc_issuer", self.oidc_issuer),
+                    ("oidc_audience", self.oidc_audience),
+                    ("oidc_client_id", self.oidc_client_id),
+                    ("oidc_authorization_endpoint", self.oidc_authorization_endpoint),
+                    ("entra_tenant_id", self.entra_tenant_id),
+                )
+                if val is not None
+            ]
+            if configured:
+                raise ValueError(f"Local auth does not use OIDC/Entra fields: {', '.join(configured)}")
+        elif self.auth_provider == "oidc":
             missing = [
                 name
                 for name, val in (
@@ -262,11 +462,46 @@ class WebSettings(BaseModel):
 
     @model_validator(mode="after")
     def _enforce_secret_key_in_production(self) -> WebSettings:
-        """Reject the default secret key when host suggests non-local deployment."""
-        if self.secret_key == "change-me-in-production" and self.host not in _LOCAL_HOSTS:
+        """Reject default or undersized JWT HMAC keys on non-loopback hosts."""
+        if self.host in _LOCAL_HOSTS:
+            return self
+        if self.secret_key == "change-me-in-production":
             raise ValueError(
                 "secret_key must be set to a secure value for non-local deployments "
                 "(host is not a loopback address). Set ELSPETH_WEB__SECRET_KEY or pass secret_key explicitly."
+            )
+        secret_key_bytes = self.secret_key.encode("utf-8")
+        if len(secret_key_bytes) < _MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES:
+            raise ValueError(
+                f"secret_key must be at least {_MIN_NON_LOCAL_JWT_SECRET_KEY_BYTES} bytes for non-local deployments "
+                "(host is not a loopback address). Generate a high-entropy key for ELSPETH_WEB__SECRET_KEY."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_known_weak_signing_key(self) -> WebSettings:
+        """Refuse uniform-byte placeholder signing keys on non-loopback hosts.
+
+        Test fixtures across the suite use ``b'\\x00' * 32`` and ``b'0' * 32``
+        as convenient 32-byte placeholders. Those values are operationally
+        indistinguishable from "the operator forgot to generate a real key" —
+        on a non-loopback host that is a security incident waiting to happen.
+        Mirrors the shape of ``_enforce_secret_key_in_production`` above.
+
+        A real key from ``openssl rand -base64 32`` is uniformly distributed;
+        a single repeated byte (any value) is the signature of a placeholder.
+        The check is intentionally simple — "all bytes identical" — to avoid
+        false positives on legitimate (if unusual) high-entropy keys.
+        """
+        if self.host in _LOCAL_HOSTS:
+            return self
+        raw_key = self.shareable_link_signing_key.get_secret_value()
+        if len(set(raw_key)) == 1:
+            raise ValueError(
+                "shareable_link_signing_key is a known-weak placeholder "
+                "(uniform-byte pattern detected); generate a real key with "
+                "``openssl rand -base64 32`` for non-loopback deployments. "
+                f"Host '{self.host}' is not a loopback address."
             )
         return self
 

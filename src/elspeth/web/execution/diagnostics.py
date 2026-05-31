@@ -27,6 +27,7 @@ from elspeth.web.config import WebSettings
 from elspeth.web.execution.discard_summary import _sqlite_database_file_missing
 from elspeth.web.execution.schemas import (
     RunDiagnosticArtifact,
+    RunDiagnosticFailureDetail,
     RunDiagnosticNodeState,
     RunDiagnosticOperation,
     RunDiagnosticsResponse,
@@ -259,6 +260,46 @@ def load_run_diagnostics_from_db(
             for row in conn.execute(operation_stmt)
         ]
 
+        # Latest failed operation — surfaces the cause when the operations
+        # preview limit (_OPERATION_PREVIEW_LIMIT) would have buried it. We pick
+        # the most recently completed failed op with a non-empty error_message;
+        # the Landscape recorder writes the full exception chain text there
+        # (wrapper + cause + any HTTP response body captured at the wrap site).
+        failure_stmt = (
+            select(
+                operations_table.c.operation_id,
+                operations_table.c.node_id,
+                operations_table.c.operation_type,
+                operations_table.c.error_message,
+                operations_table.c.completed_at,
+                operations_table.c.started_at,
+            )
+            .where(
+                and_(
+                    operations_table.c.run_id == landscape_run_id,
+                    operations_table.c.status == "failed",
+                    operations_table.c.error_message.isnot(None),
+                )
+            )
+            .order_by(
+                operations_table.c.completed_at.desc().nulls_last(),
+                operations_table.c.started_at.desc(),
+                operations_table.c.operation_id.asc(),
+            )
+            .limit(1)
+        )
+        failure_row = conn.execute(failure_stmt).first()
+        failure_detail: RunDiagnosticFailureDetail | None = None
+        if failure_row is not None:
+            failed_at = failure_row.completed_at or failure_row.started_at
+            failure_detail = RunDiagnosticFailureDetail(
+                operation_id=failure_row.operation_id,
+                node_id=failure_row.node_id,
+                operation_type=failure_row.operation_type,
+                error_message=failure_row.error_message,
+                failed_at=failed_at,
+            )
+
         artifact_stmt = (
             select(
                 artifacts_table.c.artifact_id,
@@ -337,4 +378,5 @@ def load_run_diagnostics_from_db(
         ],
         operations=operations,
         artifacts=artifacts,
+        failure_detail=failure_detail,
     )

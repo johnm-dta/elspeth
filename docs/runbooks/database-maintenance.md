@@ -1,96 +1,54 @@
 # Runbook: Database Maintenance
 
-Maintain the audit database and payload store.
+Current as of 2026-05-20.
 
----
+Maintain the Landscape audit database and payload store without damaging
+ELSPETH's audit evidence.
 
-## Symptoms
+## When To Use
 
-- Audit database growing large
-- Slow query performance
-- Disk space warnings
-- Old runs no longer needed for compliance
+- The Landscape database is growing quickly.
+- Query performance has degraded.
+- Payload storage is approaching retention or capacity limits.
+- A deployment needs pre-maintenance backup and verification.
+- Historical audit evidence needs a retention decision.
 
----
+## Before Any Maintenance
 
-## Prerequisites
+1. Stop active writers or confirm the target database is a restored copy.
+2. Back up the database and payload store.
+3. Confirm legal/compliance retention requirements.
+4. Record any accepted audit limitation before deleting evidence.
 
-- Database access (SQLite file or PostgreSQL credentials)
-- Understanding of data retention requirements
-- Backup before any destructive operations
+See [Backup and Recovery](backup-and-recovery.md) for backup commands.
 
----
+## Assess Current State
 
-## Procedure
-
-### Rows-routed counter split deployment note (2026-05-02)
-
-The `rows_routed` counter split (`elspeth-5069612f3c`) is a runtime-state
-semantic migration even when the Landscape SQL schema does not change. Before
-the split, `token_outcomes.outcome='routed'` represented both gate
-`route_to_sink` MOVE rows and transform `on_error` DIVERT rows. After the
-split, new transform `on_error` rows are recorded as `routed_on_error`, so
-preserving an old Landscape audit database makes historical `routed` rows
-legacy ambiguous.
-
-Checkpoint files are also stale across this upgrade. They may contain serialized
-`RunResult`, `ExecutionCounters`, `AggregationFlushResult`, or progress payloads
-with the old single `rows_routed` shape. Delete the configured checkpoint
-files/directories before starting new code. Do not resume a pre-split checkpoint
-with post-split code.
-
-For dev, staging, and any pre-1.0 production deployment that accepts destructive
-pre-1.0 maintenance, stop the service, archive the current Landscape audit
-database and checkpoint directory if retention is required, then delete/recreate
-the Landscape audit database, sessions database, and checkpoint files/directories
-during the same deployment. Do not run new code against the old Landscape DB and
-then interpret pre-split `routed` rows as MOVE-only evidence.
-
-Two read surfaces cross a semantic boundary:
-
-- `ProgressEvent.rows_succeeded` before the rows_routed split is inflated:
-  routed rows are folded into the display-success count. After the split,
-  ``rows_succeeded`` reports only success-sink rows, and
-  ``rows_routed_success`` / ``rows_routed_failure`` are first-class fields on
-  the streaming progress payload (``web/execution/schemas.py::ProgressData``
-  and the engine ``contracts/cli.py::ProgressEvent``). Qualify any historical
-  streaming-progress evidence by commit context.
-- MCP `outcome_distribution["routed"]` before the split is legacy ambiguous;
-  after the split, transform on_error rows appear as `outcome_distribution["routed_on_error"]`.
-
-If an environment must preserve the old Landscape database, checkpoint archive,
-or generated audit/progress/MCP evidence, record an accepted audit limitation in
-the release notes: pre-split `token_outcomes.outcome='routed'`, pre-split
-`ProgressEvent.rows_succeeded`, and pre-split MCP `outcome_distribution["routed"]`
-require date/commit-context qualification before being used as audit evidence.
-This is an explicit limitation, not a migration shim.
-
-### Step 1: Assess Current State
-
-**SQLite:**
+SQLite database size:
 
 ```bash
-# Database file size
 ls -lh runs/audit.db
+```
 
-# Row counts
+Core row counts:
+
+```bash
 sqlite3 runs/audit.db "
-  SELECT 'runs' as table_name, COUNT(*) as row_count FROM runs
-  UNION ALL
-  SELECT 'rows', COUNT(*) FROM rows
-  UNION ALL
-  SELECT 'tokens', COUNT(*) FROM tokens
-  UNION ALL
-  SELECT 'node_states', COUNT(*) FROM node_states
-  UNION ALL
-  SELECT 'checkpoints', COUNT(*) FROM checkpoints
-  UNION ALL
-  SELECT 'artifacts', COUNT(*) FROM artifacts;
+  SELECT 'runs' AS table_name, COUNT(*) AS row_count FROM runs
+  UNION ALL SELECT 'rows', COUNT(*) FROM rows
+  UNION ALL SELECT 'tokens', COUNT(*) FROM tokens
+  UNION ALL SELECT 'token_outcomes', COUNT(*) FROM token_outcomes
+  UNION ALL SELECT 'node_states', COUNT(*) FROM node_states
+  UNION ALL SELECT 'calls', COUNT(*) FROM calls
+  UNION ALL SELECT 'artifacts', COUNT(*) FROM artifacts;
 "
+```
 
-# Runs by date
+Runs by date:
+
+```bash
 sqlite3 runs/audit.db "
-  SELECT DATE(started_at) as run_date, COUNT(*) as run_count
+  SELECT DATE(started_at) AS run_date, COUNT(*) AS run_count
   FROM runs
   GROUP BY DATE(started_at)
   ORDER BY run_date DESC
@@ -98,209 +56,157 @@ sqlite3 runs/audit.db "
 "
 ```
 
-**PostgreSQL:**
+PostgreSQL table sizes:
 
 ```bash
 psql -d elspeth -c "
   SELECT
     schemaname,
     tablename,
-    pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) as size
+    pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) AS size
   FROM pg_tables
   WHERE schemaname = 'public'
   ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC;
 "
 ```
 
-### Step 2: Identify Retention Candidates
+## Payload Retention
 
-Find runs older than retention period (e.g., 90 days):
+Use the maintained `elspeth purge` command for payload retention. Do not delete
+payload files with `find -delete`; the purge command discovers references from
+Landscape and updates reproducibility grades where applicable.
+
+Dry-run:
 
 ```bash
-sqlite3 runs/audit.db "
-  SELECT run_id, started_at, status,
-         (SELECT COUNT(*) FROM rows WHERE rows.run_id = runs.run_id) as row_count
-  FROM runs
-  WHERE started_at < datetime('now', '-90 days')
-  ORDER BY started_at;
-"
+elspeth purge --dry-run --database runs/audit.db --payload-dir .elspeth/payloads
 ```
 
-### Step 3: Export Before Deletion (Optional)
-
-If compliance requires archives:
+Execute:
 
 ```bash
-# Export run data to JSON
-sqlite3 runs/audit.db "
-  SELECT json_object(
-    'run_id', run_id,
-    'config', config,
-    'status', status,
-    'started_at', started_at,
-    'completed_at', completed_at
-  )
-  FROM runs
-  WHERE run_id = '<RUN_ID>';
-" > run_archive.json
-
-# Export all processing states for a run
-sqlite3 -header -csv runs/audit.db "
-  SELECT ns.*, t.row_id, t.branch_name
-  FROM node_states ns
-  JOIN tokens t ON ns.token_id = t.token_id
-  JOIN rows r ON t.row_id = r.row_id
-  WHERE r.run_id = '<RUN_ID>';
-" > node_states_archive.csv
+elspeth purge \
+  --database runs/audit.db \
+  --payload-dir .elspeth/payloads \
+  --retention-days 90 \
+  --yes
 ```
 
-### Step 4: Delete Old Data
+If the payload store path is configured in `settings.yaml`, the command can read
+it from settings when run from the pipeline directory.
 
-**⚠️ CAUTION: DESTRUCTIVE OPERATION**
+## Audit Database Retention
 
-This procedure permanently deletes audit data. Before proceeding:
-- [ ] Verify you have a recent backup
-- [ ] Confirm retention period meets compliance requirements
-- [ ] Test the deletion query with `SELECT COUNT(*)` first
-- [ ] Ensure no pipelines are currently running
+Do not hand-delete rows from Landscape tables as routine maintenance. Landscape
+uses composite keys, partial indexes, cross-table evidence, and Tier-1 integrity
+assumptions; ad hoc deletes can produce a plausible but false audit story.
 
-```bash
-# Backup first
-cp runs/audit.db runs/audit.db.backup.$(date +%Y%m%d)
+If an environment must retire audit database records, create a dedicated
+retention procedure that:
 
-# Delete runs older than 90 days (cascades to related tables)
-# Execute statements one at a time due to foreign key constraints
-sqlite3 runs/audit.db "DELETE FROM checkpoints WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
-sqlite3 runs/audit.db "DELETE FROM routing_events WHERE state_id IN (SELECT state_id FROM node_states WHERE token_id IN (SELECT token_id FROM tokens WHERE row_id IN (SELECT row_id FROM rows WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days')))));"
-sqlite3 runs/audit.db "DELETE FROM token_outcomes WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
-sqlite3 runs/audit.db "DELETE FROM node_states WHERE token_id IN (SELECT token_id FROM tokens WHERE row_id IN (SELECT row_id FROM rows WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'))));"
-sqlite3 runs/audit.db "DELETE FROM tokens WHERE row_id IN (SELECT row_id FROM rows WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days')));"
-sqlite3 runs/audit.db "DELETE FROM artifacts WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
-sqlite3 runs/audit.db "DELETE FROM rows WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
-sqlite3 runs/audit.db "DELETE FROM nodes WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
-sqlite3 runs/audit.db "DELETE FROM edges WHERE run_id IN (SELECT run_id FROM runs WHERE started_at < datetime('now', '-90 days'));"
-sqlite3 runs/audit.db "DELETE FROM runs WHERE started_at < datetime('now', '-90 days');"
-```
+- states the legal retention basis
+- snapshots the full database before deletion
+- runs against a restored copy first
+- proves foreign-key integrity after deletion
+- proves token-outcome completeness after deletion
+- records any accepted audit limitation in release or incident evidence
 
-### Step 5: Vacuum the Database
+Use [Token Outcome Assurance](../contracts/token-outcomes/README.md) to verify
+token lifecycle integrity after any retention migration.
 
-Reclaim disk space after deletion:
+## Vacuum And Analyze
 
-**SQLite:**
+Run these after supported maintenance operations.
+
+SQLite:
 
 ```bash
+sqlite3 runs/audit.db "PRAGMA integrity_check;"
 sqlite3 runs/audit.db "VACUUM;"
+sqlite3 runs/audit.db "ANALYZE;"
 ```
 
-**PostgreSQL:**
+PostgreSQL:
 
 ```bash
 psql -d elspeth -c "VACUUM ANALYZE;"
 ```
 
-### Step 6: Clean Payload Store
+## PostgreSQL-Specific Checks
 
-Remove orphaned payloads:
+Check connection count:
 
-```bash
-# Find payload retention setting
-cat pipeline.yaml | grep -A3 "payload_store:"
-
-# Delete payloads older than retention
-find .elspeth/payloads -type f -mtime +90 -delete
+```sql
+SELECT count(*) FROM pg_stat_activity WHERE datname = 'elspeth';
 ```
 
----
+Check bloat/table size:
+
+```sql
+SELECT
+  schemaname,
+  tablename,
+  pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) AS total_size,
+  pg_size_pretty(pg_relation_size(schemaname || '.' || tablename)) AS table_size
+FROM pg_tables
+WHERE schemaname = 'public';
+```
+
+Reindex only during a planned maintenance window:
+
+```bash
+psql -d elspeth -c "REINDEX DATABASE elspeth;"
+```
+
+## Historical Semantic Boundary
+
+Runs created before the rows-routed counter split and before ADR-019's two-axis
+terminal model require date/commit-context qualification. Do not interpret old
+single-axis `routed` evidence as if it used the current
+`TerminalOutcome`/`TerminalPath` model.
+
+If old Landscape data must be preserved for audit, retain the database snapshot
+and document the limitation rather than migrating it silently.
 
 ## Maintenance Schedule
 
 | Task | Frequency | Command |
 |------|-----------|---------|
 | Check database size | Weekly | `ls -lh runs/audit.db` |
-| Delete old runs | Monthly | See Step 4 |
-| Vacuum database | After deletions | `sqlite3 runs/audit.db "VACUUM;"` |
-| Clean payload store | Monthly | `find .elspeth/payloads -mtime +90 -delete` |
-
----
-
-## Performance Optimization
-
-### Add Indexes (if missing)
-
-```sql
--- Index for querying rows by run
-CREATE INDEX IF NOT EXISTS idx_rows_run_id ON rows(run_id);
-
--- Index for querying node states by token
-CREATE INDEX IF NOT EXISTS idx_node_states_token ON node_states(token_id);
-
--- Index for date-based queries
-CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at);
-```
-
-### Analyze Tables
-
-```bash
-sqlite3 runs/audit.db "ANALYZE;"
-```
-
----
-
-## PostgreSQL-Specific Tasks
-
-### Check for Bloat
-
-```sql
-SELECT
-  schemaname,
-  tablename,
-  pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) as total_size,
-  pg_size_pretty(pg_relation_size(schemaname || '.' || tablename)) as table_size
-FROM pg_tables
-WHERE schemaname = 'public';
-```
-
-### Reindex
-
-```bash
-psql -d elspeth -c "REINDEX DATABASE elspeth;"
-```
-
-### Connection Pool Monitoring
-
-```sql
-SELECT count(*) FROM pg_stat_activity WHERE datname = 'elspeth';
-```
-
----
+| Check row counts | Weekly | Core row-count SQL above |
+| Payload purge dry-run | Monthly | `elspeth purge --dry-run --database runs/audit.db` |
+| Payload purge | Per retention policy | `elspeth purge --database runs/audit.db --retention-days 90 --yes` |
+| SQLite integrity check | Before/after maintenance | `sqlite3 runs/audit.db "PRAGMA integrity_check;"` |
+| SQLite vacuum/analyze | After supported deletion | `sqlite3 runs/audit.db "VACUUM; ANALYZE;"` |
 
 ## Troubleshooting
 
-### Database Locked (SQLite)
+### Database Locked
 
 ```bash
-# Check for active connections
 fuser runs/audit.db
-
-# Wait for lock to release or kill process
 ```
+
+Wait for the active writer to finish. Kill a process only under incident
+response procedure.
 
 ### Slow Queries
 
-1. Check for missing indexes
-2. Run ANALYZE
-3. Consider partitioning large tables (PostgreSQL)
+1. Run `ANALYZE`.
+2. Check query plans.
+3. For PostgreSQL, inspect table size and indexes.
+4. For SQLite, consider whether the workload should move to PostgreSQL.
 
 ### Disk Full
 
-1. Stop running pipelines
-2. Delete old runs (Step 4)
-3. Vacuum (Step 5)
-4. Consider moving to larger storage
-
----
+1. Stop active writers.
+2. Take a backup if possible.
+3. Run payload purge dry-run and then purge if policy permits.
+4. Move backups/payloads to larger storage.
+5. Vacuum only after supported deletion.
 
 ## See Also
 
 - [Backup and Recovery](backup-and-recovery.md)
+- [Incident Response](incident-response.md)
 - [Configuration Reference](../reference/configuration.md#landscape-settings-audit-trail)

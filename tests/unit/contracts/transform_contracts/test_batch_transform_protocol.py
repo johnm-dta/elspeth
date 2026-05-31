@@ -106,6 +106,7 @@ class _BatchContractExemplarTransform(BaseTransform, BatchTransformMixin):
     """
 
     name = "batch_contract_exemplar"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _BatchContractInputSchema
     output_schema: type[PluginSchema] = _BatchContractOutputSchema
     plugin_version = "1.0.0"

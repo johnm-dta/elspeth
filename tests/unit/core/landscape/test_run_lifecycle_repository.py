@@ -16,17 +16,28 @@ from __future__ import annotations
 import json
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
-from elspeth.contracts import ExportStatus, FieldContract, ReproducibilityGrade, RunStatus, SchemaContract, SecretResolutionInput
+from elspeth.contracts import (
+    Determinism,
+    ExportStatus,
+    FieldContract,
+    ReproducibilityGrade,
+    RunStatus,
+    SchemaContract,
+    SecretResolutionInput,
+)
 from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
 from elspeth.core.dependency_config import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.core.landscape._database_ops import DatabaseOps
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.model_loaders import RunLoader
-from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
-from elspeth.core.landscape.schema import runs_table
+from elspeth.core.landscape.run_lifecycle_repository import (
+    RunLifecycleRepository,
+    is_valid_sha256_hex,
+)
+from elspeth.core.landscape.schema import run_attributions_table, runs_table
 from tests.fixtures.landscape import make_factory, make_landscape_db
 
 
@@ -100,6 +111,42 @@ class TestBeginRunDirect:
                 canonical_version="v1",
                 run_id="completed-at-begin",
                 status=RunStatus.COMPLETED,
+            )
+
+    def test_begin_run_records_web_attribution_without_changing_config_hash(self) -> None:
+        """User attribution is audit metadata, not part of the pipeline config hash."""
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        config = {"pipeline": "test"}
+
+        attributed = repo.begin_run(
+            config=config,
+            canonical_version="v1",
+            run_id="attributed-run",
+            initiated_by_user_id="alice",
+            auth_provider_type="local",
+        )
+        unattributed = repo.begin_run(config=config, canonical_version="v1", run_id="unattributed-run")
+
+        with db.read_only_connection() as conn:
+            row = conn.execute(select(run_attributions_table).where(run_attributions_table.c.run_id == "attributed-run")).one()
+
+        assert attributed.config_hash == unattributed.config_hash
+        assert row.initiated_by_user_id == "alice"
+        assert row.auth_provider_type == "local"
+
+    def test_begin_run_rejects_partial_web_attribution(self) -> None:
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+
+        with pytest.raises(AuditIntegrityError, match="initiated_by_user_id"):
+            repo.begin_run(
+                config={"pipeline": "test"},
+                canonical_version="v1",
+                run_id="partial-attribution",
+                auth_provider_type="local",
             )
 
 
@@ -864,6 +911,30 @@ class TestUpdateRunStatus:
         with pytest.raises(AuditIntegrityError, match="complete_run"):
             repo.update_run_status("run-1", RunStatus.COMPLETED)
 
+    @pytest.mark.parametrize("status", [RunStatus.COMPLETED_WITH_FAILURES, RunStatus.EMPTY])
+    def test_success_terminal_status_rejected(self, status: RunStatus) -> None:
+        """Successful terminal statuses must go through complete_run()."""
+        _, repo = _make_repo()
+        with pytest.raises(AuditIntegrityError, match="complete_run"):
+            repo.update_run_status("run-1", status)
+
+    @pytest.mark.parametrize("status", [RunStatus.COMPLETED_WITH_FAILURES, RunStatus.EMPTY])
+    def test_success_terminal_to_running_rejected(self, status: RunStatus) -> None:
+        """Successful terminal runs are immutable — cannot be reopened."""
+        _, repo = _make_repo()
+        repo.complete_run("run-1", status)
+        completed = repo.get_run("run-1")
+        assert completed is not None
+        assert completed.completed_at is not None
+
+        with pytest.raises(AuditIntegrityError, match=status.value):
+            repo.update_run_status("run-1", RunStatus.RUNNING)
+
+        reread = repo.get_run("run-1")
+        assert reread is not None
+        assert reread.status == status
+        assert reread.completed_at == completed.completed_at
+
     def test_failed_to_running_allowed_for_resume(self) -> None:
         """FAILED→RUNNING is the resume path — must be allowed."""
         _, repo = _make_repo()
@@ -937,7 +1008,7 @@ class TestFinalizeRunEdgeCases:
 
     def test_finalize_nondeterministic_run(self) -> None:
         """finalize_run with nondeterministic nodes yields REPLAY_REPRODUCIBLE."""
-        from elspeth.contracts import Determinism, NodeType
+        from elspeth.contracts import NodeType
         from elspeth.contracts.schema import SchemaConfig
 
         db = make_landscape_db()
@@ -1050,4 +1121,106 @@ class TestPreflightAuditWriteErrors:
                 reachable=True,
                 count=1,
                 message="ok",
+            )
+
+
+class TestSha256HexValidator:
+    """Pin the shape of the sha256-hex validator used by Tier-1 write guards."""
+
+    def test_canonical_digest_is_accepted(self) -> None:
+        """A real hashlib.sha256 hex digest passes validation."""
+        import hashlib
+
+        digest = hashlib.sha256(b"audit-anchor").hexdigest()
+        assert is_valid_sha256_hex(digest)
+
+    def test_all_zero_hex_is_accepted(self) -> None:
+        """The conftest synthetic snapshot ('0' * 64) must pass — many tests rely on it."""
+        assert is_valid_sha256_hex("0" * 64)
+
+    def test_non_hex_string_is_rejected(self) -> None:
+        """Non-hex characters fail even at the right length."""
+        # 64 chars but with non-hex 'z' — rejected.
+        assert not is_valid_sha256_hex("z" * 64)
+        # The spec's example: a non-empty non-hex string that the old
+        # ``.strip()`` guard would have admitted.
+        assert not is_valid_sha256_hex("not-a-sha")
+
+    def test_wrong_length_is_rejected(self) -> None:
+        """60 chars of hex is still rejected — exact length required."""
+        assert not is_valid_sha256_hex("a" * 60)
+        assert not is_valid_sha256_hex("a" * 65)
+
+    def test_uppercase_hex_is_rejected(self) -> None:
+        """sha256 hexdigest is lowercase by contract; uppercase signals a bug."""
+        assert not is_valid_sha256_hex("A" * 64)
+
+    def test_empty_and_whitespace_rejected(self) -> None:
+        assert not is_valid_sha256_hex("")
+        assert not is_valid_sha256_hex(" " * 64)
+
+
+class TestBeginRunOpenrouterCatalogSnapshotValidation:
+    """Pin the write-side guard for ``openrouter_catalog_sha256``.
+
+    The guard is the audit-trail integrity check: a non-empty but
+    non-hex string must crash rather than corrupting the runs row.
+    """
+
+    def test_begin_run_rejects_non_hex_sha256(self) -> None:
+        """A non-empty non-hex string passes ``.strip()`` but fails hex validation."""
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        with pytest.raises(AuditIntegrityError, match="64 lowercase hex chars"):
+            repo.begin_run(
+                config={"pipeline": "test"},
+                canonical_version="v1",
+                run_id="bad-sha-run",
+                openrouter_catalog_sha256="not-a-sha",
+                openrouter_catalog_source="bundled",
+            )
+
+    def test_begin_run_rejects_none_sha256(self) -> None:
+        """``None`` fails the ``type(...) is not str`` guard inside the validator."""
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        with pytest.raises(AuditIntegrityError, match="64 lowercase hex chars"):
+            repo.begin_run(
+                config={"pipeline": "test"},
+                canonical_version="v1",
+                run_id="none-sha-run",
+                openrouter_catalog_sha256=None,  # type: ignore[arg-type]
+                openrouter_catalog_source="bundled",
+            )
+
+
+class TestWriteRepositoryOpenrouterCatalogSnapshotValidation:
+    """Pin the same hex-shape guard at the synthesised-run write site."""
+
+    def test_record_synthesised_run_rejects_non_hex_sha256(self) -> None:
+        from datetime import UTC, datetime
+
+        from elspeth.contracts import NodeType
+        from elspeth.contracts.synthesised_audit import SynthesisedNodeSpec
+        from elspeth.core.landscape.write_repository import LandscapeWriteRepository
+
+        db = make_landscape_db()
+        repo = LandscapeWriteRepository(db)
+        node_specs = (
+            SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv_file", plugin_version="1.0"),
+            SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="json_file", plugin_version="1.0"),
+        )
+        with pytest.raises(LandscapeRecordError, match="64 lowercase hex chars"):
+            repo.record_synthesised_run(
+                pipeline_yaml="version: 1",
+                rows=(),
+                source_data_hash="0" * 64,
+                llm_call_count=0,
+                node_specs=node_specs,
+                started_at=datetime.now(UTC),
+                metadata={"seeded_from_cache": True, "cache_key": "ck"},
+                openrouter_catalog_sha256="not-a-sha",
+                openrouter_catalog_source="bundled",
             )

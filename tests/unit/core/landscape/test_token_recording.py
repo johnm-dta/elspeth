@@ -6,11 +6,16 @@ from elspeth.contracts import NodeStateStatus, NodeType, TerminalOutcome, Termin
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema import SchemaConfig
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+
+# Minimal contract for tests that only care about token lifecycle, not contract content.
+# SchemaContract.from_checkpoint validates the hash — this round-trips correctly.
+_MINIMAL_CONTRACT = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 
 
 def _setup(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFactory]:
@@ -373,6 +378,8 @@ class TestCoalesceTokens:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-1"), TokenRef(token_id=token_b.token_id, run_id="run-1")],
             row_id=row.row_id,
+            merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
         assert merged.token_id is not None
         assert merged.row_id == row.row_id
@@ -384,6 +391,8 @@ class TestCoalesceTokens:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-1"), TokenRef(token_id=token_b.token_id, run_id="run-1")],
             row_id=row.row_id,
+            merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
         assert merged.join_group_id is not None
 
@@ -399,6 +408,8 @@ class TestCoalesceTokens:
                 TokenRef(token_id=token_c.token_id, run_id="run-1"),
             ],
             row_id=row.row_id,
+            merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
         assert merged.token_id is not None
         assert merged.join_group_id is not None
@@ -410,7 +421,9 @@ class TestCoalesceTokens:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-1"), TokenRef(token_id=token_b.token_id, run_id="run-1")],
             row_id=row.row_id,
+            merged_payload={"merged": True},
             step_in_pipeline=5,
+            merged_contract=_MINIMAL_CONTRACT,
         )
         assert merged.step_in_pipeline == 5
 
@@ -424,7 +437,8 @@ class TestExpandToken:
         children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=4,
+            child_payloads=[{"item": i} for i in range(4)],
+            output_contract=_MINIMAL_CONTRACT,
         )
         assert len(children) == 4
         assert expand_group_id is not None
@@ -435,7 +449,8 @@ class TestExpandToken:
         children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=3,
+            child_payloads=[{"item": i} for i in range(3)],
+            output_contract=_MINIMAL_CONTRACT,
         )
         assert all(c.expand_group_id == expand_group_id for c in children)
 
@@ -445,7 +460,8 @@ class TestExpandToken:
         children, _eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=2,
+            child_payloads=[{"item": 1}, {"item": 2}],
+            output_contract=_MINIMAL_CONTRACT,
         )
         assert all(c.row_id == row.row_id for c in children)
 
@@ -455,7 +471,8 @@ class TestExpandToken:
         _children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=3,
+            child_payloads=[{"item": i} for i in range(3)],
+            output_contract=_MINIMAL_CONTRACT,
         )
         outcome = factory.data_flow.get_token_outcome(token.token_id)
         assert outcome is not None
@@ -471,17 +488,8 @@ class TestExpandToken:
             factory.data_flow.expand_token(
                 parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
                 row_id=row.row_id,
-                count=0,
-            )
-
-    def test_count_negative_raises_value_error(self):
-        _db, factory = _setup()
-        row, token = _make_row(factory)
-        with pytest.raises(ValueError):
-            factory.data_flow.expand_token(
-                parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
-                row_id=row.row_id,
-                count=-1,
+                child_payloads=[],
+                output_contract=_MINIMAL_CONTRACT,
             )
 
     def test_record_parent_outcome_false_skips_outcome(self):
@@ -490,8 +498,9 @@ class TestExpandToken:
         _children, _eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=2,
+            child_payloads=[{"item": 1}, {"item": 2}],
             record_parent_outcome=False,
+            output_contract=_MINIMAL_CONTRACT,
         )
         outcome = factory.data_flow.get_token_outcome(token.token_id)
         assert outcome is None
@@ -502,7 +511,8 @@ class TestExpandToken:
         children, _eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=5,
+            child_payloads=[{"item": i} for i in range(5)],
+            output_contract=_MINIMAL_CONTRACT,
         )
         token_ids = [c.token_id for c in children]
         assert len(set(token_ids)) == 5
@@ -513,8 +523,9 @@ class TestExpandToken:
         children, _eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=2,
+            child_payloads=[{"item": 1}, {"item": 2}],
             step_in_pipeline=7,
+            output_contract=_MINIMAL_CONTRACT,
         )
         assert all(c.step_in_pipeline == 7 for c in children)
 
@@ -524,7 +535,8 @@ class TestExpandToken:
         children, expand_group_id = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=1,
+            child_payloads=[{"item": 1}],
+            output_contract=_MINIMAL_CONTRACT,
         )
         assert len(children) == 1
         assert expand_group_id is not None
@@ -1297,7 +1309,8 @@ class TestCrossRunContaminationPrevention:
             factory.data_flow.expand_token(
                 parent_ref=TokenRef(token_id=token_a.token_id, run_id="run-B"),
                 row_id=row_a.row_id,
-                count=3,
+                child_payloads=[{"item": i} for i in range(3)],
+                output_contract=_MINIMAL_CONTRACT,
             )
 
     def test_expand_token_rejects_wrong_row_id(self):
@@ -1322,7 +1335,8 @@ class TestCrossRunContaminationPrevention:
             factory.data_flow.expand_token(
                 parent_ref=TokenRef(token_id=token_a.token_id, run_id="run-A"),
                 row_id=row_b.row_id,
-                count=2,
+                child_payloads=[{"item": 1}, {"item": 2}],
+                output_contract=_MINIMAL_CONTRACT,
             )
 
     def test_expand_token_accepts_correct_ownership(self):
@@ -1340,7 +1354,8 @@ class TestCrossRunContaminationPrevention:
         children, eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token_a.token_id, run_id="run-A"),
             row_id=row_a.row_id,
-            count=3,
+            child_payloads=[{"item": i} for i in range(3)],
+            output_contract=_MINIMAL_CONTRACT,
         )
         assert len(children) == 3
         assert eg is not None
@@ -1371,6 +1386,8 @@ class TestCrossRunContaminationPrevention:
             factory.data_flow.coalesce_tokens(
                 parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-A"), TokenRef(token_id=token_b.token_id, run_id="run-B")],
                 row_id=row_a.row_id,
+                merged_payload={"merged": True},
+                merged_contract=_MINIMAL_CONTRACT,
             )
 
     def test_coalesce_tokens_rejects_wrong_row_id(self):
@@ -1397,6 +1414,8 @@ class TestCrossRunContaminationPrevention:
             factory.data_flow.coalesce_tokens(
                 parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-A"), TokenRef(token_id=token_b.token_id, run_id="run-A")],
                 row_id=row_b.row_id,
+                merged_payload={"merged": True},
+                merged_contract=_MINIMAL_CONTRACT,
             )
 
     def test_coalesce_tokens_accepts_correct_ownership(self):
@@ -1415,6 +1434,8 @@ class TestCrossRunContaminationPrevention:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-A"), TokenRef(token_id=token_b.token_id, run_id="run-A")],
             row_id=row_a.row_id,
+            merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
         assert merged.token_id is not None
         assert merged.run_id == "run-A"
@@ -1463,7 +1484,8 @@ class TestTokenRunIdConsistency:
         children, _eg = factory.data_flow.expand_token(
             parent_ref=TokenRef(token_id=token.token_id, run_id="run-1"),
             row_id=row.row_id,
-            count=3,
+            child_payloads=[{"item": i} for i in range(3)],
+            output_contract=_MINIMAL_CONTRACT,
         )
         assert all(c.run_id == "run-1" for c in children)
 
@@ -1475,6 +1497,8 @@ class TestTokenRunIdConsistency:
         merged = factory.data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=token_a.token_id, run_id="run-1"), TokenRef(token_id=token_b.token_id, run_id="run-1")],
             row_id=row.row_id,
+            merged_payload={"merged": True},
+            merged_contract=_MINIMAL_CONTRACT,
         )
         assert merged.run_id == "run-1"
 

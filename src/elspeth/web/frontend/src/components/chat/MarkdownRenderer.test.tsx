@@ -1,7 +1,9 @@
+import { readFileSync } from "node:fs";
+
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MarkdownRenderer } from "./MarkdownRenderer";
+import { MarkdownRenderer, mermaidThemeFromTokens } from "./MarkdownRenderer";
 
 describe("MarkdownRenderer", () => {
   it("renders plain text as a paragraph", () => {
@@ -38,6 +40,15 @@ describe("MarkdownRenderer", () => {
     expect(screen.getByText("Col A")).toBeInTheDocument();
   });
 
+  it("renders external links with safe new-tab attributes", () => {
+    render(<MarkdownRenderer content="[Docs](https://example.com/docs)" />);
+
+    const link = screen.getByRole("link", { name: "Docs" });
+    expect(link).toHaveAttribute("href", "https://example.com/docs");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
   it("renders a mermaid container for mermaid code blocks", () => {
     const content = "```mermaid\ngraph TD\n  A --> B\n```";
     const { container } = render(<MarkdownRenderer content={content} />);
@@ -52,6 +63,49 @@ describe("MarkdownRenderer", () => {
     for (const block of codeBlocks) {
       expect(block.textContent).not.toContain("graph TD");
     }
+  });
+});
+
+describe("MarkdownRenderer Mermaid theme", () => {
+  it("derives Mermaid theme variables from CSS tokens", () => {
+    document.documentElement.style.setProperty(
+      "--color-surface-elevated",
+      "rgb(1, 2, 3)",
+    );
+    document.documentElement.style.setProperty("--color-text", "rgb(4, 5, 6)");
+    document.documentElement.style.setProperty(
+      "--color-border-strong",
+      "rgba(7, 8, 9, 0.4)",
+    );
+    document.documentElement.style.setProperty(
+      "--color-text-muted",
+      "rgb(10, 11, 12)",
+    );
+    document.documentElement.style.setProperty(
+      "--color-surface-raised",
+      "rgb(13, 14, 15)",
+    );
+    document.documentElement.style.setProperty("--color-bg", "rgb(16, 17, 18)");
+
+    const config = mermaidThemeFromTokens("dark");
+
+    expect(config.theme).toBe("dark");
+    expect(config.themeVariables).toMatchObject({
+      primaryColor: "rgb(1, 2, 3)",
+      primaryTextColor: "rgb(4, 5, 6)",
+      primaryBorderColor: "rgba(7, 8, 9, 0.4)",
+      lineColor: "rgb(10, 11, 12)",
+      secondaryColor: "rgb(13, 14, 15)",
+      tertiaryColor: "rgb(16, 17, 18)",
+    });
+  });
+
+  it("does not hardcode Mermaid theme hex literals in the renderer", () => {
+    const source = readFileSync("src/components/chat/MarkdownRenderer.tsx", "utf8");
+
+    expect(source).not.toMatch(/primaryColor:\s*"#[0-9a-fA-F]+"/);
+    expect(source).not.toMatch(/primaryTextColor:\s*"#[0-9a-fA-F]+"/);
+    expect(source).not.toMatch(/primaryBorderColor:\s*"#[0-9a-fA-F]+"/);
   });
 });
 

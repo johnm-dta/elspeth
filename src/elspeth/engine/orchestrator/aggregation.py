@@ -25,6 +25,7 @@ from elspeth.engine.orchestrator.types import (
     ExecutionCounters,
     PendingTokenMap,
     PipelineConfig,
+    RowProcessorHandle,
 )
 
 if TYPE_CHECKING:
@@ -36,7 +37,6 @@ if TYPE_CHECKING:
     from elspeth.contracts.results import RowResult
     from elspeth.core.landscape.execution_repository import ExecutionRepository
     from elspeth.engine.dag_navigator import WorkItem
-    from elspeth.engine.processor import RowProcessor
 
 
 def find_aggregation_transform(
@@ -161,7 +161,7 @@ def rebind_checkpoint_batch_ids(
 def _process_flush_results(
     completed_results: Sequence[RowResult],
     work_items: Sequence[WorkItem],
-    processor: RowProcessor,
+    processor: RowProcessorHandle,
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,
@@ -188,7 +188,7 @@ def _process_flush_results(
 
 def check_aggregation_timeouts(
     config: PipelineConfig,
-    processor: RowProcessor,
+    processor: RowProcessorHandle,
     ctx: PluginContext,
     pending_tokens: PendingTokenMap,
     agg_transform_lookup: dict[str, AggNodeEntry] | None = None,
@@ -222,7 +222,7 @@ def check_aggregation_timeouts(
 
     Args:
         config: Pipeline configuration with aggregation_settings
-        processor: RowProcessor with public aggregation timeout API
+        processor: RowProcessor-compatible handle with public aggregation timeout API
         ctx: Plugin context for transform execution
         pending_tokens: Dict of sink_name -> tokens to append results to
         agg_transform_lookup: Pre-computed dict mapping node_id_str ->
@@ -288,7 +288,7 @@ def check_aggregation_timeouts(
 
 def flush_remaining_aggregation_buffers(
     config: PipelineConfig,
-    processor: RowProcessor,
+    processor: RowProcessorHandle,
     ctx: PluginContext,
     pending_tokens: PendingTokenMap,
 ) -> AggregationFlushResult:
@@ -310,7 +310,7 @@ def flush_remaining_aggregation_buffers(
 
     Args:
         config: Pipeline configuration with aggregation_settings
-        processor: RowProcessor with public aggregation facades
+        processor: RowProcessor-compatible handle with public aggregation facades
         ctx: Plugin context for transform execution
         pending_tokens: Dict of sink_name -> tokens to append results to
 

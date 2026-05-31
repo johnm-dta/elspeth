@@ -55,7 +55,7 @@ class TestLLMConfigSchema:
         """
         schema = LLMTransform.get_config_schema()
         azure = schema["$defs"]["AzureOpenAIConfig"]
-        assert set(azure["required"]) >= {"deployment_name", "endpoint", "api_key", "template"}
+        assert set(azure["required"]) >= {"deployment_name", "endpoint", "api_key", "prompt_template"}
 
     def test_openrouter_variant_publishes_required_provider_fields(self) -> None:
         """Mirror of the Azure test for the other provider — fail loudly if the
@@ -65,7 +65,7 @@ class TestLLMConfigSchema:
         """
         schema = LLMTransform.get_config_schema()
         openrouter = schema["$defs"]["OpenRouterConfig"]
-        assert set(openrouter["required"]) >= {"api_key", "model", "template"}
+        assert set(openrouter["required"]) >= {"api_key", "model", "prompt_template"}
 
     def test_matches_typeadapter_fixture(self) -> None:
         """Schema drift detector: compare against an explicit TypeAdapter.
@@ -138,7 +138,7 @@ class TestLLMConfigSchema:
         schema = LLMTransform.get_config_schema()
         azure_valid = {
             "provider": "azure",
-            "template": "hello",
+            "prompt_template": "hello",
             "api_key": "k",
             "endpoint": "https://example.invalid/",
             "deployment_name": "d",

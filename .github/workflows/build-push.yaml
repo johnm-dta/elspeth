@@ -12,7 +12,6 @@
 # Tags:
 #   - sha-<commit>  (immutable, for CI)
 #   - v1.2.3        (semantic version, for releases)
-#   - latest        (most recent main, avoid in production)
 
 name: Build and Push
 
@@ -49,6 +48,9 @@ concurrency:
 env:
   # Image name (without registry prefix)
   IMAGE_NAME: elspeth
+  # Commit that the built image represents. For workflow_run, github.sha is the
+  # default-branch tip, not necessarily the completed CI run's commit.
+  IMAGE_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
   # Platforms to build for
   PLATFORMS: linux/amd64,linux/arm64
 
@@ -58,7 +60,7 @@ jobs:
   # ===========================================================================
   build-push:
     name: Build and Push
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
     # Only run if CI passed (for workflow_run trigger) or always for tags/dispatch
     if: |
       github.event_name == 'push' ||
@@ -66,8 +68,10 @@ jobs:
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
     permissions:
+      actions: read
       contents: read
       packages: write
+      id-token: write
 
     outputs:
       image_tag: ${{ steps.meta.outputs.version }}
@@ -76,13 +80,41 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ env.IMAGE_SHA }}
+
+      - name: Verify CI success for image commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_SHA: ${{ env.IMAGE_SHA }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "Workflow run trigger already supplied successful CI conclusion for ${IMAGE_SHA}."
+            exit 0
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${IMAGE_SHA}/check-runs?check_name=CI%20Success" > ci-success-check-runs.json
+          python3 - <<'PY'
+          import json
+          import sys
+
+          with open("ci-success-check-runs.json", encoding="utf-8") as handle:
+              payload = json.load(handle)
+
+          runs = payload.get("check_runs", [])
+          successes = [run for run in runs if run.get("conclusion") == "success"]
+          if not successes:
+              print("No successful CI Success check run found for IMAGE_SHA; refusing to publish image.", file=sys.stderr)
+              sys.exit(1)
+          print(f"Found successful CI Success check for IMAGE_SHA ({successes[0].get('html_url', 'no URL')}).")
+          PY
 
       - name: Set up QEMU (for multi-platform builds)
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       # -----------------------------------------------------------------------
       # Determine which registries to push to
@@ -97,21 +129,21 @@ jobs:
           REGISTRY="${INPUT_REGISTRY:-both}"
 
           if [[ "$REGISTRY" == "ghcr" || "$REGISTRY" == "both" ]]; then
-            echo "push_ghcr=true" >> $GITHUB_OUTPUT
+            echo "push_ghcr=true" >> "$GITHUB_OUTPUT"
           else
-            echo "push_ghcr=false" >> $GITHUB_OUTPUT
+            echo "push_ghcr=false" >> "$GITHUB_OUTPUT"
           fi
 
           if [[ "$REGISTRY" == "acr" || "$REGISTRY" == "both" ]]; then
             # Only push to ACR if credentials are configured
             if [[ -n "$ACR_REGISTRY" ]]; then
-              echo "push_acr=true" >> $GITHUB_OUTPUT
+              echo "push_acr=true" >> "$GITHUB_OUTPUT"
             else
-              echo "push_acr=false" >> $GITHUB_OUTPUT
+              echo "push_acr=false" >> "$GITHUB_OUTPUT"
               echo "::warning::ACR credentials not configured, skipping ACR push"
             fi
           else
-            echo "push_acr=false" >> $GITHUB_OUTPUT
+            echo "push_acr=false" >> "$GITHUB_OUTPUT"
           fi
 
       # -----------------------------------------------------------------------
@@ -119,7 +151,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Generate image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
@@ -130,15 +162,13 @@ jobs:
             # Semantic version from tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            # Latest on main
-            type=raw,value=latest,enable={{is_default_branch}}
 
       # -----------------------------------------------------------------------
       # Login to registries
       # -----------------------------------------------------------------------
       - name: Login to GHCR
         if: steps.registries.outputs.push_ghcr == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -146,7 +176,7 @@ jobs:
 
       - name: Login to ACR
         if: steps.registries.outputs.push_acr == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ${{ secrets.ACR_REGISTRY }}
           username: ${{ secrets.AZURE_CLIENT_ID }}
@@ -158,15 +188,14 @@ jobs:
       - name: Build and push to GHCR
         id: ghcr-push
         if: steps.registries.outputs.push_ghcr == 'true'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:sha-${{ env.IMAGE_SHA }}
             ${{ contains(github.ref, 'refs/tags/v') && format('ghcr.io/{0}/{1}:{2}', github.repository_owner, env.IMAGE_NAME, github.ref_name) || '' }}
-            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}/{1}:latest', github.repository_owner, env.IMAGE_NAME) || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -179,18 +208,38 @@ jobs:
       - name: Build and push to ACR
         id: acr-push
         if: steps.registries.outputs.push_acr == 'true'
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
           push: true
           tags: |
-            ${{ secrets.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+            ${{ secrets.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ env.IMAGE_SHA }}
             ${{ contains(github.ref, 'refs/tags/v') && format('{0}/{1}:{2}', secrets.ACR_REGISTRY, env.IMAGE_NAME, github.ref_name) || '' }}
-            ${{ github.ref == 'refs/heads/main' && format('{0}/{1}:latest', secrets.ACR_REGISTRY, env.IMAGE_NAME) || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      # -----------------------------------------------------------------------
+      # Sign pushed image digests with GitHub OIDC/Sigstore.
+      # -----------------------------------------------------------------------
+      - name: Install cosign
+        if: steps.ghcr-push.outputs.digest != '' || steps.acr-push.outputs.digest != ''
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+
+      - name: Sign GHCR image digest
+        if: steps.ghcr-push.outputs.digest != ''
+        env:
+          IMAGE_DIGEST: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}@${{ steps.ghcr-push.outputs.digest }}
+        run: cosign sign --yes "$IMAGE_DIGEST"
+
+      - name: Sign ACR image digest
+        if: steps.acr-push.outputs.digest != ''
+        env:
+          IMAGE_DIGEST: ${{ secrets.ACR_REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.acr-push.outputs.digest }}
+        run: cosign sign --yes "$IMAGE_DIGEST"
 
       # -----------------------------------------------------------------------
       # Summary
@@ -201,38 +250,42 @@ jobs:
           PUSH_GHCR: ${{ steps.registries.outputs.push_ghcr }}
           PUSH_ACR: ${{ steps.registries.outputs.push_acr }}
           REPO_OWNER: ${{ github.repository_owner }}
-          GIT_SHA: ${{ github.sha }}
+          IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
-          echo "## Docker Image Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Registry | Image | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Docker Image Build Summary"
+            echo ""
+            echo "| Registry | Image | Status |"
+            echo "|----------|-------|--------|"
 
-          if [[ "$PUSH_GHCR" == "true" ]]; then
-            echo "| GHCR | \`ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${GIT_SHA}\` | ✅ Pushed |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| GHCR | - | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
-          fi
+            if [[ "$PUSH_GHCR" == "true" ]]; then
+              echo "| GHCR | \`ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}\` | ✅ Pushed |"
+            else
+              echo "| GHCR | - | ⏭️ Skipped |"
+            fi
 
-          if [[ "$PUSH_ACR" == "true" ]]; then
-            echo "| ACR | \`${ACR_REGISTRY}/${IMAGE_NAME}:sha-${GIT_SHA}\` | ✅ Pushed |" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "| ACR | - | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
-          fi
+            if [[ "$PUSH_ACR" == "true" ]]; then
+              echo "| ACR | \`${ACR_REGISTRY}/${IMAGE_NAME}:sha-${IMAGE_SHA}\` | ✅ Pushed |"
+            else
+              echo "| ACR | - | ⏭️ Skipped |"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ===========================================================================
   # Smoke Test (Verify image works)
   # ===========================================================================
   smoke-test:
     name: Smoke Test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
     needs: [build-push]
     steps:
       - name: Checkout code (for example files)
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ env.IMAGE_SHA }}
 
       - name: Login to GHCR (to pull image)
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -241,9 +294,9 @@ jobs:
       - name: Basic CLI tests
         env:
           REPO_OWNER: ${{ github.repository_owner }}
-          GIT_SHA: ${{ github.sha }}
+          IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
-          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${GIT_SHA}"
+          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}"
 
           echo "Testing image: $IMAGE"
 
@@ -262,9 +315,9 @@ jobs:
       - name: Run pipeline integration test
         env:
           REPO_OWNER: ${{ github.repository_owner }}
-          GIT_SHA: ${{ github.sha }}
+          IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
-          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${GIT_SHA}"
+          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}"
 
           echo "=== Test 4: Run actual pipeline (threshold_gate_container example) ==="
 
@@ -333,35 +386,56 @@ jobs:
           echo "Normal output:"
           cat examples/threshold_gate_container/output/normal.csv
 
-      - name: Test summary
-        if: always()
+      - name: Run representative example smoke tests
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+          IMAGE_SHA: ${{ env.IMAGE_SHA }}
         run: |
-          echo "## Container Smoke Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Test | Description | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|-------------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| CLI Version | \`elspeth --version\` | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| CLI Help | \`elspeth --help\` | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| Plugin List | \`elspeth plugins list\` | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| Pipeline Run | threshold_gate example | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| Output Verify | CSV row counts correct | ✅ |" >> $GITHUB_STEP_SUMMARY
+          IMAGE="ghcr.io/${REPO_OWNER}/${IMAGE_NAME}:sha-${IMAGE_SHA}"
+
+          echo "=== Test 6: Run representative no-secret examples ==="
+          for example in boolean_routing batch_aggregation json_explode schema_contracts_demo; do
+            echo "Running example: ${example}"
+            rm -rf "examples/${example}/output" "examples/${example}/runs"
+            mkdir -p "examples/${example}/output" "examples/${example}/runs"
+            docker run --rm \
+              -v "$PWD:/app:rw" \
+              "$IMAGE" run \
+              --settings "examples/${example}/settings.yaml" \
+              --execute
+          done
+
+      - name: Test summary
+        run: |
+          {
+            echo "## Container Smoke Test Results"
+            echo ""
+            echo "| Test | Description | Status |"
+            echo "|------|-------------|--------|"
+            echo "| CLI Version | \`elspeth --version\` | ✅ |"
+            echo "| CLI Help | \`elspeth --help\` | ✅ |"
+            echo "| Plugin List | \`elspeth plugins list\` | ✅ |"
+            echo "| Pipeline Run | threshold_gate example | ✅ |"
+            echo "| Output Verify | CSV row counts correct | ✅ |"
+            echo "| Representative Examples | boolean, batch, JSON explode, schema contracts | ✅ |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ===========================================================================
   # Create GitHub Release (on version tags)
   # ===========================================================================
   release:
     name: Create Release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, nyx-ci, trusted]
     needs: [build-push, smoke-test]
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@26994186c0ac3ef5cae75ac16aa32e8153525f77
         with:
           generate_release_notes: true
           body: |

@@ -152,6 +152,7 @@ class CanDropRowsContract(DeclarationContract):
 
     name: ClassVar[str] = "can_drop_rows"
     payload_schema: ClassVar[type] = UnexpectedEmptyEmissionPayload
+    violation_class: ClassVar[type[UnexpectedEmptyEmissionViolation]] = UnexpectedEmptyEmissionViolation
 
     def applies_to(self, plugin: Any) -> bool:
         passes_through_input = _require_bool_flag(plugin, attr_name="passes_through_input")

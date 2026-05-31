@@ -15,6 +15,7 @@ import pytest
 from elspeth.contracts.declaration_contracts import (
     BatchFlushInputs,
     BatchFlushOutputs,
+    DeclarationContractViolation,
     PostEmissionInputs,
     PostEmissionOutputs,
     _clear_registry_for_tests,
@@ -24,9 +25,11 @@ from elspeth.contracts.declaration_contracts import (
     register_declaration_contract,
 )
 from elspeth.contracts.errors import (
+    TIER_1_ERRORS,
     FrameworkBugError,
     OrchestrationInvariantError,
     PassThroughContractViolation,
+    PassThroughPayload,
     UnexpectedEmptyEmissionViolation,
 )
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -75,6 +78,55 @@ class _FakeTransform:
     declared_input_fields = frozenset()
     is_batch_aware = False
     _output_schema_config = None
+
+
+def test_pass_through_violation_is_declaration_contract_violation() -> None:
+    assert issubclass(PassThroughContractViolation, DeclarationContractViolation)
+
+
+def test_pass_through_violation_payload_schema_matches_contract_schema() -> None:
+    assert PassThroughContractViolation.payload_schema is PassThroughPayload
+    assert PassThroughDeclarationContract.payload_schema is PassThroughPayload
+    assert PassThroughDeclarationContract.violation_class is PassThroughContractViolation
+
+
+def test_pass_through_violation_remains_tier_1() -> None:
+    assert PassThroughContractViolation in TIER_1_ERRORS
+
+
+def test_pass_through_violation_keeps_legacy_audit_shape() -> None:
+    violation = PassThroughContractViolation(
+        transform="Fake",
+        transform_node_id="n-1",
+        run_id="r",
+        row_id="rw",
+        token_id="t",
+        static_contract=frozenset({"b", "a"}),
+        runtime_observed=frozenset({"a"}),
+        divergence_set=frozenset({"b"}),
+        message="dropped b",
+    )
+
+    assert violation.static_contract == frozenset({"a", "b"})
+    assert violation.runtime_observed == frozenset({"a"})
+    assert violation.divergence_set == frozenset({"b"})
+    assert violation.payload == {
+        "static_contract": ("a", "b"),
+        "runtime_observed": ("a",),
+        "divergence_set": ("b",),
+    }
+    assert violation.to_audit_dict() == {
+        "exception_type": "PassThroughContractViolation",
+        "message": "dropped b",
+        "transform": "Fake",
+        "transform_node_id": "n-1",
+        "run_id": "r",
+        "row_id": "rw",
+        "token_id": "t",
+        "static_contract": ["a", "b"],
+        "runtime_observed": ["a"],
+        "divergence_set": ["b"],
+    }
 
 
 @pytest.fixture()

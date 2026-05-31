@@ -1,0 +1,274 @@
+// ============================================================================
+// GuidedTurn dispatcher -- routing contract regression coverage.
+//
+// Pins THREE contracts:
+//   1. Six-turn-type routing correctness: each TurnPayload.type routes to
+//      exactly the matching leaf widget, identifiable by a widget-specific
+//      rendered element.
+//   2. onSubmit forwarding: the dispatcher passes onSubmit through unchanged;
+//      a widget event fires the SAME fn reference the dispatcher received.
+//   3. Exhaustiveness compile-time check: the `const _exhaustive: never`
+//      pattern in the default case fails to compile if a new TurnType is
+//      added to guided.ts without a matching switch arm -- verified by the
+//      type-system, no runtime test needed (the default throw tests the
+//      runtime guard path in isolation).
+//
+// Widget-specific rendered identifiers used per routing test:
+//   single_select         -- payload.question text (legend text)
+//   inspect_and_confirm   -- "Looks right" button (inspect-view action)
+//   multi_select_with_custom -- payload.question text (legend text)
+//   schema_form           -- "Continue" button (submit action, present when canSubmit)
+//   propose_chain         -- "Accept proposal" button
+//   recipe_offer          -- SchemaFormTurn recipe-decision renderer
+// ============================================================================
+
+import { describe, it, expect, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { GuidedTurn } from "./GuidedTurn";
+import { nullResponse } from "@/test/guided-fixtures";
+import type {
+  TurnPayload,
+  SingleSelectPayload,
+  InspectAndConfirmPayload,
+  MultiSelectWithCustomPayload,
+  SchemaFormPayload,
+  ProposeChainPayload,
+} from "@/types/guided";
+
+// ── Fixtures ──────────────────────────────────────────────────────────────────
+
+const SINGLE_SELECT_PAYLOAD: SingleSelectPayload = {
+  question: "Which data source should we use?",
+  options: [{ id: "csv", label: "CSV File", hint: null }],
+  allow_custom: false,
+};
+
+const INSPECT_AND_CONFIRM_PAYLOAD: InspectAndConfirmPayload = {
+  observed: {
+    columns: ["name", "value"],
+    samples: [{ name: "foo", value: 42 }],
+    warnings: [],
+  },
+};
+
+const MULTI_SELECT_PAYLOAD: MultiSelectWithCustomPayload = {
+  question: "Which output formats do you need?",
+  options: [
+    { id: "csv", label: "CSV", hint: null },
+    { id: "json", label: "JSON", hint: null },
+  ],
+  default_chosen: ["csv"],
+  escape_label: null,
+};
+
+// SchemaFormTurn renders a "Continue" button (enabled when canSubmit=true).
+// A required string field with a non-empty prefilled value satisfies canSubmit.
+const SCHEMA_FORM_PAYLOAD: SchemaFormPayload = {
+  mode: "plugin_options",
+  plugin: "csv",
+  knobs: {
+    fields: [
+      {
+        name: "path",
+        label: "Path",
+        kind: "text",
+        required: true,
+        nullable: false,
+      },
+    ],
+  },
+  prefilled: { path: "/data/file.csv" },
+};
+
+const PROPOSE_CHAIN_PAYLOAD: ProposeChainPayload = {
+  steps: [
+    {
+      plugin: "llm_classify",
+      options: {},
+      rationale: "Classifies rows using an LLM.",
+    },
+  ],
+  why: "This chain addresses the stated classification goal.",
+  blockers: [],
+};
+
+const RECIPE_OFFER_PAYLOAD: SchemaFormPayload = {
+  mode: "recipe_decision",
+  knobs: { fields: [] },
+  prefilled: {},
+  recipe_context: {
+    recipe_name: "csv_to_json",
+    description: "Convert CSV rows to JSON.",
+    alternatives: ["build_manually"],
+  },
+};
+
+/** Build a TurnPayload with the given type and typed payload. */
+function makeTurn(
+  type: "single_select",
+  payload: SingleSelectPayload,
+): TurnPayload;
+function makeTurn(
+  type: "inspect_and_confirm",
+  payload: InspectAndConfirmPayload,
+): TurnPayload;
+function makeTurn(
+  type: "multi_select_with_custom",
+  payload: MultiSelectWithCustomPayload,
+): TurnPayload;
+function makeTurn(
+  type: "schema_form",
+  payload: SchemaFormPayload,
+): TurnPayload;
+function makeTurn(
+  type: "propose_chain",
+  payload: ProposeChainPayload,
+): TurnPayload;
+function makeTurn(
+  type: "recipe_offer",
+  payload: SchemaFormPayload,
+): TurnPayload;
+function makeTurn(type: TurnPayload["type"], payload: unknown): TurnPayload {
+  return { type, step_index: 0, payload };
+}
+
+// ── Suite 1: Six-turn-type routing correctness ────────────────────────────────
+
+describe("GuidedTurn dispatcher — routing", () => {
+  it("single_select: renders SingleSelectTurn (question legend)", () => {
+    render(
+      <GuidedTurn
+        turn={makeTurn("single_select", SINGLE_SELECT_PAYLOAD)}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText("Which data source should we use?"),
+    ).toBeTruthy();
+  });
+
+  it("inspect_and_confirm: renders InspectAndConfirmTurn ('Looks right' button)", () => {
+    render(
+      <GuidedTurn
+        turn={makeTurn("inspect_and_confirm", INSPECT_AND_CONFIRM_PAYLOAD)}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Looks right" }),
+    ).toBeTruthy();
+  });
+
+  it("multi_select_with_custom: renders MultiSelectWithCustomTurn (question legend)", () => {
+    render(
+      <GuidedTurn
+        turn={makeTurn("multi_select_with_custom", MULTI_SELECT_PAYLOAD)}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText("Which output formats do you need?"),
+    ).toBeTruthy();
+  });
+
+  it("schema_form: renders SchemaFormTurn ('Continue' button)", () => {
+    render(
+      <GuidedTurn
+        turn={makeTurn("schema_form", SCHEMA_FORM_PAYLOAD)}
+        onSubmit={vi.fn()}
+      />,
+    );
+    // "Continue" button is present when the required field is prefilled.
+    expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+  });
+
+  it("propose_chain: renders ProposeChainTurn ('Accept all steps' button)", () => {
+    render(
+      <GuidedTurn
+        turn={makeTurn("propose_chain", PROPOSE_CHAIN_PAYLOAD)}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Accept all steps" }),
+    ).toBeTruthy();
+  });
+
+  it("recipe_offer: renders SchemaFormTurn recipe decision", () => {
+    render(
+      <GuidedTurn
+        turn={makeTurn("recipe_offer", RECIPE_OFFER_PAYLOAD)}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("heading", { level: 3, name: "csv_to_json" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Apply recipe" })).toBeTruthy();
+  });
+});
+
+// ── Suite 2: onSubmit forwarding ──────────────────────────────────────────────
+
+describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
+  it("click on option chip forwards onSubmit with the correct GuidedRespondRequest body", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("single_select", SINGLE_SELECT_PAYLOAD)}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "CSV File" }));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith({
+      ...nullResponse(),
+      chosen: ["csv"],
+      custom_inputs: null,
+    });
+  });
+});
+
+// ── Suite 3: Distinctness / independence pin ──────────────────────────────────
+
+describe("GuidedTurn dispatcher — widget instance independence", () => {
+  it("two simultaneous single_select turns render independently without state bleed", () => {
+    const onSubmit1 = vi.fn();
+    const onSubmit2 = vi.fn();
+
+    const { container } = render(
+      <div>
+        <GuidedTurn
+          turn={makeTurn("single_select", {
+            question: "First turn question",
+            options: [{ id: "opt_a", label: "Option A", hint: null }],
+            allow_custom: false,
+          })}
+          onSubmit={onSubmit1}
+        />
+        <GuidedTurn
+          turn={makeTurn("single_select", {
+            question: "Second turn question",
+            options: [{ id: "opt_b", label: "Option B", hint: null }],
+            allow_custom: false,
+          })}
+          onSubmit={onSubmit2}
+        />
+      </div>,
+    );
+
+    // Both question texts rendered separately.
+    expect(screen.getByText("First turn question")).toBeTruthy();
+    expect(screen.getByText("Second turn question")).toBeTruthy();
+
+    // Both option buttons present.
+    expect(screen.getByRole("button", { name: "Option A" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Option B" })).toBeTruthy();
+
+    // No state bleed: container has two distinct guided-turn roots.
+    const turnRoots = container.querySelectorAll(".guided-turn");
+    expect(turnRoots.length).toBe(2);
+  });
+});

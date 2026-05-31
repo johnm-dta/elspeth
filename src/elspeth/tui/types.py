@@ -90,6 +90,8 @@ class NodeStateInfo(TypedDict, total=False):
     - input_hash: Hash of input data
     - output_hash: Hash of output data (if completed)
     - error_json: JSON string of error details (if failed)
+    - success_reason_json: JSON string of success provenance (if completed)
+    - context_after_json: JSON string of post-execution context (if available)
     - artifact: Artifact info dict (for sink nodes)
     """
 
@@ -108,6 +110,8 @@ class NodeStateInfo(TypedDict, total=False):
     input_hash: str
     output_hash: str
     error_json: str
+    success_reason_json: str
+    context_after_json: str
     artifact: dict[str, Any]
 
 

@@ -158,6 +158,10 @@ class TestYamlRootTypeErrors:
 class TestDatabaseConnectionErrors:
     """Test database connection error handling."""
 
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="Root user can write anywhere, permission test won't work",
+    )
     def test_run_sqlite_path_not_writable(self, tmp_path: Path) -> None:
         """Unwritable database path shows clear error message.
 

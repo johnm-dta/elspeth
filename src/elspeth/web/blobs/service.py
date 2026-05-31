@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Any, TypeVar
 from uuid import UUID, uuid4
 
+from opentelemetry import metrics
 from sqlalchemy import Engine, func, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
+from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.blobs.protocol import (
@@ -38,14 +40,60 @@ from elspeth.web.blobs.protocol import (
     BlobStateError,
     FinalizeBlobStatus,
 )
+from elspeth.web.sessions.converters import pipeline_dict_from_record
 from elspeth.web.sessions.models import (
     blob_run_links_table,
     blobs_table,
     composition_states_table,
     runs_table,
 )
+from elspeth.web.sessions.protocol import CompositionStateRecord
 
 _T = TypeVar("_T")
+
+_BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER = metrics.get_meter(__name__).create_counter("blob_copy_fork.orphan_rows_left_behind")
+
+_ACTIVE_RUN_COMPOSITION_COLUMNS = (
+    runs_table.c.id.label("run_id"),
+    composition_states_table.c.id.label("state_id"),
+    composition_states_table.c.session_id.label("state_session_id"),
+    composition_states_table.c.version.label("state_version"),
+    composition_states_table.c.source,
+    composition_states_table.c.nodes,
+    composition_states_table.c.edges,
+    composition_states_table.c.outputs,
+    composition_states_table.c.metadata_,
+    composition_states_table.c.is_valid,
+    composition_states_table.c.validation_errors,
+    composition_states_table.c.created_at,
+    composition_states_table.c.derived_from_state_id,
+    composition_states_table.c.composer_meta,
+)
+
+
+def _uuid_from_db(value: Any) -> UUID:
+    return UUID(str(value))
+
+
+def _active_run_pipeline_dict(active_run: Any) -> dict[str, Any]:
+    """Convert an active-run join row to canonical runtime/YAML shape."""
+    return pipeline_dict_from_record(
+        CompositionStateRecord(
+            id=_uuid_from_db(active_run.state_id),
+            session_id=_uuid_from_db(active_run.state_session_id),
+            version=active_run.state_version,
+            source=active_run.source,
+            nodes=active_run.nodes,
+            edges=active_run.edges,
+            outputs=active_run.outputs,
+            metadata_=active_run.metadata_,
+            is_valid=bool(active_run.is_valid),
+            validation_errors=active_run.validation_errors,
+            created_at=active_run.created_at,
+            derived_from_state_id=_uuid_from_db(active_run.derived_from_state_id) if active_run.derived_from_state_id is not None else None,
+            composer_meta=active_run.composer_meta,
+        )
+    )
 
 
 def content_hash(data: bytes) -> str:
@@ -82,38 +130,84 @@ def sanitize_filename(filename: str) -> str:
     return sanitized
 
 
-def _source_references_blob(
-    source: Any,
+def _option_value_references_blob(value: Any, blob_id: str, storage_path: str) -> bool:
+    """Recursively inspect an option value for blob identity markers."""
+    if type(value) is dict:
+        if "blob_ref" in value and value["blob_ref"] == blob_id:
+            return True
+        if any(key in value and value[key] == storage_path for key in ("path", "file")):
+            return True
+        return any(_option_value_references_blob(child, blob_id, storage_path) for child in value.values())
+    if type(value) is list:
+        return any(_option_value_references_blob(child, blob_id, storage_path) for child in value)
+    return False
+
+
+def _options_reference_blob(options: Any, blob_id: str, storage_path: str, owner: str) -> bool:
+    if options is None:
+        return False
+    if type(options) is not dict:
+        raise AuditIntegrityError(f"Tier 1: composition_states.{owner}.options is {type(options).__name__}, expected dict")
+    return _option_value_references_blob(options, blob_id, storage_path)
+
+
+def _composition_references_blob(
+    composition_state: Any,
     blob_id: str,
     storage_path: str,
 ) -> bool:
-    """Check whether a composition state source references a specific blob.
+    """Check whether any runtime/YAML-shape composition section references a blob.
 
-    Returns True if the source's options contain a matching ``blob_ref``
-    OR a ``path``/``file`` that matches the blob's storage_path.
+    ``composition_state`` must be the canonical pipeline dict emitted by
+    ``generate_pipeline_dict()`` or ``pipeline_dict_from_record()``. It walks
+    source options, node-collection options, and sink options for either a
+    matching ``blob_ref`` marker or a path/file value matching ``storage_path``.
 
-    Tier 1 guards: if source or options have wrong types, that is DB
-    corruption — crash immediately rather than silently passing the guard.
-    Explicit raises (not ``assert``) because ``python -O`` strips asserts
-    and would turn every corruption-detection site here into a silent
-    pass-through.
+    Tier 1 guards: malformed present sections are DB/audit corruption, so they
+    raise ``AuditIntegrityError`` instead of becoming silent false negatives.
     """
-    if source is None:
+    if composition_state is None:
         return False
-    if not isinstance(source, dict):
-        raise AuditIntegrityError(f"Tier 1: composition_states.source is {type(source).__name__}, expected dict")
-    options = source.get("options")
-    if options is None:
+    if type(composition_state) is not dict:
+        raise AuditIntegrityError(f"Tier 1: composition_states is {type(composition_state).__name__}, expected dict")
+
+    if "source" in composition_state:
+        source = composition_state["source"]
+        if source is not None and type(source) is not dict:
+            raise AuditIntegrityError(f"Tier 1: composition_states.source is {type(source).__name__}, expected dict")
+        source_options = source["options"] if source is not None and "options" in source else None
+        if _options_reference_blob(source_options, blob_id, storage_path, "source"):
+            return True
+
+    for collection_key in ("transforms", "gates", "aggregations", "coalesce"):
+        if collection_key not in composition_state:
+            continue
+        nodes = composition_state[collection_key]
+        if nodes is None:
+            continue
+        if type(nodes) is not list:
+            raise AuditIntegrityError(f"Tier 1: composition_states.{collection_key} is {type(nodes).__name__}, expected list")
+        for index, node in enumerate(nodes):
+            if type(node) is not dict:
+                raise AuditIntegrityError(f"Tier 1: composition_states.{collection_key}[{index}] is {type(node).__name__}, expected dict")
+            node_options = node["options"] if "options" in node else None
+            if _options_reference_blob(node_options, blob_id, storage_path, f"{collection_key}[{index}]"):
+                return True
+
+    if "sinks" not in composition_state:
         return False
-    if not isinstance(options, dict):
-        raise AuditIntegrityError(f"Tier 1: composition_states.source.options is {type(options).__name__}, expected dict")
-    # Check blob_ref (canonical blob reference)
-    if options.get("blob_ref") == blob_id:
-        return True
-    # Check path/file (a run can read a blob's backing file via plain
-    # set_source without blob_ref — the execution service only creates
-    # blob_run_links when blob_ref is present)
-    return any(options.get(key) == storage_path for key in ("path", "file"))
+    sinks = composition_state["sinks"]
+    if sinks is None:
+        return False
+    if type(sinks) is not dict:
+        raise AuditIntegrityError(f"Tier 1: composition_states.sinks is {type(sinks).__name__}, expected dict")
+    for sink_name, sink in sinks.items():
+        if type(sink) is not dict:
+            raise AuditIntegrityError(f"Tier 1: composition_states.sinks[{sink_name!r}] is {type(sink).__name__}, expected dict")
+        sink_options = sink["options"] if "options" in sink else None
+        if _options_reference_blob(sink_options, blob_id, storage_path, f"sinks[{sink_name!r}]"):
+            return True
+    return False
 
 
 def _assert_blob_run_same_session(
@@ -165,6 +259,16 @@ def _guard_blob_row_literals(row: Any) -> None:
         raise AuditIntegrityError(f"Tier 1: blobs.created_by is {row.created_by!r}, expected one of {sorted(BLOB_CREATORS)}")
     if row.mime_type not in ALLOWED_MIME_TYPES:
         raise AuditIntegrityError(f"Tier 1: blobs.mime_type is {row.mime_type!r}, not in the allowed MIME set")
+    # Tier 1 guard for the closed CreationModality enum (Phase 5a Task 2.5).
+    # Mirrors the ck_blobs_creation_modality DB CHECK; this Python guard
+    # catches tampered or migration-bug-introduced rows that bypassed the
+    # DB layer (e.g. a manual SQLite UPDATE).  AuditIntegrityError keeps
+    # the audit-trail correctness invariant — the read path never silently
+    # returns a record whose static type is a lie.
+    if row.creation_modality not in {m.value for m in CreationModality}:
+        raise AuditIntegrityError(
+            f"Tier 1: blobs.creation_modality is {row.creation_modality!r}, expected one of {sorted(m.value for m in CreationModality)}"
+        )
 
 
 def _row_to_blob_record(row: Any) -> BlobRecord:
@@ -182,6 +286,17 @@ def _row_to_blob_record(row: Any) -> BlobRecord:
         created_by=row.created_by,
         source_description=row.source_description,
         status=row.status,
+        # Tier 1 read: ``creation_modality`` has already been checked
+        # against the closed CreationModality enum in
+        # ``_guard_blob_row_literals``; coerce to the enum so consumers
+        # get the typed value rather than the bare wire-format string.
+        creation_modality=CreationModality(row.creation_modality),
+        created_from_message_id=row.created_from_message_id,
+        creating_model_identifier=row.creating_model_identifier,
+        creating_model_version=row.creating_model_version,
+        creating_provider=row.creating_provider,
+        creating_composer_skill_hash=row.creating_composer_skill_hash,
+        creating_arguments_hash=row.creating_arguments_hash,
     )
 
 
@@ -228,6 +343,35 @@ class BlobServiceImpl:
             run_id=UUID(row.run_id),
             direction=row.direction,
         )
+
+    def _enforce_ready_finalize_quota(
+        self,
+        conn: Connection,
+        *,
+        blob_id_str: str,
+        session_id_str: str,
+        status: FinalizeBlobStatus,
+        size_bytes: int | None,
+    ) -> None:
+        """Enforce session storage quota when a pending blob becomes ready."""
+        if status != "ready" or size_bytes is None or size_bytes <= 0:
+            return
+        current_total = conn.execute(
+            select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(
+                blobs_table.c.session_id == session_id_str,
+                blobs_table.c.id != blob_id_str,
+            )
+        ).scalar()
+        # COALESCE guarantees an exact int; bool/subclasses or any other type
+        # are Tier 1 anomalies. Explicit raise so the guard survives python -O.
+        if type(current_total) is not int:
+            raise AuditIntegrityError(f"Tier 1: COALESCE(SUM) returned {type(current_total).__name__}, expected int")
+        if current_total + size_bytes > self._max_storage_per_session:
+            raise BlobQuotaExceededError(
+                session_id_str,
+                current_bytes=current_total,
+                limit_bytes=self._max_storage_per_session,
+            )
 
     async def create_blob(
         self,
@@ -291,6 +435,19 @@ class BlobServiceImpl:
                             created_by=created_by,
                             source_description=source_description,
                             status="ready",
+                            # User-uploaded blobs (REST POST /blobs, drag-
+                            # and-drop): content was provided verbatim by
+                            # the operator outside the chat surface, so
+                            # ``created_from_message_id`` is NULL and all
+                            # ``creating_*`` fields are NULL (Phase 5a
+                            # Task 2.5).
+                            creation_modality=CreationModality.VERBATIM.value,
+                            created_from_message_id=None,
+                            creating_model_identifier=None,
+                            creating_model_version=None,
+                            creating_provider=None,
+                            creating_composer_skill_hash=None,
+                            creating_arguments_hash=None,
                         )
                     )
             except Exception:
@@ -311,6 +468,13 @@ class BlobServiceImpl:
                 created_by=created_by,
                 source_description=source_description,
                 status="ready",
+                creation_modality=CreationModality.VERBATIM,
+                created_from_message_id=None,
+                creating_model_identifier=None,
+                creating_model_version=None,
+                creating_provider=None,
+                creating_composer_skill_hash=None,
+                creating_arguments_hash=None,
             )
 
         return await self._run_sync(_sync)
@@ -328,6 +492,8 @@ class BlobServiceImpl:
         # so the check survives ``python -O`` (mirrors create_blob()).
         if created_by not in BLOB_CREATORS:
             raise RuntimeError(f"Invalid created_by {created_by!r} — must be one of {sorted(BLOB_CREATORS)}")
+        if mime_type not in ALLOWED_MIME_TYPES:
+            raise RuntimeError(f"Invalid mime_type {mime_type!r} — not in the allowed MIME set")
         safe_filename = sanitize_filename(filename)
         blob_id = str(uuid4())
         session_id_str = str(session_id)
@@ -352,6 +518,20 @@ class BlobServiceImpl:
                         created_by=created_by,
                         source_description=source_description,
                         status="pending",
+                        # Pending output blobs (pipeline-produced): the
+                        # content is filled in later by the sink writer;
+                        # provenance for these is the pipeline run, not
+                        # a chat message, so the chat-message FK is NULL
+                        # and the modality is VERBATIM (the run wrote
+                        # exactly the bytes the sink emitted; no LLM
+                        # authored them).  Phase 5a Task 2.5.
+                        creation_modality=CreationModality.VERBATIM.value,
+                        created_from_message_id=None,
+                        creating_model_identifier=None,
+                        creating_model_version=None,
+                        creating_provider=None,
+                        creating_composer_skill_hash=None,
+                        creating_arguments_hash=None,
                     )
                 )
 
@@ -367,6 +547,13 @@ class BlobServiceImpl:
                 created_by=created_by,
                 source_description=source_description,
                 status="pending",
+                creation_modality=CreationModality.VERBATIM,
+                created_from_message_id=None,
+                creating_model_identifier=None,
+                creating_model_version=None,
+                creating_provider=None,
+                creating_composer_skill_hash=None,
+                creating_arguments_hash=None,
             )
 
         return await self._run_sync(_sync)
@@ -402,6 +589,13 @@ class BlobServiceImpl:
                 # callers confused by a stale blob hear about the lifecycle
                 # problem first.  See _validate_finalize_hash() docstring.
                 _validate_finalize_hash(blob_id_str, status, content_hash)
+                self._enforce_ready_finalize_quota(
+                    conn,
+                    blob_id_str=blob_id_str,
+                    session_id_str=row.session_id,
+                    status=status,
+                    size_bytes=size_bytes,
+                )
 
                 updates: dict[str, Any] = {"status": status}
                 if size_bytes is not None:
@@ -485,12 +679,12 @@ class BlobServiceImpl:
                 #    but the backing file is about to be needed.
                 #
                 #    Scoped to THIS blob: join runs → composition_states and
-                #    check whether the active run's source references this
-                #    blob via blob_ref OR via a path/file that matches this
-                #    blob's storage_path.  Runs whose source doesn't touch
-                #    this blob must not block unrelated blob deletions.
+                #    check whether the active run's canonical pipeline dict
+                #    references this blob via blob_ref OR via a path/file that
+                #    matches this blob's storage_path. Runs whose state doesn't
+                #    touch this blob must not block unrelated blob deletions.
                 active_run = conn.execute(
-                    select(runs_table.c.id, composition_states_table.c.source)
+                    select(*_ACTIVE_RUN_COMPOSITION_COLUMNS)
                     .join(
                         composition_states_table,
                         runs_table.c.state_id == composition_states_table.c.id,
@@ -498,8 +692,12 @@ class BlobServiceImpl:
                     .where(runs_table.c.session_id == row.session_id)
                     .where(runs_table.c.status.in_(["pending", "running"]))
                 ).first()
-                if active_run is not None and _source_references_blob(active_run.source, blob_id_str, row.storage_path):
-                    raise BlobActiveRunError(blob_id_str, run_id=active_run.id)
+                if active_run is not None and _composition_references_blob(
+                    _active_run_pipeline_dict(active_run),
+                    blob_id_str,
+                    row.storage_path,
+                ):
+                    raise BlobActiveRunError(blob_id_str, run_id=active_run.run_id)
 
                 # Delete backing file first — orphaned DB row is recoverable,
                 # orphaned file with no metadata is not
@@ -583,6 +781,14 @@ class BlobServiceImpl:
                     run_id=str(run_id),
                     caller="BlobServiceImpl.link_blob_to_run",
                 )
+                existing = conn.execute(
+                    select(blob_run_links_table.c.blob_id)
+                    .where(blob_run_links_table.c.blob_id == str(blob_id))
+                    .where(blob_run_links_table.c.run_id == str(run_id))
+                    .where(blob_run_links_table.c.direction == direction)
+                ).first()
+                if existing is not None:
+                    return
                 conn.execute(
                     blob_run_links_table.insert().values(
                         blob_id=str(blob_id),
@@ -837,6 +1043,14 @@ class BlobServiceImpl:
                     f"will appear as a 'ready' blob in the target session — "
                     f"manual cleanup of blobs.id={orphan_id} required."
                 )
+                _BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER.add(
+                    1,
+                    {
+                        "orphan_blob_id": str(orphan_id),
+                        "target_session_id": target_session_id_str,
+                        "exc_type": type(recorded_exc).__name__,
+                    },
+                )
             raise
 
         return blob_map
@@ -872,29 +1086,13 @@ class BlobServiceImpl:
                     message=f"Cannot finalize blob {blob_id_str} — status is '{row.status}', expected 'pending'",
                 )
 
-            # Enforce quota when finalizing with a real size — pending blobs
-            # were reserved at size_bytes=0, so this is the first time the
-            # actual size is known.  Without this check, pipeline-generated
-            # output could bypass the per-session storage cap entirely.
-            if status == "ready" and size_bytes is not None and size_bytes > 0:
-                session_id_str = row.session_id
-                current_total = conn.execute(
-                    select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(
-                        blobs_table.c.session_id == session_id_str,
-                        blobs_table.c.id != blob_id_str,
-                    )
-                ).scalar()
-                # COALESCE guarantees an exact int; bool/subclasses or any
-                # other type are Tier 1 anomalies. Explicit raise so the
-                # guard survives ``python -O``.
-                if type(current_total) is not int:
-                    raise AuditIntegrityError(f"Tier 1: COALESCE(SUM) returned {type(current_total).__name__}, expected int")
-                if current_total + size_bytes > self._max_storage_per_session:
-                    raise BlobQuotaExceededError(
-                        session_id_str,
-                        current_bytes=current_total,
-                        limit_bytes=self._max_storage_per_session,
-                    )
+            self._enforce_ready_finalize_quota(
+                conn,
+                blob_id_str=blob_id_str,
+                session_id_str=row.session_id,
+                status=status,
+                size_bytes=size_bytes,
+            )
 
             updates: dict[str, Any] = {"status": status}
             if size_bytes is not None:

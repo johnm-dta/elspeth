@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from threading import Lock
 from typing import Any, NotRequired, TypedDict, cast
@@ -21,15 +22,15 @@ logger = structlog.get_logger(__name__)
 _BUFFER_STACK_KEY = "landscape_journal_buffer_stack"
 
 
-class PayloadInfo(TypedDict):
+class PayloadInfo(TypedDict, total=False):
     """Payload enrichment data for calls table inserts."""
 
     request_ref: str | None
     request_payload: str | None
     response_ref: str | None
     response_payload: str | None
-    request_payload_error: NotRequired[str]
-    response_payload_error: NotRequired[str]
+    request_payload_error: str
+    response_payload_error: str
 
 
 class JournalRecord(TypedDict):
@@ -253,45 +254,58 @@ class LandscapeJournal:
 
     def _enrich_with_payloads(self, record: JournalRecord, statement: str, parameters: Any, executemany: bool) -> None:
         table, columns = self._parse_insert_statement(statement)
+        allow_extra_params = False
+        if table is None:
+            table, columns = self._parse_update_statement(statement)
+            allow_extra_params = True
         base_table = table.split(".")[-1] if table else table
         if base_table != "calls" or columns is None or self._payload_store is None:
+            return
+        if "request_ref" not in columns and "response_ref" not in columns:
             return
 
         if executemany:
             enrichments: list[PayloadInfo] = []
             for param_set in parameters:
-                enrichments.append(self._payloads_for_params(columns, param_set))
+                enrichments.append(self._payloads_for_params(columns, param_set, allow_extra_params=allow_extra_params))
             record["payloads"] = enrichments
         else:
-            payload_dict = self._payloads_for_params(columns, parameters)
-            record["request_ref"] = payload_dict["request_ref"]
-            record["request_payload"] = payload_dict["request_payload"]
-            record["response_ref"] = payload_dict["response_ref"]
-            record["response_payload"] = payload_dict["response_payload"]
+            payload_dict = self._payloads_for_params(columns, parameters, allow_extra_params=allow_extra_params)
+            if "request_ref" in payload_dict:
+                record["request_ref"] = payload_dict["request_ref"]
+            if "request_payload" in payload_dict:
+                record["request_payload"] = payload_dict["request_payload"]
             if "request_payload_error" in payload_dict:
                 record["request_payload_error"] = payload_dict["request_payload_error"]
+            if "response_ref" in payload_dict:
+                record["response_ref"] = payload_dict["response_ref"]
+            if "response_payload" in payload_dict:
+                record["response_payload"] = payload_dict["response_payload"]
             if "response_payload_error" in payload_dict:
                 record["response_payload_error"] = payload_dict["response_payload_error"]
 
-    def _payloads_for_params(self, columns: list[str], params: Any) -> PayloadInfo:
-        values = self._columns_to_values(columns, params)
-        request_ref = cast("str | None", values["request_ref"])
-        response_ref = cast("str | None", values["response_ref"])
+    def _payloads_for_params(self, columns: list[str], params: Any, *, allow_extra_params: bool = False) -> PayloadInfo:
+        values = self._update_columns_to_values(columns, params) if allow_extra_params else self._columns_to_values(columns, params)
+        return self._payloads_for_values(values)
 
-        request_payload, request_error = self._load_payload(request_ref)
-        response_payload, response_error = self._load_payload(response_ref)
+    def _payloads_for_values(self, values: Mapping[str, object]) -> PayloadInfo:
+        result: PayloadInfo = {}
 
-        result: PayloadInfo = {
-            "request_ref": request_ref,
-            "request_payload": request_payload,
-            "response_ref": response_ref,
-            "response_payload": response_payload,
-        }
+        if "request_ref" in values:
+            request_ref = cast("str | None", values["request_ref"])
+            request_payload, request_error = self._load_payload(request_ref)
+            result["request_ref"] = request_ref
+            result["request_payload"] = request_payload
+            if request_error is not None:
+                result["request_payload_error"] = request_error
 
-        if request_error is not None:
-            result["request_payload_error"] = request_error
-        if response_error is not None:
-            result["response_payload_error"] = response_error
+        if "response_ref" in values:
+            response_ref = cast("str | None", values["response_ref"])
+            response_payload, response_error = self._load_payload(response_ref)
+            result["response_ref"] = response_ref
+            result["response_payload"] = response_payload
+            if response_error is not None:
+                result["response_payload_error"] = response_error
 
         return result
 
@@ -343,7 +357,38 @@ class LandscapeJournal:
         return table, columns
 
     @staticmethod
+    def _parse_update_statement(statement: str) -> tuple[str | None, list[str] | None]:
+        sql = statement.strip()
+        upper = sql.upper()
+        if not upper.startswith("UPDATE "):
+            return None, None
+        set_index = upper.find(" SET ")
+        if set_index == -1:
+            return None, None
+        table = sql[len("UPDATE ") : set_index].strip().strip('"').strip("'").lower()
+        where_index = upper.find(" WHERE ", set_index + len(" SET "))
+        assignments = sql[set_index + len(" SET ") :] if where_index == -1 else sql[set_index + len(" SET ") : where_index]
+        columns: list[str] = []
+        for assignment in assignments.split(","):
+            lhs, separator, _rhs = assignment.partition("=")
+            if separator == "":
+                return table, None
+            column = lhs.strip().strip('"').strip("'")
+            if "." in column:
+                column = column.rsplit(".", 1)[-1].strip().strip('"').strip("'")
+            columns.append(column)
+        return table, columns
+
+    @staticmethod
     def _columns_to_values(columns: list[str], params: Any) -> dict[str, object]:
         if isinstance(params, dict):
             return {col: params[col] for col in columns}
         return dict(zip(columns, params, strict=True))
+
+    @staticmethod
+    def _update_columns_to_values(columns: list[str], params: Any) -> dict[str, object]:
+        if isinstance(params, dict):
+            return {col: params[col] for col in columns}
+        if len(params) < len(columns):
+            return dict(zip(columns, params, strict=True))
+        return dict(zip(columns, params[: len(columns)], strict=True))

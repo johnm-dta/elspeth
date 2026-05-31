@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useExecutionStore } from "./executionStore";
+import { useInterpretationEventsStore } from "./interpretationEventsStore";
+import { useSessionStore } from "./sessionStore";
 import { connectToRun } from "@/api/websocket";
+import { resetStore } from "@/test/store-helpers";
 import type { Run, RunAccounting, RunDiagnostics, RunEvent, ValidationResult } from "@/types/index";
+import type { InterpretationEvent } from "@/types/interpretation";
 
 // Mock the API client
 vi.mock("@/api/client", () => ({
@@ -17,10 +21,32 @@ vi.mock("@/api/websocket", () => ({
   connectToRun: vi.fn(),
 }));
 
+const READY_READINESS = {
+  authoring_valid: true,
+  execution_ready: true,
+  completion_ready: true,
+  blockers: [],
+};
+const BLOCKED_READINESS = {
+  authoring_valid: false,
+  execution_ready: false,
+  completion_ready: false,
+  blockers: [],
+};
+
+function resetInterpretationStore(): void {
+  resetStore(useInterpretationEventsStore);
+}
+
 describe("executionStore.validate", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    resetInterpretationStore();
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: { version: 1, source: null, nodes: [], outputs: [] },
+    } as never);
   });
 
   it("stores validation result on success", async () => {
@@ -30,6 +56,7 @@ describe("executionStore.validate", () => {
       checks: [],
       errors: [],
       warnings: [],
+      readiness: READY_READINESS,
     };
 
     const { validatePipeline } = await import("@/api/client");
@@ -56,6 +83,17 @@ describe("executionStore.validate", () => {
         },
       ],
       warnings: [],
+      readiness: {
+        ...BLOCKED_READINESS,
+        blockers: [
+          {
+            code: "settings_load",
+            component_id: "llm_extract",
+            component_type: "transform",
+            detail: "llm_extract",
+          },
+        ],
+      },
     };
 
     const { validatePipeline } = await import("@/api/client");
@@ -64,11 +102,39 @@ describe("executionStore.validate", () => {
     await useExecutionStore.getState().validate("session-1");
 
     // validate() should only store the result — no cross-store side effects.
-    // Orchestration (system messages, LLM feedback) is handled by InspectorPanel.
+    // Orchestration (system messages, LLM feedback) is handled by subscriptions.
     const state = useExecutionStore.getState();
     expect(state.validationResult).toEqual(failedResult);
     expect(state.isValidating).toBe(false);
     expect(state.error).toBeNull();
+  });
+
+  it("blocks execution until the pending interpretation review is resolved", async () => {
+    const { executePipeline } = await import("@/api/client");
+    useInterpretationEventsStore.setState({
+      pendingBySession: {
+        "session-1": {
+          "evt-1": makeInterpretationEvent({
+            kind: "llm_model_choice",
+            affected_node_id: "label_colors",
+            llm_draft: "openai/gpt-4.1",
+          }),
+        },
+      },
+      resolvedCountBySession: {},
+      resolvedBySession: {},
+      optedOutBySession: {},
+    });
+
+    const runId = await useExecutionStore.getState().execute("session-1");
+
+    const state = useExecutionStore.getState();
+    expect(runId).toBeNull();
+    expect(executePipeline).not.toHaveBeenCalled();
+    expect(state.isExecuting).toBe(false);
+    expect(state.error).toBe(
+      "Set the LLM model choice for label_colors before running.",
+    );
   });
 
   it("sets error state when API call fails", async () => {
@@ -78,12 +144,86 @@ describe("executionStore.validate", () => {
       detail: "Internal server error",
     });
 
-    await useExecutionStore.getState().validate("session-1");
+    const result = await useExecutionStore.getState().validate("session-1");
 
     const state = useExecutionStore.getState();
     expect(state.validationResult).toBeNull();
     expect(state.isValidating).toBe(false);
     expect(state.error).toContain("internal error");
+    // Catch path must return false so the caller does not cache this version.
+    expect(result).toBe(false);
+  });
+
+  it("does not store a validation result that resolves after the user switches sessions", async () => {
+    const staleResult: ValidationResult = {
+      is_valid: true,
+      summary: "Stale session result",
+      checks: [],
+      errors: [],
+      warnings: [],
+      readiness: READY_READINESS,
+    };
+    let resolveValidation: (result: ValidationResult) => void = () => {};
+    const pendingValidation = new Promise<ValidationResult>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const { validatePipeline } = await import("@/api/client");
+    (validatePipeline as ReturnType<typeof vi.fn>).mockReturnValue(pendingValidation);
+
+    const validatePromise = useExecutionStore.getState().validate("session-1");
+    useSessionStore.setState({ activeSessionId: "session-2" } as never);
+    resolveValidation(staleResult);
+    await validatePromise;
+
+    const state = useExecutionStore.getState();
+    expect(state.validationResult).toBeNull();
+    expect(state.isValidating).toBe(false);
+  });
+
+  it("does not store a validation result after the composition version changes", async () => {
+    const staleResult: ValidationResult = {
+      is_valid: false,
+      summary: "Stale version result",
+      checks: [],
+      errors: [
+        {
+          component_id: "source",
+          component_type: "source",
+          message: "Missing path on the old snapshot",
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+      readiness: {
+        ...BLOCKED_READINESS,
+        blockers: [
+          {
+            code: "settings_load",
+            component_id: "source",
+            component_type: "source",
+            detail: "source",
+          },
+        ],
+      },
+    };
+    let resolveValidation: (result: ValidationResult) => void = () => {};
+    const pendingValidation = new Promise<ValidationResult>((resolve) => {
+      resolveValidation = resolve;
+    });
+    const { validatePipeline } = await import("@/api/client");
+    (validatePipeline as ReturnType<typeof vi.fn>).mockReturnValue(pendingValidation);
+
+    const validatePromise = useExecutionStore.getState().validate("session-1");
+    useSessionStore.setState({
+      compositionState: { version: 2, source: null, nodes: [], outputs: [] },
+    } as never);
+    resolveValidation(staleResult);
+    const applied = await validatePromise;
+
+    const state = useExecutionStore.getState();
+    expect(applied).toBe(false);
+    expect(state.validationResult).toBeNull();
+    expect(state.isValidating).toBe(false);
   });
 });
 
@@ -98,6 +238,37 @@ function makeRun(overrides: Partial<Run> & { error?: string | null } = {}): Run 
     composition_version: 1,
     ...overrides,
   } as Run;
+}
+
+function makeInterpretationEvent(
+  overrides: Partial<InterpretationEvent> = {},
+): InterpretationEvent {
+  return {
+    id: "evt-1",
+    session_id: "session-1",
+    composition_state_id: "state-1",
+    affected_node_id: "llm_classify",
+    tool_call_id: "tc-1",
+    user_term: "cool",
+    kind: "vague_term",
+    llm_draft: "engaging",
+    accepted_value: null,
+    choice: "pending",
+    created_at: "2026-04-26T05:31:57.000Z",
+    resolved_at: null,
+    actor: "user:owner:u-1",
+    interpretation_source: "user_approved",
+    model_identifier: "anthropic/claude-opus-4-7",
+    model_version: "20260518",
+    provider: "anthropic",
+    composer_skill_hash: "deadbeef",
+    arguments_hash: null,
+    hash_domain_version: null,
+    runtime_model_identifier_at_resolve: null,
+    runtime_model_version_at_resolve: null,
+    resolved_prompt_template_hash: null,
+    ...overrides,
+  };
 }
 
 function makeAccounting(overrides: Partial<RunAccounting> = {}): RunAccounting {
@@ -171,6 +342,7 @@ function makeDiagnostics(overrides: Partial<RunDiagnostics> = {}): RunDiagnostic
     ],
     operations: [],
     artifacts: [],
+    failure_detail: null,
     ...overrides,
   };
 }
@@ -179,6 +351,7 @@ describe("executionStore failed run events", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    resetInterpretationStore();
   });
 
   it("preserves terminal failed event detail in progress and run list", () => {
@@ -233,6 +406,7 @@ describe("executionStore fanout guard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    resetInterpretationStore();
   });
 
   const guard = {
@@ -304,6 +478,7 @@ describe("executionStore.cancel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    resetInterpretationStore();
   });
 
   it("marks an active run as cancelling while the backend drains work", async () => {
@@ -344,6 +519,7 @@ describe("executionStore progress events advance live accounting", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
+    resetInterpretationStore();
   });
 
   it("advances live source/token counters without reintroducing legacy run rows", () => {
@@ -550,6 +726,75 @@ describe("executionStore progress events advance live accounting", () => {
       accounting,
       finished_at: "2026-04-26T05:32:08.000Z",
     });
+  });
+
+  it("refreshes the run list after terminal completion so discard summaries reach the UI", async () => {
+    const close = vi.fn();
+    const accounting = makeAccounting({
+      source: { rows_processed: 0 },
+      tokens: {
+        emitted: 0,
+        terminal: 0,
+        succeeded: 0,
+        failed: 0,
+        structural: 0,
+        pending: 0,
+      },
+    });
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    const { fetchRuns } = await import("@/api/client");
+    (fetchRuns as ReturnType<typeof vi.fn>).mockResolvedValue([
+      makeRun({
+        id: "run-1",
+        status: "empty",
+        accounting,
+        discard_summary: {
+          total: 2,
+          validation_errors: 2,
+          transform_errors: 0,
+          sink_discards: 0,
+          stages: [
+            {
+              stage: "source_validation",
+              node_id: "source_csv_upload",
+              count: 2,
+            },
+          ],
+        },
+      }),
+    ]);
+    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      progress: {
+        source_rows_processed: 0,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        accounting: null,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    const completedEvent: RunEvent = {
+      run_id: "run-1",
+      timestamp: "2026-04-26T05:32:08.000Z",
+      event_type: "completed",
+      data: {
+        status: "empty",
+        accounting,
+        landscape_run_id: "landscape-run-1",
+      },
+    };
+    handlers.onComplete(completedEvent, completedEvent.data);
+
+    expect(fetchRuns).toHaveBeenCalledWith("session-1");
   });
 });
 

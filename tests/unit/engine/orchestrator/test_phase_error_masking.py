@@ -15,7 +15,7 @@ from typing import Any, cast
 
 import pytest
 
-from elspeth.contracts import SinkProtocol, SourceProtocol
+from elspeth.contracts import Determinism, SinkProtocol, SourceProtocol
 from elspeth.contracts.events import PhaseError
 from elspeth.core.config import SourceSettings
 from elspeth.core.dag import ExecutionGraph
@@ -56,6 +56,8 @@ class MaskingEventBus:
 
 class FailingSource(ListSource):
     """Source that throws on load()."""
+
+    determinism = Determinism.IO_READ
 
     def __init__(self) -> None:
         super().__init__([], name="failing_source", on_success="default")

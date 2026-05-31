@@ -10,7 +10,7 @@ cross-scenario scorecard.
 
 This is the *forward-going* harness. The 2026-05-03 historical eval lives
 under `evals/2026-05-03-composer/` and is frozen evidence backing the reports
-in `notes/composer-*-2026-05-03.md`. Don't mutate that folder; iterate here.
+in `docs/composer/evidence/composer-*-2026-05-03.md`. Don't mutate that folder; iterate here.
 
 ## Layout
 

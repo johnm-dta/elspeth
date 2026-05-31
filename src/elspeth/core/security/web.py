@@ -95,8 +95,12 @@ def validate_url_scheme(url: str) -> None:
         url: URL to validate
 
     Raises:
+        TypeError: If url is not a string
         SSRFBlockedError: If scheme is not in allowlist
     """
+    if type(url) is not str:
+        raise TypeError(f"url must be str, got {type(url).__name__}: {url!r}")
+
     parsed = urllib.parse.urlparse(url)
     scheme = parsed.scheme.lower()
     if scheme in ALLOWED_SCHEMES:

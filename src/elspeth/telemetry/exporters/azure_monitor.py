@@ -14,6 +14,7 @@ from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from opentelemetry.sdk.trace.export import SpanExportResult
 
 from elspeth.telemetry.errors import TELEMETRY_TRANSPORT_ERRORS, TelemetryExporterError
 from elspeth.telemetry.serialization import (
@@ -211,12 +212,12 @@ class AzureMonitorExporter:
             deployment_environment=self._deployment_environment,
         )
 
-    def export(self, event: TelemetryEvent) -> None:
+    def export(self, event: TelemetryEvent) -> bool | None:
         """Export a single telemetry event.
 
         Events are buffered until batch_size is reached, then flushed.
-        This method MUST NOT raise exceptions - telemetry failures should
-        not crash the pipeline.
+        Handled transport failures return False so TelemetryManager can account
+        for them without crashing the pipeline.
 
         Args:
             event: The telemetry event to export
@@ -226,44 +227,53 @@ class AzureMonitorExporter:
                 "Azure Monitor exporter not configured, dropping event",
                 event_type=type(event).__name__,
             )
-            return
+            return False
 
         try:
             self._buffer.append(event)
             if len(self._buffer) >= self._batch_size:
-                self._flush_batch()
+                return self._flush_batch()
         except Exception as e:
             if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
                 raise  # Programming error — must crash
-            # Export MUST NOT raise - log and continue
             logger.warning(
                 "Failed to buffer telemetry event",
                 exporter=self._name,
                 event_type=type(event).__name__,
                 error=str(e),
             )
+            return False
+        return None
 
-    def _flush_batch(self) -> None:
+    def _flush_batch(self) -> bool | None:
         """Convert buffered events to spans and export to Azure Monitor.
 
         Called internally when buffer reaches batch_size, and
-        externally via flush().
+        externally via flush(). Returns False when a handled transport failure
+        prevents delivery.
         """
         if not self._buffer:
             logger.debug(
                 "Azure Monitor flush requested with empty buffer",
                 exporter=self._name,
             )
-            return
+            return None
 
         if not self._azure_exporter:
             logger.warning("Azure Monitor exporter not initialized, dropping batch")
             self._buffer.clear()
-            return
+            return False
 
         try:
             spans = [self._event_to_span(e) for e in self._buffer]
-            self._azure_exporter.export(spans)
+            result = self._azure_exporter.export(spans)
+            if result == SpanExportResult.FAILURE:
+                logger.warning(
+                    "Azure Monitor exporter reported failed status",
+                    exporter=self._name,
+                    span_count=len(spans),
+                )
+                return False
             logger.debug(
                 "Azure Monitor batch exported",
                 span_count=len(spans),
@@ -277,8 +287,10 @@ class AzureMonitorExporter:
                 span_count=len(self._buffer),
                 error=str(e),
             )
+            return False
         finally:
             self._buffer.clear()
+        return None
 
     def _event_to_span(self, event: TelemetryEvent) -> SyntheticReadableSpan:
         """Convert TelemetryEvent to OpenTelemetry ReadableSpan.
@@ -338,14 +350,14 @@ class AzureMonitorExporter:
         """Serialize event fields as span attributes."""
         return serialize_event_attributes(event)
 
-    def flush(self) -> None:
+    def flush(self) -> bool | None:
         """Flush any buffered events to Azure Monitor.
 
         Called periodically and at pipeline shutdown to ensure events
-        are delivered.
+        are delivered. Returns False for a handled transport failure.
         """
         try:
-            self._flush_batch()
+            return self._flush_batch()
         except Exception as e:
             if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
                 raise  # Programming error — must crash
@@ -354,6 +366,7 @@ class AzureMonitorExporter:
                 exporter=self._name,
                 error=str(e),
             )
+            return False
 
     def close(self) -> None:
         """Release resources held by the exporter.

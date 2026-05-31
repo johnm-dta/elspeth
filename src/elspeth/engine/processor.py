@@ -35,8 +35,7 @@ if TYPE_CHECKING:
     from elspeth.engine.clock import Clock
     from elspeth.engine.coalesce_executor import CoalesceExecutor
     from elspeth.engine.executors import GateOutcome
-    from elspeth.engine.orchestrator.types import RowPlugin
-    from elspeth.telemetry import TelemetryManager
+    from elspeth.engine.orchestrator.types import RowPlugin, TelemetryManagerProtocol
 
 from elspeth.contracts import BatchTransformProtocol, SourceProtocol, TransformProtocol
 from elspeth.contracts.declaration_contracts import (
@@ -71,6 +70,7 @@ from elspeth.contracts.errors import (
 )
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import FailureInfo
+from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.errors import LandscapeRecordError
@@ -328,7 +328,7 @@ class RowProcessor:
         payload_store: PayloadStore | None = None,
         clock: Clock | None = None,
         max_workers: int | None = None,
-        telemetry_manager: TelemetryManager | None = None,
+        telemetry_manager: TelemetryManagerProtocol | None = None,
     ) -> None:
         """Initialize processor.
 
@@ -1231,29 +1231,36 @@ class RowProcessor:
             for i, token in enumerate(fctx.buffered_tokens):
                 if i in quarantined_index_set:
                     error_hash = hashlib.sha256(f"quarantined_in_batch:{fctx.batch_id}:{i}".encode()).hexdigest()[:16]
-                    self._data_flow.record_token_outcome(
-                        ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=TerminalOutcome.FAILURE,
-                        path=TerminalPath.QUARANTINED_AT_SOURCE,
-                        error_hash=error_hash,
-                    )
-                    self._emit_token_completed(
-                        token,
-                        outcome=TerminalOutcome.FAILURE,
-                        path=TerminalPath.QUARANTINED_AT_SOURCE,
-                    )
+                    batch_id = None
+                    outcome = TerminalOutcome.FAILURE
+                    path = TerminalPath.QUARANTINED_AT_SOURCE
                 else:
+                    error_hash = None
+                    batch_id = fctx.batch_id
+                    outcome = TerminalOutcome.TRANSIENT
+                    path = TerminalPath.BATCH_CONSUMED
+                try:
                     self._data_flow.record_token_outcome(
                         ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=TerminalOutcome.TRANSIENT,
-                        path=TerminalPath.BATCH_CONSUMED,
-                        batch_id=fctx.batch_id,
+                        outcome=outcome,
+                        path=path,
+                        error_hash=error_hash,
+                        batch_id=batch_id,
                     )
-                    self._emit_token_completed(
-                        token,
-                        outcome=TerminalOutcome.TRANSIENT,
-                        path=TerminalPath.BATCH_CONSUMED,
-                    )
+                except LandscapeRecordError as record_failure:
+                    raise AuditIntegrityError(
+                        f"Failed to record batch parent terminal outcome for token {token.token_id!r} "
+                        f"during transform-mode aggregation routing "
+                        f"(transform={fctx.transform.name!r}, node={fctx.node_id!r}, batch_id={fctx.batch_id!r}). "
+                        f"Audit trail is INCOMPLETE — expanded child tokens were already created and "
+                        f"some buffered parents may already be terminalized while others remain BUFFERED. "
+                        f"Recorder failure: {type(record_failure).__name__}: {record_failure}."
+                    ) from record_failure
+                self._emit_token_completed(
+                    token,
+                    outcome=outcome,
+                    path=path,
+                )
 
             # Build triggering RowResult if applicable (count-triggered only).
             # The triggering token is always the last buffered token (buffered
@@ -1593,9 +1600,14 @@ class RowProcessor:
         Note: TransformResult.error() is NOT retried - that's a processing error,
         not a transient failure. Only exceptions trigger retry.
 
+        Resume state (attempt offset and checkpoint provenance) is read from the
+        token itself (token.resume_attempt_offset, token.resume_checkpoint_id) and
+        flows through to execute_transform. No explicit threading needed.
+
         Args:
             transform: Transform to execute
-            token: Current token
+            token: Current token; token.resume_attempt_offset and
+                token.resume_checkpoint_id carry the resume state.
             ctx: Plugin context
 
         Returns:
@@ -1971,18 +1983,48 @@ class RowProcessor:
             coalesce_name=coalesce_name,
         )
 
+    def _terminal_coalesce_row_result(
+        self,
+        token: TokenInfo,
+        coalesce_name: CoalesceName,
+        *,
+        context: str,
+    ) -> RowResult:
+        """Build the terminal-coalesce RowResult (SUCCESS/COALESCED routed to the coalesce sink).
+
+        Single source of truth for the three terminal-coalesce sites (barrier-fire in
+        _maybe_coalesce_token, lost-branch in _notify_coalesce_of_lost_branch, and resume
+        re-drive in resume_incomplete_token) so the audit RowResult shape cannot drift between them.
+
+        This constructs ONLY the RowResult — it does NOT emit telemetry or record outcomes.
+        Each call site retains its own telemetry handling (e.g. _notify_coalesce_of_lost_branch
+        deliberately does not emit TokenCompleted here, deferring to accumulate_row_outcomes).
+        """
+        sink_name = self._nav.resolve_coalesce_sink(coalesce_name, context=context)
+        return RowResult(
+            token=token,
+            final_data=token.row_data,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.COALESCED,
+            sink_name=sink_name,
+        )
+
     def process_token(
         self,
         token: TokenInfo,
         ctx: PluginContext,
         *,
-        current_node_id: NodeID,
+        current_node_id: NodeID | None,
         coalesce_node_id: NodeID | None = None,
         coalesce_name: CoalesceName | None = None,
     ) -> list[RowResult]:
         """Process an existing token through the pipeline starting at current_node_id.
 
-        Used for mid-pipeline coalesce merges that must continue processing.
+        current_node_id=None is valid only when sink routing is explicit: either the
+        token has a branch_name present in _branch_to_sink, or on_success_sink is set
+        (via an inherited WorkItem). _process_single_token enforces this invariant and
+        raises OrchestrationInvariantError if neither is satisfied. Used for mid-pipeline
+        coalesce merges that must continue processing, and for resume of fork→sink tokens.
         """
         return self._drain_work_queue(
             self._nav.create_work_item(
@@ -1992,6 +2034,146 @@ class RowProcessor:
                 coalesce_name=coalesce_name,
             ),
             ctx,
+        )
+
+    def _resolve_step_node(self, spec: IncompleteTokenSpec) -> NodeID:
+        """Map an incomplete token's step_in_pipeline back to the NodeID that created it.
+
+        _node_step_map is a bijection (unique monotonic step per node assigned by
+        build_step_map via enumerate(..., start=1)), so the inverse is well-defined.
+        Used to find the expand/coalesce node so the re-drive can continue from the
+        node AFTER it (via resolve_next_node).
+
+        Raises:
+            OrchestrationInvariantError: If no node maps to spec.step_in_pipeline.
+                Indicates audit/DAG inconsistency — step was persisted for a token
+                but the current DAG has no node at that step position.
+        """
+        target_step = spec.step_in_pipeline
+        if target_step is None:
+            raise OrchestrationInvariantError(
+                f"Incomplete token {spec.token_id} has step_in_pipeline=None — "
+                "cannot resolve node ID for mid-DAG resume. Audit/DAG inconsistency."
+            )
+        for node_id, step in self._node_step_map.items():
+            if step == target_step:
+                return node_id
+        raise OrchestrationInvariantError(
+            f"No node maps to step_in_pipeline={target_step} for incomplete token "
+            f"{spec.token_id} — _node_step_map has no such step. Audit/DAG inconsistency."
+        )
+
+    def resume_incomplete_token(
+        self,
+        spec: IncompleteTokenSpec,
+        row_data: PipelineRow,
+        ctx: PluginContext,
+        *,
+        resume_checkpoint_id: str,
+    ) -> list[RowResult]:
+        """Drive one reconstructed incomplete child token to completion in place.
+
+        Reuses the persisted token id (continuing under the ORIGINAL parent) and re-drives
+        from the correct mid-DAG node. The TokenInfo carries resume_attempt_offset =
+        spec.max_attempt + 1 and resume_checkpoint_id, so every node_state it writes is at
+        the bumped attempt and stamped with provenance (ADDENDUM 4 — carried on the token,
+        NOT passed as params to process_token).
+
+        Dispatch cases (branch_name checked first to avoid confusing a fork→coalesce
+        before-barrier token with a post-coalesce merged token that also has join_group_id):
+
+        1. fork → sink terminal branch: branch_name in _branch_to_sink → current_node_id=None
+           (process_token's None-path routes via branch_to_sink to the terminal sink).
+        2. fork → coalesce, crashed before barrier: branch_name in _branch_to_coalesce →
+           re-run the branch from its first processing node with coalesce context.
+        3. expand child: expand_group_id set → re-drive from the node AFTER the expand node.
+        4. post-coalesce merged token, crashed after barrier (B1 review finding): join_group_id
+           set AND fork_group_id None AND branch_name None →
+           - Non-terminal coalesce (next node exists): process_token from node after coalesce.
+           - Terminal coalesce (no next node): reconstruct the COALESCED RowResult directly,
+             mirroring _maybe_coalesce_token's terminal-coalesce path (the correct routing
+             mechanism is resolve_coalesce_sink; process_token(None) is NOT valid for a
+             branchless merged token without on_success_sink context).
+
+        Raises:
+            OrchestrationInvariantError: If the token's lineage fields do not match any
+                known resume-start pattern — indicates audit/DAG inconsistency.
+        """
+        token = TokenInfo(
+            row_id=spec.row_id,
+            token_id=spec.token_id,
+            row_data=row_data,
+            branch_name=spec.branch_name,
+            fork_group_id=spec.fork_group_id,
+            join_group_id=spec.join_group_id,
+            expand_group_id=spec.expand_group_id,
+            resume_attempt_offset=spec.max_attempt + 1,
+            resume_checkpoint_id=resume_checkpoint_id,
+        )
+        branch = spec.branch_name
+
+        if branch is not None and BranchName(branch) in self._branch_to_sink:
+            # fork → sink terminal branch: straight to the sink via None-path routing.
+            return self.process_token(token, ctx, current_node_id=None)
+
+        if branch is not None and BranchName(branch) in self._branch_to_coalesce:
+            # fork → coalesce, crashed BEFORE the barrier: re-run the branch from its
+            # first node with coalesce context so _maybe_coalesce_token fires at the barrier.
+            coalesce_name = self._branch_to_coalesce[BranchName(branch)]
+            first_node = self._nav.resolve_branch_first_node(branch)
+            return self.process_token(
+                token,
+                ctx,
+                current_node_id=first_node,
+                coalesce_name=coalesce_name,
+            )
+
+        if spec.expand_group_id is not None:
+            # expand child: re-drive from the node AFTER the expand node.
+            # expand is never terminal; an `after` of None here is an audit/DAG inconsistency
+            # that process_token's None-enforcement raises on (no branch_to_sink / on_success_sink).
+            after = self._nav.resolve_next_node(self._resolve_step_node(spec))
+            return self.process_token(token, ctx, current_node_id=after)
+
+        if spec.join_group_id is not None and spec.fork_group_id is None and branch is None:
+            # post-coalesce merged token, crashed AFTER the barrier (B1 review finding):
+            # step_in_pipeline is the coalesce node's step. Re-drive downstream of the
+            # coalesce node, or reconstruct the terminal COALESCED RowResult if the coalesce
+            # was terminal (no next node exists).
+            coalesce_node_id = self._resolve_step_node(spec)
+            after = self._nav.resolve_next_node(coalesce_node_id)
+            if after is not None:
+                return self.process_token(token, ctx, current_node_id=after)
+            # Terminal coalesce: no downstream processing nodes.
+            # process_token(current_node_id=None) is NOT valid for a branchless merged token
+            # (no branch_to_sink entry, no on_success_sink). Mirror _maybe_coalesce_token's
+            # terminal-coalesce path: resolve the sink and return the COALESCED RowResult
+            # directly for the caller (orchestrator) to route to sink.
+            #
+            # _resolve_step_node guarantees coalesce_node_id is in _node_step_map but NOT
+            # that it is in _coalesce_name_by_node_id — wrap the lookup so a mismatch is an
+            # uncontexted-KeyError-free audit-grade invariant failure.
+            try:
+                coalesce_name = self._coalesce_name_by_node_id[coalesce_node_id]
+            except KeyError as exc:
+                raise OrchestrationInvariantError(
+                    f"Post-coalesce token {spec.token_id} resolved to node {coalesce_node_id!r} "
+                    f"which is not a known coalesce node (known: {sorted(self._coalesce_name_by_node_id)}). "
+                    f"Audit/DAG inconsistency."
+                ) from exc
+            return [
+                self._terminal_coalesce_row_result(
+                    token,
+                    coalesce_name,
+                    context=f"terminal coalesce resume for incomplete token '{spec.token_id}'",
+                )
+            ]
+
+        raise OrchestrationInvariantError(
+            f"Incomplete token {spec.token_id} has branch_name={branch!r}, "
+            f"fork_group_id={spec.fork_group_id!r}, join_group_id={spec.join_group_id!r}, "
+            f"expand_group_id={spec.expand_group_id!r} — no resume-start node resolvable. "
+            f"Audit/DAG inconsistency."
         )
 
     def _maybe_coalesce_token(
@@ -2024,18 +2206,12 @@ class RowProcessor:
             if self._nav.resolve_next_node(coalesce_node_id) is None:
                 if coalesce_name is None:
                     raise OrchestrationInvariantError("Terminal coalesce outcome missing coalesce_name")
-                sink_name = self._nav.resolve_coalesce_sink(
-                    coalesce_name,
-                    context=f"terminal coalesce outcome for token '{coalesce_outcome.merged_token.token_id}'",
-                )
                 return (
                     True,
-                    RowResult(
-                        token=coalesce_outcome.merged_token,
-                        final_data=coalesce_outcome.merged_token.row_data,
-                        outcome=TerminalOutcome.SUCCESS,
-                        path=TerminalPath.COALESCED,
-                        sink_name=sink_name,
+                    self._terminal_coalesce_row_result(
+                        coalesce_outcome.merged_token,
+                        coalesce_name,
+                        context=f"terminal coalesce outcome for token '{coalesce_outcome.merged_token.token_id}'",
                     ),
                 )
 
@@ -2132,21 +2308,15 @@ class RowProcessor:
 
         if outcome.merged_token is not None:
             if self._nav.resolve_next_node(coalesce_node_id) is None:
-                sink_name = self._nav.resolve_coalesce_sink(
-                    coalesce_name,
-                    context=f"branch-loss notification for row '{current_token.row_id}'",
-                )
                 # Terminal coalesce — no downstream transforms.
                 # Do NOT emit TokenCompleted here: the merged token still
                 # needs to flow through the sink write for durable recording.
                 # Telemetry is emitted later by accumulate_row_outcomes.
                 return [
-                    RowResult(
-                        token=outcome.merged_token,
-                        final_data=outcome.merged_token.row_data,
-                        outcome=TerminalOutcome.SUCCESS,
-                        path=TerminalPath.COALESCED,
-                        sink_name=sink_name,
+                    self._terminal_coalesce_row_result(
+                        outcome.merged_token,
+                        coalesce_name,
+                        context=f"branch-loss notification for row '{current_token.row_id}'",
                     ),
                 ]
             # Non-terminal — resume merged token at coalesce step
@@ -2249,6 +2419,10 @@ class RowProcessor:
             coalesce_node_id: Coalesce barrier node for fork branches (or None).
             coalesce_name: Coalesce point name for fork branches (or None).
             current_on_success_sink: Current sink name, may be updated by transform.on_success.
+
+        Resume state (attempt offset and checkpoint provenance) is carried on
+        current_token.resume_attempt_offset and current_token.resume_checkpoint_id
+        and flow through to execute_transform without explicit threading.
 
         Returns:
             _TransformContinue: Token should advance to next node (updated token + updated sink).
@@ -2371,6 +2545,8 @@ class RowProcessor:
             # Queue each child for continued processing.
             # Pass updated_sink so terminal children inherit the
             # expanding transform's sink instead of defaulting to source_on_success.
+            # Children born during a re-drive get fresh token_ids with no prior node_states,
+            # so they use the default resume_attempt_offset=0 / resume_checkpoint_id=None.
             for child_token in child_tokens:
                 child_coalesce_name = coalesce_name if coalesce_name is not None and child_token.branch_name is not None else None
                 child_items.append(
@@ -2674,6 +2850,8 @@ class RowProcessor:
                 cfg_coalesce_name = self._branch_to_coalesce[BranchName(cfg_branch_name)]
 
             # See config gate fork handler above for routing logic.
+            # Children born during a re-drive get fresh token_ids with no prior node_states,
+            # so they use the default resume_attempt_offset=0 / resume_checkpoint_id=None.
             if cfg_coalesce_name is None and cfg_branch_name and BranchName(cfg_branch_name) in self._branch_to_sink:
                 child_items.append(
                     self._nav.create_work_item(
@@ -2792,7 +2970,9 @@ class RowProcessor:
         """Process a single token through processing nodes starting at node_id.
 
         Args:
-            token: Token to process
+            token: Token to process; token.resume_attempt_offset and
+                token.resume_checkpoint_id carry the resume state for this token
+                and propagate automatically through all node_state writes.
             ctx: Plugin context
             current_node_id: Node ID to start processing from. None is valid only
                 for terminal work items that already have explicit sink context

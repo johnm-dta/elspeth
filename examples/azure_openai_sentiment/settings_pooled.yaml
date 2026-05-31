@@ -20,7 +20,7 @@ transforms:
     endpoint: ${AZURE_OPENAI_ENDPOINT}
     api_key: ${AZURE_OPENAI_KEY}
     api_version: ${AZURE_OPENAI_API_VERSION}
-    template: 'Analyze the sentiment of the following text and respond with ONLY a JSON object.
+    prompt_template: 'Analyze the sentiment of the following text and respond with ONLY a JSON object.
 
 
       Text: {{ row.text }}

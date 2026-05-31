@@ -23,12 +23,13 @@ from typing import Any
 
 import yaml
 
-from elspeth.web.composer.state import CompositionState
+from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState
+from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 
 # Web-specific metadata keys that should NOT appear in engine YAML.
 # These are UI-layer concerns for provenance tracking, not plugin config.
 # Plugin configs use Pydantic with extra="forbid" — unknown keys cause errors.
-_WEB_ONLY_OPTION_KEYS = frozenset({"blob_ref"})
+_WEB_ONLY_OPTION_KEYS = frozenset({"blob_ref"}) | AUTHORING_METADATA_OPTION_KEYS
 
 
 def _strip_web_metadata(options: dict[str, Any]) -> dict[str, Any]:
@@ -36,26 +37,28 @@ def _strip_web_metadata(options: dict[str, Any]) -> dict[str, Any]:
 
     Returns a shallow copy with web-only keys removed.
     """
-    return {k: v for k, v in options.items() if k not in _WEB_ONLY_OPTION_KEYS}
+    stripped = {k: v for k, v in options.items() if k not in _WEB_ONLY_OPTION_KEYS}
+    if options.get("blob_ref") is not None and options.get("mode") == "bind_source":
+        stripped.pop("mode", None)
+    return stripped
 
 
-def generate_yaml(state: CompositionState) -> str:
-    """Convert a CompositionState to ELSPETH pipeline YAML.
+def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
+    """Convert a CompositionState to ELSPETH's canonical pipeline dict.
 
-    The output is deterministic: same state produces byte-identical YAML.
     Maps CompositionState fields to the YAML structure expected by
-    ELSPETH's load_settings() parser.
+    ELSPETH's load_settings() parser. This is the canonical analysis form
+    for code that needs to walk a composition state using runtime/YAML
+    section names without serializing to text first.
 
     Calls state.to_dict() to unwrap all frozen containers
-    (MappingProxyType -> dict, tuple -> list) before passing to
-    yaml.dump(). This avoids RepresenterError from PyYAML on frozen
-    types. See spec R4 and AC #15.
+    (MappingProxyType -> dict, tuple -> list) before building the dict.
 
     Args:
-        state: The pipeline composition state to serialize.
+        state: The pipeline composition state to convert.
 
     Returns:
-        YAML string representing the pipeline configuration.
+        Plain dict representing the pipeline configuration.
     """
     # Unwrap frozen containers to plain Python types (R4).
     # to_dict() recursively converts MappingProxyType -> dict,
@@ -63,6 +66,11 @@ def generate_yaml(state: CompositionState) -> str:
     state_dict = state.to_dict()
 
     doc: dict[str, Any] = {}
+
+    for node in state_dict["nodes"]:
+        node_type = node["node_type"]
+        if node_type not in COMPOSER_NODE_TYPES:
+            raise ValueError(f"Unknown node_type '{node_type}' for node '{node['id']}'.")
 
     # Source — state_dict["source"] is always present (None or dict).
     source = state_dict["source"]
@@ -95,7 +103,7 @@ def generate_yaml(state: CompositionState) -> str:
                 "on_error": t["on_error"],
             }
             if t["options"]:
-                entry["options"] = t["options"]
+                entry["options"] = _strip_web_metadata(dict(t["options"]))
             doc["transforms"].append(entry)
 
     # Gates — condition and routes are conditionally present (only on gates).
@@ -145,7 +153,7 @@ def generate_yaml(state: CompositionState) -> str:
             if "expected_output_count" in a:
                 entry["expected_output_count"] = a["expected_output_count"]
             if a["options"]:
-                entry["options"] = a["options"]
+                entry["options"] = _strip_web_metadata(dict(a["options"]))
             doc["aggregations"].append(entry)
 
     # Coalesce — branches, policy, merge are conditionally present.
@@ -173,11 +181,28 @@ def generate_yaml(state: CompositionState) -> str:
                 "on_write_failure": output["on_write_failure"],
             }
             if output["options"]:
-                sink_entry["options"] = output["options"]
+                sink_entry["options"] = _strip_web_metadata(dict(output["options"]))
             doc["sinks"][output["name"]] = sink_entry
 
     # landscape key is intentionally omitted -- URL comes from
     # WebSettings.get_landscape_url() at execution time (security fix S1).
+    return doc
+
+
+def generate_yaml(state: CompositionState) -> str:
+    """Convert a CompositionState to deterministic ELSPETH pipeline YAML.
+
+    The output is deterministic: same state produces byte-identical YAML.
+    YAML serialization is a thin wrapper around ``generate_pipeline_dict()``
+    so there is only one mapping from composer state to runtime/YAML shape.
+
+    Args:
+        state: The pipeline composition state to serialize.
+
+    Returns:
+        YAML string representing the pipeline configuration.
+    """
+    doc = generate_pipeline_dict(state)
 
     # sort_keys=False preserves insertion order: source → transforms →
     # gates → aggregations → coalesce → sinks (the natural pipeline flow).

@@ -3,9 +3,9 @@
 **Date:** 2026-05-03
 **Deploy under test:** https://elspeth.foundryside.dev (HEAD `f3137ae8`)
 **Companion documents in this checkout:**
-- `/home/john/elspeth/notes/composer-fieldreport-2026-05-03.md` — boss-facing field report (the brief)
-- `/home/john/elspeth/notes/composer-eval-hardmode-2026-05-03.md` — technical eval report
-- `/home/john/elspeth/notes/composer-eval-basic-2026-05-03.md` — basic-mode (LLM-driver) eval, same day
+- `/home/john/elspeth/docs/composer/evidence/composer-fieldreport-2026-05-03.md` — boss-facing field report (the brief)
+- `/home/john/elspeth/docs/composer/evidence/composer-eval-hardmode-2026-05-03.md` — technical eval report
+- `/home/john/elspeth/docs/composer/evidence/composer-eval-basic-2026-05-03.md` — basic-mode (LLM-driver) eval, same day
 
 This folder contains every artefact produced by the hard-mode eval: persona specs, scenario fixtures, harness scripts, per-scenario session/message/state/run/diagnostic dumps, and an aggregate scorecard. Every claim in any of the three companion documents can be traced back to a specific file under here.
 

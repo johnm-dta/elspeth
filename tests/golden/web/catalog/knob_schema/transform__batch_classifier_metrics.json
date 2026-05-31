@@ -1,0 +1,51 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Name of the field containing ground-truth labels",
+        "kind": "text",
+        "label": "Actual Field",
+        "name": "actual_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Name of the field containing predicted labels",
+        "kind": "text",
+        "label": "Predicted Field",
+        "name": "predicted_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Optional positive label for binary precision/recall/F1 metrics.",
+        "kind": "json-value",
+        "label": "Positive Label",
+        "name": "positive_label",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "batch_classifier_metrics"
+}

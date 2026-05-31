@@ -25,6 +25,7 @@ Thread Safety:
 
 import queue
 import threading
+from collections import defaultdict
 from typing import TypedDict
 
 import structlog
@@ -127,7 +128,7 @@ class TelemetryManager:
         # Health metrics
         self._events_emitted = 0
         self._events_dropped = 0
-        self._exporter_failures: dict[str, int] = {}
+        self._exporter_failures: defaultdict[str, int] = defaultdict(int)
         self._last_logged_drop_count: int = 0
 
         # Track whether we've already disabled telemetry
@@ -136,7 +137,7 @@ class TelemetryManager:
         # Store exception for fail_on_total=True to re-raise on flush()
         # Widened from TelemetryExporterError to Exception to also capture
         # FrameworkBugError/AuditIntegrityError from background thread.
-        self._stored_exception: Exception | None = None
+        self._stored_exception: object | None = None
 
         # Thread coordination
         self._shutdown_event = threading.Event()
@@ -226,7 +227,19 @@ class TelemetryManager:
                 continue
 
             try:
-                exporter.export(event)
+                result = exporter.export(event)
+                if result is False:
+                    breaker.record_failure()
+                    failures += 1
+                    self._exporter_failures[exporter.name] += 1
+                    logger.warning(
+                        "Telemetry exporter reported handled failure",
+                        exporter=exporter.name,
+                        event_type=type(event).__name__,
+                        circuit_state=breaker.state.name,
+                    )
+                    continue
+
                 breaker.record_success()
                 successes += 1
             except Exception as e:
@@ -235,7 +248,7 @@ class TelemetryManager:
 
                 breaker.record_failure()
                 failures += 1
-                self._exporter_failures[exporter.name] = self._exporter_failures.get(exporter.name, 0) + 1
+                self._exporter_failures[exporter.name] += 1
                 logger.warning(
                     "Telemetry exporter failed",
                     exporter=exporter.name,
@@ -479,7 +492,7 @@ class TelemetryManager:
         return {
             "events_emitted": self._events_emitted,
             "events_dropped": events_dropped,
-            "exporter_failures": self._exporter_failures.copy(),
+            "exporter_failures": dict(self._exporter_failures),
             "consecutive_total_failures": self._consecutive_total_failures,
             "queue_depth": self._queue.qsize(),
             "queue_maxsize": self._queue.maxsize,
@@ -508,12 +521,26 @@ class TelemetryManager:
         # Re-raise stored exception from background thread (fail_on_total=True)
         if self._stored_exception is not None:
             exc = self._stored_exception
-            self._stored_exception = None  # Clear to allow recovery
-            raise exc
+            if not isinstance(exc, BaseException):
+                self._stored_exception = None
+                raise TypeError(f"Stored telemetry exception is not raiseable: {type(exc).__name__}")
+            try:
+                raise exc
+            finally:
+                self._stored_exception = None  # Clear to allow recovery
 
         for exporter in self._exporters:
             try:
-                exporter.flush()
+                result = exporter.flush()
+                if result is False:
+                    breaker = self._circuit_breakers[id(exporter)]
+                    breaker.record_failure()
+                    self._exporter_failures[exporter.name] += 1
+                    logger.warning(
+                        "Exporter reported handled flush failure",
+                        exporter=exporter.name,
+                        circuit_state=breaker.state.name,
+                    )
             except Exception as e:
                 if not isinstance(e, TELEMETRY_TRANSPORT_ERRORS):
                     raise  # Programming error — must crash

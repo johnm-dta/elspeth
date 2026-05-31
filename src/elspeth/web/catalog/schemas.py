@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from elspeth.contracts.enums import DerivedAuditCharacteristics
+
 PluginKind = Literal["source", "transform", "sink"]
 
 
@@ -33,12 +35,41 @@ class ConfigFieldSummary(_StrictResponse):
 
 
 class PluginSummary(_StrictResponse):
-    """Lightweight plugin info for catalog browsing."""
+    """Lightweight plugin info for catalog browsing.
+
+    Phase 7A adds reference-content fields (when-to-use prose, capability
+    tags, audit-characteristic flags) so the catalog drawer can render
+    persona-facing reference cards instead of a bare name+description.
+    All new fields are optional and default to None / empty for plugins
+    that haven't been authored yet; the frontend renders a fallback
+    message rather than blocking display.
+
+    `audit_characteristics` is the catalog service's *derived* set:
+    declared characteristics from the plugin class composed with the
+    characteristic inferred from `determinism`, then sorted into a
+    deterministic tuple for stable wire-format ordering. Quarantine
+    behaviour is author-declared (the `_on_validation_failure` signal
+    is a per-instance attribute and cannot be inferred from the class
+    object). See `CatalogServiceImpl._derive_audit_characteristics`.
+    """
 
     name: str
     description: str
     plugin_type: PluginKind
     config_fields: list[ConfigFieldSummary]
+
+    # Phase 7A reference-content fields
+    usage_when_to_use: str | None = None
+    usage_when_not_to_use: str | None = None
+    example_use: str | None = None
+    capability_tags: tuple[str, ...] = ()
+    audit_characteristics: DerivedAuditCharacteristics = ()
+
+    # JIT-hints Phase 1: discovery-time composer hints. Populated from
+    # ``plugin_cls.get_agent_assistance(issue_code=None).composer_hints``
+    # when the plugin overrides the hook; ``()`` otherwise. Advisory
+    # coaching only — not contract, not audit-hashed.
+    composer_hints: tuple[str, ...] = ()
 
 
 class PluginSchemaInfo(_StrictResponse):
@@ -53,3 +84,12 @@ class PluginSchemaInfo(_StrictResponse):
     plugin_type: PluginKind
     description: str
     json_schema: dict[str, Any]
+    knob_schema: dict[str, Any]
+    """Lowered composer knob schema, computed once at catalog load."""
+
+    # JIT-hints Phase 1: same semantics as PluginSummary.composer_hints.
+    # Carried on the full-schema response so an LLM that asked for the
+    # schema (e.g. to introspect config fields before set_source) sees
+    # the same hints it would have seen from list_*. Avoids requiring
+    # a follow-up get_plugin_assistance call to surface the hints.
+    composer_hints: tuple[str, ...] = ()

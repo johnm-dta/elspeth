@@ -1,0 +1,101 @@
+/* composer.css — Composer-area UI surfaces.
+   Owners: .save-for-review-* (Share-for-review dialog).
+
+   This file did not exist in pre-split App.css — the Save-for-review dialog
+   was shipped without a stylesheet, so its URL input rendered at browser
+   default size (~25 chars wide) and clipped the share URL. Adding minimal
+   rules here so the input flexes to fill its row. */
+
+.save-for-review-dialog {
+  margin-top: var(--space-lg);
+  padding: var(--space-lg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+}
+
+.save-for-review-dialog-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.save-for-review-dialog-content > header h2 {
+  margin: 0;
+}
+
+.save-for-review-dialog-content > footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.save-for-review-success {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.save-for-review-success > p {
+  margin: 0;
+}
+
+.save-for-review-url-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.save-for-review-url-row label {
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.save-for-review-url-row input[type="text"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* Vertical padding raised to --space-sm so the input clears the WCAG 2.5.8
+     24×24 minimum target with comfortable margin. */
+  padding: var(--space-sm) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+.save-for-review-url-row a {
+  flex: 0 0 auto;
+  color: var(--color-link);
+  /* Inline-flex with the compact control floor (36px) so the anchor has
+     a real touch target rather than just line-height (~18px). */
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--size-control-compact);
+  padding: 0 var(--space-sm);
+  border-radius: var(--radius-sm);
+}
+
+.save-for-review-url-row a:hover {
+  background: var(--color-surface-hover);
+}
+
+.save-for-review-tip {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.save-for-review-error {
+  padding: var(--space-md);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.save-for-review-error > p {
+  margin: 0 0 var(--space-sm);
+}

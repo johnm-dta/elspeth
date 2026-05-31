@@ -20,6 +20,20 @@ interface WorkingView {
   likelyNext: string;
 }
 
+function isTerminalPhase(
+  phase: ComposerProgressSnapshot["phase"] | undefined,
+): boolean {
+  return phase === "complete" || phase === "failed" || phase === "cancelled";
+}
+
+function terminalStatusLabel(
+  phase: ComposerProgressSnapshot["phase"] | undefined,
+): string {
+  if (phase === "failed") return "Failed";
+  if (phase === "cancelled") return "Stopped";
+  return "Updated";
+}
+
 function plural(count: number, singular: string, pluralLabel = `${singular}s`): string {
   return count === 1 ? `1 ${singular}` : `${count} ${pluralLabel}`;
 }
@@ -125,7 +139,7 @@ function heuristicWorkingView(
 /**
  * Animated three-dot composing indicator shown while the backend
  * is processing the LLM tool-use loop. Uses the .composing-dot CSS
- * class from App.css for staggered bounce animation.
+ * class from styles/animations.css for staggered bounce animation.
  * Screen-reader announcements are handled by the parent ChatPanel live region.
  */
 export function ComposingIndicator({
@@ -136,20 +150,29 @@ export function ComposingIndicator({
   const workingView =
     backendWorkingView(composerProgress) ??
     heuristicWorkingView(latestRequest, compositionState);
+  const isTerminal = isTerminalPhase(composerProgress?.phase);
 
   return (
     <div
-      className="composing-indicator composing-row"
+      className={`composing-indicator composing-row${isTerminal ? " composing-indicator--terminal" : ""}`}
       role="status"
     >
       <div className="composing-bubble">
-        <div className="composing-pulse" aria-hidden="true">
-          <span className="composing-dot" />
-          <span className="composing-dot" />
-          <span className="composing-dot" />
-        </div>
+        {isTerminal ? (
+          <div className="composing-terminal-mark" aria-hidden="true">
+            {terminalStatusLabel(composerProgress?.phase)}
+          </div>
+        ) : (
+          <div className="composing-pulse" aria-hidden="true">
+            <span className="composing-dot" />
+            <span className="composing-dot" />
+            <span className="composing-dot" />
+          </div>
+        )}
         <div className="composing-working-view">
-          <div className="composing-label">Working on...</div>
+          <div className="composing-label">
+            {isTerminal ? "Last composer update" : "Working on..."}
+          </div>
           <div className="composing-title">{workingView.headline}</div>
           <div className="composing-section">
             <div className="composing-label">What ELSPETH can see</div>

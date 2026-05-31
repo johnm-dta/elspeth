@@ -3,7 +3,7 @@
 
 from typing import Any
 
-from elspeth.contracts import ArtifactDescriptor
+from elspeth.contracts import ArtifactDescriptor, Determinism
 from elspeth.contracts.contexts import SinkContext
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.schema_contract import SchemaContract
@@ -15,6 +15,7 @@ class StubSink(BaseSink):
     """Stub sink implementation for testing."""
 
     name = "stub"
+    determinism = Determinism.IO_WRITE
     input_schema = None  # type: ignore
     _on_write_failure: str | None = "discard"
 

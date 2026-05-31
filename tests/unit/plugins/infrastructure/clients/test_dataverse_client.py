@@ -375,6 +375,20 @@ class TestDomainAllowlist:
                 credential=FakeCredential(),  # type: ignore[arg-type]  # test fake
             )
 
+    @pytest.mark.parametrize(
+        ("environment_url", "match"),
+        [
+            ("http://myorg.crm.dynamics.com", "HTTPS"),
+            ("https://user:pass@myorg.crm.dynamics.com", "embedded credentials"),
+        ],
+    )
+    def test_constructor_rejects_credential_unsafe_environment_url(self, environment_url: str, match: str) -> None:
+        with pytest.raises(DataverseClientError, match=match):
+            DataverseClient(
+                environment_url=environment_url,
+                credential=FakeCredential(),  # type: ignore[arg-type]  # test fake
+            )
+
 
 class TestValidateAdditionalDomain:
     """Safety regex for user-provided additional domain patterns."""

@@ -64,7 +64,7 @@ def _invalid_contract_state() -> CompositionState:
             OutputSpec(
                 name="main",
                 plugin="csv",
-                options={"path": "outputs/out.csv", "schema": {"mode": "observed"}, "collision_policy": "auto_increment"},
+                options={"path": "outputs/out.csv", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
                 on_write_failure="discard",
             ),
         ),
@@ -87,7 +87,7 @@ def _valid_state_with_no_edge_contracts() -> CompositionState:
             OutputSpec(
                 name="main",
                 plugin="csv",
-                options={"path": "outputs/out.csv", "schema": {"mode": "observed"}, "collision_policy": "auto_increment"},
+                options={"path": "outputs/out.csv", "schema": {"mode": "observed"}, "mode": "write", "collision_policy": "auto_increment"},
                 on_write_failure="discard",
             ),
         ),
@@ -132,6 +132,7 @@ def _connection_valid_field_mapper_state_without_edges() -> CompositionState:
                 options={
                     "path": "outputs/out.csv",
                     "schema": {"mode": "observed", "required_fields": ["body"]},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 on_write_failure="discard",
@@ -224,9 +225,19 @@ class TestDispatchTool:
         assert result["success"] is True
 
     def test_set_source_mutates_state(self, scratch_dir: Path) -> None:
+        # set_source is promoted to a type-driven manifest entry
+        # (SetSourceArgumentsModel) with extra="forbid" — the LLM-supplied
+        # argument set MUST include all four required fields.  Prior to
+        # promotion this test omitted on_validation_failure and relied on
+        # the handler defaulting it via .get(); that path is gone.
         result = _dispatch_tool(
             "set_source",
-            {"plugin": "csv", "on_success": "node_1", "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}}},
+            {
+                "plugin": "csv",
+                "on_success": "node_1",
+                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
             _empty_state(),
             _mock_catalog(),
             scratch_dir,
@@ -261,6 +272,7 @@ class TestDispatchTool:
                 "options": {
                     "path": "outputs/out.csv",
                     "schema": {"mode": "observed"},
+                    "mode": "write",
                     "collision_policy": "auto_increment",
                 },
                 "on_write_failure": "discard",
@@ -285,6 +297,7 @@ class TestDispatchTool:
                     options={
                         "path": "outputs/out.csv",
                         "schema": {"mode": "observed"},
+                        "mode": "write",
                         "collision_policy": "auto_increment",
                     },
                     on_write_failure="discard",
@@ -358,10 +371,16 @@ class TestDispatchTool:
         )
         session_id = new_result["data"]["session_id"]
 
-        # Modify state via set_source
+        # Modify state via set_source.  All four required fields per
+        # SetSourceArgumentsModel (extra="forbid").
         modified = _dispatch_tool(
             "set_source",
-            {"plugin": "csv", "on_success": "node_1", "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}}},
+            {
+                "plugin": "csv",
+                "on_success": "node_1",
+                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
             _empty_state(),
             _mock_catalog(),
             scratch_dir,
@@ -561,14 +580,19 @@ class TestValidationToDictSemanticContracts:
 async def test_mcp_preview_runtime_preflight_joins_shared_session_inflight() -> None:
     from elspeth.composer_mcp.server import _mcp_preview_runtime_preflight
     from elspeth.web.execution.runtime_preflight import RuntimePreflightCoordinator
-    from elspeth.web.execution.schemas import ValidationResult
+    from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
 
     coordinator = RuntimePreflightCoordinator()
     state = _valid_state_with_no_edge_contracts()
     calls = 0
     started = asyncio.Event()
     release = asyncio.Event()
-    expected = ValidationResult(is_valid=True, checks=[], errors=[])
+    expected = ValidationResult(
+        is_valid=True,
+        checks=[],
+        errors=[],
+        readiness=ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[]),
+    )
 
     async def run_preflight(candidate: CompositionState) -> ValidationResult:
         nonlocal calls

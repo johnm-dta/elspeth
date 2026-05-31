@@ -1,0 +1,3 @@
+# Entries override the plugin config title+description lint.
+# Format: { id: "<kind>/<plugin_name>:<field_name>", reason: "<why>" }
+entries: []

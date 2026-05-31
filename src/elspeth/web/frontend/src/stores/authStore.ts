@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { UserProfile, ApiError } from "../types/index";
 import * as api from "../api/client";
+import { usePreferencesStore } from "./preferencesStore";
 
 const TOKEN_KEY = "auth_token";
 
@@ -12,7 +13,7 @@ interface AuthState {
 
   login: (username: string, password: string) => Promise<void>;
   loginWithToken: (token: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   loadFromStorage: () => Promise<void>;
 }
 
@@ -59,20 +60,22 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
-  logout() {
+  async logout() {
     localStorage.removeItem(TOKEN_KEY);
     set({ token: null, user: null, loginError: null, isLoading: false });
-    void import("./sessionStore").then(({ useSessionStore }) => {
-      useSessionStore.getState().reset?.();
-    });
-    void import("./executionStore").then(({ useExecutionStore }) => {
-      useExecutionStore.getState().reset?.();
-    });
+    const [{ useSessionStore }, { useExecutionStore }] = await Promise.all([
+      import("./sessionStore"),
+      import("./executionStore"),
+    ]);
+    useSessionStore.getState().reset?.();
+    useExecutionStore.getState().reset?.();
+    usePreferencesStore.getState().reset();
   },
 
   async loadFromStorage() {
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) {
+      usePreferencesStore.getState().reset();
       set({ isLoading: false });
       return;
     }
@@ -83,6 +86,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     } catch {
       // Token invalid or expired -- clear it
       localStorage.removeItem(TOKEN_KEY);
+      usePreferencesStore.getState().reset();
       set({ token: null, user: null, isLoading: false });
     }
   },

@@ -144,6 +144,7 @@ class ExecutionRepository:
         state_id: str | None = None,
         attempt: int = 0,
         quarantined: bool = False,
+        resume_checkpoint_id: str | None = None,
     ) -> NodeStateOpen:
         """Begin recording a node state (token visiting a node).
 
@@ -157,6 +158,10 @@ class ExecutionRepository:
             attempt: Attempt number (0 for first attempt)
             quarantined: If True, input_data is Tier-3 external data that may
                 contain non-canonical values (NaN, Infinity). Uses repr_hash fallback.
+            resume_checkpoint_id: Checkpoint ID this node_state was re-driven from
+                during a resume operation. NULL for every original-run write; set when
+                re-driving an incomplete token so explain() can distinguish resume
+                re-drives from run-1 tenacity retries (epoch 11).
 
         Returns:
             NodeStateOpen model with status=OPEN
@@ -194,6 +199,7 @@ class ExecutionRepository:
                 status=state.status,
                 input_hash=state.input_hash,
                 started_at=state.started_at,
+                resume_checkpoint_id=resume_checkpoint_id,
             )
         )
 
@@ -771,6 +777,7 @@ class ExecutionRepository:
         *,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call:
         """Record an external call for a node state.
 
@@ -785,6 +792,14 @@ class ExecutionRepository:
             latency_ms: Call duration in milliseconds
             request_ref: Optional payload store reference for request
             response_ref: Optional payload store reference for response
+            resolved_prompt_template_hash: Cross-DB hash anchor (Phase 5b Task 9).
+                When this LLM-transform call is downstream of an interpretation
+                event the L3 plugin forwards the SHA-256 of the resolved prompt
+                template string here; the value MUST equal
+                ``interpretation_events.resolved_prompt_template_hash`` in the
+                session audit DB for the same resolved string. ``None`` for
+                non-LLM calls or for LLM transforms not downstream of an
+                interpretation event.
 
         Returns:
             The recorded Call model
@@ -815,6 +830,7 @@ class ExecutionRepository:
             "request_ref": prepared.request_ref,
             "response_hash": prepared.response_hash,
             "response_ref": prepared.response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
             "error_json": prepared.error_json,
             "latency_ms": latency_ms,
             "created_at": timestamp,
@@ -837,6 +853,7 @@ class ExecutionRepository:
             response_ref=response_ref,
             error_json=prepared.error_json,
             latency_ms=latency_ms,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
     # === Operations (Source/Sink I/O) ===
@@ -845,7 +862,7 @@ class ExecutionRepository:
         self,
         run_id: str,
         node_id: str,
-        operation_type: Literal["source_load", "sink_write"],
+        operation_type: Literal["source_load", "sink_write", "runtime_preflight"],
         *,
         input_data: Mapping[str, object] | None = None,
     ) -> Operation:
@@ -1017,8 +1034,10 @@ class ExecutionRepository:
         error: CallPayload | None = None,
         latency_ms: float | None = None,
         *,
+        call_index: int | None = None,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call:
         """Record an external call made during an operation.
 
@@ -1039,7 +1058,8 @@ class ExecutionRepository:
         Returns:
             The recorded Call model
         """
-        call_index = self.allocate_operation_call_index(operation_id)
+        if call_index is None:
+            call_index = self.allocate_operation_call_index(operation_id)
         call_id = f"call_{operation_id}_{call_index}"
         timestamp = now()
         prepared = self._prepare_call_payloads(
@@ -1061,6 +1081,7 @@ class ExecutionRepository:
             "request_ref": prepared.request_ref,
             "response_hash": prepared.response_hash,
             "response_ref": prepared.response_ref,
+            "resolved_prompt_template_hash": resolved_prompt_template_hash,
             "error_json": prepared.error_json,
             "latency_ms": latency_ms,
             "created_at": timestamp,
@@ -1083,6 +1104,7 @@ class ExecutionRepository:
             response_ref=response_ref,
             error_json=prepared.error_json,
             latency_ms=latency_ms,
+            resolved_prompt_template_hash=resolved_prompt_template_hash,
         )
 
     def get_operation(self, operation_id: str) -> Operation | None:

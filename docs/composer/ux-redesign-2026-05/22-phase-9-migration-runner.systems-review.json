@@ -1,0 +1,170 @@
+{
+  "review_meta": {
+    "plan_path": "docs/composer/ux-redesign-2026-05/22-phase-9-migration-runner.md",
+    "reviewer_lens": "systems",
+    "reviewed_at": "2026-05-19",
+    "branch": "RC5.2"
+  },
+  "status": "BLOCKING",
+  "blocking_count": 3,
+  "warning_count": 7,
+  "issues": [
+    {
+      "id": "SYS-001",
+      "severity": "BLOCKING",
+      "category": "dependency_chain",
+      "location_in_plan": "Task 5a — Displace initialize_session_schema",
+      "finding": "Task 5a's call-site enumeration is wrong by approximately 5x. The plan lists 9 test files as callers of initialize_session_schema. The actual count is 48 unique files with 178 total call sites across integration, unit, property, and eval tests. The plan explicitly states to run grep to confirm 'no other test call sites exist before committing' — if the implementer runs that grep and follows the plan's logic, they will see 48 files and have no instruction on how to route them. The plan splits callers into 'caretaker path' (need the full caretaker) vs 'schema-initialised DB only' (metadata.create_all suffices), but makes this routing decision for only 9 files. The unlisted 39 files are predominantly unit tests for composer, secrets, blobs, shareable reviews, and preferences that use initialize_session_schema only to get a schema-stamped in-memory DB before exercising unrelated logic. All 39 will break silently at import (ImportError) or at call time (AttributeError) if the function is deleted without updating them.",
+      "evidence": "grep -rn 'initialize_session_schema' /home/john/elspeth/tests/ yields 48 unique files. Plan §Task5a lists: tests/integration/web/conftest.py, test_step_handlers.py, test_blobs_ready_hash_postgres.py, test_compose_loop_latency_sanity.py, test_composer_llm_eval_characterization.py, test_inv_audit_ahead_backward.py, test_progressive_disclosure.py, guided/conftest.py, test_compose_loop_concurrent_sessions.py — 9 entries. Actual set additionally includes: tests/unit/web/sessions/test_schema.py, tests/unit/web/composer/conftest.py, tests/unit/web/secrets/test_user_store.py, tests/unit/web/blobs/test_routes.py, tests/property/web/composer/conftest.py, and 34 others.",
+      "second_order_risk": "A Task 5a commit that updates 9 files will pass in-repo grep validation per the plan's own instruction, then fail CI on the unlisted 39. If the CI suite is fast-failing on the first error (pytest -x), the true scope of the breakage is invisible until the developer iterates. The 'run to pass' TDD step in Task 5a will not converge until all 48 files are updated. This delays the task significantly and increases the risk of incorrect substitution choices (caretaker vs metadata.create_all) for unfamiliar callers.",
+      "resolution": "Before committing to the plan's Task 5a implementation, re-run the grep and generate the full caller list. For each caller, make the explicit routing decision: (a) tests that exercise the caretaker path get a shared fixture that calls run_caretaker; (b) tests that only need a schema-populated DB get metadata.create_all(engine) directly. Document the routing decision per file in the Task 5a checklist.",
+      "confidence": "HIGH — empirically verified against the live codebase"
+    },
+    {
+      "id": "SYS-002",
+      "severity": "BLOCKING",
+      "category": "dependency_chain",
+      "location_in_plan": "Task 5a — Displace initialize_session_schema (and §3 Caretaker-logic activation)",
+      "finding": "Task 5a plans to delete initialize_session_schema entirely and explicitly relocate only _validate_partial_index_dialect_symmetry to caretaker.py. The plan does not mention the schema-sentinel system: _stamp_schema_sentinels (writes PRAGMA application_id = 0x454C5350 and PRAGMA user_version = SESSION_SCHEMA_EPOCH on fresh DBs) and _assert_schema_sentinels (reads them back on every startup and refuses to open a DB that belongs to another application or has a mismatched schema epoch). These are 60 lines of schema.py (lines 109-168) that perform two distinct safety functions: (1) application identity guard — prevents ELSPETH from operating on an arbitrary SQLite file that happened to be at the configured path; (2) schema-epoch guard — fast-path detection that a pre-Phase-9 DB needs operator action. Neither is replaced by OrphanLiveTable or OrphanLiveColumn. OrphanLiveTable fires after the caretaker has already opened and begun to reflect the target DB; by then, operating on the wrong file is already in progress. The plan's claim that 'metadata.create_all() is called inertly' treats schema.py as simple schema bootstrap, missing that the sentinel mechanism is a trust-boundary guard.",
+      "evidence": "schema.py lines 75-107 (initialize_session_schema body) calls _stamp_schema_sentinels then _validate_current_schema on fresh DBs, and _assert_schema_sentinels then _validate_current_schema on existing DBs. _assert_schema_sentinels at lines 126-168 checks app_id != 0 and app_id != SESSION_DB_APPLICATION_ID (raises with 'This SQLite file does not belong to ELSPETH') and user_ver != 0 and user_ver != SESSION_SCHEMA_EPOCH (raises with 'Pre-release ELSPETH does not migrate session databases'). Neither condition is referenced anywhere in plan §§3-5. SESSION_SCHEMA_EPOCH=7 in models.py line 69.",
+      "second_order_risk": "Without the application_id guard, any SQLite file at the configured path — auth.db, an old Alembic DB, a user's accidentally symlinked file — will be silently opened and reflected, and the caretaker will begin classifying its tables according to metadata, potentially issuing DDL against the wrong database. The schema-epoch guard was the operator-facing signal for 'this DB predates this release'; its removal eliminates the fast diagnostic and forces operators to interpret OrphanLiveTable errors instead. Future schema versions have no in-DB watermark, so rollback detection relies entirely on the Landscape (a separate DB) rather than the database itself.",
+      "resolution": "Either (a) preserve _stamp_schema_sentinels and _assert_schema_sentinels by relocating them alongside _validate_partial_index_dialect_symmetry into caretaker.py, call _assert_schema_sentinels before reflection and _stamp_schema_sentinels after fresh-create; or (b) explicitly retire the sentinel mechanism with a documented rationale for why OrphanLiveTable is a sufficient substitute — including analysis of the wrong-file scenario. Option (a) is strongly preferred.",
+      "confidence": "HIGH — empirically verified; schema.py lines 109-168 confirm the mechanism exists and is not mentioned in the plan"
+    },
+    {
+      "id": "SYS-003",
+      "severity": "BLOCKING",
+      "category": "dependency_chain",
+      "location_in_plan": "Task 3 — Migration plan dataclass + Landscape event records; §3 step 7-9",
+      "finding": "The plan defines a MigrationRecorder Protocol 'wired at L3 startup' and states 'the concrete Landscape recorder is wired at L3 startup.' In the actual web subsystem, the Landscape is never held as a long-lived engine in create_app(). LandscapeDB is opened per-call as a context manager via LandscapeDB.from_url(url, passphrase=...) and released immediately after each write. There is no app.state.landscape_engine and no landscape engine construction in create_app(). The concrete MigrationRecorder implementation will therefore need to hold either a URL+passphrase for per-call opens, or open and hold one LandscapeDB for the duration of the caretaker run (emitting 2N+2 events: plan record, N action-start/action-complete pairs, completion record). The plan is silent on this choice. The per-call pattern matches the rest of the web subsystem but opens the LandscapeDB N+2 times for one caretaker run; the held-open pattern is an architectural inconsistency with the rest of the codebase but is more efficient for a startup-blocking synchronous path. This is a structural wiring decision that must be made before Task 3 implementation begins — not discoverable from the plan's Protocol definition alone.",
+      "evidence": "web/auth/audit.py lines 174, 197, 226: three separate methods each open with LandscapeDB.from_url(...) as a context manager and close at end of method. web/composer/tutorial_service.py lines 268, 371: same pattern. No LandscapeDB constructed in create_app() (verified by grepping app.py for 'LandscapeDB', 'landscape_engine', 'landscape_db'). app.state.auth_audit_recorder = AuthAuditRecorder.from_settings(settings) at line 562 stores a URL, not an open DB. Plan §Task 3 creates a Protocol with 7 methods — all synchronous. Plan §6 step 7 says 'Caretaker records MigrationPlanRecord BEFORE executing.' The plan does not say where the LandscapeDB URL comes from at caretaker call time in create_app.",
+      "second_order_risk": "If the per-call pattern is used, N per-action audit records (Task 6) for a shadow-copy operation (12 steps × 2 per step = 24 events for one table) plus the plan record plus the completion record means 26 LandscapeDB open/close cycles for migrating a single table with an enum extension. On a slow disk or under lock contention (the landscape DB is also SQLite), this makes startup-blocking caretaker measurably slower. If the held-open pattern is used, there is now one callsite in the codebase that holds a LandscapeDB open across multiple writes — a divergence that will confuse future implementers who copy the existing pattern.",
+      "resolution": "Explicitly choose the wiring strategy in Task 3 or Task 5: either (a) MigrationRecorder holds a LandscapeDB.from_url factory (URL + passphrase) and opens per-write, documenting that this is consistent with the rest of the web subsystem; or (b) MigrationRecorder holds an open LandscapeDB for its lifetime, opened before MigrationPlanRecord write and closed after outcome record, with an explicit comment explaining the held-open choice.",
+      "confidence": "HIGH — empirically verified by grepping the live codebase"
+    },
+    {
+      "id": "SYS-004",
+      "severity": "WARNING",
+      "category": "dependency_chain",
+      "location_in_plan": "§2 Option (c) classification table — Task 1",
+      "finding": "The classification table in §2 Option (c) lists 13 tables. models.py defines 15 tables. The two missing from the plan's classification table are composer_completion_events_table (added by Phase 6A per schema.py comments) and skill_markdown_history_table. Both tables exist in the live metadata at HEAD. The plan's Task 1 says to add migration_class to 'each Table definition per the classification table in §2 Option (c)' — an implementer following this instruction will add classification to 13 tables and leave 2 unclassified. The caretaker will then default both to 'data' (the conservative fallback) and emit a classification-default omission warning in every MigrationPlanRecord for every deploy.",
+      "evidence": "grep -n 'Table(' /home/john/elspeth/src/elspeth/web/sessions/models.py yields 15 Table constructors: sessions_table (84), chat_messages_table (172), composition_states_table (269), composition_proposals_table (371), proposal_events_table (469), interpretation_events_table (506), composer_completion_events_table (719), skill_markdown_history_table (798), runs_table (933), blobs_table (1000), blob_run_links_table (1158), run_events_table (1183), user_secrets_table (1203), user_preferences_table (1238), audit_access_log_table (1305). The plan's §2 table has 13 entries and names no 'composer_completion_events' or 'skill_markdown_history' row.",
+      "second_order_risk": "Every MigrationPlanRecord emitted after Phase 9 ships will log a classification-default omission for these two tables. This is audit noise that operators will have to explain during formal inquiry ('why does every migration plan record say two tables had no classification?'). The CI gate (enforce_migration_classification.py from R6/Task 1) will catch the omission at PR time — but only if it is wired to CI before the Task 1 commit lands.",
+      "resolution": "Add explicit migration_class entries to the §2 classification table for composer_completion_events_table (data — it is a completion-gesture audit trail per schema.py line 38-40, and trg_composer_completion_events_no_update/no_delete protect its immutability) and skill_markdown_history_table (determine data vs definitional based on whether skill history should survive schema migrations). Add both to the Task 1 checklist.",
+      "confidence": "HIGH — empirically verified by counting Table() constructors in models.py"
+    },
+    {
+      "id": "SYS-005",
+      "severity": "WARNING",
+      "category": "failure_modes",
+      "location_in_plan": "Task 7 orphan-plan detection; Task 10 runbook — mid-ceremony SIGKILL recovery",
+      "finding": "The plan's orphan-scan (Task 7) fires BEFORE plan computation. OrphanLiveTable detection (§3 step 5) fires DURING plan computation. In a mid-ceremony SIGKILL scenario where (a) the Landscape has an orphan MigrationPlanRecord from the interrupted run, AND (b) the DB has a <table>_new orphan table, the orphan-plan refusal fires first and exits before OrphanLiveTable is ever checked. The Task 10 runbook's 'mid-ceremony SIGKILL recovery' step says 'executor runs PRAGMA foreign_key_check on next boot and refuses to start if any violation is reported' — but that path is unreachable. The operator who follows the orphan-plan runbook, calls force-clear-orphan-plan, and retries will then hit OrphanLiveTable on the retry boot. The runbook makes no mention of this second-refusal step in the recovery sequence.",
+      "evidence": "§3 step 5 (OrphanLiveTable inspection) occurs in plan computation sequence after step 4 (reflect live DB). Task 7 orphan-scan startup guard: 'At caretaker startup, BEFORE plan computation, the caretaker scans the Landscape for MigrationPlanRecord entries with no paired outcome record.' Task 10 runbook lists orphan-plan-record cleanup steps (1)-(4) with no mention of OrphanLiveTable as a possible follow-on refusal after clearing the orphan plan.",
+      "second_order_risk": "An operator following the Task 10 runbook exactly after a SIGKILL mid-ceremony will clear the orphan plan, retry, see OrphanLiveTable instead of the expected clean boot, and be confused — the runbook gave them a four-step procedure that ends with 'retry deploy' and the deploy immediately fails with an error the runbook does not describe. This is an operational recovery loop gap.",
+      "resolution": "Add a step 3.5 to the orphan-plan-record runbook entry: 'After clearing the orphan plan record, also inspect the live DB for tables matching the pattern <table>_new. If present, the shadow-copy ceremony was interrupted mid-rename; follow the OrphanLiveTable runbook entry to resolve before retrying.' Alternatively, teach the caretaker to perform both scans before any refusal and report all blocking conditions at once.",
+      "confidence": "HIGH — logical analysis of documented refusal ordering; runbook reviewed in §Task 10"
+    },
+    {
+      "id": "SYS-006",
+      "severity": "WARNING",
+      "category": "failure_modes",
+      "location_in_plan": "§3 step 8 vs §6 R3",
+      "finding": "The plan has an internal contradiction on transaction scope. §3 step 8 states 'single transaction.' §6 R3 and Task 7 acknowledge 'per-table transactions' as a fallback where transactional DDL is unavailable. SQLite supports transactional DDL for CREATE TABLE but PRAGMA foreign_keys (used in the shadow-copy's step 1 and step 12) is explicitly documented as non-transactional and auto-commits its surrounding transaction on some SQLite configurations. The shadow-copy ceremony uses raw_connection() to bypass the engine-level FK listener, which itself re-enables foreign_keys=ON on each connect event. If PRAGMA is not transactional, the 'single transaction wrapping all 12 steps' claim in §3 is not achievable. If mid-plan failure occurs during a per-table transaction, the MigrationPartialFailureRecord's 'which tables completed' list must be derived from the per-action records in the Landscape — but if the Landscape write for a per-action record also fails (nested failure), the forensic reconstruction path loses fidelity.",
+      "evidence": "§3 step 8: 'Caretaker executes the plan inside a single transaction. SQLite supports transactional DDL with partial constraints; the executor handles the documented SQLite-specific cases (e.g. CREATE TABLE is transactional, PRAGMA is not).' Task 7: 'Where transactional DDL is unavailable for a specific operation, the executor runs per-table transactions and emits a MigrationPartialFailureRecord.' §6 R3: 'Some operations (PRAGMA, certain DDL combinations) commit implicitly.'",
+      "second_order_risk": "Under the shadow-copy ceremony, 'PRAGMA foreign_keys=OFF' at step 1 is non-transactional and commits immediately. A SIGKILL after step 1 leaves FK enforcement disabled with no automatic rollback mechanism. The plan accounts for this by using raw_connection() and manual restoration at step 12 — but only documents this at the executor level (Task 4), not at the transaction-scope level (§3 step 8). An implementer reading §3 may implement a single transaction wrapper that is incompatible with the 12-step ceremony because PRAGMA cannot be rolled back.",
+      "resolution": "Reconcile §3 step 8 with Task 7 explicitly: state that 'single transaction' is the goal for non-PRAGMA DDL operations and 'per-table transactions with per-action records' is the actual invariant for the shadow-copy ceremony, with the transition between the two being dialect-determined. Document which specific DDL operations in the 12 steps are transactional and which are not.",
+      "confidence": "HIGH — internal plan contradiction, corroborated by SQLite documentation and R3 text"
+    },
+    {
+      "id": "SYS-007",
+      "severity": "WARNING",
+      "category": "feedback_loops",
+      "location_in_plan": "Task 7 — Fail-safe rollback; §3 step 9-10",
+      "finding": "The orphan-plan-record refusal creates a recovery loop with a potential dead-end if the Landscape DB itself is damaged. The recovery path requires: (1) operator runs force-clear-orphan-plan CLI; (2) CLI writes MigrationOrphanCleared to the Landscape; (3) caretaker retries. But force-clear-orphan-plan must open the same Landscape DB that the orphan MigrationPlanRecord lives in. If the Landscape DB is the cause of the audit write failure that created the orphan (e.g. disk full, file corruption), the force-clear-orphan-plan command will also fail, because it writes to the same Landscape DB. The operator is then blocked by the caretaker (refuses: orphan plan) and by the CLI recovery tool (also fails: same DB). The plan documents 'If DB is inconsistent, fall back to backup + delete-the-DB' but this applies to the sessions DB, not the Landscape DB.",
+      "evidence": "Task 7: 'Add an elspeth migration force-clear-orphan-plan subcommand to the existing elspeth CLI.' The command 'writes a MigrationOrphanCleared event linking the plan_id to operator-supplied justification text, then exits.' The Landscape DB URL for this write is settings.get_landscape_url() — same as the URL that failed during the original caretaker run. §6 R4 documents only the sessions DB failure modes; Landscape DB failure modes are addressed by 'no retry; crash with exception' but the resulting state — orphan plan in a potentially corrupt Landscape — has no runbook entry.",
+      "second_order_risk": "This is a reinforcing loop: Landscape write fails → orphan plan created → recovery tool needs Landscape write → recovery tool also fails → operator cannot clear orphan → app cannot start. The only exit is manual Landscape DB surgery or a 'force-delete-orphan-plan-without-audit' escape hatch that the plan does not provide and that would violate audit primacy.",
+      "resolution": "Add a runbook entry for 'Landscape DB is the source of the orphan write failure' as a distinct scenario from 'sessions DB is inconsistent.' This entry should document the Landscape DB diagnostic steps (is the file accessible? is it corrupt? is disk full?) and the acceptable recovery (restore Landscape DB from backup, or, if no backup, document that clearing the orphan under these conditions creates an auditable gap in the Landscape that must be noted in the incident record). Optionally, provide a --force-without-audit flag for force-clear-orphan-plan that writes to a local logfile instead of the Landscape — with explicit documentation that this flag breaks audit primacy and must only be used when the Landscape is confirmed unrecoverable.",
+      "confidence": "MEDIUM — logical analysis; actual likelihood depends on Landscape DB reliability in the deployment context"
+    },
+    {
+      "id": "SYS-008",
+      "severity": "WARNING",
+      "category": "failure_modes",
+      "location_in_plan": "§5 Fixture DB generation — synthetic-only constraint",
+      "finding": "The synthetic-only constraint's production-session-ID detection relies on 'no session IDs that match the format of real production sessions.' Production session IDs are UUIDs (inferred from the sessions table having a UUID primary key per models.py and ELSPETH's use of standard UUID generation). The synthetic fixture generation instructions require 'FixtureSeed(\"alice@example.invalid\", ...)' which would produce UUID session IDs as part of normal fixture seeding. The CI gate cannot distinguish a fixture UUID generated during synthetic seeding from a UUID copied from a real production session — both are valid UUID format. The production-session-ID constraint is therefore unenforced for session IDs.",
+      "evidence": "Plan §5: 'no session IDs that match the format of real production sessions.' models.py line 84: sessions_table = Table(... — UUID-based PKs are standard across the session tables. Synthetic seeds via create_app() at a historical revision will produce valid UUID session IDs. The CI gate regex for 'format of real production sessions' cannot distinguish fixture UUIDs from production UUIDs without additional marking.",
+      "second_order_risk": "If synthetic fixture generation is ever done by mistake against a real dev DB (not a clean fixture DB), the CI gate's UUID check will pass and real session IDs may be committed to the repo. The tamper-detection SHA-256 hash in FIXTURES.md prevents silent modification of an existing fixture but does not prevent a fixture being generated from the wrong source.",
+      "resolution": "Either (a) use a fixed synthetic UUID seed set (hard-coded UUIDs with a well-known prefix like 00000000-0000-0000-0000-XXXXXXXXXXXX) and have the CI gate check for that prefix; or (b) add a 'fixture_generated_from' metadata row to the fixture SQLite itself at generation time (e.g. a synthetic_fixture_metadata table with a boolean is_synthetic=1) that is checked by the CI gate. Document the chosen mechanism in FIXTURES.md.",
+      "confidence": "MEDIUM — depends on the actual session ID format; UUID assumption based on standard ELSPETH patterns"
+    },
+    {
+      "id": "SYS-009",
+      "severity": "WARNING",
+      "category": "timing_assumptions",
+      "location_in_plan": "§3 step 4a — dialect check",
+      "finding": "The plan says 'If it is not sqlite, the caretaker refuses to start with UnsupportedDialect and records a MigrationUnsupportedDialectRefusal Landscape event before raising.' The Landscape event write requires a working Landscape DB. If the deployment is already misconfigured with a non-SQLite sessions engine AND the Landscape is unreachable, the attempt to record the UnsupportedDialectRefusal will itself fail with a Landscape write exception. The caretaker will then crash with the Landscape exception, not with UnsupportedDialect. The operator sees a Landscape connectivity error rather than the actionable 'unsupported dialect' message. This is a narrow case but follows the pattern of audit-primacy causing the diagnostic message to be swallowed by the audit write.",
+      "evidence": "§3 step 4a: 'records a MigrationUnsupportedDialectRefusal Landscape event before raising.' §3 step 9 and audit primacy clause: 'if the Landscape write fails, the caretaker crashes immediately with the offending exception.' Both rules apply in this path; the Landscape write exception takes precedence.",
+      "second_order_risk": "Low severity in practice since the operator can read the crash traceback — but the 'Landscape write before raising' pattern for error records should be reviewed for all error-path Landscape writes. If any error-path write fails, the exception chain may obscure the original diagnostic.",
+      "resolution": "For error-path Landscape events (UnsupportedDialect, OrphanLiveTable, OrphanMigrationPlanRefusal), consider reversing the order: raise the primary exception first (to ensure the actionable message is always visible), then attempt the Landscape write in a finally/cleanup path. This inverts audit primacy for error records only — acceptable because the error is already recorded in the exception itself. Document this as a deliberate exception to the audit-primacy rule.",
+      "confidence": "MEDIUM — corner case, but consistent with how the caretaker's audit-primacy clause interacts with multi-failure paths"
+    },
+    {
+      "id": "SYS-010",
+      "severity": "WARNING",
+      "category": "historical_pattern",
+      "location_in_plan": "§2 trade-off table — Simplicity: ~400 LOC",
+      "finding": "The plan's Simplicity verdict ('~400 LOC') is understated when the full delivery surface is counted. Phase 9 ships: caretaker.py, detector.py, executor.py, contracts/migration.py (protocol + 5 record types), CLI subcommand (force-clear-orphan-plan), scripts/cicd/enforce_migration_classification.py, CI workflow job, operator runbook doc, 4 fixture SQLite binaries, FIXTURES.md, 11 test files (Tasks 1-11 TDD shapes), and a property-style assertion suite. The prior Alembic evaluation (Option b) was rejected partly on 'high ceremony' grounds. The homegrown replacement, when fully costed, includes its own version of every component Alembic provides: schema-version tracking (Landscape events), migration sequencing (detector sort order), apply/rollback (executor + per-table transactions), CLI tooling (force-clear-orphan-plan), and historical fixtures (the three generation SQLite binaries, which are Alembic's migration scripts expressed as binary blobs). The '~400 LOC' vs 'high ceremony' comparison framing in §2 is misleading. This does not mean Option (c) is wrong — audit-native events and additive-only coverage are real advantages — but the simplicity claim should not be used to justify shortcuts during implementation.",
+      "evidence": "Option (b) is rejected with 'high ceremony — Alembic adds a config file, env.py, migrations directory, autogeneration ceremony, revision-id collisions.' Phase 9 Option (c) delivers: 3 new Python modules, 1 contracts module, 5 frozen record types, 1 Protocol, 1 CLI subcommand, 1 CI enforcement script, 1 CI workflow job, 1 runbook document, 4 binary fixture files with integrity manifest, 11 TDD task cycles. The surface area is comparable to Alembic's; the discipline cost has been shifted, not eliminated.",
+      "second_order_risk": "If the simplicity framing leads implementers to underestimate review time, the 11-task plan may be executed without adequate review for each task's interaction effects. The most dangerous interactions are R1 (data table misclassified as definitional) and the sentinel deletion (SYS-002), both of which benefit from explicit reviewer attention that a 'simple ~400 LOC' framing may not trigger.",
+      "resolution": "Update the §2 trade-off table Simplicity verdict to: 'Medium — ~400 LOC core module, plus CI gate, CLI subcommand, runbook, and historical fixture infrastructure. Comparable total ceremony to Alembic; audit-native advantage is the decisive factor, not simplicity.' This sets correct expectations for reviewers and implementers.",
+      "confidence": "HIGH — surface area count verifiable from the task list"
+    }
+  ],
+  "pattern_recognition": [
+    {
+      "archetype": "fixes-that-fail",
+      "instance": "SYS-002 — sentinel deletion",
+      "description": "The plan fixes the 'crash on any drift' behavior of initialize_session_schema by replacing it with the caretaker. In doing so, it deletes the file-identity guard (_assert_schema_sentinels) that was a separate safety concern from schema drift. The fix solves the stated problem (crash-on-drift) while discarding adjacent protection (wrong-file guard). Classic fixes-that-fail: the fix is correct for its stated target and creates a new vulnerability in a neighboring invariant."
+    },
+    {
+      "archetype": "shifting-the-burden",
+      "instance": "SYS-010 — discipline-cost displacement from Alembic to homegrown",
+      "description": "Alembic's revision-graph ceremony was the 'burden' that Option (b) was rejected for. Option (c) shifts the burden to: binary fixture maintenance, CI fixture-freshness gate, classification enforcement CI gate, per-action Landscape records, orphan-scan startup guard, force-clear-orphan-plan CLI, and operator runbook. The total discipline cost is similar; the form is different. This is the Shifting the Burden archetype: a high-visibility cost (Alembic files) is replaced by a distributed low-visibility cost (accumulated infrastructure). Not a reason to reject Option (c), but a reason to resist the simplicity framing."
+    },
+    {
+      "archetype": "optimistic-ordering",
+      "instance": "SYS-005 — refusal-order interaction",
+      "description": "The plan documents two refusal mechanisms (orphan-plan-scan and OrphanLiveTable) and a runbook for each, but assumes they will not both fire in the same recovery attempt. In the mid-SIGKILL scenario they always both fire sequentially. The runbook assumes the operator clears one block and reaches a clean state, not a second block. Optimistic ordering: the system was designed as if failure modes are mutually exclusive."
+    },
+    {
+      "archetype": "reality-staleness",
+      "instance": "Plan §Task 5a line references",
+      "description": "The plan states _validate_partial_index_dialect_symmetry is at 'schema.py:226' and is 'called from initialize_session_schema at line 60.' Actual locations: defined at line 377, called (via _validate_current_schema) at line 185. The plan also lists 9 test callers when the actual count is 48. These are not contradictions in design intent but indicators that the plan was authored against a prior version of the code and not refreshed before the implementation-ready verdict. Plans with stale line references are reliable indicators of a codebase that moved under the plan."
+    }
+  ],
+  "summary": {
+    "dependency_chain_depth": 3,
+    "potential_feedback_loops": 2,
+    "pattern_matches": 4,
+    "timing_assumptions": 2,
+    "blocking_issues": [
+      "SYS-001: Task 5a test-file enumeration is ~5x undercounted (9 listed, 48 actual); implementer will have no routing guidance for 39 unlisted files",
+      "SYS-002: schema-sentinel system (_stamp_schema_sentinels, _assert_schema_sentinels) not preserved or replaced in plan; silently loses application-identity guard and schema-epoch watermark",
+      "SYS-003: MigrationRecorder wiring strategy not specified; LandscapeDB.from_url per-call pattern vs held-open is an architectural decision with startup-latency implications"
+    ],
+    "warnings": [
+      "SYS-004: classification table in §2 missing two tables present in models.py (composer_completion_events_table, skill_markdown_history_table)",
+      "SYS-005: mid-SIGKILL recovery runbook is logically incomplete; orphan-plan scan fires before OrphanLiveTable check, so clearing the orphan plan leads to a second refusal not documented in the runbook",
+      "SYS-006: internal contradiction on transaction scope — §3 claims single transaction, Task 7 and R3 acknowledge per-table fallback; PRAGMA non-transactionality is unreconciled with the shadow-copy ceremony wrapper",
+      "SYS-007: recovery loop dead-end when Landscape DB is the source of the orphan-write failure; force-clear-orphan-plan writes to the same DB that failed",
+      "SYS-008: synthetic fixture UUID constraint is unenforced by the planned CI gate; production UUIDs and fixture UUIDs are format-identical",
+      "SYS-009: error-path Landscape events (UnsupportedDialect, OrphanLiveTable) can swallow the primary diagnostic message if the Landscape write itself fails",
+      "SYS-010: simplicity framing (~400 LOC) understates total delivery surface; discipline cost has been shifted from Alembic ceremony to distributed infrastructure"
+    ],
+    "operator_decisions_still_open": [
+      "Fixture-generation approach (historical-revision-checkout vs synthetic-from-MetaData) — blocks Task 9 implementation shape",
+      "Sub-phase split (9A/9B/9C) — mentioned in §862 changelog but not resolved",
+      "Post-ship rollback strategy confirmation (runbook option (a) vs (b)) — operator confirmation requested per §8"
+    ]
+  }
+}

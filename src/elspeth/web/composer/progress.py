@@ -4,148 +4,42 @@ The progress surface is a UI status channel, not a reasoning transcript.
 Snapshots summarize visible composer lifecycle boundaries and tool categories;
 they must never carry raw tool arguments, tool results, secrets, or provider
 chain-of-thought.
+
+The L0-suitable progress contracts (``ComposerProgressEvent``,
+``ComposerProgressPhase``, ``ComposerProgressReason``,
+``ComposerProgressSink``, ``COMPOSER_PROGRESS_MAX_EVIDENCE``,
+``NON_TERMINAL_PROGRESS_PHASES``) live in
+``elspeth.contracts.composer_progress``.  This module owns only the
+L3-dependent residue: the in-memory ``ComposerProgressRegistry`` (which
+uses threading), the snapshot subclass that joins event with session
+identity, and the per-phase event factory functions whose copy
+references tool names from ``elspeth.web.composer.tools``.
 """
 
 from __future__ import annotations
 
 import threading
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Self
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
-
-COMPOSER_PROGRESS_MAX_EVIDENCE = 4
-_MAX_PROGRESS_TEXT_CHARS = 180
-
-type ComposerProgressPhase = Literal[
-    "idle",
-    "starting",
-    "calling_model",
-    "using_tools",
-    "validating",
-    "saving",
-    "complete",
-    "failed",
-    "cancelled",
-]
-
-# Phases that indicate the composer is actively working on a request. The
-# in-flight enumeration endpoint filters on this set so an operator polling
-# /_active sees the live composer requests for their own sessions even if
-# the SPA tab that posted them is no longer connected.
-NON_TERMINAL_PROGRESS_PHASES: frozenset[ComposerProgressPhase] = frozenset(
-    {
-        "starting",
-        "calling_model",
-        "using_tools",
-        "validating",
-        "saving",
-    }
+from elspeth.contracts.composer_progress import (
+    NON_TERMINAL_PROGRESS_PHASES,
+    ComposerProgressEvent,
+    ComposerProgressSink,
 )
+from elspeth.web.composer.tools import is_discovery_tool
 
-# Stable machine-readable reason codes for composer progress events.
-#
-# Public taxonomy distinct from ComposerConvergenceError.budget_exhausted —
-# the exception models which budget tripped (a private engine concept), this
-# Literal is the public-facing UX/observability discriminator. They map but
-# they are not the same enum: the convergence error contributes three of
-# these codes; the others come from sibling exception classes or from
-# success/idle sentinels.
-#
-# Required when phase == "failed" (enforced by the model_validator on
-# ComposerProgressEvent below) so a new failure site cannot ship without
-# carrying a stable code. The frontend, structured logs, and the 422
-# response body all branch on this value.
-type ComposerProgressReason = Literal[
-    # Convergence sub-causes — split out from the single
-    # ComposerConvergenceError class via its budget_exhausted discriminator.
-    "convergence_composition_budget",
-    "convergence_discovery_budget",
-    "convergence_wall_clock_timeout",
-    # Provider-side failures — LiteLLM exception families.
-    "provider_auth_failed",
-    "provider_unavailable",
-    # Server-side plugin bug escaping execute_tool.
-    "plugin_crash",
-    # Runtime preflight failure (cached path-1 or post-compose path-2 —
-    # users cannot act on the path distinction, so a single code).
-    "runtime_preflight_failed",
-    # Generic ComposerServiceError — prompt prep / availability / catch-all.
-    "service_setup_failed",
-    # Client closed the HTTP connection or operator cancelled the request
-    # before the composer returned. Distinct from convergence_wall_clock_timeout
-    # (server budget exceeded) so dashboards and audit can tell apart "the
-    # client gave up" from "the server gave up". Required when phase ==
-    # "cancelled" by the same model_validator that requires it on "failed".
-    "client_cancelled",
-    # Non-failure sentinels — every snapshot carries a code so observability
-    # and the SPA never have to special-case None.
-    "composer_idle",
-    "composer_complete",
+__all__ = [
+    "ComposerProgressRegistry",
+    "ComposerProgressSnapshot",
+    "client_cancelled_progress_event",
+    "convergence_progress_event",
+    "emit_progress",
+    "model_call_progress_event",
+    "tool_batch_progress_event",
+    "tool_completed_progress_event",
+    "tool_started_progress_event",
 ]
-type ComposerProgressSink = Callable[["ComposerProgressEvent"], Awaitable[None]]
-
-
-class _StrictProgressModel(BaseModel):
-    """Strict model for system-owned progress snapshots."""
-
-    model_config = ConfigDict(strict=True, extra="forbid")
-
-
-class ComposerProgressEvent(_StrictProgressModel):
-    """Provider-safe progress event emitted by the composer path."""
-
-    phase: ComposerProgressPhase
-    headline: str
-    evidence: tuple[str, ...] = ()
-    likely_next: str | None = None
-    reason: ComposerProgressReason | None = None
-
-    @field_validator("headline")
-    @classmethod
-    def _validate_headline(cls, value: str) -> str:
-        return _clean_required_text(value, field_name="headline")
-
-    @field_validator("likely_next")
-    @classmethod
-    def _validate_likely_next(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return _clean_required_text(value, field_name="likely_next")
-
-    @field_validator("evidence")
-    @classmethod
-    def _bound_evidence(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        bounded: list[str] = []
-        for item in value:
-            cleaned = _clean_required_text(item, field_name="evidence")
-            bounded.append(cleaned)
-            if len(bounded) == COMPOSER_PROGRESS_MAX_EVIDENCE:
-                break
-        return tuple(bounded)
-
-    @model_validator(mode="after")
-    def _require_reason_when_terminal_non_success(self) -> Self:
-        # Mechanically forbids the drift the original bug exhibited: a
-        # phase="failed" event was emitted with text-only differentiation
-        # at three distinct sites and three sub-causes collapsed into one
-        # generic message because nothing in the contract required a
-        # discriminator. With this validator, a new failure site cannot
-        # be added without choosing a code from ComposerProgressReason.
-        # The same rule applies to phase == "cancelled" (added with the
-        # in-flight observability work) — operator dashboards branch on
-        # reason to distinguish client_cancelled from a future operator-
-        # initiated cancel without parsing the headline.
-        # Other phases keep reason optional — they're status pings, not
-        # routing decisions.
-        if self.phase in ("failed", "cancelled") and self.reason is None:
-            raise ValueError(
-                "ComposerProgressEvent.reason is required when phase is 'failed' or "
-                "'cancelled' so the frontend, audit logs, and HTTP response body can "
-                "branch on a stable taxonomy instead of free-text headline parsing."
-            )
-        return self
 
 
 class ComposerProgressSnapshot(ComposerProgressEvent):
@@ -287,7 +181,7 @@ def convergence_progress_event(
       the service implementation;
     - taking a string discriminator (not the exception) avoids importing
       ``ComposerConvergenceError`` from ``composer.protocol``, which already
-      imports ``ComposerProgressSink`` from this module — keeping the helper
+      imports ``ComposerProgressSink`` from contracts — keeping the helper
       here would otherwise create a circular import.
 
     Recovery copy is what the user can act on:
@@ -355,10 +249,144 @@ def _idle_snapshot(session_id: str) -> ComposerProgressSnapshot:
     )
 
 
-def _clean_required_text(value: str, *, field_name: str) -> str:
-    cleaned = value.strip()
-    if not cleaned:
-        raise ValueError(f"composer progress {field_name} must contain visible text")
-    if len(cleaned) > _MAX_PROGRESS_TEXT_CHARS:
-        return cleaned[: _MAX_PROGRESS_TEXT_CHARS - 1].rstrip() + "."
-    return cleaned
+# ---------------------------------------------------------------------------
+# Progress event factories — co-located with ComposerProgressEvent so the
+# per-phase headline / evidence / likely_next copy lives in one place.
+# ---------------------------------------------------------------------------
+
+
+async def emit_progress(
+    progress: ComposerProgressSink | None,
+    event: ComposerProgressEvent,
+) -> None:
+    """Emit provider-safe progress when a sink is available."""
+    if progress is None:
+        return
+    await progress(event)
+
+
+def model_call_progress_event(message: str) -> ComposerProgressEvent:
+    headline = "I'm asking the model to choose the next safe pipeline update."
+    normalized = message.lower()
+    if "html" in normalized and "json" in normalized:
+        headline = "I'm asking the model to choose an HTML input and JSON output."
+    return ComposerProgressEvent(
+        phase="calling_model",
+        headline=headline,
+        evidence=("The composer is using the prepared prompt and visible pipeline state.",),
+        likely_next="The model may answer directly or request safe pipeline tools.",
+    )
+
+
+def tool_batch_progress_event(tool_names: tuple[str, ...]) -> ComposerProgressEvent:
+    if any(_is_schema_or_catalog_tool(name) for name in tool_names):
+        return ComposerProgressEvent(
+            phase="using_tools",
+            headline="The model requested plugin schemas.",
+            evidence=("Checking available source, transform, and sink tools.",),
+            likely_next="ELSPETH will use visible schemas to guide the pipeline shape.",
+        )
+    if any(name in {"get_pipeline_state", "preview_pipeline", "diff_pipeline"} for name in tool_names):
+        return ComposerProgressEvent(
+            phase="using_tools",
+            headline="The model is checking the current pipeline.",
+            evidence=("Reading the visible pipeline graph and validation summary.",),
+            likely_next="ELSPETH will compare the request with the current setup.",
+        )
+    if any(_is_secret_tool(name) for name in tool_names):
+        return ComposerProgressEvent(
+            phase="using_tools",
+            headline="The model is checking available secret references.",
+            evidence=("Checking available secret references without reading secret values.",),
+            likely_next="ELSPETH will keep any credential references deferred.",
+        )
+    if any(not is_discovery_tool(name) for name in tool_names):
+        return ComposerProgressEvent(
+            phase="using_tools",
+            headline="The model is updating the pipeline graph.",
+            evidence=("A pipeline-editing tool was requested.",),
+            likely_next="ELSPETH will validate the result before saving it.",
+        )
+    return ComposerProgressEvent(
+        phase="using_tools",
+        headline="The model requested composer tool information.",
+        evidence=("Checking visible composer tool results.",),
+        likely_next="ELSPETH will continue from the tool response.",
+    )
+
+
+def tool_started_progress_event(tool_name: str) -> ComposerProgressEvent:
+    if _is_schema_or_catalog_tool(tool_name):
+        return ComposerProgressEvent(
+            phase="using_tools",
+            headline="I'm checking available source, transform, and sink tools.",
+            evidence=("Reading plugin names and schemas only.",),
+            likely_next="ELSPETH will choose compatible pipeline components.",
+        )
+    if _is_secret_tool(tool_name):
+        return ComposerProgressEvent(
+            phase="using_tools",
+            headline="I'm checking available secret references.",
+            evidence=("Secret names can be checked; secret values stay hidden.",),
+            likely_next="ELSPETH will wire only deferred secret references if needed.",
+        )
+    if is_discovery_tool(tool_name):
+        return ComposerProgressEvent(
+            phase="using_tools",
+            headline="I'm checking the current pipeline and tool context.",
+            evidence=("Reading visible composer state.",),
+            likely_next="ELSPETH will use the result to decide the next action.",
+        )
+    return ComposerProgressEvent(
+        phase="using_tools",
+        headline="I'm updating the pipeline graph.",
+        evidence=("A pipeline-editing tool is running.",),
+        likely_next="ELSPETH will validate the updated pipeline.",
+    )
+
+
+def tool_completed_progress_event(tool_name: str, success: bool) -> ComposerProgressEvent:
+    if not success:
+        return ComposerProgressEvent(
+            phase="using_tools",
+            headline="A composer tool reported a visible blocker.",
+            evidence=("The tool result was returned without exposing raw request values.",),
+            likely_next="ELSPETH will ask the model to adjust the pipeline request.",
+        )
+    if is_discovery_tool(tool_name):
+        return ComposerProgressEvent(
+            phase="using_tools",
+            headline="The requested tool information is ready.",
+            evidence=(_safe_tool_evidence(tool_name),),
+            likely_next="ELSPETH will continue with the visible result.",
+        )
+    return ComposerProgressEvent(
+        phase="validating",
+        headline="The composer has updated the pipeline and is validating the result.",
+        evidence=("A pipeline-editing tool completed successfully.",),
+        likely_next="ELSPETH will save the updated pipeline if it is accepted.",
+    )
+
+
+def _is_schema_or_catalog_tool(tool_name: str) -> bool:
+    return tool_name in {
+        "list_sources",
+        "list_transforms",
+        "list_sinks",
+        "get_plugin_schema",
+        "list_models",
+    }
+
+
+def _is_secret_tool(tool_name: str) -> bool:
+    return tool_name in {"list_secret_refs", "validate_secret_ref", "wire_secret_ref"}
+
+
+def _safe_tool_evidence(tool_name: str) -> str:
+    if _is_schema_or_catalog_tool(tool_name):
+        return "Checking available source, transform, and sink tools."
+    if _is_secret_tool(tool_name):
+        return "Checking available secret references without reading secret values."
+    if tool_name in {"get_pipeline_state", "preview_pipeline", "diff_pipeline"}:
+        return "Reading the visible pipeline graph and validation summary."
+    return "Using visible composer tool output."

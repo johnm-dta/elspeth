@@ -18,6 +18,7 @@ import chromadb.errors
 import structlog
 from pydantic import BaseModel, Field, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.enums import CallStatus, CallType
 from elspeth.contracts.errors import (
@@ -25,6 +26,7 @@ from elspeth.contracts.errors import (
     DuplicateDocumentError,
     FrameworkBugError,
 )
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.contracts.url import SanitizedDatabaseUrl
 from elspeth.core.canonical import canonical_json
@@ -82,11 +84,14 @@ class ChromaSinkConfig(DataPluginConfig):
 
     collection: str = Field(description="ChromaDB collection name")
     mode: Literal["persistent", "client"] = Field(description="Connection mode")
-    persist_directory: str | None = Field(default=None)
-    host: str | None = Field(default=None)
-    port: int = Field(default=8000, ge=1, le=65535)
-    ssl: bool = Field(default=True)
-    distance_function: Literal["cosine", "l2", "ip"] = Field(default="cosine")
+    persist_directory: str | None = Field(default=None, description="Local persistence directory for persistent Chroma mode.")
+    host: str | None = Field(default=None, description="Chroma server host for client mode.")
+    port: int = Field(default=8000, ge=1, le=65535, description="Chroma server port for client mode.")
+    ssl: bool = Field(default=True, description="Whether to use TLS when connecting to a Chroma server.")
+    distance_function: Literal["cosine", "l2", "ip"] = Field(
+        default="cosine",
+        description="Vector distance function used when creating the Chroma collection.",
+    )
 
     field_mapping: FieldMappingConfig = Field(description="Maps row fields to ChromaDB document/id/metadata")
     on_duplicate: Literal["overwrite", "skip", "error"] = Field(
@@ -168,10 +173,28 @@ class ChromaSink(BaseSink):
     """
 
     name = "chroma_sink"
+    determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2d5637e16b4ebeb1"
+    source_file_hash: str | None = "sha256:eab66a25fd4ce2a7"
     config_model = ChromaSinkConfig
     supports_resume = False
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Writes rows to a ChromaDB collection as embedded documents with metadata.",
+                composer_hints=(
+                    "Set field_mapping.document_field and id_field to string fields; non-string required fields are diverted per row.",
+                    "metadata_fields may contain only Chroma-compatible scalar values: str, int, float, bool, or None.",
+                    "Use mode=persistent with persist_directory for local storage, or mode=client with host/port/ssl for a server.",
+                    "Choose on_duplicate as overwrite, skip, or error before running; the default overwrites document IDs.",
+                    "Chroma sink does not support resume, so plan reruns around idempotent document IDs.",
+                ),
+            )
+        return None
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

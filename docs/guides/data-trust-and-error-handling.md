@@ -1,6 +1,6 @@
 # Data Trust Model & Error Handling Guide
 
-**MANDATORY READING** when working on: Sources, Transforms, Sinks, Aggregations, external API integrations, Landscape recording, or any code that handles data crossing system boundaries. (Gates are config-driven operations, not plugins — see CLAUDE.md.)
+**MANDATORY READING** when working on: Sources, Transforms, Sinks, Aggregations, external API integrations, Landscape recording, or any code that handles data crossing system boundaries. (Gates are config-driven operations, not plugins — see AGENTS.md.)
 
 ## Overview
 
@@ -83,14 +83,19 @@ first = row["items"][0]  # 💥 IndexError - wrap this!
 
 **Correct handling:**
 ```python
-def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
     # Wrap operations that can fail on valid-typed but problematic values
     try:
         result = row["numerator"] / row["denominator"]
     except ZeroDivisionError:
-        return TransformResult.error({"reason": "division_by_zero", "row_id": ctx.row_id})
+        return TransformResult.error({"reason": "division_by_zero"})
 
-    return TransformResult.success({"result": result})
+    output = row.to_dict()
+    output["result"] = result
+    return TransformResult.success(
+        PipelineRow(output, row.contract),
+        success_reason={"action": "calculated_result", "fields_added": ["result"]},
+    )
 ```
 
 ### Tier 3: External Data (Source Input) - ZERO TRUST
@@ -149,7 +154,7 @@ Transforms that make external calls (LLM APIs, HTTP requests, database queries) 
 ### The Pattern for External Calls
 
 ```python
-def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
     # row enters as Tier 2 (pipeline data - trust the schema)
     customer_id = row["customer_id"]  # Direct access OK - it's Tier 2
 
@@ -182,8 +187,12 @@ def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
         })
 
     # NOW it's our data (Tier 2) - add to row and continue
-    row["llm_classification"] = parsed["category"]  # Safe - validated above
-    return TransformResult.success(row)
+    output = row.to_dict()
+    output["llm_classification"] = parsed["category"]  # Safe - validated above
+    return TransformResult.success(
+        PipelineRow(output, row.contract),
+        success_reason={"action": "classified", "fields_added": ["llm_classification"]},
+    )
 ```
 
 ### The Rule: Minimize Distance Before Validation
@@ -389,15 +398,20 @@ Even type-valid row data can cause operation failures. Wrap these operations:
 
 ```python
 # CORRECT - wrapping operations on their data
-def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
     try:
         result = row["numerator"] / row["denominator"]  # Their data can be 0
     except ZeroDivisionError:
         return TransformResult.error({"reason": "division_by_zero"})
-    return TransformResult.success({"result": result})
+    output = row.to_dict()
+    output["result"] = result
+    return TransformResult.success(
+        PipelineRow(output, row.contract),
+        success_reason={"action": "calculated_result", "fields_added": ["result"]},
+    )
 
 # WRONG - wrapping access to OUR internal state
-def process(self, row: dict[str, Any], ctx: PluginContext) -> TransformResult:
+def process(self, row: PipelineRow, ctx: PluginContext) -> TransformResult:
     try:
         batch_avg = self._total / self._batch_count  # OUR bug if _batch_count is 0
     except ZeroDivisionError:

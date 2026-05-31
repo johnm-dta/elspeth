@@ -6,6 +6,9 @@
 // is available, these can be replaced with imports from the generated file.
 // ============================================================================
 
+import type { AuditCharacteristicFlag } from "../components/catalog/auditCharacteristics";
+import type { FailedTurn } from "./recovery";
+
 // ── Auth ────────────────────────────────────────────────────────────────────
 
 /**
@@ -21,17 +24,7 @@ export interface AuthConfig {
 }
 
 /**
- * Minimal identity claims extracted from the JWT or session.
- * Used internally for attribution and display.
- */
-export interface UserIdentity {
-  user_id: string;
-  username: string;
-}
-
-/**
  * Full user profile returned by GET /api/auth/me.
- * Extends UserIdentity with display-oriented fields.
  */
 export interface UserProfile {
   user_id: string;
@@ -43,7 +36,7 @@ export interface UserProfile {
 
 // ── Sessions ────────────────────────────────────────────────────────────────
 
-/** Session summary for sidebar listing. */
+/** Session summary for session switcher listings. */
 export interface Session {
   id: string;
   title: string;
@@ -51,6 +44,11 @@ export interface Session {
   updated_at: string;
   forked_from_session_id?: string;
   forked_from_message_id?: string;
+  /**
+   * True for run-bearing sessions that the user has archived. Unrun sessions
+   * are physically deleted; sessions with durable history are hidden instead.
+   */
+  archived?: boolean;
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -73,13 +71,17 @@ export interface ToolCall {
 export interface ChatMessage {
   id: string;
   session_id: string;
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "tool" | "audit";
   content: string;
+  raw_content?: string | null;
   tool_calls: ToolCall[] | null;
   created_at: string;
   local_status?: "pending" | "failed";
   local_error?: string;
-  composition_state_id?: string;
+  composition_state_id?: string | null;
+  tool_call_id?: string | null;
+  parent_assistant_id?: string | null;
+  sequence_no?: number | null;
 }
 
 // ── Composition State ───────────────────────────────────────────────────────
@@ -175,6 +177,43 @@ export interface CompositionStateVersion {
   node_count: number;
 }
 
+// ── Composer Proposal Lifecycle ────────────────────────────────────────────
+
+export type ComposerTrustMode = "explicit_approve" | "auto_commit";
+export type ComposerDensityDefault = "high" | "medium" | "low";
+export type ProposalLifecycleStatus = "pending" | "committed" | "rejected";
+
+export interface ComposerPreferences {
+  session_id: string;
+  trust_mode: ComposerTrustMode;
+  density_default: ComposerDensityDefault;
+  interpretation_review_disabled: boolean;
+  updated_at: string;
+}
+
+export interface CompositionProposal {
+  id: string;
+  session_id: string;
+  tool_call_id: string;
+  tool_name: string;
+  status: ProposalLifecycleStatus;
+  summary: string;
+  rationale: string;
+  affects: string[];
+  arguments_redacted_json: Record<string, unknown>;
+  base_state_id: string | null;
+  committed_state_id: string | null;
+  audit_event_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MessageWithStateResponse {
+  message: ChatMessage;
+  state: CompositionState | null;
+  proposals: CompositionProposal[];
+}
+
 // ── Composer Progress ──────────────────────────────────────────────────────
 
 export type ComposerProgressPhase =
@@ -231,12 +270,34 @@ export interface ComposerProgressSnapshot {
 
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
 
-/** Plugin summary from the catalog listing endpoints. */
+/** Plugin summary from the catalog listing endpoints.
+ *
+ * Phase 7A added reference-content fields populated by plugin authors.
+ * Unfilled plugins return `null` / empty values; the catalog drawer
+ * renders a "see the technical description" fallback for them.
+ *
+ * ``audit_characteristics`` is typed as the closed vocabulary union to
+ * mirror the Python ``DerivedAuditCharacteristics = tuple[AuditCharacteristic, ...]``
+ * type. The wire is structurally JSON ``string[]``; the union tightens
+ * the in-TS surface so internal call sites cannot construct a
+ * PluginSummary with a typo'd flag. Forward compatibility for unknown
+ * wire values is preserved by the lookup boundary at
+ * ``lookupAuditCharacteristic(flag: string)``, which still accepts
+ * ``string`` and returns ``null`` (rendering the grey "unknown" chip)
+ * for a flag outside the union.
+ */
 export interface PluginSummary {
   name: string;
   plugin_type: "source" | "transform" | "sink";
   description: string;
   config_fields: { name: string; type: string; required: boolean; description: string; default: unknown }[];
+
+  // Phase 7B reference-content fields
+  usage_when_to_use: string | null;
+  usage_when_not_to_use: string | null;
+  example_use: string | null;
+  capability_tags: string[];
+  audit_characteristics: AuditCharacteristicFlag[];
 }
 
 /** Detailed plugin schema info including configuration JSON Schema. */
@@ -254,10 +315,22 @@ export interface PluginSchemaInfo {
  * Represents one discrete validation step (schema compatibility,
  * route validity, source path security, etc.).
  */
+export const VALIDATION_CHECK_OUTCOME_CODE_VALUES = [
+  "secret_refs.no_refs",
+  "secret_refs.resolved",
+  "secret_refs.unresolved",
+  "secret_refs.skipped_no_service",
+  "validation.skipped_after_failure",
+] as const;
+
+export type ValidationCheckOutcomeCode = (typeof VALIDATION_CHECK_OUTCOME_CODE_VALUES)[number];
+
 export interface ValidationCheck {
   name: string;
   passed: boolean;
   detail: string;
+  affected_nodes: string[];
+  outcome_code: ValidationCheckOutcomeCode | null;
 }
 
 /**
@@ -270,6 +343,7 @@ export interface ValidationError {
   component_type: string | null;
   message: string;
   suggestion: string | null;
+  error_code?: string | null;
 }
 
 /**
@@ -309,6 +383,20 @@ export interface SemanticEdgeContract {
   requirement_code: string;
 }
 
+export interface ValidationReadinessBlocker {
+  code: string;
+  component_id: string | null;
+  component_type: string | null;
+  detail: string;
+}
+
+export interface ValidationReadiness {
+  authoring_valid: boolean;
+  execution_ready: boolean;
+  completion_ready: boolean;
+  blockers: ValidationReadinessBlocker[];
+}
+
 /**
  * Full validation result from POST /api/sessions/{id}/validate.
  * Stage 2 validation with per-component detail.
@@ -319,6 +407,7 @@ export interface ValidationResult {
   checks: ValidationCheck[];
   errors: ValidationError[];
   warnings?: ValidationWarning[];
+  readiness: ValidationReadiness;
   semantic_contracts?: SemanticEdgeContract[];
 }
 
@@ -335,11 +424,18 @@ export type PipelineStatus = "valid" | "valid-with-warnings" | "invalid";
 // ── Execution ───────────────────────────────────────────────────────────────
 
 /** Counts routed to the virtual discard sink. */
+export interface DiscardStageSummary {
+  stage: "source_validation" | "transform_validation" | "sink_discard";
+  node_id: string | null;
+  count: number;
+}
+
 export interface DiscardSummary {
   total: number;
   validation_errors: number;
   transform_errors: number;
   sink_discards: number;
+  stages?: DiscardStageSummary[];
 }
 
 /**
@@ -586,6 +682,20 @@ export interface RunDiagnosticSummary {
   latest_activity_at: string | null;
 }
 
+// Focused pointer to the operation that caused a run to fail. The backend
+// surfaces the most recent failed operation here so the UI does not have to
+// scan the (paged) operations array to find the cause. ``error_message`` is
+// the full chain text from Landscape's ``operations.error_message`` — wrapper
+// error plus cause(s) plus any truncated HTTP response body captured at the
+// LLM-client wrap site.
+export interface RunDiagnosticFailureDetail {
+  operation_id: string;
+  node_id: string;
+  operation_type: string;
+  error_message: string;
+  failed_at: string;
+}
+
 export interface RunDiagnostics {
   run_id: string;
   landscape_run_id: string;
@@ -595,6 +705,7 @@ export interface RunDiagnostics {
   tokens: RunDiagnosticToken[];
   operations: RunDiagnosticOperation[];
   artifacts: RunDiagnosticArtifact[];
+  failure_detail: RunDiagnosticFailureDetail | null;
 }
 
 export interface CancelRunResponse {
@@ -619,12 +730,7 @@ export interface RunOutputArtifact {
   size_bytes: number;
   created_at: string;
   exists_now: boolean;
-  // Optional in the wire shape so an OLDER backend (pre-`downloadable`
-  // rollout) doesn't make every artifact look "outside allowed sink
-  // directories" — that message implies sink misconfiguration but
-  // would actually be a deploy-skew. Missing → caller treats as
-  // "unknown, optimistic show-the-button"; explicit false → suppress.
-  downloadable?: boolean;
+  downloadable: boolean;
 }
 
 export interface RunOutputsResponse {
@@ -711,6 +817,10 @@ export interface ApiError {
   status: number;
   detail: string;
   error_type?: string;
+  partial_state?: CompositionState | null;
+  failed_turn?: FailedTurn | null;
+  partial_state_save_failed?: boolean;
+  partial_state_save_error?: string | null;
   fanout_guard?: ExecutionFanoutGuard;
   provider_detail?: string;
   provider_status_code?: number;
@@ -727,6 +837,32 @@ export interface SystemStatus {
 
 // ── Blob Manager ────────────────────────────────────────────────────────────
 
+/**
+ * Wire form of the closed `creation_modality` enum (Phase 5a Task 2.5).
+ * Snake_case mirrors the SQL CHECK constraint exactly. The frontend
+ * `InlineSourceSummary.provenance` discriminant uses hyphenated forms;
+ * the single translation point is the `fetchBlob` response adapter in
+ * `api/client.ts` (`toInlineSourceProvenance`).
+ */
+export type BlobCreationModalityWire =
+  | "verbatim"
+  | "llm_generated"
+  | "disambiguated"
+  | "llm_generated_then_amended";
+
+/**
+ * Display form of the creation modality used by
+ * `InlineSourceSummary.provenance`. Hyphenated form; see
+ * `BlobCreationModalityWire` for the snake_case wire form. The adapter
+ * `toInlineSourceProvenance` in `api/client.ts` is the only place wire
+ * → display translation is performed.
+ */
+export type InlineSourceProvenance =
+  | "verbatim"
+  | "llm-generated"
+  | "disambiguated"
+  | "llm-generated-then-amended";
+
 /** Blob metadata returned by all blob endpoints. */
 export interface BlobMetadata {
   id: string;
@@ -739,6 +875,16 @@ export interface BlobMetadata {
   created_by: "user" | "assistant" | "pipeline";
   source_description: string | null;
   status: "ready" | "pending" | "error";
+  // Inline-blob provenance. The wire form is snake_case; the frontend's
+  // `InlineSourceSummary.provenance` field is hyphenated. Translation
+  // lives in `api/client.ts` only.
+  creation_modality: BlobCreationModalityWire;
+  created_from_message_id: string | null;
+  creating_model_identifier: string | null;
+  creating_model_version: string | null;
+  creating_provider: string | null;
+  creating_composer_skill_hash: string | null;
+  creating_arguments_hash: string | null;
 }
 
 /**
@@ -750,9 +896,108 @@ export type BlobCategory = "source" | "sink" | "other";
 // ── Secret References ───────────────────────────────────────────────────────
 
 /** Secret inventory item — browser-safe metadata, never contains values. */
+export type SecretUnavailabilityReason =
+  | "fingerprint_resolver_not_configured"
+  | "env_var_not_set"
+  | "value_decryption_failed";
+
 export interface SecretInventoryItem {
   name: string;
   scope: "user" | "server" | "org";
   available: boolean;
   source_kind: string;
+  reason: SecretUnavailabilityReason | null;
+}
+
+// ── Audit Readiness Panel (Phase 2) ────────────────────────────────────────
+//
+// These types mirror the Pydantic models in
+// src/elspeth/web/audit_readiness/models.py (Phase 2A). If a backend literal
+// is added, the union here must be widened in the same commit and the
+// AuditReadinessPanel's row-renderer switch must add a case — the exhaustive
+// `never` default arm fails the build otherwise.
+
+export type ReadinessRowId =
+  | "validation"
+  | "plugin_trust"
+  | "provenance"
+  | "retention"
+  | "llm_interpretations"
+  | "secrets";
+
+export type ReadinessStatus = "ok" | "warning" | "error" | "not_applicable";
+
+export interface ReadinessRow {
+  id: ReadinessRowId;
+  label: string;
+  status: ReadinessStatus;
+  summary: string;
+  detail: string | null;
+  /**
+   * IDs of components the row implicates. May reference node ids, source,
+   * or sink names. The frontend's click handler resolves these against
+   * CompositionState.nodes for jump-to-component navigation; non-node ids
+   * fall through to a no-op (no error).
+   */
+  component_ids: readonly string[];
+}
+
+export interface AuditReadinessSnapshot {
+  session_id: string;
+  composition_version: number;
+  checked_at: string;
+  rows: readonly ReadinessRow[];
+  validation_result: ValidationResult;
+}
+
+export interface AuditReadinessExplain {
+  session_id: string;
+  composition_version: number;
+  narrative: string;
+}
+
+/**
+ * Frontend-derived projection of an inline-blob source attached to the
+ * current composition state. Computed from compositionState.source +
+ * blob metadata. Never persisted; recomputed on each composition mutation.
+ */
+export interface InlineSourceSummary {
+  blobId: string;
+  filename: string;
+  mimeType: string;
+  /** Truncated content excerpt for display; never the full payload. */
+  contentPreview: string;
+  /** Best-effort row count from the parsed source; null if unparseable. */
+  rowCount: number | null;
+  /**
+   * SHA-256 of the raw inline content (from session blob metadata).
+   *
+   * NON-NULLABLE BY CONTRACT. Every persisted blob carries a hash — that's
+   * a Tier-1 audit-trail invariant on our data (CLAUDE.md "Auditability
+   * Standard": hashes survive payload deletion, integrity is always
+   * verifiable). The inline-source projection MUST throw, not
+   * coerce, when the wire returns a null or empty hash: silently
+   * substituting an empty string into the rendered audit-info pane
+   * gives an auditor a value the system never asserted, which is exactly
+   * the fabrication CLAUDE.md forbids. The throw lives in
+   * `projectInlineSourceSummary` — keep it there.
+   */
+  contentHash: string;
+  /**
+   * How this inline source's content was produced. Projected from the
+   * server-recorded `creation_modality` column via the `fetchBlob`
+   * response adapter in `client.ts`.
+   *
+   * - "verbatim"                   — user typed the content directly.
+   * - "llm-generated"              — LLM generated rows; user confirmed.
+   * - "disambiguated"              — LLM interpreted ambiguous input; user confirmed.
+   * - "llm-generated-then-amended" — LLM generated rows, user amended via
+   *                                  "Edit the list" (F-4). Drives the Edit
+   *                                  button visibility alongside "llm-generated".
+   *
+   * The frontend uses hyphenated forms; the server uses snake_case
+   * (`llm_generated`, `llm_generated_then_amended`). The adapter in
+   * `client.ts` is the single translation point.
+   */
+  provenance: InlineSourceProvenance;
 }

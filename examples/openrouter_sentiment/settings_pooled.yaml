@@ -19,7 +19,7 @@ transforms:
     provider: openrouter
     api_key: ${OPENROUTER_API_KEY}
     model: openai/gpt-4.1-mini
-    template: 'Analyze the sentiment of the following text and respond with ONLY a JSON object.
+    prompt_template: 'Analyze the sentiment of the following text and respond with ONLY a JSON object.
 
 
       Text: {{ row.text }}

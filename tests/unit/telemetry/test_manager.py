@@ -680,6 +680,124 @@ class TestExporterFailureIsolation:
         finally:
             manager.close()
 
+    def test_exporter_handled_failure_return_tracked_per_name(self) -> None:
+        class ReportingFailureExporter:
+            _name = "reported-failure"
+
+            @property
+            def name(self) -> str:
+                return self._name
+
+            def configure(self, _config: object) -> None:
+                pass
+
+            def export(self, _event: object) -> bool:
+                return False
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        config = MockTelemetryConfig()
+        failing = ReportingFailureExporter()
+        manager = TelemetryManager(config, exporters=[failing])
+        try:
+            manager.handle_event(_lifecycle_event())
+            _wait_for_processing(manager)
+            metrics = manager.health_metrics
+            assert metrics["events_emitted"] == 0
+            assert metrics["events_dropped"] == 1
+            assert metrics["exporter_failures"].get("reported-failure") == 1
+        finally:
+            manager.close()
+
+    def test_mixed_outcome_one_success_one_handled_failure(self) -> None:
+        """Mixed dispatch: one exporter returns False, one succeeds.
+
+        The successful exporter records the event in events_emitted
+        (at least one success means the event is emitted), but the failing
+        exporter's name is tracked in exporter_failures.
+        """
+
+        class ReportingFailureExporter:
+            _name = "reported-failure"
+
+            @property
+            def name(self) -> str:
+                return self._name
+
+            def configure(self, _config: object) -> None:
+                pass
+
+            def export(self, _event: object) -> bool:
+                return False
+
+            def flush(self) -> bool | None:
+                return None
+
+            def close(self) -> None:
+                pass
+
+        config = MockTelemetryConfig()
+        failing = ReportingFailureExporter()
+        succeeding = TelemetryTestExporter(name="succeeding")
+        manager = TelemetryManager(config, exporters=[failing, succeeding])
+        try:
+            manager.handle_event(_lifecycle_event())
+            _wait_for_processing(manager)
+            metrics = manager.health_metrics
+            assert metrics["events_emitted"] == 1
+            assert metrics["events_dropped"] == 0
+            assert metrics["exporter_failures"].get("reported-failure") == 1
+            assert "succeeding" not in metrics["exporter_failures"]
+        finally:
+            manager.close()
+
+    def test_repeated_false_returns_trip_circuit_breaker(self) -> None:
+        """Repeated `False` returns from an exporter trip its per-exporter
+        circuit breaker. Subsequent events are skipped before reaching the
+        exporter, so call_count and exporter_failures stop at the threshold.
+        """
+
+        class CountingFailureExporter:
+            _name = "reported-failure"
+
+            def __init__(self) -> None:
+                self.call_count = 0
+
+            @property
+            def name(self) -> str:
+                return self._name
+
+            def configure(self, _config: object) -> None:
+                pass
+
+            def export(self, _event: object) -> bool:
+                self.call_count += 1
+                return False
+
+            def flush(self) -> bool | None:
+                return None
+
+            def close(self) -> None:
+                pass
+
+        config = MockTelemetryConfig()
+        threshold = config.max_consecutive_failures
+        failing = CountingFailureExporter()
+        manager = TelemetryManager(config, exporters=[failing])
+        try:
+            for _ in range(threshold + 3):
+                manager.handle_event(_lifecycle_event())
+            _wait_for_processing(manager)
+            assert failing.call_count == threshold
+            metrics = manager.health_metrics
+            assert metrics["exporter_failures"].get("reported-failure") == threshold
+        finally:
+            manager.close()
+
 
 # =============================================================================
 # Total Exporter Failure
@@ -943,6 +1061,41 @@ class TestFlush:
             object.__setattr__(exporter, "flush", bad_flush)
             # Should not raise
             manager.flush()
+        finally:
+            manager.close()
+
+    def test_flush_consumes_exporter_handled_failure(self) -> None:
+        """When an exporter's flush() returns False, the manager records the
+        handled flush failure (exporter_failures incremented, circuit breaker
+        records the failure) and does not raise.
+        """
+
+        class HandledFlushFailureExporter:
+            _name = "flush-failed"
+
+            @property
+            def name(self) -> str:
+                return self._name
+
+            def configure(self, _config: object) -> None:
+                pass
+
+            def export(self, _event: object) -> bool | None:
+                return None
+
+            def flush(self) -> bool:
+                return False
+
+            def close(self) -> None:
+                pass
+
+        config = MockTelemetryConfig()
+        failing = HandledFlushFailureExporter()
+        manager = TelemetryManager(config, exporters=[failing])
+        try:
+            manager.flush()
+            metrics = manager.health_metrics
+            assert metrics["exporter_failures"].get("flush-failed") == 1
         finally:
             manager.close()
 

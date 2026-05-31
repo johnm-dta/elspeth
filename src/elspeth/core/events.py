@@ -80,7 +80,15 @@ class EventBus:
                 target="settings.yaml"
             ))
         """
-        handlers = tuple(self._subscribers.get(type(event), ()))
+        event_type = type(event)
+        if event_type in self._subscribers:
+            handlers = tuple(self._subscribers[event_type])
+        else:
+            # Documented contract (see docstring): an event type with no
+            # subscribers is a deliberate no-op for decoupling. self._subscribers
+            # is first-party state, so absence here is an expected condition we
+            # branch on explicitly — not an external-data default to coerce.
+            handlers = ()
         for handler in handlers:
             handler(event)
 

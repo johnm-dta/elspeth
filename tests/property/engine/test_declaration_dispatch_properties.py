@@ -418,6 +418,7 @@ def _mk_violation_b(message: str) -> _TestViolationB:
 class _PreEmissionRaiserA(DeclarationContract):
     name: ClassVar[str] = "test_pre_emission_raiser_a"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationA]] = _TestViolationA
     last_raised: ClassVar[DeclarationContractViolation | None] = None
 
     def applies_to(self, plugin: Any) -> bool:
@@ -441,6 +442,7 @@ class _PreEmissionRaiserA(DeclarationContract):
 class _PreEmissionRaiserB(DeclarationContract):
     name: ClassVar[str] = "test_pre_emission_raiser_b"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationB]] = _TestViolationB
     last_raised: ClassVar[DeclarationContractViolation | None] = None
 
     def applies_to(self, plugin: Any) -> bool:
@@ -464,6 +466,7 @@ class _PreEmissionRaiserB(DeclarationContract):
 class _PostEmissionRaiserA(DeclarationContract):
     name: ClassVar[str] = "test_post_emission_raiser_a"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationA]] = _TestViolationA
     last_raised: ClassVar[DeclarationContractViolation | None] = None
 
     def applies_to(self, plugin: Any) -> bool:
@@ -491,6 +494,7 @@ class _PostEmissionRaiserA(DeclarationContract):
 class _PostEmissionRaiserB(DeclarationContract):
     name: ClassVar[str] = "test_post_emission_raiser_b"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationB]] = _TestViolationB
     last_raised: ClassVar[DeclarationContractViolation | None] = None
 
     def applies_to(self, plugin: Any) -> bool:
@@ -518,6 +522,7 @@ class _PostEmissionRaiserB(DeclarationContract):
 class _BatchFlushRaiserA(DeclarationContract):
     name: ClassVar[str] = "test_batch_flush_raiser_a"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationA]] = _TestViolationA
     last_raised: ClassVar[DeclarationContractViolation | None] = None
 
     def applies_to(self, plugin: Any) -> bool:
@@ -545,6 +550,7 @@ class _BatchFlushRaiserA(DeclarationContract):
 class _BatchFlushRaiserB(DeclarationContract):
     name: ClassVar[str] = "test_batch_flush_raiser_b"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationB]] = _TestViolationB
     last_raised: ClassVar[DeclarationContractViolation | None] = None
 
     def applies_to(self, plugin: Any) -> bool:
@@ -572,6 +578,7 @@ class _BatchFlushRaiserB(DeclarationContract):
 class _BoundaryRaiserA(DeclarationContract):
     name: ClassVar[str] = "test_boundary_raiser_a"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationA]] = _TestViolationA
     last_raised: ClassVar[DeclarationContractViolation | None] = None
 
     def applies_to(self, plugin: Any) -> bool:
@@ -599,6 +606,7 @@ class _BoundaryRaiserA(DeclarationContract):
 class _BoundaryRaiserB(DeclarationContract):
     name: ClassVar[str] = "test_boundary_raiser_b"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationB]] = _TestViolationB
     last_raised: ClassVar[DeclarationContractViolation | None] = None
 
     def applies_to(self, plugin: Any) -> bool:
@@ -626,6 +634,7 @@ class _BoundaryRaiserB(DeclarationContract):
 class _PreEmissionNeverRaises(DeclarationContract):
     name: ClassVar[str] = "test_pre_emission_never_raises"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationA]] = _TestViolationA
 
     def applies_to(self, plugin: Any) -> bool:
         return True
@@ -646,6 +655,7 @@ class _PreEmissionNeverRaises(DeclarationContract):
 class _PostEmissionNeverRaises(DeclarationContract):
     name: ClassVar[str] = "test_post_emission_never_raises"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationA]] = _TestViolationA
 
     def applies_to(self, plugin: Any) -> bool:
         return True
@@ -666,6 +676,7 @@ class _PostEmissionNeverRaises(DeclarationContract):
 class _BatchFlushNeverRaises(DeclarationContract):
     name: ClassVar[str] = "test_batch_flush_never_raises"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationA]] = _TestViolationA
 
     def applies_to(self, plugin: Any) -> bool:
         return True
@@ -686,6 +697,7 @@ class _BatchFlushNeverRaises(DeclarationContract):
 class _BoundaryNeverRaises(DeclarationContract):
     name: ClassVar[str] = "test_boundary_never_raises"
     payload_schema: ClassVar[type] = _Payload
+    violation_class: ClassVar[type[_TestViolationA]] = _TestViolationA
 
     def applies_to(self, plugin: Any) -> bool:
         return True

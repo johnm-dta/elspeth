@@ -30,6 +30,18 @@ ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
 # Required columns that have been added since initial schema.
 # Used by _validate_schema() to detect outdated SQLite databases.
 _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
+    # Web auth audit trail - records login, token, and auth failure events.
+    ("auth_events", "event_id"),
+    ("auth_events", "occurred_at"),
+    ("auth_events", "event_type"),
+    ("auth_events", "outcome"),
+    ("auth_events", "provider"),
+    ("auth_events", "metadata_json"),
+    # Web run attribution - records the authenticated user that initiated a run.
+    ("run_attributions", "run_id"),
+    ("run_attributions", "recorded_at"),
+    ("run_attributions", "initiated_by_user_id"),
+    ("run_attributions", "auth_provider_type"),
     ("tokens", "expand_group_id"),
     # Added for run ownership — prevents cross-run contamination of token-linked records
     ("tokens", "run_id"),
@@ -74,13 +86,41 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     # ADR-019 two-axis terminal model: old is_terminal DBs must fail fast.
     ("token_outcomes", "completed"),
     ("token_outcomes", "path"),
+    # Phase 5b interpretation-review audit anchor — runtime LLM calls must
+    # carry the resolved prompt hash used to join back to session DB events.
+    ("calls", "resolved_prompt_template_hash"),
+    # Phase 4 tutorial audit-story projection fields.
+    ("runs", "llm_call_count"),
+    ("runs", "seeded_from_cache"),
+    ("runs", "cache_key"),
+    # Preflight results are written after run creation; partial stale tables
+    # otherwise pass schema validation and fail later on insert.
+    ("preflight_results", "result_id"),
+    ("preflight_results", "run_id"),
+    ("preflight_results", "result_type"),
+    ("preflight_results", "name"),
+    ("preflight_results", "result_json"),
+    ("preflight_results", "created_at"),
+    # Epoch 11: resume fork/expand/coalesce re-emit fix (F1).
+    # token_data_ref persists per-token payloads for expand children + coalesce merged tokens.
+    # resume_checkpoint_id marks resume re-drives so explain() can distinguish them from
+    # run-1 tenacity retries (filters on resume_checkpoint_id IS NULL).
+    ("tokens", "token_data_ref"),
+    ("node_states", "resume_checkpoint_id"),
+    # F3 co-fix: the OpenRouter catalog columns (epoch 10) were never added to the
+    # Postgres staleness backstop, so a stale Postgres DB would slip past validation.
+    ("runs", "openrouter_catalog_sha256"),
+    ("runs", "openrouter_catalog_source"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).
 # Format: (table_name, column_name, referenced_table)
 # Use this only for exact single-column contracts. Run-scoped contracts belong in
 # _REQUIRED_COMPOSITE_FOREIGN_KEYS so stale single-column FKs cannot satisfy them.
-_REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (("validation_errors", "row_id", "rows"),)
+_REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
+    ("validation_errors", "row_id", "rows"),
+    ("preflight_results", "run_id", "runs"),
+)
 
 # Required composite foreign keys for run-scoped audit integrity.
 # Format: (table_name, constrained_columns, referenced_table, referenced_columns)
@@ -104,6 +144,10 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
 # Required check constraints for audit integrity.
 # Format: (table_name, constraint_name)
 _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
+    ("auth_events", "ck_auth_events_event_type"),
+    ("auth_events", "ck_auth_events_outcome"),
+    ("auth_events", "ck_auth_events_provider"),
+    ("run_attributions", "ck_run_attributions_auth_provider_type"),
     ("calls", "calls_has_parent"),
     ("preflight_results", "ck_preflight_result_type"),
 )
@@ -111,13 +155,21 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
 # Required indexes (including partial unique indexes) for audit integrity.
 # Format: (table_name, index_name)
 _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
+    ("auth_events", "ix_auth_events_occurred_at"),
+    ("auth_events", "ix_auth_events_type_outcome"),
+    ("auth_events", "ix_auth_events_user"),
+    ("run_attributions", "ix_run_attributions_user"),
     ("calls", "ix_calls_state_call_index_unique"),
     ("calls", "ix_calls_operation_call_index_unique"),
+    ("calls", "ix_calls_resolved_prompt_template_hash"),
+    ("checkpoints", "ix_checkpoints_run_sequence_unique"),
+    ("preflight_results", "ix_preflight_results_run"),
     ("token_outcomes", "ix_token_outcomes_terminal_unique"),
     ("validation_errors", "ix_validation_errors_run_row"),
 )
 
 _ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset({"ix_tokens_run_id"})
+_ADDITIVE_TABLE_NAMES: frozenset[str] = frozenset({"auth_events", "run_attributions"})
 
 
 def _collect_missing_required_columns(inspector: Inspector) -> list[tuple[str, str]]:
@@ -467,7 +519,7 @@ class LandscapeDB:
                 "Verify the database path is correct.\n\n"
                 f"Database: {self.connection_string}"
             )
-        missing_tables = sorted(expected_tables - existing_tables) if present_landscape_tables else []
+        missing_tables = sorted((expected_tables - existing_tables) - _ADDITIVE_TABLE_NAMES) if present_landscape_tables else []
 
         missing_columns = _collect_missing_required_columns(inspector)
         token_outcomes_shape_errors = _collect_token_outcomes_shape_errors(

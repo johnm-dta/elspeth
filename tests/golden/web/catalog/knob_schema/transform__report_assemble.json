@@ -1,0 +1,75 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Name of the string field to collate",
+        "kind": "text",
+        "label": "Text Field",
+        "name": "text_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "report_body",
+        "description": "Output field for assembled text",
+        "kind": "text",
+        "label": "Output Field",
+        "name": "output_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "plain_text",
+        "description": "Output rendering format: 'plain_text' for newline-joined text, 'markdown' for # title prefix, or 'html_fragment' for <h1>/<p> block elements (escaped).",
+        "enum": [
+          "plain_text",
+          "markdown",
+          "html_fragment"
+        ],
+        "kind": "enum",
+        "label": "Format",
+        "name": "format",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "\n",
+        "description": "Separator used between input rows",
+        "kind": "text",
+        "label": "Join With",
+        "name": "join_with",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Optional report title",
+        "kind": "text",
+        "label": "Title",
+        "name": "title",
+        "nullable": true,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "report_assemble"
+}

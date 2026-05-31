@@ -521,4 +521,5 @@ def _make_settings() -> WebSettings:
         composer_max_discovery_turns=5,
         composer_timeout_seconds=30.0,
         composer_rate_limit_per_minute=60,
+        shareable_link_signing_key=b"\x00" * 32,
     )

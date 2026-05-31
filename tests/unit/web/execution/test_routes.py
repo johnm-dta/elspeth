@@ -34,6 +34,7 @@ from elspeth.web.execution.schemas import (
     RunDiagnosticSummary,
     RunStatusResponse,
     ValidationCheck,
+    ValidationReadiness,
     ValidationResult,
 )
 from elspeth.web.sessions.protocol import RunAlreadyActiveError
@@ -41,6 +42,14 @@ from elspeth.web.sessions.protocol import RunAlreadyActiveError
 # ── Helpers ───────────────────────────────────────────────────────────
 
 _TEST_USER_ID = "test-user-123"
+
+
+def _ready_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=True, execution_ready=True, completion_ready=True, blockers=[])
+
+
+def _blocked_readiness() -> ValidationReadiness:
+    return ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[])
 
 
 def _request_for_app(app: FastAPI) -> Request:
@@ -166,9 +175,10 @@ class TestValidateEndpoint:
             return_value=ValidationResult(
                 is_valid=True,
                 checks=[
-                    ValidationCheck(name="settings_load", passed=True, detail="OK"),
+                    ValidationCheck(name="settings_load", passed=True, detail="OK", affected_nodes=(), outcome_code=None),
                 ],
                 errors=[],
+                readiness=_ready_readiness(),
             )
         )
         app = _create_test_app(execution_service=svc)
@@ -183,7 +193,7 @@ class TestValidateEndpoint:
     async def test_validate_delegates_to_service(self) -> None:
         """AC #16: validate route delegates to service.validate()."""
         svc = MagicMock()
-        svc.validate = AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[]))
+        svc.validate = AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness()))
         app = _create_test_app(execution_service=svc)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(f"/api/sessions/{uuid4()}/validate")
@@ -197,9 +207,16 @@ class TestValidateEndpoint:
             return_value=ValidationResult(
                 is_valid=False,
                 checks=[
-                    ValidationCheck(name="settings_load", passed=False, detail="Bad YAML"),
+                    ValidationCheck(
+                        name="settings_load",
+                        passed=False,
+                        detail="Bad YAML",
+                        affected_nodes=(),
+                        outcome_code=None,
+                    ),
                 ],
                 errors=[],
+                readiness=_blocked_readiness(),
             )
         )
         app = _create_test_app(execution_service=svc)
@@ -224,6 +241,8 @@ class TestExecuteEndpoint:
             assert resp.status_code == 202
             body = resp.json()
             assert body["run_id"] == str(expected_run_id)
+        assert svc.execute.await_args.kwargs["user_id"] == _TEST_USER_ID
+        assert svc.execute.await_args.kwargs["auth_provider_type"] == "local"
 
     @pytest.mark.asyncio
     async def test_execute_with_active_run_returns_409(self) -> None:
@@ -363,6 +382,59 @@ class TestExecuteEndpoint:
         assert detail["semantic_contracts"][0]["consumer_plugin"] == "line_explode"
         assert detail["semantic_contracts"][0]["from_id"] == "scrape"
         assert detail["semantic_contracts"][0]["requirement_code"] == "line_explode.source_field.line_framed_text"
+
+    @pytest.mark.asyncio
+    async def test_execute_returns_422_for_unresolved_interpretation_placeholder(self) -> None:
+        """F-17 / F-21: unresolved interpretation placeholder maps to 422 with structured payload.
+
+        The route handler MUST sit ABOVE the ``except
+        ExecuteRequestValidationError`` (which maps to 400) and the bare
+        ``except ValueError`` (which maps to 404) so the structured 422
+        payload reaches the frontend.  A regression that demoted this
+        catch order would leak the placeholder error as a generic 404 or
+        400 and lose the (node_id, term) list the frontend banner uses.
+        """
+        from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
+
+        exc = UnresolvedInterpretationPlaceholderError(
+            placeholders=(("rate_node", "cool"), ("summarise_node", "important")),
+        )
+
+        svc = MagicMock()
+        svc.execute = AsyncMock(side_effect=exc)
+        app = _create_test_app(execution_service=svc)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(f"/api/sessions/{uuid4()}/execute")
+        assert resp.status_code == 422
+        body = resp.json()
+        detail = body["detail"]
+        assert detail["kind"] == "interpretation_placeholder_unresolved"
+        # Message names every unresolved site so the operator sees them
+        # without needing to expand the banner.
+        assert "{{interpretation:cool}}" in detail["message"]
+        assert "rate_node" in detail["message"]
+        assert "{{interpretation:important}}" in detail["message"]
+        assert "summarise_node" in detail["message"]
+        # Structured placeholder list — the frontend renders per-site
+        # entries from this without parsing the message string.
+        assert detail["placeholders"] == [
+            {"node_id": "rate_node", "term": "cool"},
+            {"node_id": "summarise_node", "term": "important"},
+        ]
+        assert detail["interpretation_sites"] == [
+            {
+                "component_id": "rate_node",
+                "component_type": "transform",
+                "kind": "vague_term",
+                "user_term": "cool",
+            },
+            {
+                "component_id": "summarise_node",
+                "component_type": "transform",
+                "kind": "vague_term",
+                "user_term": "important",
+            },
+        ]
 
 
 class TestRunDiagnosticsEndpoint:
@@ -678,6 +750,165 @@ class TestRunDiagnosticsEndpoint:
         assert response.working_view.headline == "Runtime records are updating"
         assert "3 tokens are visible in the runtime trace." in response.working_view.evidence
 
+    @pytest.mark.asyncio
+    async def test_evaluate_diagnostics_surfaces_bad_request_provider_detail(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Parity with the /sessions/ route: when ``explain_run_diagnostics``
+        raises ``_BadRequestLLMError`` and ``composer_expose_provider_errors``
+        is True, the 502 detail carries ``provider_detail`` /
+        ``provider_status_code`` from the carrier attributes rather than the
+        redacted ``str(exc)`` wrap message. Pins the fix for the parallel
+        silent-failure bug closed by commit 299b2b2be on the sessions side.
+        """
+        from fastapi import HTTPException
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.get_status = AsyncMock(
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="running",
+                started_at=datetime.now(UTC),
+                finished_at=None,
+                error=None,
+                landscape_run_id=str(run_id),
+            )
+        )
+        diagnostics = RunDiagnosticsResponse(
+            run_id=str(run_id),
+            landscape_run_id=str(run_id),
+            run_status="running",
+            summary=RunDiagnosticSummary(
+                token_count=0,
+                preview_limit=50,
+                preview_truncated=False,
+                state_counts={},
+                operation_counts={},
+                latest_activity_at=None,
+            ),
+            tokens=[],
+            operations=[],
+            artifacts=[],
+        )
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_diagnostics_for_settings",
+            lambda *args, **kwargs: diagnostics,
+        )
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
+
+        class FakeComposer:
+            async def explain_run_diagnostics(self, snapshot: dict[str, object]) -> str:
+                raise _BadRequestLLMError(
+                    "LLM request rejected (BadRequestError)",
+                    provider_detail="Model `gpt-foo` does not exist",
+                    provider_status_code=400,
+                )
+
+        app = _create_test_app(execution_service=svc)
+        app.state.composer_service = FakeComposer()
+        app.state.settings.composer_expose_provider_errors = True
+        endpoint = _route_endpoint(app, "evaluate_run_diagnostics")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await endpoint(
+                run_id,
+                _request_for_app(app),
+                limit=50,
+                user=UserIdentity(user_id=_TEST_USER_ID, username="testuser"),
+                service=svc,
+            )
+
+        assert exc_info.value.status_code == 502
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail["error_type"] == "run_diagnostics_explanation_failed"
+        assert detail["detail"] == "_BadRequestLLMError"
+        assert detail["provider_detail"] == "Model `gpt-foo` does not exist"
+        assert detail["provider_status_code"] == 400
+
+    @pytest.mark.asyncio
+    async def test_evaluate_diagnostics_redacts_bad_request_when_expose_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When ``composer_expose_provider_errors`` is False the 502 detail
+        carries class-name only — no provider_detail / provider_status_code.
+        Pins the redaction-by-default contract that the staging-debug toggle
+        is the only path to operator-only material.
+        """
+        from fastapi import HTTPException
+
+        from elspeth.web.composer.service import _BadRequestLLMError
+
+        run_id = uuid4()
+        svc = MagicMock()
+        svc.get_status = AsyncMock(
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="running",
+                started_at=datetime.now(UTC),
+                finished_at=None,
+                error=None,
+                landscape_run_id=str(run_id),
+            )
+        )
+        diagnostics = RunDiagnosticsResponse(
+            run_id=str(run_id),
+            landscape_run_id=str(run_id),
+            run_status="running",
+            summary=RunDiagnosticSummary(
+                token_count=0,
+                preview_limit=50,
+                preview_truncated=False,
+                state_counts={},
+                operation_counts={},
+                latest_activity_at=None,
+            ),
+            tokens=[],
+            operations=[],
+            artifacts=[],
+        )
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes.load_run_diagnostics_for_settings",
+            lambda *args, **kwargs: diagnostics,
+        )
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.asyncio.to_thread", fake_to_thread)
+
+        class FakeComposer:
+            async def explain_run_diagnostics(self, snapshot: dict[str, object]) -> str:
+                raise _BadRequestLLMError(
+                    "LLM request rejected (BadRequestError)",
+                    provider_detail="Model `gpt-foo` does not exist",
+                    provider_status_code=400,
+                )
+
+        app = _create_test_app(execution_service=svc)
+        app.state.composer_service = FakeComposer()
+        app.state.settings.composer_expose_provider_errors = False
+        endpoint = _route_endpoint(app, "evaluate_run_diagnostics")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await endpoint(
+                run_id,
+                _request_for_app(app),
+                limit=50,
+                user=UserIdentity(user_id=_TEST_USER_ID, username="testuser"),
+                service=svc,
+            )
+
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail["error_type"] == "run_diagnostics_explanation_failed"
+        assert detail["detail"] == "_BadRequestLLMError"
+        assert "provider_detail" not in detail
+        assert "provider_status_code" not in detail
+
 
 class TestExecuteIDORAndPathTraversal:
     """IDOR and path traversal defense-in-depth checks in execute().
@@ -785,26 +1016,47 @@ class TestExecuteIDORAndPathTraversal:
         assert resp_a.json() == {"detail": "Blob not found"}
 
     @pytest.mark.asyncio
-    async def test_execute_source_path_traversal_returns_404(self) -> None:
+    async def test_execute_source_path_traversal_returns_400(self) -> None:
         """Source path escaping allowed directories is rejected."""
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
         svc = MagicMock()
-        svc.execute = AsyncMock(side_effect=ValueError("Source path='../../etc/passwd' resolves outside allowed directories"))
+        svc.execute = AsyncMock(
+            side_effect=PathAllowlistViolationError("Source path='../../etc/passwd' resolves outside allowed directories")
+        )
         app = _create_test_app(execution_service=svc)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(f"/api/sessions/{uuid4()}/execute")
-            assert resp.status_code == 404
+            assert resp.status_code == 400
             assert "resolves outside" in resp.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_execute_sink_path_traversal_returns_404(self) -> None:
+    async def test_execute_sink_path_traversal_returns_400(self) -> None:
         """Sink path escaping allowed output directories is rejected."""
+        from elspeth.web.execution.errors import PathAllowlistViolationError
+
         svc = MagicMock()
-        svc.execute = AsyncMock(side_effect=ValueError("Sink 'out' path='../../../tmp/evil' resolves outside allowed output directories"))
+        svc.execute = AsyncMock(
+            side_effect=PathAllowlistViolationError("Sink 'out' path='../../../tmp/evil' resolves outside allowed output directories")
+        )
         app = _create_test_app(execution_service=svc)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(f"/api/sessions/{uuid4()}/execute")
-            assert resp.status_code == 404
+            assert resp.status_code == 400
             assert "resolves outside" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_execute_malformed_blob_ref_returns_400(self) -> None:
+        """Malformed caller-supplied blob_ref is validation, not not-found."""
+        from elspeth.web.execution.errors import MalformedBlobRefError
+
+        svc = MagicMock()
+        svc.execute = AsyncMock(side_effect=MalformedBlobRefError("blob_ref must be a UUID"))
+        app = _create_test_app(execution_service=svc)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(f"/api/sessions/{uuid4()}/execute")
+            assert resp.status_code == 400
+            assert resp.json()["detail"] == "blob_ref must be a UUID"
 
 
 class TestWebSocketReconnectTier1Guards:
@@ -1269,6 +1521,7 @@ class TestResultsEndpoint:
                 "validation_errors": 1,
                 "transform_errors": 1,
                 "sink_discards": 1,
+                "stages": [],
             }
 
     @pytest.mark.asyncio

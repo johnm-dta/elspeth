@@ -8,10 +8,12 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from elspeth.web.composer.progress import (
+from elspeth.contracts.composer_progress import (
     COMPOSER_PROGRESS_MAX_EVIDENCE,
     NON_TERMINAL_PROGRESS_PHASES,
     ComposerProgressEvent,
+)
+from elspeth.web.composer.progress import (
     ComposerProgressRegistry,
     client_cancelled_progress_event,
     convergence_progress_event,

@@ -78,12 +78,30 @@ class ExecutionService(Protocol):
         """
         ...
 
+    async def validate_state(
+        self,
+        state: CompositionState,
+        *,
+        user_id: str | None = None,
+        session_id: UUID | None = None,
+    ) -> ValidationResult:
+        """Async dry-run validation for an already materialized composition state.
+
+        Callers that have already read a CompositionState use this overload so
+        validation and any adjacent projections are computed from the same
+        composition version. When provided, ``session_id`` scopes inline blob
+        metadata lookups to the same session boundary that execution enforces
+        before linking blobs to runs.
+        """
+        ...
+
     async def execute(
         self,
         session_id: UUID,
         state_id: UUID | None = None,
         *,
         user_id: str | None = None,
+        auth_provider_type: str | None = None,
         fanout_ack_token: str | None = None,
     ) -> UUID:
         """Start a background pipeline run.
@@ -95,6 +113,7 @@ class ExecutionService(Protocol):
             session_id: Session to execute.
             state_id: Specific state to execute (latest if None).
             user_id: Authenticated user's ID for scoped secret resolution.
+            auth_provider_type: Auth provider namespace for Landscape run attribution.
             fanout_ack_token: Optional launch acknowledgement for high-fanout
                 LLM/provider-call risk.
 

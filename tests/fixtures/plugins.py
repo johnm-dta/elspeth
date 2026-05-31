@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 
 from pydantic import ConfigDict
 
-from elspeth.contracts import ArtifactDescriptor, PluginSchema, SourceRow
+from elspeth.contracts import ArtifactDescriptor, Determinism, PluginSchema, SourceRow
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
@@ -32,6 +32,7 @@ class ListSource(_TestSourceBase):
         source = ListSource([{"value": 1}], name="my_source")
     """
 
+    determinism = Determinism.IO_READ
     output_schema = _EngineTestSchema
 
     def __init__(self, data: list[dict[str, Any]], name: str = "list_source", on_success: str = "default") -> None:
@@ -203,6 +204,8 @@ class FailingSource(ListSource):
         source = FailingSource(error_message="Custom load failure")
     """
 
+    determinism = Determinism.IO_READ
+
     def __init__(
         self,
         *,
@@ -220,6 +223,7 @@ class PassTransform(BaseTransform):
     """Identity transform — passes rows through unchanged."""
 
     name = "pass_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
 
@@ -249,6 +253,7 @@ class FailTransform(BaseTransform):
     """Transform that always returns an error result."""
 
     name = "fail_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
     on_error = "discard"
@@ -278,6 +283,7 @@ class ConditionalErrorTransform(BaseTransform):
     """Transform that errors on rows where 'fail' key is truthy."""
 
     name = "conditional_error"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
     on_error = "discard"
@@ -310,6 +316,7 @@ class CountingTransform(BaseTransform):
     """Transform that counts invocations (for retry testing)."""
 
     name = "counting_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
 
@@ -341,6 +348,7 @@ class SlowTransform(BaseTransform):
     """Transform with configurable delay (for timeout testing)."""
 
     name = "slow_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
 
@@ -375,6 +383,7 @@ class ErrorOnNthTransform(BaseTransform):
     """Transform that errors on the Nth invocation (for retry integration)."""
 
     name = "error_on_nth"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
     on_error = "discard"
@@ -405,3 +414,54 @@ class ErrorOnNthTransform(BaseTransform):
         if self._call_count == self._error_on:
             return TransformResult.error({"reason": "simulated_failure", "error": f"nth_error_{self._error_on}"}, retryable=True)
         return TransformResult.success(row, success_reason={"action": "passed"})
+
+
+class CallRecordingTransform(BaseTransform):
+    """Transform that records a single HTTP operation_call via ctx.record_call().
+
+    Used by F1 Cell-2 regression: proves re-driven transforms RE-FIRE their
+    recorded calls (at-least-once) and that the re-fired call's node_state
+    carries resume_checkpoint_id (attributability invariant, ADDENDUM 2.C).
+
+    Each invocation of process() records one HTTP call with a synthetic
+    request payload.  The call is state-parented (calls.state_id → node_states)
+    so it inherits the resume_checkpoint_id from its parent node_state.
+    """
+
+    name = "call_recording_transform"
+    determinism = Determinism.NON_DETERMINISTIC  # has external call side-effects
+    input_schema: type[PluginSchema] = _TestSchema
+    output_schema: type[PluginSchema] = _TestSchema
+
+    def __init__(
+        self,
+        *,
+        name: str | None = None,
+        input_connection: str | None = None,
+        on_success: str | None = None,
+        on_error: str | None = None,
+    ) -> None:
+        super().__init__({"schema": {"mode": "observed"}})
+        if name is not None:
+            self.name = name
+        if input_connection is not None:
+            self.input = input_connection
+        if on_success is not None:
+            self.on_success = on_success
+        if on_error is not None:
+            self.on_error = on_error
+
+    def process(self, row: Any, ctx: Any) -> TransformResult:
+        from elspeth.contracts.enums import CallStatus, CallType
+
+        # Record a synthetic HTTP call so the audit trail contains a calls row
+        # linked to this node_state (state-parented: calls.state_id is set).
+        # On resume, the re-drive writes a new node_state at attempt=max+1 with
+        # resume_checkpoint_id set, and records another calls row linked there.
+        ctx.record_call(
+            call_type=CallType.HTTP,
+            status=CallStatus.SUCCESS,
+            request_data={"url": "http://test.internal/probe", "row_value": row["value"] if "value" in row else 0},
+            response_data={"status": 200},
+        )
+        return TransformResult.success(row, success_reason={"action": "call_recorded"})

@@ -82,7 +82,7 @@ def _make_single_query_config() -> dict[str, Any]:
         "deployment_name": "gpt-4o",
         "endpoint": "https://test.openai.azure.com",
         "api_key": "test-key",
-        "template": "Analyze: {{ row.content }}",
+        "prompt_template": "Analyze: {{ row.content }}",
         "system_prompt": "Respond with a sentiment analysis.",
         "response_field": "llm_response",
         "schema": {"mode": "observed"},
@@ -98,7 +98,7 @@ def _make_multi_query_config() -> dict[str, Any]:
         "deployment_name": "gpt-4o",
         "endpoint": "https://test.openai.azure.com",
         "api_key": "test-key",
-        "template": "Assess: {{ row.content }} for {{ row.criterion }}",
+        "prompt_template": "Assess: {{ row.content }} for {{ row.criterion }}",
         "system_prompt": 'Respond in JSON: {"score": <0-100>, "rationale": "<text>"}',
         "queries": {
             "quality": {

@@ -1,0 +1,5471 @@
+{
+  "audit_evidence.guard_symmetry": [],
+  "audit_evidence.gve_attribution": [],
+  "audit_evidence.nominal_base": [],
+  "audit_evidence.tier_1_decoration": [],
+  "composer.catch_order": [],
+  "composer.exception_channel": [],
+  "immutability.freeze_guards": [],
+  "immutability.frozen_annotations": [],
+  "manifest.contract_manifest": [],
+  "manifest.symbol_inventory": [],
+  "manifest.test_to_source_mapping": [],
+  "meta.no-new-bespoke-cicd-enforcer": [],
+  "plugin_contract.component_type": [],
+  "plugin_contract.options_metadata": [],
+  "plugin_contract.plugin_hashes": [],
+  "trust_tier.tier_model": [
+    {
+      "file_path": "__init__.py",
+      "fingerprint": "1669d46742317730"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "033d2c51778f64b1"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "221bdcf91322b83f"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "22f285aba2205491"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "23afd40ba8f23278"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "415daf4019b0ce06"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "45bb214756e424f4"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "4de78450929f4ea9"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "52b9cb98b256ee05"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "6035b2aa7dedb2bb"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "672febe3c56dae3a"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "6dc81aa15090acfb"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "8ae5d6522c263d61"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "93e6a82b4f0ca412"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "9858dd3faf6fed3a"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "9b59e188503db090"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "a606604efe50b325"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "c9f6382f018bbcdc"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "cce2082beec6d734"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "d561ece1d92f92a4"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "dc4bab0f14bd8213"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "dece69e83338a78f"
+    },
+    {
+      "file_path": "cli.py",
+      "fingerprint": "f4f0b8e93d34fe0d"
+    },
+    {
+      "file_path": "cli_helpers.py",
+      "fingerprint": "9f8a901a0dbf5e00"
+    },
+    {
+      "file_path": "composer_mcp/server.py",
+      "fingerprint": "021f442ff89dbcd0"
+    },
+    {
+      "file_path": "composer_mcp/server.py",
+      "fingerprint": "133f0a792cbb73c2"
+    },
+    {
+      "file_path": "composer_mcp/server.py",
+      "fingerprint": "98007a473ebfd71b"
+    },
+    {
+      "file_path": "composer_mcp/server.py",
+      "fingerprint": "98b4aecd73b670e4"
+    },
+    {
+      "file_path": "composer_mcp/server.py",
+      "fingerprint": "9a0433912e12b106"
+    },
+    {
+      "file_path": "composer_mcp/server.py",
+      "fingerprint": "a3fcbff54a101aca"
+    },
+    {
+      "file_path": "composer_mcp/server.py",
+      "fingerprint": "bbe2757f46dc0db3"
+    },
+    {
+      "file_path": "composer_mcp/server.py",
+      "fingerprint": "c26d94c9af67e5c0"
+    },
+    {
+      "file_path": "composer_mcp/server.py",
+      "fingerprint": "c2b135ef979f04d3"
+    },
+    {
+      "file_path": "composer_mcp/server.py",
+      "fingerprint": "e977464336f5aeca"
+    },
+    {
+      "file_path": "contracts/aggregation_checkpoint.py",
+      "fingerprint": "1abbd73daea00336"
+    },
+    {
+      "file_path": "contracts/aggregation_checkpoint.py",
+      "fingerprint": "410826e9445318e0"
+    },
+    {
+      "file_path": "contracts/aggregation_checkpoint.py",
+      "fingerprint": "6641938c93dedd43"
+    },
+    {
+      "file_path": "contracts/aggregation_checkpoint.py",
+      "fingerprint": "6b36d00dcf1f3fe2"
+    },
+    {
+      "file_path": "contracts/aggregation_checkpoint.py",
+      "fingerprint": "9a206bf8390324dc"
+    },
+    {
+      "file_path": "contracts/aggregation_checkpoint.py",
+      "fingerprint": "b9f67ece7cf3cc22"
+    },
+    {
+      "file_path": "contracts/audit.py",
+      "fingerprint": "b3144b567f48c1f7"
+    },
+    {
+      "file_path": "contracts/call_data.py",
+      "fingerprint": "7b3f19649a8d0ba1"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "19abe48e3beb1349"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "55a0135e0b79b4e8"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "799b0dd9a65a5f25"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "821ae8c78839b003"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "9841073fc592c915"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "a9c7157fdbc968f6"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "b902bbadd04a5b76"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "c511b2c983442be0"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "c6056254ccdd9301"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "d3b4cb4a7e4899c5"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "d92e2b13f26bd0eb"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "d95e133f14493ce6"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "eae7be371ffa4051"
+    },
+    {
+      "file_path": "contracts/coalesce_checkpoint.py",
+      "fingerprint": "f6124646c3a92ca1"
+    },
+    {
+      "file_path": "contracts/composer_interpretation.py",
+      "fingerprint": "ffdde8578491891c"
+    },
+    {
+      "file_path": "contracts/config/runtime.py",
+      "fingerprint": "1150f951c0e9018e"
+    },
+    {
+      "file_path": "contracts/config/runtime.py",
+      "fingerprint": "45aa28db08eba5f3"
+    },
+    {
+      "file_path": "contracts/config/runtime.py",
+      "fingerprint": "542bc3ebff8c2007"
+    },
+    {
+      "file_path": "contracts/config/runtime.py",
+      "fingerprint": "569eca0f46084515"
+    },
+    {
+      "file_path": "contracts/config/runtime.py",
+      "fingerprint": "6252708928dc00e6"
+    },
+    {
+      "file_path": "contracts/config/runtime.py",
+      "fingerprint": "8a7ada815bfab93b"
+    },
+    {
+      "file_path": "contracts/config/runtime.py",
+      "fingerprint": "c8c79f6df5b5ce6c"
+    },
+    {
+      "file_path": "contracts/config/runtime.py",
+      "fingerprint": "ce1874f9e78f8b75"
+    },
+    {
+      "file_path": "contracts/config/runtime.py",
+      "fingerprint": "e5aa141d7c16816d"
+    },
+    {
+      "file_path": "contracts/contract_propagation.py",
+      "fingerprint": "b77bb8f4e1cd3d1d"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "093beab514f8afac"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "2212c714a526f507"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "4e1ee8121534c796"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "536648a6116a61bc"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "6c41510b89706238"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "838f778550c9082b"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "8bdbb2025fef18ad"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "a85b8946e67e213d"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "a87d117a553d6317"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "b40c0c006383eef3"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "e133c044ae29deb9"
+    },
+    {
+      "file_path": "contracts/contract_records.py",
+      "fingerprint": "f1e5f488bd3e77ea"
+    },
+    {
+      "file_path": "contracts/data.py",
+      "fingerprint": "a073efa3e28410f3"
+    },
+    {
+      "file_path": "contracts/data.py",
+      "fingerprint": "ac45cbd0e981e3ec"
+    },
+    {
+      "file_path": "contracts/declaration_contracts.py",
+      "fingerprint": "28b565efc229de07"
+    },
+    {
+      "file_path": "contracts/declaration_contracts.py",
+      "fingerprint": "2be5b2edada71a02"
+    },
+    {
+      "file_path": "contracts/declaration_contracts.py",
+      "fingerprint": "6cd7a87f9b40bc62"
+    },
+    {
+      "file_path": "contracts/declaration_contracts.py",
+      "fingerprint": "88e060f1276007c6"
+    },
+    {
+      "file_path": "contracts/declaration_contracts.py",
+      "fingerprint": "8d6e48bba4566067"
+    },
+    {
+      "file_path": "contracts/declaration_contracts.py",
+      "fingerprint": "e770539007d53958"
+    },
+    {
+      "file_path": "contracts/diversion.py",
+      "fingerprint": "812da1ffd6ca2443"
+    },
+    {
+      "file_path": "contracts/events.py",
+      "fingerprint": "10b33b0fb9c2977f"
+    },
+    {
+      "file_path": "contracts/events.py",
+      "fingerprint": "131f1bf57f5fa161"
+    },
+    {
+      "file_path": "contracts/events.py",
+      "fingerprint": "272f31499d1d2cc3"
+    },
+    {
+      "file_path": "contracts/events.py",
+      "fingerprint": "7df4158d6c9bc90e"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "34605275e8e38be8"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "465cdfc5523bb0b8"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "5c64abca13e0856a"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "5f1ff6b1b90ca351"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "6ac1b4cabb0e228a"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "6f459f535f6e4193"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "803600c043ae543c"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "8ea258dc624e433a"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "985a2110a9c3fc38"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "a6b7eac7a31b51da"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "aca2b17f07805a58"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "ad5e712dea14bb60"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "c8c23b30600f0dad"
+    },
+    {
+      "file_path": "contracts/freeze.py",
+      "fingerprint": "cccb10f598f15dd6"
+    },
+    {
+      "file_path": "contracts/hashing.py",
+      "fingerprint": "22ed3013b3aeaf26"
+    },
+    {
+      "file_path": "contracts/hashing.py",
+      "fingerprint": "239eea97d58b1b9e"
+    },
+    {
+      "file_path": "contracts/hashing.py",
+      "fingerprint": "2a349c6bf220a9c0"
+    },
+    {
+      "file_path": "contracts/hashing.py",
+      "fingerprint": "31d52c3080fdb31f"
+    },
+    {
+      "file_path": "contracts/hashing.py",
+      "fingerprint": "32c95dc9621996dc"
+    },
+    {
+      "file_path": "contracts/hashing.py",
+      "fingerprint": "4e289c5c05fb4f61"
+    },
+    {
+      "file_path": "contracts/hashing.py",
+      "fingerprint": "8565df78b19e294d"
+    },
+    {
+      "file_path": "contracts/hashing.py",
+      "fingerprint": "9c9a5760a23a654e"
+    },
+    {
+      "file_path": "contracts/hashing.py",
+      "fingerprint": "a62722333a3034f0"
+    },
+    {
+      "file_path": "contracts/header_modes.py",
+      "fingerprint": "dc93452b5432e8a4"
+    },
+    {
+      "file_path": "contracts/identity.py",
+      "fingerprint": "1fe109115f3ce0f7"
+    },
+    {
+      "file_path": "contracts/plugin_context.py",
+      "fingerprint": "5e7b2d9d784b791f"
+    },
+    {
+      "file_path": "contracts/plugin_context.py",
+      "fingerprint": "8f7477d482ca1864"
+    },
+    {
+      "file_path": "contracts/plugin_context.py",
+      "fingerprint": "98e659ce14979fbe"
+    },
+    {
+      "file_path": "contracts/plugin_context.py",
+      "fingerprint": "b105d00f0725cd72"
+    },
+    {
+      "file_path": "contracts/plugin_context.py",
+      "fingerprint": "de0a402f0392027c"
+    },
+    {
+      "file_path": "contracts/results.py",
+      "fingerprint": "76f5d63ed35c8aae"
+    },
+    {
+      "file_path": "contracts/results.py",
+      "fingerprint": "93d14b11b2947abf"
+    },
+    {
+      "file_path": "contracts/results.py",
+      "fingerprint": "dffcf694f45bb0f9"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "0451c4e7cc3c8c9b"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "1119394c40a75da9"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "130a777f23302f64"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "1cc9e2464855fac7"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "1f455b7b669bd4d1"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "2597a07ec2b2dcfb"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "3a567cfde624dea5"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "3bb3b1e9ac9bc925"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "3dabde1cb7b00df4"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "3f17a37cfb997382"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "52eb3369a21c3288"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "670f598fa5131832"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "68d7460ec8f2e561"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "6b9345f0d4d137a9"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "744309c6de383a8a"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "758b8a3b5f15fd40"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "762aeb93015bbf59"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "82c73144c0c99b82"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "861ca5b68766b6e2"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "90bd89abeed6aba3"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "91bb0a633c4fbc88"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "940ca68fbbd73b93"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "ba73f4a03b47d88b"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "c288b9dbe8e00752"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "c8486c5674a254e9"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "ce1d585bb7e69df5"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "d4a397a3aec95d00"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "d6fcb70b45f90d78"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "dfea05f420799af2"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "e0a2f608e6c2f3c8"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "fbc6029271502b52"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "fc53b565c1f36986"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "fddde8bb0b416579"
+    },
+    {
+      "file_path": "contracts/runtime_val_manifest.py",
+      "fingerprint": "ff811fe1b8027960"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "03744ad8cce49c72"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "037b5c53a4900905"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "1e95933928eb27b1"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "28fae9dd4ce51a0a"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "2fc14119e5fa34d6"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "3fe79875e47c81f9"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "40b58318adb0d8f1"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "454821772c69da5f"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "71d1485bf1fe987a"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "72b983639e970b02"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "73f023a865d90c56"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "842aa8504f66a14d"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "8ce74aac7d6b91df"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "9132eb855d9a224f"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "941fa9db63bc4336"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "a526cb6a7ed08ae4"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "ad90af095de064f5"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "afe0b552cbcde5e1"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "c7a5f11e8e5e11d2"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "d46885fdd6431aa3"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "d68d7a5fc6958893"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "db3c90478b71e28c"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "e4a987f2d6847add"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "e655736b5ba3bd2a"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "ea4b39c48fe0003d"
+    },
+    {
+      "file_path": "contracts/schema.py",
+      "fingerprint": "f3a0c020e0442a4c"
+    },
+    {
+      "file_path": "contracts/schema_contract.py",
+      "fingerprint": "13c2f8a3bfbe5f2a"
+    },
+    {
+      "file_path": "contracts/schema_contract.py",
+      "fingerprint": "19c383f767c4ed8c"
+    },
+    {
+      "file_path": "contracts/secret_scrub.py",
+      "fingerprint": "632c3578c777667a"
+    },
+    {
+      "file_path": "contracts/secret_scrub.py",
+      "fingerprint": "8fab1531e0c85285"
+    },
+    {
+      "file_path": "contracts/secret_scrub.py",
+      "fingerprint": "bd64099f718e5990"
+    },
+    {
+      "file_path": "contracts/secret_scrub.py",
+      "fingerprint": "d3ca157446456a19"
+    },
+    {
+      "file_path": "contracts/security.py",
+      "fingerprint": "e763a5c875c64b76"
+    },
+    {
+      "file_path": "contracts/tier_registry.py",
+      "fingerprint": "18d4ee87363f8490"
+    },
+    {
+      "file_path": "contracts/tier_registry.py",
+      "fingerprint": "360d94dd51a67c28"
+    },
+    {
+      "file_path": "contracts/tier_registry.py",
+      "fingerprint": "b6d17d7d22d3b69b"
+    },
+    {
+      "file_path": "contracts/tier_registry.py",
+      "fingerprint": "ce98be6cf59df4d5"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "0192b0a1f52dfa83"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "0e475ede2ebe9155"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "10e4c0205b5c76e4"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "29be9e3dba5cbde9"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "29c062a5c7ee1146"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "2c6980d0ea9ad310"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "2e94d762e75a12ac"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "3bebb40afa86eea5"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "5e44a56402938020"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "7f703050ee6b225f"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "84e0752567e3eaa1"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "85e186ef81d29212"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "8dc3b88e67140f75"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "a028dfec488d183f"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "a32515393b4908e3"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "aabd320d84fc249a"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "b640a9380d5efac9"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "bfa07a6f7fbe5510"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "d2c08fc759d1117b"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "d9b5c4a81a4d58f1"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "ec7333682574d79f"
+    },
+    {
+      "file_path": "contracts/token_usage.py",
+      "fingerprint": "ffc727d22f9afde6"
+    },
+    {
+      "file_path": "contracts/transform_contract.py",
+      "fingerprint": "24df5cf5593bf5fa"
+    },
+    {
+      "file_path": "contracts/transform_contract.py",
+      "fingerprint": "37ef1f2fbd33537f"
+    },
+    {
+      "file_path": "contracts/transform_contract.py",
+      "fingerprint": "a9ba219b5d0e0a54"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "17534a078b1a1ad8"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "1af39ff971cbe5da"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "265da3f04c16ed8e"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "2ea2c1eed147c8df"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "33c94c68a7ab867a"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "48d40e586998365d"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "50a060c7b56f86d5"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "76805a78ab901edb"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "7f772187ca7ade28"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "9f2eaa6366064a79"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "a83e31b91aebeaff"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "aaec4501412b1939"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "cdad46840dbe5cf2"
+    },
+    {
+      "file_path": "contracts/type_normalization.py",
+      "fingerprint": "f8f218a0f889730a"
+    },
+    {
+      "file_path": "contracts/url.py",
+      "fingerprint": "a8a9139e2ff09e37"
+    },
+    {
+      "file_path": "contracts/url.py",
+      "fingerprint": "ec8dd835c4c43c96"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "0100cd362b521bd1"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "05438efe3dcfada6"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "05ba59815ff33f21"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "06a2a3260cd7fe4d"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "10e73c24908522b7"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "17b0c1703c00c7a2"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "3310aff1426ad617"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "380c8461b687c081"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "3db4e2755848ac98"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "442f9a1f411a1cd0"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "54c2d02d60087f77"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "72f79611b9d549d9"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "8204328f5d5a1574"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "8232406952131b5e"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "91f91f5c3e35e962"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "aa116ad1556acd55"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "ae33e349f3bb421e"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "b26d50562c16f852"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "c475409025e910bc"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "c65382fa7e02810c"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "c9531c6a04908179"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "caf2dab7931eae70"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "d999959c10ca7f31"
+    },
+    {
+      "file_path": "core/canonical.py",
+      "fingerprint": "e1a9506c26cf5732"
+    },
+    {
+      "file_path": "core/checkpoint/recovery.py",
+      "fingerprint": "7a2f9a2b860707a7"
+    },
+    {
+      "file_path": "core/checkpoint/recovery.py",
+      "fingerprint": "c48ba8486b6c2e03"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "273f707dcd7d2715"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "3b281eeeed6ea725"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "4caef713e72da410"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "536a707d2c187622"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "5489fa474057e670"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "755597011f4f00b0"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "8fe487c1aed56a45"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "a715fdc0c601c28f"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "b1dbbdedb998f0f7"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "be3984d8f5bd0518"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "cb45c50da6366324"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "dca291232de403e4"
+    },
+    {
+      "file_path": "core/checkpoint/serialization.py",
+      "fingerprint": "ef96cb9ea70edb86"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "0d88d581cbbd51d1"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "14b86ddeed131914"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "1576cc79d52cca92"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "20f2fbb004b25484"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "20f65047ccdaa41e"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "2145712e9457503d"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "2274f66a2c3edf07"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "263300bd073361c3"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "26b73e0b6dd9831e"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "2817bb647aed8695"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "2a54b85f3d81252a"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "304b3cdccdf508e6"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "30977a32cf247c8f"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "3bc7c47f5ee9ff7b"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "43ac7a5838288f7c"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "55de4e7c48c49cef"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "583b300981111bd9"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "5d5a5f5d05ca1aa6"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "5dfd395156c9401f"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "6097ceb8451ad208"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "646cba7ed370a23f"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "6d427bce88c9dbb8"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "73c661bcd21c7e92"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "753a10fef814ac89"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "7ce7403d7167bc5d"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "8bff971da4e16ca1"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "8d728aba6654ea79"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "94cce9c1d4cdc45a"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "9a90835f7a818367"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "9e51a119bcd26138"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "a9d282c7c7e127d9"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "abc0006be44c149c"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "ac2f0c854dca4273"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "aec66d0b14a57603"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "b907c5517a01d8bb"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "b9673df8b24661a7"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "b9e263a276af747d"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "bb16b34552a8c8f4"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "bbf991d784cdf633"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "c5b2a35c5b8e3875"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "cbd6c8dd08ef206d"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "d77b1745c565fbac"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "d7d5a176b3b51adb"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "e5d101f4b70c7d3c"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "ef6e6ba82ed76a52"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "f2261b307dfc11c9"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "f525eec3a4826469"
+    },
+    {
+      "file_path": "core/config.py",
+      "fingerprint": "f8f28ae6b491b479"
+    },
+    {
+      "file_path": "core/dag/builder.py",
+      "fingerprint": "5495ade25a19136a"
+    },
+    {
+      "file_path": "core/dag/graph.py",
+      "fingerprint": "034b31cfc88d8f9c"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "077fffc1162b4a8c"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "0a8e517b95afe99d"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "0c24b8c6ea6c6121"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "0ea9800929e01470"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "1a0326b7c9a9be9d"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "2044ce34e7068a0e"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "28d4eb0851ef2bfc"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "2ab317626c72c7a2"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "45b4d41ffd098adf"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "4787e79adcdf5f92"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "546c0bc3dd9ceb18"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "5c800b833d64ee57"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "5cfa580fa93e2511"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "5e626f7e33feab2b"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "63667b07fa759ea9"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "6775d1d16fe0dc25"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "69ea88d3b43bbcde"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "93fad93a20e77a51"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "983fd6164e53c620"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "98bd4a04f75f9ff4"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "aa37b6b18d3decf6"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "ba185a79065fe3ff"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "bee9ef11e7396518"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "c06db95de0a522f4"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "c3d09e764e9d4d79"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "c4f851544dd70950"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "e25351dde7462e46"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "e3cccb3d530ea75d"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "f86688e53e08c1d8"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "fc3139feae6eaee5"
+    },
+    {
+      "file_path": "core/expression_parser.py",
+      "fingerprint": "fd97d72e58bbc9e0"
+    },
+    {
+      "file_path": "core/landscape/data_flow_repository.py",
+      "fingerprint": "79239e021b66fa02"
+    },
+    {
+      "file_path": "core/landscape/data_flow_repository.py",
+      "fingerprint": "8ca3a7ee3cc84783"
+    },
+    {
+      "file_path": "core/landscape/data_flow_repository.py",
+      "fingerprint": "90984799b1de3e99"
+    },
+    {
+      "file_path": "core/landscape/data_flow_repository.py",
+      "fingerprint": "b4edfad55e521778"
+    },
+    {
+      "file_path": "core/landscape/data_flow_repository.py",
+      "fingerprint": "cf71d23d49a057eb"
+    },
+    {
+      "file_path": "core/landscape/database.py",
+      "fingerprint": "82e1ad5791af3c88"
+    },
+    {
+      "file_path": "core/landscape/execution_repository.py",
+      "fingerprint": "6e0f00f363e89415"
+    },
+    {
+      "file_path": "core/landscape/execution_repository.py",
+      "fingerprint": "d2e05dfce7443480"
+    },
+    {
+      "file_path": "core/landscape/execution_repository.py",
+      "fingerprint": "eff9a05711d4e280"
+    },
+    {
+      "file_path": "core/landscape/exporter.py",
+      "fingerprint": "2ab8c4e8346624bb"
+    },
+    {
+      "file_path": "core/landscape/exporter.py",
+      "fingerprint": "3c496d74f0061e4b"
+    },
+    {
+      "file_path": "core/landscape/exporter.py",
+      "fingerprint": "ab62b04f8526e5dc"
+    },
+    {
+      "file_path": "core/landscape/formatters.py",
+      "fingerprint": "025dc51a6af9edce"
+    },
+    {
+      "file_path": "core/landscape/formatters.py",
+      "fingerprint": "1f23342d66b0011f"
+    },
+    {
+      "file_path": "core/landscape/formatters.py",
+      "fingerprint": "4ff56b10ba964585"
+    },
+    {
+      "file_path": "core/landscape/formatters.py",
+      "fingerprint": "53661d1f104135c7"
+    },
+    {
+      "file_path": "core/landscape/formatters.py",
+      "fingerprint": "6c7c40e792d8051a"
+    },
+    {
+      "file_path": "core/landscape/formatters.py",
+      "fingerprint": "83aa289553214222"
+    },
+    {
+      "file_path": "core/landscape/formatters.py",
+      "fingerprint": "a0193055e2975e5b"
+    },
+    {
+      "file_path": "core/landscape/formatters.py",
+      "fingerprint": "c68d6a98b5613338"
+    },
+    {
+      "file_path": "core/landscape/formatters.py",
+      "fingerprint": "d4cb1e086f8b9b89"
+    },
+    {
+      "file_path": "core/landscape/formatters.py",
+      "fingerprint": "f595b2964f2033cc"
+    },
+    {
+      "file_path": "core/landscape/journal.py",
+      "fingerprint": "5e0132fcb9b07e19"
+    },
+    {
+      "file_path": "core/landscape/journal.py",
+      "fingerprint": "9ee72dfb595910f1"
+    },
+    {
+      "file_path": "core/landscape/journal.py",
+      "fingerprint": "a9752b464cf35808"
+    },
+    {
+      "file_path": "core/landscape/journal.py",
+      "fingerprint": "b0c3ed03154efd86"
+    },
+    {
+      "file_path": "core/landscape/journal.py",
+      "fingerprint": "fee618cbb10c467d"
+    },
+    {
+      "file_path": "core/landscape/query_repository.py",
+      "fingerprint": "5b5158345e746330"
+    },
+    {
+      "file_path": "core/landscape/run_lifecycle_repository.py",
+      "fingerprint": "0239c3a6625d769d"
+    },
+    {
+      "file_path": "core/landscape/run_lifecycle_repository.py",
+      "fingerprint": "47dab18c3242a09c"
+    },
+    {
+      "file_path": "core/landscape/run_lifecycle_repository.py",
+      "fingerprint": "82e26f9ca676ab5e"
+    },
+    {
+      "file_path": "core/landscape/run_lifecycle_repository.py",
+      "fingerprint": "ecc7a9f1b2775f3d"
+    },
+    {
+      "file_path": "core/operations.py",
+      "fingerprint": "0501b4f813c2abd1"
+    },
+    {
+      "file_path": "core/payload_store.py",
+      "fingerprint": "5e6dea501dc28457"
+    },
+    {
+      "file_path": "core/payload_store.py",
+      "fingerprint": "7ffad90e4cb20922"
+    },
+    {
+      "file_path": "core/rate_limit/limiter.py",
+      "fingerprint": "3aef03c2689d8024"
+    },
+    {
+      "file_path": "core/rate_limit/limiter.py",
+      "fingerprint": "3e1bc5e9e76ba71f"
+    },
+    {
+      "file_path": "core/retention/purge.py",
+      "fingerprint": "0d32fa231299f2d6"
+    },
+    {
+      "file_path": "core/retention/purge.py",
+      "fingerprint": "ed928398c920ef43"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "0b576f1d6696f5f2"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "3a599cde099ef173"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "3d896ce8c256c210"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "3e805a39e8bd81d0"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "3ecb76dbec7fdfbc"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "44723f88720fa834"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "8e1281628c1ee021"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "94ce6d951d982b10"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "9ccf568e7a9ad61b"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "9e32c79b6e91d244"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "c2ca338c9e78af85"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "d25bd12be96813c1"
+    },
+    {
+      "file_path": "core/secrets.py",
+      "fingerprint": "f7af5c751dd54f3a"
+    },
+    {
+      "file_path": "core/security/config_secrets.py",
+      "fingerprint": "c6b8e283546c7541"
+    },
+    {
+      "file_path": "core/security/secret_loader.py",
+      "fingerprint": "cb4d8fc57f9917d4"
+    },
+    {
+      "file_path": "core/security/secret_loader.py",
+      "fingerprint": "d5cef0272959b730"
+    },
+    {
+      "file_path": "core/security/secret_loader.py",
+      "fingerprint": "e77b2a357f43e9a2"
+    },
+    {
+      "file_path": "core/security/web.py",
+      "fingerprint": "587644c24ab0025d"
+    },
+    {
+      "file_path": "core/security/web.py",
+      "fingerprint": "7a01ee7ca996531d"
+    },
+    {
+      "file_path": "core/security/web.py",
+      "fingerprint": "b3d293b81a3a0807"
+    },
+    {
+      "file_path": "core/security/web.py",
+      "fingerprint": "bdf07052a9f75058"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "0c7d72fbee4d77cd"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "107661138c064cec"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "43fe1a67a40a66ba"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "49898c2998df4fe6"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "4a4aae4814e2d02e"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "50efc7d6a803f3bf"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "5e2d542a15058444"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "76a969bedb6d3f12"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "86090d293f1dd55d"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "89f7e97f9589a1a1"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "99a6e293e223267f"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "a8e7bbdaa3c39c93"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "ad832be62f2b87ea"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "c42188aaf7dd3ad6"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "cdc37a2d9951c860"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "d1c76de12eb37427"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "dafa58b503737c2d"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "dbd5107c2a0d4c8d"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "de9306d31778da22"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "e474b6e4c0756ffb"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "e8d8ce9dac994da8"
+    },
+    {
+      "file_path": "core/templates.py",
+      "fingerprint": "ff8806f40c7803a4"
+    },
+    {
+      "file_path": "engine/_best_effort.py",
+      "fingerprint": "437c71e49d86fee5"
+    },
+    {
+      "file_path": "engine/_best_effort.py",
+      "fingerprint": "c48026df1d344433"
+    },
+    {
+      "file_path": "engine/batch_adapter.py",
+      "fingerprint": "bcf52a77562fcc5d"
+    },
+    {
+      "file_path": "engine/coalesce_executor.py",
+      "fingerprint": "4a8461c859544771"
+    },
+    {
+      "file_path": "engine/commencement.py",
+      "fingerprint": "18ca009ccd49b5e0"
+    },
+    {
+      "file_path": "engine/dag_navigator.py",
+      "fingerprint": "03ea79cf8a9eac76"
+    },
+    {
+      "file_path": "engine/dag_navigator.py",
+      "fingerprint": "0a8f6e539820acaf"
+    },
+    {
+      "file_path": "engine/dag_navigator.py",
+      "fingerprint": "b5664d584207fe6f"
+    },
+    {
+      "file_path": "engine/dependency_resolver.py",
+      "fingerprint": "0ecc84f5b6b35d41"
+    },
+    {
+      "file_path": "engine/executors/declaration_dispatch.py",
+      "fingerprint": "15d9ff75661bacf0"
+    },
+    {
+      "file_path": "engine/executors/gate.py",
+      "fingerprint": "68ff7b444bed568c"
+    },
+    {
+      "file_path": "engine/executors/gate.py",
+      "fingerprint": "89678e9942929fa8"
+    },
+    {
+      "file_path": "engine/executors/sink.py",
+      "fingerprint": "00755313e7e139d5"
+    },
+    {
+      "file_path": "engine/executors/sink.py",
+      "fingerprint": "1b066df6010227f2"
+    },
+    {
+      "file_path": "engine/executors/sink.py",
+      "fingerprint": "333193edcab82132"
+    },
+    {
+      "file_path": "engine/executors/sink.py",
+      "fingerprint": "6bf4f058589b3c6f"
+    },
+    {
+      "file_path": "engine/executors/sink.py",
+      "fingerprint": "7484e4d5a8bb7618"
+    },
+    {
+      "file_path": "engine/executors/sink.py",
+      "fingerprint": "8ae24dda2209d609"
+    },
+    {
+      "file_path": "engine/executors/state_guard.py",
+      "fingerprint": "81df711769fff87f"
+    },
+    {
+      "file_path": "engine/executors/state_guard.py",
+      "fingerprint": "86d1554e15f3f1f6"
+    },
+    {
+      "file_path": "engine/executors/state_guard.py",
+      "fingerprint": "d9eb19b04d13628e"
+    },
+    {
+      "file_path": "engine/executors/transform.py",
+      "fingerprint": "29c0eb433f05f97b"
+    },
+    {
+      "file_path": "engine/executors/transform.py",
+      "fingerprint": "7e11a7025d5e2b59"
+    },
+    {
+      "file_path": "engine/executors/transform.py",
+      "fingerprint": "98dcd0390a62068f"
+    },
+    {
+      "file_path": "engine/orchestrator/aggregation.py",
+      "fingerprint": "9b7a8ae4e9506299"
+    },
+    {
+      "file_path": "engine/orchestrator/cleanup.py",
+      "fingerprint": "3f14e10c45af58b3"
+    },
+    {
+      "file_path": "engine/orchestrator/cleanup.py",
+      "fingerprint": "415077c3930e8aa6"
+    },
+    {
+      "file_path": "engine/orchestrator/core.py",
+      "fingerprint": "019440ebb17bbab0"
+    },
+    {
+      "file_path": "engine/orchestrator/core.py",
+      "fingerprint": "b1be0a96de0e9f0f"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "234840683c030073"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "2eb0994608f3c7bb"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "3e3ac5f66f8d5e7e"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "4c75d5612b325236"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "6ca1e695c92ecd95"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "853347c66d90dd22"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "8d66944eadbf933a"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "a96b7a8d581e144b"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "b29f9569a61ec28b"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "c7ca039c1e4e899c"
+    },
+    {
+      "file_path": "engine/processor.py",
+      "fingerprint": "e14b85cf8455c4e0"
+    },
+    {
+      "file_path": "engine/tokens.py",
+      "fingerprint": "8ec8856b43c9c369"
+    },
+    {
+      "file_path": "engine/triggers.py",
+      "fingerprint": "3985f741fe191c64"
+    },
+    {
+      "file_path": "engine/triggers.py",
+      "fingerprint": "4280b12abecfe75a"
+    },
+    {
+      "file_path": "mcp/analyzers/diagnostics.py",
+      "fingerprint": "40990bb066beecfa"
+    },
+    {
+      "file_path": "mcp/analyzers/diagnostics.py",
+      "fingerprint": "8469476a0928a7e1"
+    },
+    {
+      "file_path": "mcp/analyzers/diagnostics.py",
+      "fingerprint": "b7966ea7dd1cf403"
+    },
+    {
+      "file_path": "mcp/analyzers/queries.py",
+      "fingerprint": "0405c1e8da1f7384"
+    },
+    {
+      "file_path": "mcp/analyzers/queries.py",
+      "fingerprint": "0cf7d8c184708eb1"
+    },
+    {
+      "file_path": "mcp/analyzers/queries.py",
+      "fingerprint": "fff66bf31e5a4ba5"
+    },
+    {
+      "file_path": "mcp/analyzers/reports.py",
+      "fingerprint": "96ee99d7e6d9fd09"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "0ce1b996f347ef27"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "159c354dbbbcf1c1"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "17d1058830f1a72e"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "250dc301eb3eda7c"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "2529659573ed39fa"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "577bcdb96c8563c7"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "75c243703258cd62"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "886c5e8c1a03c949"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "8cb0408144fa69d1"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "96b537de0cd74938"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "a69205613d36935a"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "ae2fe4789b6823df"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "b20406c8a83aad1b"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "badb2efd50be18f6"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "da18b04f04396605"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "dbbeb81e161a9a1d"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "e7cd285cc4aea6a3"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "e7d3dc44f7d439ce"
+    },
+    {
+      "file_path": "mcp/server.py",
+      "fingerprint": "ed1bf072e80f189d"
+    },
+    {
+      "file_path": "plugins/infrastructure/batching/mixin.py",
+      "fingerprint": "188d682d00e17ea1"
+    },
+    {
+      "file_path": "plugins/infrastructure/batching/mixin.py",
+      "fingerprint": "24666a1e729638d7"
+    },
+    {
+      "file_path": "plugins/infrastructure/batching/mixin.py",
+      "fingerprint": "2f93bd40222e5b89"
+    },
+    {
+      "file_path": "plugins/infrastructure/batching/mixin.py",
+      "fingerprint": "44635c7d2b4b541c"
+    },
+    {
+      "file_path": "plugins/infrastructure/batching/mixin.py",
+      "fingerprint": "9b67bbe4194832ff"
+    },
+    {
+      "file_path": "plugins/infrastructure/batching/mixin.py",
+      "fingerprint": "cb11639929a462ac"
+    },
+    {
+      "file_path": "plugins/infrastructure/batching/mixin.py",
+      "fingerprint": "e7a832f8c64e2c4e"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "14654725f5bfbd6b"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "1c6195582cf4949e"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "40da889badf6051d"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "46b1134094557050"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "4d916623676ac4fb"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "5327170d8779a051"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "8f06ed3f73df463e"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "bbb2da9c756e4a85"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "cada8bdd2e2eb4fb"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "d93168b40d03aba8"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "ead2d4e860b8be01"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "f057cb32f14c78e2"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/dataverse.py",
+      "fingerprint": "f3c2203bac0e0492"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/fingerprinting.py",
+      "fingerprint": "53d215b4a1821fc4"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/fingerprinting.py",
+      "fingerprint": "546d12d164b09125"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/http.py",
+      "fingerprint": "10ab112db646388f"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/http.py",
+      "fingerprint": "588df931d0f0d1f1"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/http.py",
+      "fingerprint": "c10e1a372d3013e8"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/json_utils.py",
+      "fingerprint": "3c3837df78ef9794"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/json_utils.py",
+      "fingerprint": "69e4555441880c47"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/json_utils.py",
+      "fingerprint": "aa9f282205f934d0"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "0c44117ffc61f1bf"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "153b600f7b824428"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "369b5c198983a3e5"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "3ce6385129d45fcc"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "54f676db05cacf08"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "6f49fd2afcb62733"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "77a7aab3739e8bd0"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "92c580e9594a61bd"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "9f00f16205160b4f"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "b0e4cd97b979fa8d"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "bcb37b188197d7f9"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "d741dbbe7cf1857f"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/llm.py",
+      "fingerprint": "f8ac3c8b6b9c5f85"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/replayer.py",
+      "fingerprint": "381f34b2720cd26a"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
+      "fingerprint": "1a56c5169fca221b"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
+      "fingerprint": "3c62e2c3ff824fd7"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
+      "fingerprint": "423ca2aea34a9f56"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
+      "fingerprint": "46bde1db12749de8"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
+      "fingerprint": "866a8f498d10e0fe"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
+      "fingerprint": "8c1f201c7b5ddd49"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
+      "fingerprint": "ac3495bbb7ec9639"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
+      "fingerprint": "d3ae8b449f567803"
+    },
+    {
+      "file_path": "plugins/infrastructure/clients/retrieval/azure_search.py",
+      "fingerprint": "f9be71eef8e59cb3"
+    },
+    {
+      "file_path": "plugins/infrastructure/config_base.py",
+      "fingerprint": "06bc6e6d57f87e71"
+    },
+    {
+      "file_path": "plugins/infrastructure/config_base.py",
+      "fingerprint": "2bb17951492b01c1"
+    },
+    {
+      "file_path": "plugins/infrastructure/config_base.py",
+      "fingerprint": "95ab69bb6ee80b4f"
+    },
+    {
+      "file_path": "plugins/infrastructure/config_base.py",
+      "fingerprint": "9bea95cd4ffa873a"
+    },
+    {
+      "file_path": "plugins/infrastructure/config_base.py",
+      "fingerprint": "af185ebab8392cdd"
+    },
+    {
+      "file_path": "plugins/infrastructure/config_base.py",
+      "fingerprint": "b123f8cc318706cb"
+    },
+    {
+      "file_path": "plugins/infrastructure/config_base.py",
+      "fingerprint": "bbf4c10152ef0fde"
+    },
+    {
+      "file_path": "plugins/infrastructure/config_base.py",
+      "fingerprint": "d27a6a119f07d5aa"
+    },
+    {
+      "file_path": "plugins/infrastructure/config_base.py",
+      "fingerprint": "d35de5aaeebf98a0"
+    },
+    {
+      "file_path": "plugins/infrastructure/config_base.py",
+      "fingerprint": "e9064dddb97b1895"
+    },
+    {
+      "file_path": "plugins/infrastructure/discovery.py",
+      "fingerprint": "12a2a0eef980437f"
+    },
+    {
+      "file_path": "plugins/infrastructure/manager.py",
+      "fingerprint": "0e88b71c015f8aa0"
+    },
+    {
+      "file_path": "plugins/infrastructure/pooling/executor.py",
+      "fingerprint": "5ce04fa54ab80b94"
+    },
+    {
+      "file_path": "plugins/infrastructure/pooling/executor.py",
+      "fingerprint": "71e586ef9fbea49d"
+    },
+    {
+      "file_path": "plugins/infrastructure/pooling/executor.py",
+      "fingerprint": "d90958e285a74a8e"
+    },
+    {
+      "file_path": "plugins/infrastructure/preflight.py",
+      "fingerprint": "2019727813f38ff9"
+    },
+    {
+      "file_path": "plugins/infrastructure/schema_factory.py",
+      "fingerprint": "aaf5e095cde89de1"
+    },
+    {
+      "file_path": "plugins/infrastructure/schema_factory.py",
+      "fingerprint": "b5937945437c8045"
+    },
+    {
+      "file_path": "plugins/infrastructure/schema_factory.py",
+      "fingerprint": "b9ac312a7188fcc8"
+    },
+    {
+      "file_path": "plugins/infrastructure/schema_factory.py",
+      "fingerprint": "c9b616f9b6b12e98"
+    },
+    {
+      "file_path": "plugins/infrastructure/utils.py",
+      "fingerprint": "c10d679ccb3cd196"
+    },
+    {
+      "file_path": "plugins/infrastructure/validation.py",
+      "fingerprint": "9240c6f6517a323b"
+    },
+    {
+      "file_path": "plugins/sinks/azure_blob_sink.py",
+      "fingerprint": "304f148f13df7df3"
+    },
+    {
+      "file_path": "plugins/sinks/azure_blob_sink.py",
+      "fingerprint": "a46b952b7c0461a9"
+    },
+    {
+      "file_path": "plugins/sinks/chroma_sink.py",
+      "fingerprint": "12aaa412bd91a810"
+    },
+    {
+      "file_path": "plugins/sinks/chroma_sink.py",
+      "fingerprint": "817edacea0609417"
+    },
+    {
+      "file_path": "plugins/sinks/chroma_sink.py",
+      "fingerprint": "8501da8c0e5bf4c0"
+    },
+    {
+      "file_path": "plugins/sinks/chroma_sink.py",
+      "fingerprint": "87156d7ec508a40b"
+    },
+    {
+      "file_path": "plugins/sinks/chroma_sink.py",
+      "fingerprint": "d7e05b8fc5f239a9"
+    },
+    {
+      "file_path": "plugins/sinks/chroma_sink.py",
+      "fingerprint": "fe6fa1b761d7dd9c"
+    },
+    {
+      "file_path": "plugins/sinks/csv_sink.py",
+      "fingerprint": "73ebd4f4b271eb4f"
+    },
+    {
+      "file_path": "plugins/sinks/database_sink.py",
+      "fingerprint": "4aa464556c62f83d"
+    },
+    {
+      "file_path": "plugins/sinks/database_sink.py",
+      "fingerprint": "575071cf7b46d784"
+    },
+    {
+      "file_path": "plugins/sinks/database_sink.py",
+      "fingerprint": "9e9d1f67fecbd6f2"
+    },
+    {
+      "file_path": "plugins/sinks/database_sink.py",
+      "fingerprint": "d64a7ca89b0cfe0e"
+    },
+    {
+      "file_path": "plugins/sinks/dataverse.py",
+      "fingerprint": "110077f751072c97"
+    },
+    {
+      "file_path": "plugins/sinks/dataverse.py",
+      "fingerprint": "62d1b423172204ec"
+    },
+    {
+      "file_path": "plugins/sinks/json_sink.py",
+      "fingerprint": "05b836e27035e553"
+    },
+    {
+      "file_path": "plugins/sinks/json_sink.py",
+      "fingerprint": "70e172c6d4480200"
+    },
+    {
+      "file_path": "plugins/sinks/json_sink.py",
+      "fingerprint": "7f2a8740a6f881fa"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "06c8cb35688214ff"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "39664fb9a4cb9fa2"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "3c529a5cd371be8f"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "431d28180bca26dd"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "501ead0ca19e6205"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "72e6ca8223767db9"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "7be036c024aeeefe"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "97a1ef9c4fc676bd"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "aa46346e001aaf01"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "c861bcabbb4691df"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "e53a46e32abaefb1"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "e59ce88529f38df2"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "ebcdf378c1b17bc6"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "f7674d7898065886"
+    },
+    {
+      "file_path": "plugins/sources/azure_blob_source.py",
+      "fingerprint": "feb5a61fc7ca0a29"
+    },
+    {
+      "file_path": "plugins/sources/csv_source.py",
+      "fingerprint": "03e9ae5f3a3442e8"
+    },
+    {
+      "file_path": "plugins/sources/csv_source.py",
+      "fingerprint": "054e76166ade23bc"
+    },
+    {
+      "file_path": "plugins/sources/csv_source.py",
+      "fingerprint": "0fb2b154fb016195"
+    },
+    {
+      "file_path": "plugins/sources/csv_source.py",
+      "fingerprint": "122485b351a8f172"
+    },
+    {
+      "file_path": "plugins/sources/csv_source.py",
+      "fingerprint": "21b69c7fe66e0a1b"
+    },
+    {
+      "file_path": "plugins/sources/csv_source.py",
+      "fingerprint": "55805867c8844172"
+    },
+    {
+      "file_path": "plugins/sources/csv_source.py",
+      "fingerprint": "7b8583638b096231"
+    },
+    {
+      "file_path": "plugins/sources/csv_source.py",
+      "fingerprint": "bb231ad98805d136"
+    },
+    {
+      "file_path": "plugins/sources/csv_source.py",
+      "fingerprint": "efb42c44febf0c23"
+    },
+    {
+      "file_path": "plugins/sources/csv_source.py",
+      "fingerprint": "feb345d977d9991e"
+    },
+    {
+      "file_path": "plugins/sources/dataverse.py",
+      "fingerprint": "5e69d62057bf8bb7"
+    },
+    {
+      "file_path": "plugins/sources/dataverse.py",
+      "fingerprint": "b8ab7237d10474f3"
+    },
+    {
+      "file_path": "plugins/sources/dataverse.py",
+      "fingerprint": "b9db16c1b599becb"
+    },
+    {
+      "file_path": "plugins/sources/dataverse.py",
+      "fingerprint": "d31e59f727e94dff"
+    },
+    {
+      "file_path": "plugins/sources/dataverse.py",
+      "fingerprint": "dfad59c5d97e602a"
+    },
+    {
+      "file_path": "plugins/sources/json_source.py",
+      "fingerprint": "0008bc20a3903010"
+    },
+    {
+      "file_path": "plugins/sources/json_source.py",
+      "fingerprint": "624f4fc7fffa80de"
+    },
+    {
+      "file_path": "plugins/sources/json_source.py",
+      "fingerprint": "6650d40e380ee359"
+    },
+    {
+      "file_path": "plugins/sources/json_source.py",
+      "fingerprint": "88d3243e32627155"
+    },
+    {
+      "file_path": "plugins/sources/json_source.py",
+      "fingerprint": "8a21e061f1127edd"
+    },
+    {
+      "file_path": "plugins/sources/json_source.py",
+      "fingerprint": "a8886f7f301af61e"
+    },
+    {
+      "file_path": "plugins/sources/json_source.py",
+      "fingerprint": "ad1b700baaf7e161"
+    },
+    {
+      "file_path": "plugins/sources/json_source.py",
+      "fingerprint": "cd3cc8680d23c268"
+    },
+    {
+      "file_path": "plugins/sources/json_source.py",
+      "fingerprint": "ce254b64675c2272"
+    },
+    {
+      "file_path": "plugins/sources/json_source.py",
+      "fingerprint": "fa48854b9099cf4c"
+    },
+    {
+      "file_path": "plugins/sources/text_source.py",
+      "fingerprint": "57eaf7e1d1239212"
+    },
+    {
+      "file_path": "plugins/sources/text_source.py",
+      "fingerprint": "75958c4926a6eef7"
+    },
+    {
+      "file_path": "plugins/transforms/azure/base.py",
+      "fingerprint": "699d136adcf37eb7"
+    },
+    {
+      "file_path": "plugins/transforms/azure/base.py",
+      "fingerprint": "9a9ec030916d9d1c"
+    },
+    {
+      "file_path": "plugins/transforms/azure/base.py",
+      "fingerprint": "fe069bead7e3ca1b"
+    },
+    {
+      "file_path": "plugins/transforms/azure/content_safety.py",
+      "fingerprint": "9f0698389d7d37f0"
+    },
+    {
+      "file_path": "plugins/transforms/batch_stats.py",
+      "fingerprint": "53b9aaaebd24b448"
+    },
+    {
+      "file_path": "plugins/transforms/batch_stats.py",
+      "fingerprint": "f766934dc73b2fb7"
+    },
+    {
+      "file_path": "plugins/transforms/json_explode.py",
+      "fingerprint": "1fea5cdc20957b47"
+    },
+    {
+      "file_path": "plugins/transforms/keyword_filter.py",
+      "fingerprint": "92874338b07da8c1"
+    },
+    {
+      "file_path": "plugins/transforms/llm/base.py",
+      "fingerprint": "145ba0179b5ad95e"
+    },
+    {
+      "file_path": "plugins/transforms/llm/base.py",
+      "fingerprint": "7f6476fbc28644cf"
+    },
+    {
+      "file_path": "plugins/transforms/llm/base.py",
+      "fingerprint": "adb7dfe27969f67b"
+    },
+    {
+      "file_path": "plugins/transforms/llm/base.py",
+      "fingerprint": "c145032e0760e8d5"
+    },
+    {
+      "file_path": "plugins/transforms/llm/langfuse.py",
+      "fingerprint": "12dfc8f5aea99faf"
+    },
+    {
+      "file_path": "plugins/transforms/llm/langfuse.py",
+      "fingerprint": "28e7d9b4e750ad16"
+    },
+    {
+      "file_path": "plugins/transforms/llm/langfuse.py",
+      "fingerprint": "6b062300d3b8dbda"
+    },
+    {
+      "file_path": "plugins/transforms/llm/langfuse.py",
+      "fingerprint": "c31f6369aaefb035"
+    },
+    {
+      "file_path": "plugins/transforms/llm/langfuse.py",
+      "fingerprint": "ee5d4ce5a472ec5c"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "1718242e7a7d2760"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "1b8ff4e2b7e5c4a9"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "20cd9ef2d0e1cb90"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "388d232f2ac89c01"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "4d858ee0a56813b3"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "57a3f2ba08b42f8e"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "5c1bb12399f773cc"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "65fd18e999f42819"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "6f0a6e71a00b83bc"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "85e3bdf6ab272281"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "95880328e7f55b35"
+    },
+    {
+      "file_path": "plugins/transforms/llm/model_catalog.py",
+      "fingerprint": "fd61529203352e72"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "08f16d68224b6028"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "199db6cf8aefef18"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "255ac4deb6977b06"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "34851b08660c82f7"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "3d1c1c9e751f5c37"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "7dfb943095ed0e6d"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "8cb43d8883d25dda"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "b3302b20da432f3a"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "cd3eb8f695edfb5e"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "d05d899abe381126"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "e41932636e3cc9e9"
+    },
+    {
+      "file_path": "plugins/transforms/llm/multi_query.py",
+      "fingerprint": "ed76064e8e587774"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/azure.py",
+      "fingerprint": "12722f02fe362f5e"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/azure.py",
+      "fingerprint": "34ce884612f29d1b"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/azure.py",
+      "fingerprint": "3e6c0bc264e0b845"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/azure.py",
+      "fingerprint": "415d9313aae0b7a0"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/azure.py",
+      "fingerprint": "44dab3972482286d"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/azure.py",
+      "fingerprint": "77f3a047d7935f7e"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/azure.py",
+      "fingerprint": "9ff0fc2752a76664"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/azure.py",
+      "fingerprint": "cecce23ef443e0d1"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "1f9c45733f098cc6"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "21db366b4552e5f2"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "2afc7b2b6eb9f376"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "2f32f98e935b5917"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "5da87d93fffb7d38"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "5efb581a1e28002d"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "61b5a2dd3817b305"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "76262435be4044cf"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "7713d8abf04feef1"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "7af53523c63137a1"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "8fe6e1f28234c719"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "9673eb343b135996"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "9d031d2a6147d0bb"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "d553e839d4b2888e"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "e78299f93093b19e"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "ef30da28f8f013eb"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "fbc78b36adc81e1a"
+    },
+    {
+      "file_path": "plugins/transforms/llm/providers/openrouter.py",
+      "fingerprint": "fcb27f2b753be3d2"
+    },
+    {
+      "file_path": "plugins/transforms/llm/templates.py",
+      "fingerprint": "37944740c243c74e"
+    },
+    {
+      "file_path": "plugins/transforms/llm/templates.py",
+      "fingerprint": "800105da743708bc"
+    },
+    {
+      "file_path": "plugins/transforms/llm/tracing.py",
+      "fingerprint": "ce9ce233b764c242"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "0188c0ff81135c8a"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "06bb82033b8958d9"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "123bb1b249654141"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "2aad7d808a948d24"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "3225c66edeb48191"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "3a25d2719a3ab3b4"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "3d231300087aa2ad"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "4108338f5466b7d3"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "421f72795de1a315"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "461c24da32d7cc62"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "46452dbadf9a8c58"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "577860e458db26dd"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "6250445b6f2170c6"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "635fbdddf952f4f0"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "6b9201e72d3dfbb4"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "8b18a2ef223b9346"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "a5f21a50b3ddde56"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "ac878de32c010d76"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "c80c685acd94bfef"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "d237d57b5e5880d4"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "da0b031f8f04a0cb"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "f7ec030b21297f58"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "fcad6c40d499039b"
+    },
+    {
+      "file_path": "plugins/transforms/llm/transform.py",
+      "fingerprint": "fce549cb3e15ad39"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "140ae8dbb130b0a9"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "2874e3e11a887508"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "549e13412abbf637"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "5f56e87774fdb1bb"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "6851833d67d94941"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "a0684e295117289c"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "b6a6985516337798"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "bf45a592f7d40cba"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "cc07adea6129ad84"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "d44d58bd61293e62"
+    },
+    {
+      "file_path": "plugins/transforms/llm/validation.py",
+      "fingerprint": "ffc8186ac2a55480"
+    },
+    {
+      "file_path": "plugins/transforms/rag/config.py",
+      "fingerprint": "3371a100de2c9052"
+    },
+    {
+      "file_path": "plugins/transforms/rag/config.py",
+      "fingerprint": "56767cfd4c9ab197"
+    },
+    {
+      "file_path": "plugins/transforms/rag/config.py",
+      "fingerprint": "8dcd5a41a5d0705b"
+    },
+    {
+      "file_path": "plugins/transforms/rag/query.py",
+      "fingerprint": "6fa9771f101ecc99"
+    },
+    {
+      "file_path": "plugins/transforms/rag/query.py",
+      "fingerprint": "8690adb65aebc738"
+    },
+    {
+      "file_path": "plugins/transforms/rag/transform.py",
+      "fingerprint": "757eb1e99aea1a3e"
+    },
+    {
+      "file_path": "plugins/transforms/rag/transform.py",
+      "fingerprint": "b22badfe2569d3ea"
+    },
+    {
+      "file_path": "plugins/transforms/safety_utils.py",
+      "fingerprint": "26483b11b49bdac1"
+    },
+    {
+      "file_path": "plugins/transforms/safety_utils.py",
+      "fingerprint": "991b2c4c011449a4"
+    },
+    {
+      "file_path": "plugins/transforms/safety_utils.py",
+      "fingerprint": "cc62a63651610eba"
+    },
+    {
+      "file_path": "plugins/transforms/safety_utils.py",
+      "fingerprint": "e1456b8ddcaf0a67"
+    },
+    {
+      "file_path": "plugins/transforms/type_coerce.py",
+      "fingerprint": "02cd9d86427056a0"
+    },
+    {
+      "file_path": "plugins/transforms/type_coerce.py",
+      "fingerprint": "f4a62fa2d55fdc71"
+    },
+    {
+      "file_path": "plugins/transforms/web_scrape.py",
+      "fingerprint": "922ac0bb4c76376b"
+    },
+    {
+      "file_path": "plugins/transforms/web_scrape.py",
+      "fingerprint": "f919002b3beb8525"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "32d86466eb627a55"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "342f6b893da88dcb"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "3987c673a2d2c95a"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "3ee2301c574959e1"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "44897e9d2009f2bc"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "60cf638fb342e456"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "6e957adaa7626c2e"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "71cde9f71bdae0a3"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "74348db694a043ea"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "9119f51894a23e33"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "94e1784114528e52"
+    },
+    {
+      "file_path": "telemetry/exporters/azure_monitor.py",
+      "fingerprint": "aa43e11f1a2c5cd2"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "075cec67814c2707"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "276fe4ecc236f48c"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "5e007c69c8d66a03"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "627ac963ddf62a95"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "7b57cffffa19e903"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "7e924a7ad0d0ba21"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "9476f6b02dc2004a"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "accf9a3a038b9924"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "b245da2b503a13ea"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "c9b6302881efd24c"
+    },
+    {
+      "file_path": "telemetry/exporters/console.py",
+      "fingerprint": "d207382e5c7055c2"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "0ad29950d81b57e8"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "1722350f766c4135"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "2d37c2dc7ff4d488"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "3739897358d18c44"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "404a939aea8beb7e"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "4c2310eaf1abb02a"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "505300651e91f5da"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "63a7f55123051ec2"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "7434767f5590e623"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "92b15ccea25c1287"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "99748d035824f576"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "a0db2ab5e7880449"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "a2e639ecbc31381c"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "b63cd836651ba83d"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "c1a1ebcbc22c1226"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "c37602aa4972660f"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "c3fa5b0b6e5ed92f"
+    },
+    {
+      "file_path": "telemetry/exporters/datadog.py",
+      "fingerprint": "ea033d7c9b4bc744"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "0c530e3132a302d5"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "152ae95f9abfd15e"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "18533278c73b7777"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "44897e9d2009f2bc"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "499ecde7b7db36a4"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "71cde9f71bdae0a3"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "94e1784114528e52"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "aa43e11f1a2c5cd2"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "ad5de47ef5a9de28"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "b04beb5aa0c1eace"
+    },
+    {
+      "file_path": "telemetry/exporters/otlp.py",
+      "fingerprint": "d75cc8b2f718955e"
+    },
+    {
+      "file_path": "telemetry/factory.py",
+      "fingerprint": "1f3cc7f6698cb122"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "05590f539280dce7"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "07c7b40d564bb0bc"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "0a1bb9f3fb968fdf"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "1c75bf1b3c8e4241"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "30047980e068a453"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "415e7b2d716d1bff"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "5f6ec240ec8867d0"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "64535719a1fd4215"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "79190bde3fa222f5"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "7b8c10be497703d4"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "9a2e20048626df2b"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "b1381b2479ddcfa8"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "c67d7657d6cfe353"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "c7e62874628e94d1"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "c87058caa78a1776"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "eef48cd4ffa15e30"
+    },
+    {
+      "file_path": "telemetry/manager.py",
+      "fingerprint": "f2a1384982428881"
+    },
+    {
+      "file_path": "telemetry/serialization.py",
+      "fingerprint": "09e32b205a4ba3c5"
+    },
+    {
+      "file_path": "telemetry/serialization.py",
+      "fingerprint": "1625e7ea618562c9"
+    },
+    {
+      "file_path": "telemetry/serialization.py",
+      "fingerprint": "4663ae87f61a77f8"
+    },
+    {
+      "file_path": "telemetry/serialization.py",
+      "fingerprint": "865b6fa9dc65a47e"
+    },
+    {
+      "file_path": "telemetry/serialization.py",
+      "fingerprint": "bb0633d7d47cd33d"
+    },
+    {
+      "file_path": "testing/__init__.py",
+      "fingerprint": "049c6f164a3396ce"
+    },
+    {
+      "file_path": "testing/__init__.py",
+      "fingerprint": "3fe3f5b3e768df7a"
+    },
+    {
+      "file_path": "testing/__init__.py",
+      "fingerprint": "613ec4ec970a5195"
+    },
+    {
+      "file_path": "testing/__init__.py",
+      "fingerprint": "656d5f58d73d11e1"
+    },
+    {
+      "file_path": "testing/__init__.py",
+      "fingerprint": "820307d8b3dcbfd2"
+    },
+    {
+      "file_path": "testing/__init__.py",
+      "fingerprint": "9364db930d5804f1"
+    },
+    {
+      "file_path": "testing/__init__.py",
+      "fingerprint": "c397ada9d03dc445"
+    },
+    {
+      "file_path": "tui/screens/explain_screen.py",
+      "fingerprint": "03a00dbb62ba5c6b"
+    },
+    {
+      "file_path": "tui/screens/explain_screen.py",
+      "fingerprint": "07b4d69f1ce67be0"
+    },
+    {
+      "file_path": "tui/screens/explain_screen.py",
+      "fingerprint": "6b0b82f760f6becd"
+    },
+    {
+      "file_path": "tui/screens/explain_screen.py",
+      "fingerprint": "7968a4980cf92534"
+    },
+    {
+      "file_path": "tui/screens/explain_screen.py",
+      "fingerprint": "a68b5fde2edfa790"
+    },
+    {
+      "file_path": "tui/screens/explain_screen.py",
+      "fingerprint": "adba2bbcb7a94ffa"
+    },
+    {
+      "file_path": "tui/screens/explain_screen.py",
+      "fingerprint": "aee96f71353ea794"
+    },
+    {
+      "file_path": "tui/screens/explain_screen.py",
+      "fingerprint": "dbc969931c539860"
+    },
+    {
+      "file_path": "tui/screens/explain_screen.py",
+      "fingerprint": "e6d8ab01221d1c94"
+    },
+    {
+      "file_path": "tui/widgets/lineage_tree.py",
+      "fingerprint": "60a7a8bf5283d1ba"
+    },
+    {
+      "file_path": "tui/widgets/lineage_tree.py",
+      "fingerprint": "ac91d1add4637c9e"
+    },
+    {
+      "file_path": "tui/widgets/node_detail.py",
+      "fingerprint": "0893509d0253958e"
+    },
+    {
+      "file_path": "tui/widgets/node_detail.py",
+      "fingerprint": "31d2650cac6556e0"
+    },
+    {
+      "file_path": "tui/widgets/node_detail.py",
+      "fingerprint": "453f95822e17bfe2"
+    },
+    {
+      "file_path": "tui/widgets/node_detail.py",
+      "fingerprint": "622dd0516891fe63"
+    },
+    {
+      "file_path": "tui/widgets/node_detail.py",
+      "fingerprint": "e530ff6d82ece7a0"
+    },
+    {
+      "file_path": "web/app.py",
+      "fingerprint": "057597c004befd39"
+    },
+    {
+      "file_path": "web/app.py",
+      "fingerprint": "2de630b45978d685"
+    },
+    {
+      "file_path": "web/app.py",
+      "fingerprint": "318afae72ce2947e"
+    },
+    {
+      "file_path": "web/app.py",
+      "fingerprint": "5a8b80ff0e908ab1"
+    },
+    {
+      "file_path": "web/app.py",
+      "fingerprint": "7a5f5f8bd4a3ac25"
+    },
+    {
+      "file_path": "web/app.py",
+      "fingerprint": "7ce3ee8e08561e45"
+    },
+    {
+      "file_path": "web/app.py",
+      "fingerprint": "91b3559b942c0040"
+    },
+    {
+      "file_path": "web/app.py",
+      "fingerprint": "9519401fd195b0ac"
+    },
+    {
+      "file_path": "web/app.py",
+      "fingerprint": "961011006d9c0cda"
+    },
+    {
+      "file_path": "web/app.py",
+      "fingerprint": "f228499fcfff4222"
+    },
+    {
+      "file_path": "web/async_workers.py",
+      "fingerprint": "2f6935230e6215d4"
+    },
+    {
+      "file_path": "web/auth/entra.py",
+      "fingerprint": "564181fecfacb986"
+    },
+    {
+      "file_path": "web/auth/entra.py",
+      "fingerprint": "9ef9844bc003576e"
+    },
+    {
+      "file_path": "web/auth/middleware.py",
+      "fingerprint": "85ef49ad42821944"
+    },
+    {
+      "file_path": "web/auth/oidc.py",
+      "fingerprint": "08a628af082bd78b"
+    },
+    {
+      "file_path": "web/auth/oidc.py",
+      "fingerprint": "4c7ec97e16ccebc9"
+    },
+    {
+      "file_path": "web/auth/oidc.py",
+      "fingerprint": "57b015b09222f296"
+    },
+    {
+      "file_path": "web/auth/oidc.py",
+      "fingerprint": "5b6d0378675eb2f2"
+    },
+    {
+      "file_path": "web/auth/oidc.py",
+      "fingerprint": "6494c39fcc6d20fc"
+    },
+    {
+      "file_path": "web/auth/oidc.py",
+      "fingerprint": "7ad8f0d01efdbd81"
+    },
+    {
+      "file_path": "web/auth/oidc.py",
+      "fingerprint": "b8b1270a71192d97"
+    },
+    {
+      "file_path": "web/auth/oidc.py",
+      "fingerprint": "c10514f46a44024c"
+    },
+    {
+      "file_path": "web/auth/oidc.py",
+      "fingerprint": "cd4ba5b028a35026"
+    },
+    {
+      "file_path": "web/auth/oidc.py",
+      "fingerprint": "e21f32481fc9784c"
+    },
+    {
+      "file_path": "web/blobs/service.py",
+      "fingerprint": "0f0584634973a5ac"
+    },
+    {
+      "file_path": "web/blobs/service.py",
+      "fingerprint": "5d74d3cb32617f1c"
+    },
+    {
+      "file_path": "web/blobs/service.py",
+      "fingerprint": "ea2f8e3e7ddf8c75"
+    },
+    {
+      "file_path": "web/blobs/service.py",
+      "fingerprint": "ffe8f02b27f08dea"
+    },
+    {
+      "file_path": "web/blobs/sniff.py",
+      "fingerprint": "a966bc58c3ffd3b7"
+    },
+    {
+      "file_path": "web/catalog/routes.py",
+      "fingerprint": "bc80b0854f0cb34e"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "0fcb6d233deaafbe"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "35f19820d9e768ad"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "627b5114d5635ef7"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "811406999d977a9f"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "9e86d37d099865b9"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "b3f6fc4a8d272276"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "b8d3d99b772457b8"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "cad629e5a725a37c"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "d98fcb19a086f35c"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "dbd0c2b47b09652b"
+    },
+    {
+      "file_path": "web/catalog/service.py",
+      "fingerprint": "ebdc5429b73a3656"
+    },
+    {
+      "file_path": "web/composer/_required_paths_validator.py",
+      "fingerprint": "b07f5f9d3d7a04bf"
+    },
+    {
+      "file_path": "web/composer/audit.py",
+      "fingerprint": "12ea97ccaadab07e"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "25bd6b9caf3d6eb7"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "48ed1111ab87ae75"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "4a1ce0b761d3a4e4"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "58cbd714466eedac"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "6935e568275233bd"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "6c67a7c575c6e380"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "916cd91a50026c05"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "9376a3ee61345695"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "ad1df95017cf95e3"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "eba465f2693a0eb4"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "f9c7773c8f4832e5"
+    },
+    {
+      "file_path": "web/composer/guided/chat_solver.py",
+      "fingerprint": "fc3be08d580be95e"
+    },
+    {
+      "file_path": "web/composer/guided/protocol.py",
+      "fingerprint": "0aaf84e80b0f3a16"
+    },
+    {
+      "file_path": "web/composer/guided/recipe_match.py",
+      "fingerprint": "6726fb5580a0cb92"
+    },
+    {
+      "file_path": "web/composer/guided/recipe_match.py",
+      "fingerprint": "e71b13ac68a94bb6"
+    },
+    {
+      "file_path": "web/composer/guided/recipe_match.py",
+      "fingerprint": "fd8beb31159c31ca"
+    },
+    {
+      "file_path": "web/composer/guided/steps.py",
+      "fingerprint": "d12bd40a848a8b71"
+    },
+    {
+      "file_path": "web/composer/implicit_decisions.py",
+      "fingerprint": "24bbd76d54ccfe33"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "00217f7aa707a30d"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "01435ad22c7f7946"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "019b920aea416acb"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "0c7de3a07a40310f"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "0d833fdefa90f98f"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "129470a225d57f27"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "14c33dfbf868059d"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "216e94b72103f074"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "23654a5020554ff2"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "25a663b069e6a21e"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "2a1833c0a52a5e5a"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "2bfecea3bd9c907b"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "320755415534b8b2"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "37f7de34a9e33a02"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "40e4830b7986f089"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "5cd0d50b12dd73ad"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "633b8b555a08a0d5"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "66a71df341185085"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "7a51927419dde97b"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "8a4d5742fc096a4c"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "9abdc8a826386eea"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "a50249b4c425b80e"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "b05d403d618526a2"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "b62e64bc2d61e617"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "c745f85451112e20"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "c958b58e1cfbd5e2"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "cb1c4be269a3e9f0"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "d613ce74e27d37d1"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "e68305badf66bd65"
+    },
+    {
+      "file_path": "web/composer/llm_response_parsing.py",
+      "fingerprint": "fa9224835d150b3f"
+    },
+    {
+      "file_path": "web/composer/recipes.py",
+      "fingerprint": "2669127d1300bf00"
+    },
+    {
+      "file_path": "web/composer/recipes.py",
+      "fingerprint": "fb7764c2c4816ee2"
+    },
+    {
+      "file_path": "web/composer/redaction.py",
+      "fingerprint": "22c2fc298648b291"
+    },
+    {
+      "file_path": "web/composer/redaction.py",
+      "fingerprint": "2d2e6b24c7aafd25"
+    },
+    {
+      "file_path": "web/composer/redaction.py",
+      "fingerprint": "4f5bfe819cd1532d"
+    },
+    {
+      "file_path": "web/composer/redaction.py",
+      "fingerprint": "849a3ad887180a44"
+    },
+    {
+      "file_path": "web/composer/redaction.py",
+      "fingerprint": "f98ce159ca5d32fa"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "1b4aa0ca1e1d2f83"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "2a6ac3e449ff4daa"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "4ba60774ae10f0f5"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "5e18582300fe4db8"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "9475aed316c9be0b"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "9c37dc8cf6aa2386"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "b8c97a159c375db2"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "c28f5f9ec51d0f9a"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "cd655256ca15f7bb"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "d6a5623c6b049c50"
+    },
+    {
+      "file_path": "web/composer/service.py",
+      "fingerprint": "ee9dfe639c1746a6"
+    },
+    {
+      "file_path": "web/composer/skills/__init__.py",
+      "fingerprint": "edd927a95648e236"
+    },
+    {
+      "file_path": "web/composer/source_inspection.py",
+      "fingerprint": "03c72d42852801e5"
+    },
+    {
+      "file_path": "web/composer/source_inspection.py",
+      "fingerprint": "314ea348e863a6f4"
+    },
+    {
+      "file_path": "web/composer/source_inspection.py",
+      "fingerprint": "327fe9a5a3e59ac5"
+    },
+    {
+      "file_path": "web/composer/source_inspection.py",
+      "fingerprint": "431bc71e5d5e137e"
+    },
+    {
+      "file_path": "web/composer/source_inspection.py",
+      "fingerprint": "61f9e4be883aff78"
+    },
+    {
+      "file_path": "web/composer/source_inspection.py",
+      "fingerprint": "684a0b8827dc898e"
+    },
+    {
+      "file_path": "web/composer/source_inspection.py",
+      "fingerprint": "839f884f581b26d0"
+    },
+    {
+      "file_path": "web/composer/source_inspection.py",
+      "fingerprint": "c2d07dc1c5c6d068"
+    },
+    {
+      "file_path": "web/composer/source_inspection.py",
+      "fingerprint": "ec99754b8b1fc32a"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "0438e025d4ddc0b3"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "0a40378bed99324c"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "1be9831e03d16765"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "1c4db9634cd49938"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "3aff3816428e3590"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "553d63b88e277081"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "5c3102391a7ef9dc"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "8e9f7b0aaa21d365"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "93e6d0f366d473f2"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "976e77012c7cb2f6"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "ad8e4160808d1d4d"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "bea652fff29d7051"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "c09544503f550037"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "cacfb09cb1ee4078"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "d30f04f5c3109e3f"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "d7b50b5c57e5c231"
+    },
+    {
+      "file_path": "web/composer/state.py",
+      "fingerprint": "f4ef2614439ba941"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "23b837ecd6491282"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "3094f7a26a967aaf"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "3188c9b110435f95"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "4af41677818f6cc6"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "871a339c17f9b72d"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "97bf31d41b0db60e"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "9c37712507402f7e"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "a6740c7904183fb7"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "b009599a7a2388a8"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "b1785a38f79e2bd6"
+    },
+    {
+      "file_path": "web/composer/telemetry_phase8.py",
+      "fingerprint": "ec883bb6324c83c0"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "0d486255de228823"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "1498557d416fbe12"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "1ed37d0b88a0151f"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "54356b4332bf5c63"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "9a7b25e2fc96514d"
+    },
+    {
+      "file_path": "web/composer/tool_batch.py",
+      "fingerprint": "e7084dd7e4c42da5"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "0ef3cc75e2a1465e"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "0f2fe440cd8b031a"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "0f5b186ad287932f"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "15be8125f8beb657"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "164c80fbe9779ed1"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "31f6c908094e6b1a"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "3239cbf18be2c50e"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "4b3383863e16a84c"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "5957a3910cece7df"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "68e923ce1abbde2a"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "6dede43afe204908"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "912e643781ca8b52"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "c08fe7a0af571fc4"
+    },
+    {
+      "file_path": "web/composer/tools/_common.py",
+      "fingerprint": "c356048be3c1668f"
+    },
+    {
+      "file_path": "web/composer/tools/_dispatch.py",
+      "fingerprint": "64df0c1899440c17"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "1572f749e0721c8d"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "1b80b2f85d944ac6"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "3658d54a8721ac96"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "79391f3b16bd3db6"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "9606870cec567eb9"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "96d73b682ad0a226"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "984ed68ceb1df11f"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "9f3a080fbddec2a0"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "b158f3692e8bbf5d"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "bf8563c850ca9a87"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "df3f9d3f9790ca88"
+    },
+    {
+      "file_path": "web/composer/tools/blobs.py",
+      "fingerprint": "e8ea24c6f35c3e3c"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "0939dce5f06ef7cb"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "0945f207a98cbbff"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "157afff4c5b89efd"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "170da3b1e8b91a7c"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "176985867214e183"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "1988212271415914"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "1a4634d0d4e540a1"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "1f07af64510ad515"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "20dc866451ce18cc"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "23513e8813c297f6"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "2780ab37f5f2d489"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "2d23380aa7ea7a24"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "2d3a8b87d9ca51f3"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "2dadfe65b888003f"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "2e46bb891c34ebf7"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "30e852fafe54278d"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "3cf8de969f916272"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "42a2049f51f41ad5"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "42dc2828b0e57306"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "556a65c1e6ad5068"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "5e95739f36d9eda1"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "65bfa9c0c7279e67"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "69025a61f1c28d9f"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "7236ffc455b6c7be"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "78003676a01b62e7"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "788462ae239e2501"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "8218c1e27d444b5d"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "9481bb581f0a388f"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "9c1695c48f0efa04"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "9e1243b28dd8b86f"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "a198571c1b9ad526"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "a46f1ac16266c1ba"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "aa5808f615d3af9a"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "abc6ef78029ec544"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "be409e72085e2f59"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "c1946cc969215bd2"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "d8ccc95d7f3fafec"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "e0bc2bf3936637b4"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "e2665599a03a84d5"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "f0e165ac927832cd"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "f179b12ee165ade2"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "f89d44e37975a3cc"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "fb7e9f0ac5e38ba3"
+    },
+    {
+      "file_path": "web/composer/tools/generation.py",
+      "fingerprint": "fd05b8a30100c68c"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "100a8d01f438c0e6"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "23a8268fd0c90047"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "2a12bf7ffce7858d"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "316d0487bb1d8b7c"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "329fb69e5f766ce6"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "32dc09ac1df53ab3"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "400e7fa8db4f1ead"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "42309d8e9c36b9ae"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "53cdd7b125696d4a"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "5e4977581a3e3e2f"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "6fb832f3172fdeb1"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "87a636f73cd97447"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "87b1f78f92cca424"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "8a8cb7d027f0f2f1"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "9821fdd3b0a0e36a"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "a12ab183df5dc425"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "a3aa2e4be368b676"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "a583fa7b91f2f5b4"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "a9b4b8adc81c4f9b"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "afcde30a5ec360ea"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "b19e372e1ba24e9a"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "b1ca3b580e951eeb"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "b3cc1f6e14caea35"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "bd3440d42f497594"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "bd8888c405f0f2b5"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "cddef38c47eddcee"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "d096c7dfd60bc4c9"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "d4327137d876f74a"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "d92cc8f903f46fb1"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "d9b8b97d7f2fd4e7"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "dbb2f95a63783167"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "edf7fab42da3610b"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "f8d3f1fc01dbefb4"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "fcc8acd21c8d9c6b"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "fd42b91d6bc188f8"
+    },
+    {
+      "file_path": "web/composer/tools/sessions.py",
+      "fingerprint": "ff5b63e0153dcdb3"
+    },
+    {
+      "file_path": "web/composer/tools/sources.py",
+      "fingerprint": "5b29016c3826c2c7"
+    },
+    {
+      "file_path": "web/composer/tools/sources.py",
+      "fingerprint": "88b260427087c8ec"
+    },
+    {
+      "file_path": "web/composer/tools/sources.py",
+      "fingerprint": "b9536a22b9e37eda"
+    },
+    {
+      "file_path": "web/composer/tools/transforms.py",
+      "fingerprint": "28b82b3b788af6e4"
+    },
+    {
+      "file_path": "web/composer/tools/transforms.py",
+      "fingerprint": "8e25103e55154751"
+    },
+    {
+      "file_path": "web/composer/yaml_generator.py",
+      "fingerprint": "553a2bc2f7828b83"
+    },
+    {
+      "file_path": "web/composer/yaml_generator.py",
+      "fingerprint": "8aa1876af2dcdcd5"
+    },
+    {
+      "file_path": "web/composer/yaml_generator.py",
+      "fingerprint": "d266b01a6f1f2583"
+    },
+    {
+      "file_path": "web/execution/failure_samples.py",
+      "fingerprint": "1f176fb7969fbed2"
+    },
+    {
+      "file_path": "web/execution/failure_samples.py",
+      "fingerprint": "b09747c7efb37444"
+    },
+    {
+      "file_path": "web/execution/failure_samples.py",
+      "fingerprint": "fdc4a3946c001515"
+    },
+    {
+      "file_path": "web/execution/fanout_guard.py",
+      "fingerprint": "fdf1ab16ee8462d4"
+    },
+    {
+      "file_path": "web/execution/outputs.py",
+      "fingerprint": "0cedc3792a8a7287"
+    },
+    {
+      "file_path": "web/execution/preflight.py",
+      "fingerprint": "42996be95a89dd56"
+    },
+    {
+      "file_path": "web/execution/preflight.py",
+      "fingerprint": "5f1f81fee41e3e1a"
+    },
+    {
+      "file_path": "web/execution/preflight.py",
+      "fingerprint": "c876a96667c425f7"
+    },
+    {
+      "file_path": "web/execution/preflight.py",
+      "fingerprint": "d0e7e2507b117f2d"
+    },
+    {
+      "file_path": "web/execution/progress.py",
+      "fingerprint": "18e58b3e32b2e5fe"
+    },
+    {
+      "file_path": "web/execution/progress.py",
+      "fingerprint": "4082e42d8f7ef55f"
+    },
+    {
+      "file_path": "web/execution/progress.py",
+      "fingerprint": "4148cfe963eb1f65"
+    },
+    {
+      "file_path": "web/execution/progress.py",
+      "fingerprint": "80dd3c1d05f93c94"
+    },
+    {
+      "file_path": "web/execution/progress.py",
+      "fingerprint": "895f7c6d83b0c1d9"
+    },
+    {
+      "file_path": "web/execution/progress.py",
+      "fingerprint": "b0813b2652b434b9"
+    },
+    {
+      "file_path": "web/execution/progress.py",
+      "fingerprint": "bcf3a714f3cd29f0"
+    },
+    {
+      "file_path": "web/execution/progress.py",
+      "fingerprint": "d21d1c5a7f779ec1"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "03f80783c2d49864"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "0f6db382cb729ec0"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "322dc8f146c19780"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "3d78dd97fe37ba1b"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "6529682f4f63b877"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "738d4af40fe8e2af"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "877d7cf203d87e44"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "a5b10b0844aaac53"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "adb32a3f23e3de7b"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "d0744adbecfc8dac"
+    },
+    {
+      "file_path": "web/execution/routes.py",
+      "fingerprint": "f803148b0c50ea15"
+    },
+    {
+      "file_path": "web/execution/runtime_preflight.py",
+      "fingerprint": "2a8571a12863dbd7"
+    },
+    {
+      "file_path": "web/execution/runtime_preflight.py",
+      "fingerprint": "3fdb1527637df68a"
+    },
+    {
+      "file_path": "web/execution/runtime_preflight.py",
+      "fingerprint": "a4269762ca0780b3"
+    },
+    {
+      "file_path": "web/execution/runtime_preflight.py",
+      "fingerprint": "cbdc5bec7bc401ee"
+    },
+    {
+      "file_path": "web/execution/schemas.py",
+      "fingerprint": "020df37cc90810ad"
+    },
+    {
+      "file_path": "web/execution/schemas.py",
+      "fingerprint": "946fe25115431a7a"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "07f7b1d9599f9e03"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "23e49ac7e2c8a1c4"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "3195518183f4604c"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "4112dae4da424dc9"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "59949748426d05a0"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "6ae11216cb6427ab"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "76aac7aeed5d2790"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "a91add5d5970814d"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "ae8955d9fc074acc"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "b4fdef35d6621b71"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "c58de878b78c532e"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "d291d0da191e7e8e"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "d458fff4dd2be32e"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "e0c1cd46e0b80ba5"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "f622220671ecdcda"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "f6eeabcecd608c77"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "f75d502d14f8d197"
+    },
+    {
+      "file_path": "web/execution/service.py",
+      "fingerprint": "fc0b10cc4927e3e0"
+    },
+    {
+      "file_path": "web/execution/validation.py",
+      "fingerprint": "0c7d6399be7e8ecd"
+    },
+    {
+      "file_path": "web/execution/validation.py",
+      "fingerprint": "3aba7cf3d76c43d9"
+    },
+    {
+      "file_path": "web/execution/validation.py",
+      "fingerprint": "7022ce32f26888c2"
+    },
+    {
+      "file_path": "web/execution/validation.py",
+      "fingerprint": "733611406e3fefe3"
+    },
+    {
+      "file_path": "web/execution/validation.py",
+      "fingerprint": "a1d34b9af2f7e3db"
+    },
+    {
+      "file_path": "web/execution/validation.py",
+      "fingerprint": "ec32acfc57602caa"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "02f23c245990e05f"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "0381e2c147a2bc8e"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "07d49fbb470ac216"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "0c2236ad2f6c486b"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "0d5b4c05aadf3fd6"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "16886e24ae15f62b"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "18de9d3b78ec6358"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "1d625567383bc88d"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "1f0153bbe841e6d7"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "20013914086be53b"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "206e3c605e388c82"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "217fa134d0b92a42"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "2587ab1f77fcdab4"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "26b0cbaf178d1568"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "2a3fd8a2ec483734"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "385c01e72ceab359"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "392c344bc278c8f0"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "3baf66e00d2b1c1a"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "4122192a709523d7"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "433c683c0bdc4377"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "4affdf991b0ddfe4"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "4bb8169dd11707ba"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "4fecb4d21840a596"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "53ca5eba8706c0de"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "53e007400c9a1af6"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "54cb997dca7286e9"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "55f447e24c1775aa"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "561ce2063138d6ff"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "56415c1776210367"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "5815ed9209f65a11"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "594870fb03593b11"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "6128522199b00d6f"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "637c8f86d98b18bd"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "638bfe5ab1b50092"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "6412974e14821e3b"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "6636b67eabdb09ce"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "697409fa3bd1f283"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "6bb3e5e5a0861293"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "708f690e0849d9c1"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "7f1a1d3af44b050f"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "83a6b1f39bb268eb"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "86cab0b9a61f1eca"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "88f2a74db799c020"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "8c74f9e9b17a594d"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "8f68d5b55614fcaa"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "99004d4e8ff1357d"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "9924c6826d354685"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "9b15fe672a503f4d"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "9dcba05d8bb325e5"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "a7db0afadbab7952"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "a94d575b1e4b7fd0"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "a9b1fb6ff48a41bb"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "b3e2fc6bc4b8bc75"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "b9ad9d2ff864b788"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "bbd3550ce9cad4d7"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "cf11f02de7f7ea77"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "d0b03f23f92b9125"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "d1e5bd0fb8484a23"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "dcb7ee51beb2370a"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "dfdb8237959ee2a5"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "e24b45f808fb4cc8"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "e6a803719cbf05ba"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "ea235fe120540c8a"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "ed88fdf8204b978f"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "ef73f40766ff9c9f"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "f40392156f3a81b6"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "f8b597a2ed35bc23"
+    },
+    {
+      "file_path": "web/interpretation_state.py",
+      "fingerprint": "fd93e0534a8ec99e"
+    },
+    {
+      "file_path": "web/middleware/rate_limit.py",
+      "fingerprint": "50c8c5807a0f8fe3"
+    },
+    {
+      "file_path": "web/middleware/request_id.py",
+      "fingerprint": "a17a1317c0fa8e7b"
+    },
+    {
+      "file_path": "web/secrets/server_store.py",
+      "fingerprint": "19395c7ca9458241"
+    },
+    {
+      "file_path": "web/secrets/server_store.py",
+      "fingerprint": "208ba630bb980dc3"
+    },
+    {
+      "file_path": "web/secrets/server_store.py",
+      "fingerprint": "64afc66c27b37667"
+    },
+    {
+      "file_path": "web/secrets/service.py",
+      "fingerprint": "00a3b8aa94bc1df2"
+    },
+    {
+      "file_path": "web/secrets/service.py",
+      "fingerprint": "2661d9a427c7a309"
+    },
+    {
+      "file_path": "web/secrets/service.py",
+      "fingerprint": "c1e9289fa7f9c2d9"
+    },
+    {
+      "file_path": "web/secrets/service.py",
+      "fingerprint": "d86f66826e90d353"
+    },
+    {
+      "file_path": "web/secrets/service.py",
+      "fingerprint": "e201cb7204d089d8"
+    },
+    {
+      "file_path": "web/secrets/user_store.py",
+      "fingerprint": "35bf7c1e6d3def8f"
+    },
+    {
+      "file_path": "web/secrets/user_store.py",
+      "fingerprint": "43dce80c56a84dc0"
+    },
+    {
+      "file_path": "web/secrets/user_store.py",
+      "fingerprint": "a93da1679d15525e"
+    },
+    {
+      "file_path": "web/sessions/_auto_title.py",
+      "fingerprint": "6eeb90e8c33babf8"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "00b7ed549b93bf34"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "10a0a4c1f8e0af26"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "16d626de6112ffc8"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "1effdbb33b2605f1"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "209b201c4d6f6543"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "22c4187cc4e2b19c"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "248c9c25b0846ebf"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "312b6f0675209ff6"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "365956fb402548eb"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "3fb4e4fbf22e6de6"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "468f024091698e3f"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "4d71e28876dcb4ae"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "5bf9de9dea5e3690"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "6eff26e727be1d1a"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "7d9b5c1063c91bfc"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "92aa5cf0eede32c5"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "a024c22b062f016e"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "a1dd46422475f434"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "bab71348af41ba49"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "be2139c04c7b110c"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "c7a42ffc3485b7c0"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "cc710463b50e2ed0"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "ce6f7b423897ff71"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "d6b20d8b8dacf40d"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "d753a4a63fb314d4"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "dc84631f2ee5050f"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "f07a10c9d12a6ba4"
+    },
+    {
+      "file_path": "web/sessions/routes/_helpers.py",
+      "fingerprint": "f1af9d80a5652f7d"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "09b43dc60ebd6036"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "3596e2d1f66b3f99"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "459203baa79b869f"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "4aac0c4c0b044ec2"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "5e022f0ca07cbf2e"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "647eaaa3142057a0"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "65afef4550e989c5"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "65b078af067fd26a"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "6a812675536c1066"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "7357db09796362cd"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "7b7d6c8ca4388365"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "89713c5bac9cbaa5"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "90d1459942d2afe8"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "97184ca5456a173f"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "a89801c4ea858a56"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "b22f01dc72b4660b"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "c0f2bbfd5e6c57ed"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "ec8182b9ca85932f"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "f09febcda74c85ae"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "f210c162f5a60357"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "fda975b0625f46e8"
+    },
+    {
+      "file_path": "web/sessions/routes/composer.py",
+      "fingerprint": "feb1bbf03070b119"
+    },
+    {
+      "file_path": "web/sessions/routes/messages.py",
+      "fingerprint": "1a85561c51205f0c"
+    },
+    {
+      "file_path": "web/sessions/routes/messages.py",
+      "fingerprint": "6ffa502bacb1e244"
+    },
+    {
+      "file_path": "web/sessions/routes/messages.py",
+      "fingerprint": "be313c147c5a50be"
+    },
+    {
+      "file_path": "web/sessions/routes/sessions.py",
+      "fingerprint": "77a40eab4296aab8"
+    },
+    {
+      "file_path": "web/sessions/routes/sessions.py",
+      "fingerprint": "7db495b3c8fcc96a"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "0d4495d6f8c7f289"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "11a57f91fd69c955"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "1691df83cddee859"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "1708f112cf7702e2"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "172bc9d251fc82bf"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "18fa846fc56b7d28"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "1acb761b19998c0b"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "1ddae53e70acacec"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "246ba1468429edc1"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "30214ff778f348cf"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "3c2ad659cde04b5d"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "4b7b3514b44dd3ea"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "5e2fcb5fc9ceac6b"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "6243f628f04d11c7"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "648e98499daf1034"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "681f49d88f2a1c6c"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "69d4c22527c9a7f2"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "80f1eb30708a93fa"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "84540ca4eb0c2165"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "8a24ff61bd796e03"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "8aadfa2550cfc8c9"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "8d1f39d4845aeaf1"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "8e54ef2105951a9c"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "8f8f6e724bdedc7e"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "9346ba4a9fc56e5e"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "9a68f6af29ba3fe0"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "a2799a9219660862"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "b3b654ded2cf792d"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "b5338dafafec529b"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "ba318c72bc72a109"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "c3e62769459a9fee"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "c4f7406126d5de85"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "ce086372dd45b64b"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "d3577a838d54074b"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "d64d0f1d9aebc0a4"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "db087c858dd24ab4"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "df35b14aa455126c"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "e6d3ef2984439ed1"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "eb855e7731de8e46"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "f8a2665a6482e9ca"
+    },
+    {
+      "file_path": "web/sessions/service.py",
+      "fingerprint": "f9fd3f4dcd0956d4"
+    }
+  ]
+}

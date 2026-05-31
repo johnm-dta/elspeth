@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.contract_propagation import narrow_contract_to_output
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
@@ -161,8 +162,9 @@ class LineExplode(BaseTransform):
     """Explode a string field into one output row per line."""
 
     name = "line_explode"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:e426cd6ca548e3e8"
+    source_file_hash: str | None = "sha256:f586c7efbb342c87"
     config_model = LineExplodeConfig
     creates_tokens = True
 
@@ -209,6 +211,17 @@ class LineExplode(BaseTransform):
     ) -> PluginAssistance | None:
         from elspeth.contracts.plugin_assistance import PluginAssistance
 
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="line_explode",
+                issue_code=None,
+                summary="Deaggregate a string field by splitting on newlines — emits one row per non-empty line.",
+                composer_hints=(
+                    "source_field must contain newline-framed text — empty/compact text yields a single row with the whole content.",
+                    "Producer compatibility: web_scrape with format: 'markdown' or text_separator: '\\n' works; format: 'text' with whitespace separator does NOT.",
+                    "If you need to split on a non-newline delimiter, use field_mapper + value_transform first to insert newlines.",
+                ),
+            )
         if issue_code != "line_explode.source_field.line_framed_text":
             return None
         return PluginAssistance(

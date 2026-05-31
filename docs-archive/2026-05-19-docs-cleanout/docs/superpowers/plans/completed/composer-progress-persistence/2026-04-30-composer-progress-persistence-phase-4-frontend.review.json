@@ -1,0 +1,189 @@
+{
+  "verdict": "IMPLEMENTED_WITH_VERIFICATION_NOTES",
+  "summary": "Phase 4A and Phase 4B implementation is complete through the local recovery panel wiring. The implementation preserves the rev-4 constraints: no constructor fallback, backend gate coverage, sessionStore-owned recovery state with recoveryStartedCompositionVersion, structural recovery clearing, active-session transcript fetches with include_tool_rows=true, local-only Apply/Discard, no feature flag, and existing dialog/useFocusTrap patterns. Final verification is green. The only operational gap is tracker access: Filigree CLI/MCP cannot open the local project database because the installed client expects schema v8 and .filigree is schema v14.",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-4-frontend.md",
+  "overview_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-overview.md",
+  "prior_review": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-4-frontend.review-rev3.json",
+  "updated_at": "2026-05-14",
+  "implementation_commits": [
+    {
+      "commit": "9257edf40",
+      "scope": "Task 0 Step 4 standalone doc fix",
+      "message": "docs(plan): refresh phase 3 manifest count"
+    },
+    {
+      "commit": "24b9246ab",
+      "scope": "Task 0 / Phase 4A backend structure cleanup",
+      "message": "refactor(composer): normalize phase 3 service helpers (composer-progress-persistence phase 4A)"
+    },
+    {
+      "commit": "2e003296f",
+      "scope": "Task 1 recovery API and TypeScript contracts",
+      "message": "feat(frontend): parse composer recovery errors (composer-progress-persistence phase 4)"
+    },
+    {
+      "commit": "6e4318bc6",
+      "scope": "Task 2 useRecoveryPanel hook",
+      "message": "feat(frontend): add recovery panel hook (composer-progress-persistence phase 4)"
+    },
+    {
+      "commit": "0702e5f0d",
+      "scope": "Task 3 sessionStore recovery state",
+      "message": "feat(frontend): store composer recovery payloads (composer-progress-persistence phase 4)"
+    },
+    {
+      "commit": "3352c9ba4",
+      "scope": "Task 4 RecoveryDiff",
+      "message": "feat(frontend): render composer recovery diff (composer-progress-persistence phase 4)"
+    },
+    {
+      "commit": "205afca57",
+      "scope": "Task 5 RecoveryTranscript",
+      "message": "feat(frontend): render composer recovery transcript (composer-progress-persistence phase 4)"
+    },
+    {
+      "commit": "08fbf624e",
+      "scope": "Task 6 RecoveryPanel",
+      "message": "feat(frontend): add composer recovery panel (composer-progress-persistence phase 4)"
+    },
+    {
+      "commit": "b29117523",
+      "scope": "Task 7 App wiring",
+      "message": "feat(frontend): trigger composer recovery panel (composer-progress-persistence phase 4)"
+    },
+    {
+      "commit": "e89e14191",
+      "scope": "Task 8/9 handoff notes and explicit typecheck script",
+      "message": "docs(plan): record phase 4 frontend verification"
+    },
+    {
+      "commit": "86ee2f734",
+      "scope": "Task 9 lint gate",
+      "message": "chore(frontend): add lint gate"
+    }
+  ],
+  "verification_results": [
+    {
+      "command": "filigree session-context",
+      "outcome": "blocked",
+      "details": "Filigree CLI cannot open .filigree because the project database is schema v14 while this installed filigree expects v8."
+    },
+    {
+      "command": "uv run filigree session-context",
+      "outcome": "blocked",
+      "details": "Same schema mismatch: Database schema v14 is newer than this version of filigree (expects v8)."
+    },
+    {
+      "command": ".venv/bin/python -m pytest -q tests/unit/web/composer/ tests/property/web/composer/ tests/integration/pipeline/test_composer_llm_eval_characterization.py",
+      "outcome": "passed",
+      "details": "Final rerun: 1774 passed, 9 warnings in 8.68s."
+    },
+    {
+      "command": "cd src/elspeth/web/frontend && npm test",
+      "outcome": "passed",
+      "details": "Final rerun: 51 test files passed; 518 tests passed."
+    },
+    {
+      "command": "cd src/elspeth/web/frontend && npm run build",
+      "outcome": "passed",
+      "details": "Final rerun: tsc and vite build completed. Vite emitted existing chunk-size and dynamic-import chunking warnings."
+    },
+    {
+      "command": "cd src/elspeth/web/frontend && npm run typecheck",
+      "outcome": "passed",
+      "details": "Added an explicit typecheck script matching the TypeScript half of build; npm run typecheck passed."
+    },
+    {
+      "command": "cd src/elspeth/web/frontend && npm run lint",
+      "outcome": "passed_with_warnings",
+      "details": "Added ESLint flat config scoped to src and vite.config.ts. Final run exited 0 with 5 pre-existing react-hooks/exhaustive-deps warnings and no errors."
+    },
+    {
+      "command": "Local Chromium smoke against npm run dev -- --host 127.0.0.1 --port 5173 with mocked API routes",
+      "outcome": "passed",
+      "details": "Verified fanout guard dialog, recovery panel open, reason/diff/transcript render, transcript URL include_tool_rows=true&limit=500&offset=0, Apply updates compositionState.version to 2, concurrent version mismatch shows confirmation, Discard preserves compositionState.version 99, provider_payload text not visible, messagePostCount=2, executePostCount=1."
+    },
+    {
+      "command": "axe-core via Chromium against visible recovery panel",
+      "outcome": "passed_with_noncritical_findings",
+      "details": "axe reported violationCount=2, criticalCount=0, criticalIds=[]. This satisfies the plan expectation of no critical violations for the visible recovery route."
+    }
+  ],
+  "completion_audit": [
+    {
+      "requirement": "Do not execute older rev-3 wording; preserve rev-3 review artifacts",
+      "evidence": "Implementation followed the live phase-4 plan and left review-rev3 artifacts unmodified/untracked for comparison."
+    },
+    {
+      "requirement": "Task 0 doc-only manifest-count fix before service refactor",
+      "evidence": "Commit 9257edf40 precedes service refactor commit 24b9246ab."
+    },
+    {
+      "requirement": "Strict ComposerServiceImpl initialization without fallback",
+      "evidence": "Task 0 structural tests and backend gate passed; forbidden module-tail monkeypatch pattern was removed in 24b9246ab."
+    },
+    {
+      "requirement": "sessionStore is source of truth for recovery state",
+      "evidence": "Commit 0702e5f0d adds recoveryError, recoveryStartedCompositionVersion, applyRecoveredState, discardRecovery, transition clearing, and focused tests."
+    },
+    {
+      "requirement": "No editorRevision; compare compose-start compositionState.version at Apply",
+      "evidence": "Task 3 tests cover successful compose advancing version while recovery is open and requiring confirmation before Apply."
+    },
+    {
+      "requirement": "Transcript fetch uses active session id with include_tool_rows=true&limit=500 and no since/include_raw_content",
+      "evidence": "Task 1 client tests and Task 5 transcript tests cover URL construction; browser smoke captured /api/sessions/session-1/messages?include_tool_rows=true&limit=500&offset=0."
+    },
+    {
+      "requirement": "Never render raw_content, hidden chain-of-thought, or provider payloads",
+      "evidence": "RecoveryTranscript tests assert raw_content/provider payload suppression; browser smoke reported hiddenProviderPayloadVisible=0."
+    },
+    {
+      "requirement": "Use local dialog/useFocusTrap pattern and --z-dialog layer",
+      "evidence": "RecoveryPanel uses useFocusTrap, dialog role/aria-modal, recovery panel/backdrop classes using --z-dialog and --z-dialog-backdrop, with focus-restoration tests."
+    },
+    {
+      "requirement": "No feature flag; panel opens only on partial_state plus failed_turn",
+      "evidence": "sessionStore tests cover recovery-shaped error opening and non-recovery convergence error staying on the existing error path."
+    },
+    {
+      "requirement": "Apply/Discard are local-only UI actions",
+      "evidence": "sessionStore and App tests assert no compose retry/fetchMessages calls from Apply/Discard; browser smoke shows only original message POSTs and one execute POST."
+    }
+  ],
+  "blocking_issues_resolved_in_plan": [
+    {
+      "id": "B-F01",
+      "resolution": "Task 0 Step 2 now assigns _max_tool_calls_per_turn directly from self._settings.composer_max_tool_calls_per_turn and forbids try/except, getattr, or runtime fallback."
+    },
+    {
+      "id": "B-TS1",
+      "resolution": "Task 0 Step 5 and Task 9 Step 0 now run .venv/bin/python -m pytest -q tests/unit/web/composer/ tests/property/web/composer/ tests/integration/pipeline/test_composer_llm_eval_characterization.py."
+    },
+    {
+      "id": "B-SYS-B1",
+      "resolution": "Task 3 now requires a clearedRecoveryState() helper and threads it through createSession, archiveSession, selectSession, and forkFromMessage, with matching tests."
+    },
+    {
+      "id": "B-SYS-B2",
+      "resolution": "Task 2 and Task 3 now replace editorRevision with recoveryStartedCompositionVersion, snapshot compositionState.version at compose-start, and compare it at Apply."
+    }
+  ],
+  "warnings_addressed_in_plan": [
+    "Task 0 AST guard now also blocks module-level _PHASE3_* captures.",
+    "Phase 3 manifest-count correction is now a standalone doc-only commit before the service refactor commit.",
+    "Task 1 tests now assert nested failed_turn fields, including null transcript_url.",
+    "Task 5 tests now assert include_tool_rows=true, fetch-once behaviour, first-500 degraded state, and redacted-only transcript rendering.",
+    "Task 6 now requires focus-restoration coverage for Discard, Apply, confirm, and cancel-confirmation, plus --z-dialog stacking.",
+    "Task 7 now documents Apply/Discard as local-only and non-audited at the user-action layer.",
+    "Task 8 now includes a fanout-guard plus recovery-panel smoke case.",
+    "Phase 4 Done When now states the panel has no feature flag and is gated solely by recovery response shape."
+  ],
+  "remaining_scope_for_reviewer": [
+    "Filigree tracker status could not be updated from this checkout because the available CLI expects schema v8 and the project database is schema v14.",
+    "The new lint gate exits successfully but reports 5 existing react-hooks/exhaustive-deps warnings outside the recovery implementation.",
+    "npm install reported the existing chevrotain@12 Node >=22 engine warning under Node v20.19.3 and npm audit reported 5 vulnerabilities (4 moderate, 1 high).",
+    "Live staging restart/live verification was not performed; verification was local plus mocked-browser smoke.",
+    "Rev-3 sibling review artifacts are intentionally preserved for comparison."
+  ]
+}

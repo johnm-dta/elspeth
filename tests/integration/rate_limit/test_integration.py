@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import TransformResult
+from elspeth.contracts import Determinism, TransformResult
 from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
 from elspeth.contracts.contexts import LifecycleContext, TransformContext
 from elspeth.contracts.plugin_context import PluginContext
@@ -33,6 +33,7 @@ class RateLimitAwareTransform(BaseTransform):
     """
 
     name = "rate_limit_test"
+    determinism = Determinism.DETERMINISTIC
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

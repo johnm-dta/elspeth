@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -276,8 +278,9 @@ class TypeCoerce(BaseTransform):
     """
 
     name = "type_coerce"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:cd665aaedabd43a5"
+    source_file_hash: str | None = "sha256:f6735afbb2dc53db"
     config_model = TypeCoerceConfig
     passes_through_input = True
 
@@ -473,3 +476,18 @@ class TypeCoerce(BaseTransform):
             )
 
         return self._align_output_contract(evolved_contract)
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="type_coerce",
+                issue_code=None,
+                summary="Explicit type casting at a pipeline midpoint — str → int, str → float, etc. Use on_error to route un-coercible rows.",
+                composer_hints=(
+                    "Sources already validate/coerce; use type_coerce only when an upstream transform's output is the wrong type.",
+                    "Set on_error to a quarantine sink to capture un-coercible rows for audit, instead of crashing the run.",
+                    "Numeric coercion accepts 'int', 'float', 'bool', 'str' — see the config schema for the full list.",
+                ),
+            )
+        return None

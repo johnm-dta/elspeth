@@ -33,6 +33,7 @@ from typing import Any
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -63,6 +64,7 @@ class _DeliberatelyMisannotatedDropper(BaseTransform):
     """
 
     name = "deliberately-misannotated-dropper"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
     source_file_hash: str | None = None
     config_model = TransformDataConfig

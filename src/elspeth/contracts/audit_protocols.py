@@ -42,6 +42,8 @@ class CallRecorder(Protocol):
 
     def allocate_call_index(self, state_id: str) -> int: ...
 
+    def allocate_operation_call_index(self, operation_id: str) -> int: ...
+
     def record_call(
         self,
         state_id: str,
@@ -55,6 +57,23 @@ class CallRecorder(Protocol):
         *,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
+    ) -> Call: ...
+
+    def record_operation_call(
+        self,
+        operation_id: str,
+        call_type: CallType,
+        status: CallStatus,
+        request_data: CallPayload,
+        response_data: CallPayload | None = None,
+        error: CallPayload | None = None,
+        latency_ms: float | None = None,
+        *,
+        call_index: int | None = None,
+        request_ref: str | None = None,
+        response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call: ...
 
 
@@ -73,6 +92,8 @@ class PluginAuditWriter(Protocol):
 
     def allocate_call_index(self, state_id: str) -> int: ...
 
+    def allocate_operation_call_index(self, operation_id: str) -> int: ...
+
     def record_call(
         self,
         state_id: str,
@@ -86,6 +107,7 @@ class PluginAuditWriter(Protocol):
         *,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call: ...
 
     def record_operation_call(
@@ -98,8 +120,10 @@ class PluginAuditWriter(Protocol):
         error: CallPayload | None = None,
         latency_ms: float | None = None,
         *,
+        call_index: int | None = None,
         request_ref: str | None = None,
         response_ref: str | None = None,
+        resolved_prompt_template_hash: str | None = None,
     ) -> Call: ...
 
     def get_node_state(self, state_id: str) -> NodeState | None: ...

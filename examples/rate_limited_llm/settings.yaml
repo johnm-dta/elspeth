@@ -35,7 +35,7 @@ transforms:
     base_url: http://127.0.0.1:8199/v1
     model: chaosllm/fake-gpt-4
     timeout_seconds: 10
-    template: |
+    prompt_template: |
       Analyze the sentiment of the following text and respond with ONLY a JSON object.
 
       Text: {{ row.text }}

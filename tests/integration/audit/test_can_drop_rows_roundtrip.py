@@ -7,7 +7,7 @@ from typing import Any, TypedDict
 
 from sqlalchemy import text
 
-from elspeth.contracts import NodeStateFailed, NodeType, PluginSchema, TransformResult
+from elspeth.contracts import Determinism, NodeStateFailed, NodeType, PluginSchema, TransformResult
 from elspeth.contracts.declaration_contracts import (
     AggregateDeclarationContractViolation,
     BatchFlushInputs,
@@ -170,6 +170,7 @@ class _SecretRoundTripViolation(DeclarationContractViolation):
 class _SecretRoundTripContract(DeclarationContract):
     name = "can_drop_rows_secret_roundtrip"
     payload_schema: type = _SecretPayload
+    violation_class: type[_SecretRoundTripViolation] = _SecretRoundTripViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return True
@@ -208,6 +209,7 @@ class _SecretRoundTripContract(DeclarationContract):
 
 class _HonestFilterTransform(BaseTransform):
     name = "honest_filter_transform"
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
     passes_through_input = True

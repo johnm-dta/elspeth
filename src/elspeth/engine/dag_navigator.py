@@ -14,17 +14,22 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import Protocol
 
-from elspeth.contracts import TransformProtocol
+from elspeth.contracts import TokenInfo, TransformProtocol
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.core.config import GateSettings
+from elspeth.engine.orchestrator.types import RowPlugin
 
-if TYPE_CHECKING:
-    from elspeth.contracts import TokenInfo
-    from elspeth.engine.orchestrator.types import RowPlugin
-    from elspeth.engine.processor import DAGTraversalContext
+
+class DAGTraversalSnapshot(Protocol):
+    """Traversal fields consumed by DAGNavigator.from_traversal_context()."""
+
+    coalesce_node_map: Mapping[CoalesceName, NodeID]
+    node_to_plugin: Mapping[NodeID, RowPlugin | GateSettings]
+    node_to_next: Mapping[NodeID, NodeID | None]
+    branch_first_node: Mapping[str, NodeID]
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +92,7 @@ class DAGNavigator:
     @classmethod
     def from_traversal_context(
         cls,
-        traversal: DAGTraversalContext,
+        traversal: DAGTraversalSnapshot,
         *,
         coalesce_on_success_map: Mapping[CoalesceName, str] | None = None,
         sink_names: frozenset[str] | None = None,
@@ -265,6 +270,10 @@ class DAGNavigator:
         token is already mid-branch, advances to the next node via
         resolve_next_node while preserving coalesce metadata for eventual
         coalesce handling.
+
+        resume_attempt_offset and resume_checkpoint_id are carried on the token
+        itself (TokenInfo fields) and propagate automatically via the token
+        reference — no explicit threading through WorkItem required.
         """
         if coalesce_name is not None:
             coalesce_node_id = self._coalesce_node_ids[coalesce_name]
@@ -314,3 +323,29 @@ class DAGNavigator:
             current_node_id=self.resolve_next_node(current_node_id),
             on_success_sink=on_success_sink,
         )
+
+    def resolve_branch_first_node(self, branch_name: str) -> NodeID:
+        """First processing node for a fork branch routed to a coalesce.
+
+        Exposes the same _branch_first_node lookup that create_continuation_work_item
+        performs inline (for fresh fork children); this accessor is the explicit entry
+        point used by the resume path (RowProcessor.resume_incomplete_token).
+
+        _branch_first_node covers all coalesce-bound branches (built by
+        ExecutionGraph.get_branch_first_nodes). Callers must only invoke this for
+        branches that are in _branch_to_coalesce; calling it for a fork→sink branch
+        will raise because those branches are not in the map.
+
+        Raises:
+            OrchestrationInvariantError: If branch_name is not in the branch_first_node
+                map. This indicates a logic error in the caller: only coalesce-bound
+                branches are registered, not fork→sink branches.
+        """
+        try:
+            return self._branch_first_node[branch_name]
+        except KeyError as exc:
+            raise OrchestrationInvariantError(
+                f"Unknown branch name '{branch_name}' — not in branch_first_node map. "
+                f"Only coalesce-bound branches are registered here; fork→sink branches "
+                f"are not. Known: {sorted(self._branch_first_node.keys())}"
+            ) from exc

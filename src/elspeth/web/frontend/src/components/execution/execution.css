@@ -1,0 +1,170 @@
+/* execution.css — Execution progress UI.
+   Owners: .progress-container, .progress-ws-banner, .progress-status-*,
+   .progress-cancel-btn, .progress-bar-outer, .progress-counters*,
+   .progress-routing-summary, .progress-accounting*, .progress-cancelled-msg,
+   .progress-failed-msg, .progress-errors-*, .progress-error-*. */
+
+/* ---------------------------------------------------------------------------
+   ProgressView
+   --------------------------------------------------------------------------- */
+.progress-container {
+  padding: var(--space-md);
+  font-size: var(--font-size-sm);
+}
+
+.progress-ws-banner {
+  padding: 6px 10px;
+  margin-bottom: var(--space-sm);
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+}
+
+.progress-status-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-sm);
+}
+
+.progress-status-label {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: var(--font-size-xs);
+  color: var(--color-text);
+}
+
+.progress-cancel-btn {
+  padding: var(--space-xs) 10px;
+  font-size: var(--font-size-xs);
+}
+
+.progress-bar-outer {
+  height: 8px;
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-md);
+}
+
+.progress-counters {
+  display: flex;
+  gap: var(--space-xl);
+  flex-wrap: wrap;
+  row-gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+}
+
+.progress-counter-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  margin-bottom: 2px;
+}
+
+.progress-counter-value {
+  font-size: var(--font-size-xl);
+  font-weight: 700;
+}
+
+.progress-routing-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.progress-accounting {
+  margin-bottom: var(--space-md);
+  padding-top: var(--space-xs);
+  border-top: 1px solid var(--color-border);
+}
+
+.progress-accounting-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: var(--space-sm);
+  margin: 0;
+}
+
+.progress-accounting-item {
+  min-width: 0;
+}
+
+.progress-accounting-item dt,
+.progress-accounting-integrity-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.progress-accounting-item dd {
+  margin: 2px 0 0;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.progress-accounting-integrity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  margin-top: var(--space-sm);
+  font-size: var(--font-size-xs);
+}
+
+.progress-accounting-integrity-item {
+  display: inline-flex;
+  gap: var(--space-xs);
+  align-items: baseline;
+}
+
+.progress-accounting-integrity-item--warning strong {
+  color: var(--color-error);
+}
+
+.progress-cancelled-msg {
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-sm);
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  border: 1px solid var(--color-warning-border);
+}
+
+.progress-failed-msg {
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-sm);
+  background-color: var(--color-error-bg);
+  color: var(--color-error);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  border: 1px solid var(--color-error-border);
+}
+
+.progress-errors-title {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--color-error);
+  margin-bottom: var(--space-xs);
+}
+
+.progress-errors-container {
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: var(--font-size-xs);
+  font-family: var(--font-mono);
+  background-color: var(--color-error-bg);
+  border-radius: var(--radius-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-error-border);
+}
+
+.progress-error-item {
+  margin-bottom: var(--space-xs);
+  padding-bottom: var(--space-xs);
+}
+
+.progress-error-row-id {
+  color: var(--color-text-muted);
+}

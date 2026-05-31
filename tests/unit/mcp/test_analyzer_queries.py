@@ -42,7 +42,7 @@ from elspeth.core.landscape.lineage import explain
 from elspeth.core.landscape.schema import nodes_table
 from elspeth.mcp.analyzer import LandscapeAnalyzer
 from elspeth.mcp.analyzers.diagnostics import get_failure_context
-from elspeth.mcp.analyzers.queries import explain_token, list_runs
+from elspeth.mcp.analyzers.queries import explain_token, list_operations, list_runs
 from elspeth.mcp.analyzers.reports import get_error_analysis, get_run_summary
 from elspeth.mcp.types import ErrorResult
 from tests.fixtures.landscape import (
@@ -154,6 +154,34 @@ def _build_linear_pipeline(
         "edge_1": edge_1,
         "edge_2": edge_2,
     }
+
+
+# ===========================================================================
+# list_operations tests
+# ===========================================================================
+
+
+class TestListOperations:
+    """Tests for operation filters exposed through the MCP analyzer."""
+
+    def test_runtime_preflight_filter_returns_runtime_preflight_operations(self) -> None:
+        """Runtime-written operation types must remain queryable through MCP."""
+        p = _build_linear_pipeline(transform_node_id="llm-transform")
+        operation = p["factory"].execution.begin_operation(
+            p["run_id"],
+            "llm-transform",
+            "runtime_preflight",
+        )
+
+        rows = list_operations(
+            p["db"],
+            p["factory"],
+            p["run_id"],
+            operation_type="runtime_preflight",
+        )
+
+        assert [row["operation_id"] for row in rows] == [operation.operation_id]
+        assert rows[0]["operation_type"] == "runtime_preflight"
 
 
 # ===========================================================================

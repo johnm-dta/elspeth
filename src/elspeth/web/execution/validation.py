@@ -23,17 +23,31 @@ only to be rejected pre-token at /execute.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 import yaml
 from pydantic import ValidationError as PydanticValidationError
 
-from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.contracts.blobs import BlobRecord
+from elspeth.contracts.blobs_inline import BlobInlineValidationViolation
+from elspeth.contracts.secrets import SecretRefPlacementViolation, WebSecretResolver
+from elspeth.core.blobs_inline import (
+    BLOB_INLINE_AGGREGATE_BYTE_CAP,
+    BLOB_INLINE_PER_REF_BYTE_CAP,
+    _substitute_blob_content_refs_for_validation,
+    _validate_blob_content_refs_sync,
+)
 from elspeth.core.config import load_settings_from_yaml_string
 from elspeth.core.dag.models import EdgeContractError, GraphValidationError
-from elspeth.core.secrets import collect_credential_field_violations, resolve_secret_refs, secret_env_ref_name
+from elspeth.core.secrets import (
+    collect_credential_field_violations,
+    collect_disallowed_secret_ref_markers,
+    resolve_secret_refs,
+    secret_env_ref_name,
+)
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
 from elspeth.engine.orchestrator.types import (
     RouteValidationError,
@@ -63,16 +77,33 @@ from elspeth.web.execution.preflight import (
 )
 from elspeth.web.execution.protocol import ValidationSettings, YamlGenerator
 from elspeth.web.execution.schemas import (
+    CHECK_OUTCOME_SECRET_REFS_NO_REFS,
+    CHECK_OUTCOME_SECRET_REFS_RESOLVED,
+    CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
+    CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
+    CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
     ValidationCheck,
     ValidationError,
+    ValidationReadiness,
+    ValidationReadinessBlocker,
     ValidationResult,
 )
+from elspeth.web.interpretation_state import (
+    INTERPRETATION_REVIEW_PENDING_CODE,
+    InterpretationReviewPending,
+    InterpretationReviewSite,
+    materialize_state_for_authoring,
+    materialize_state_for_execution,
+)
+from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
 _CHECK_PATH_ALLOWLIST = "path_allowlist"
 _CHECK_SECRET_REFS = "secret_refs"
+_CHECK_BLOB_INLINE_REFS = "blob_inline_refs"
 _CHECK_SEMANTIC_CONTRACTS = "semantic_contracts"
 _CHECK_BATCH_TRANSFORM_OPTIONS = "batch_transform_options"
+_CHECK_INTERPRETATION_REVIEW = "interpretation_review"
 _CHECK_SETTINGS = "settings_load"
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_VALUE_SOURCE_COMPLIANCE = "value_source_compliance"
@@ -80,6 +111,40 @@ _CHECK_GRAPH = RUNTIME_CHECK_GRAPH_STRUCTURE
 _CHECK_ROUTE_TARGETS = "route_target_resolution"
 _CHECK_SCHEMA = RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 assert RUNTIME_GRAPH_VALIDATION_CHECKS == (_CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA)
+
+
+def _execution_ready() -> ValidationReadiness:
+    return ValidationReadiness(
+        authoring_valid=True,
+        execution_ready=True,
+        completion_ready=True,
+        blockers=[],
+    )
+
+
+def _blocked_readiness(
+    *,
+    code: str,
+    detail: str,
+    component_id: str | None = None,
+    component_type: str | None = None,
+    authoring_valid: bool = False,
+    completion_ready: bool = False,
+) -> ValidationReadiness:
+    return ValidationReadiness(
+        authoring_valid=authoring_valid,
+        execution_ready=False,
+        completion_ready=completion_ready,
+        blockers=[
+            ValidationReadinessBlocker(
+                code=code,
+                component_id=component_id,
+                component_type=component_type,
+                detail=detail,
+            )
+        ],
+    )
+
 
 # Advisory check — non-blocking, multi-entry (one ValidationCheck per
 # detected node, all sharing this name).  Deliberately NOT included in
@@ -98,6 +163,8 @@ _ALL_CHECKS = [
     _CHECK_SECRET_REFS,
     _CHECK_SEMANTIC_CONTRACTS,
     _CHECK_BATCH_TRANSFORM_OPTIONS,
+    _CHECK_INTERPRETATION_REVIEW,
+    _CHECK_BLOB_INLINE_REFS,
     _CHECK_SETTINGS,
     _CHECK_PLUGINS,
     _CHECK_VALUE_SOURCE_COMPLIANCE,
@@ -362,9 +429,19 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
                     name=name,
                     passed=False,
                     detail=f"Skipped: {from_check} failed",
+                    affected_nodes=(),
+                    outcome_code=CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
                 )
             )
     return result
+
+
+def _format_interpretation_site(site: InterpretationReviewSite) -> str:
+    return f"{site.kind.value} review pending for {site.component_type} {site.component_id!r}: {site.user_term}"
+
+
+def _format_interpretation_sites(sites: Sequence[InterpretationReviewSite]) -> str:
+    return ", ".join(_format_interpretation_site(site) for site in sites)
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,6 +593,46 @@ def _collect_secret_refs(obj: Any, env_ref_names: set[str] | None = None) -> lis
     return refs
 
 
+def _blob_inline_component_id(field_path: str) -> str | None:
+    if field_path == "(aggregate)":
+        return None
+    if field_path.startswith("source."):
+        return "source"
+    if field_path.startswith("node:"):
+        component, _separator, _rest = field_path.partition(".")
+        return component[len("node:") :]
+    if field_path.startswith("output:"):
+        component, _separator, _rest = field_path.partition(".")
+        return component[len("output:") :]
+    return field_path
+
+
+def _blob_inline_component_type(field_path: str) -> str | None:
+    if field_path == "(aggregate)":
+        return None
+    if field_path.startswith("source."):
+        return "source"
+    if field_path.startswith("node:"):
+        return "transform"
+    if field_path.startswith("output:"):
+        return "sink"
+    return None
+
+
+def _blob_inline_validation_detail(violations: list[BlobInlineValidationViolation]) -> str:
+    return "; ".join(f"{violation.field_path}: {violation.category}" for violation in violations)
+
+
+def _blob_inline_validation_error(violation: BlobInlineValidationViolation) -> ValidationError:
+    return ValidationError(
+        component_id=_blob_inline_component_id(violation.field_path),
+        component_type=_blob_inline_component_type(violation.field_path),
+        message=f"Inline content blob reference at {violation.field_path} is {violation.category}: {violation.detail}",
+        suggestion="Verify the blob exists, is ready, is under the configured size caps, and matches the pinned sha256.",
+        error_code=f"{violation.category}_inline_blob_content",
+    )
+
+
 def validate_pipeline(
     state: CompositionState,
     settings: ValidationSettings,
@@ -523,6 +640,8 @@ def validate_pipeline(
     *,
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
+    blob_get_metadata: Callable[[UUID], BlobRecord | None] | None = None,
+    allow_pending_interpretation_placeholders: bool = False,
 ) -> ValidationResult:
     """Dry-run validation through the real engine code path.
 
@@ -552,9 +671,57 @@ def validate_pipeline(
         yaml_generator: YamlGenerator module/object with generate_yaml() method.
         secret_service: Optional secret resolver for validating secret refs.
         user_id: User ID for scoped secret resolution (required if secret_service is set).
+        blob_get_metadata: Optional sync metadata lookup for validate-time
+            inline-content blob checks. Runtime content reads stay in the
+            execution preflight; validate checks metadata only.
+        allow_pending_interpretation_placeholders: When true, composer
+            authoring preflight masks unresolved ``{{interpretation:<term>}}``
+            tokens before YAML generation. Runtime execution leaves this false.
     """
     checks: list[ValidationCheck] = []
     errors: list[ValidationError] = []
+
+    # Step 0: Empty-composition short-circuit.
+    #
+    # A CompositionState with no source, no transforms, and no outputs cannot
+    # be assembled into ElspethSettings — pydantic would raise
+    # ``2 validation errors for ElspethSettings: source/sinks Field required``,
+    # which is a Tier-3 boundary violation (internal pydantic model names
+    # leaking to a user-facing UI). It also auto-populates the post-
+    # ``exit_to_freeform`` view of any guided session, so the surface is
+    # exercised on a normal workflow, not just on hand-crafted empty configs.
+    #
+    # Return a clean ``empty_pipeline`` ValidationResult instead. The frontend
+    # subscription guard treats ``empty_pipeline`` as non-broadcast (no chat
+    # injection, no validation feedback sent to the LLM) — see
+    # ``stores/subscriptions.ts``.
+    if state.source is None and not state.nodes and not state.outputs:
+        return ValidationResult(
+            is_valid=False,
+            checks=[
+                ValidationCheck(
+                    name=_CHECK_SETTINGS,
+                    passed=False,
+                    detail="Pipeline has no source, transforms, or outputs.",
+                    affected_nodes=(),
+                    outcome_code=None,
+                ),
+                *_skipped_checks(_CHECK_SETTINGS),
+            ],
+            errors=[
+                ValidationError(
+                    component_id=None,
+                    component_type=None,
+                    message=("Pipeline is empty. Add a source and at least one output to begin building."),
+                    suggestion=("Pick a source plugin (e.g. text, csv) and an output destination, then validate again."),
+                    error_code="empty_pipeline",
+                ),
+            ],
+            readiness=_blocked_readiness(
+                code="empty_pipeline",
+                detail="Pipeline is empty.",
+            ),
+        )
 
     # Step 1: Source + sink path allowlist check (C3/S2 defense-in-depth)
     # Any `path` or `file` key in source/sink options must resolve under
@@ -580,6 +747,8 @@ def validate_pipeline(
                             name=_CHECK_PATH_ALLOWLIST,
                             passed=False,
                             detail=f"Source {key} '{value}' is outside allowed source directories",
+                            affected_nodes=(),
+                            outcome_code=None,
                         ),
                         *_skipped_checks(_CHECK_PATH_ALLOWLIST),
                     ],
@@ -589,8 +758,15 @@ def validate_pipeline(
                             component_type="source",
                             message=f"Path traversal blocked: {key}='{value}' resolves outside allowed directories",
                             suggestion="Use a file within the blobs directory.",
+                            error_code=None,
                         ),
                     ],
+                    readiness=_blocked_readiness(
+                        code="path_allowlist",
+                        detail=f"source {key} resolves outside allowed source directories",
+                        component_id="source",
+                        component_type="source",
+                    ),
                 )
 
     # Sink path allowlist — prevents arbitrary file writes via sink options.
@@ -608,6 +784,8 @@ def validate_pipeline(
                                 name=_CHECK_PATH_ALLOWLIST,
                                 passed=False,
                                 detail=f"Sink '{output.name}' {key} '{value}' is outside allowed output directories",
+                                affected_nodes=(),
+                                outcome_code=None,
                             ),
                             *_skipped_checks(_CHECK_PATH_ALLOWLIST),
                         ],
@@ -617,8 +795,15 @@ def validate_pipeline(
                                 component_type="sink",
                                 message=f"Path traversal blocked: sink '{output.name}' {key}='{value}' resolves outside allowed directories",
                                 suggestion="Use a path within the outputs or blobs directory.",
+                                error_code=None,
                             ),
                         ],
+                        readiness=_blocked_readiness(
+                            code="path_allowlist",
+                            detail=f"sink {output.name} {key} resolves outside allowed output directories",
+                            component_id=output.name,
+                            component_type="sink",
+                        ),
                     )
 
     # B11 fix: Always record the path_allowlist check
@@ -628,6 +813,8 @@ def validate_pipeline(
                 name=_CHECK_PATH_ALLOWLIST,
                 passed=True,
                 detail="All paths within allowed directories",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
     else:
@@ -636,6 +823,8 @@ def validate_pipeline(
                 name=_CHECK_PATH_ALLOWLIST,
                 passed=True,
                 detail="No path option — check skipped",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
 
@@ -646,7 +835,7 @@ def validate_pipeline(
     #       a wired secret rather than a literal placeholder string
     #       (issue elspeth-72d1dccd44 — S1A "WILL_BE_WIRED_FROM_..." defect).
     #
-    # The remediation note (notes/composer-remediation-program-2026-05-01.md)
+    # The remediation note (docs/composer/evidence/composer-remediation-program-2026-05-01.md)
     # suggested "the catalog already knows which fields require secrets."  In
     # practice the catalog renders the per-plugin schema but does not mark
     # credential fields; the closed list of credential-bearing field names
@@ -657,6 +846,7 @@ def validate_pipeline(
     all_refs: list[str] = []
     env_ref_names: set[str] = set()
     fabricated_components: list[tuple[str | None, str | None, list[str]]] = []
+    disallowed_secret_ref_components: list[tuple[str | None, str, str, list[SecretRefPlacementViolation]]] = []
     if secret_service is not None and user_id is not None:
         env_ref_names = {item.name for item in secret_service.list_refs(user_id)}
         # Walk source options, node configs, and output options for secret refs
@@ -665,19 +855,41 @@ def validate_pipeline(
             fabricated = collect_credential_field_violations(state.source.options, env_ref_names)
             if fabricated:
                 fabricated_components.append(("source", "source", fabricated))
+            disallowed = collect_disallowed_secret_ref_markers(
+                state.source.options,
+                env_ref_names,
+                additional_allowed_fields=allowed_secret_ref_fields("source", state.source.plugin),
+            )
+            if disallowed:
+                disallowed_secret_ref_components.append(("source", "source", state.source.plugin, disallowed))
         for node in state.nodes or ():
             all_refs.extend(_collect_secret_refs(node.options, env_ref_names))
             fabricated = collect_credential_field_violations(node.options, env_ref_names)
             if fabricated:
                 fabricated_components.append((node.id, "transform", fabricated))
+            node_plugin = node.plugin or "<unset>"
+            disallowed = collect_disallowed_secret_ref_markers(
+                node.options,
+                env_ref_names,
+                additional_allowed_fields=allowed_secret_ref_fields("transform", node_plugin),
+            )
+            if disallowed:
+                disallowed_secret_ref_components.append((node.id, "transform", node_plugin, disallowed))
         for output in state.outputs or ():
             all_refs.extend(_collect_secret_refs(output.options, env_ref_names))
             fabricated = collect_credential_field_violations(output.options, env_ref_names)
             if fabricated:
                 fabricated_components.append((output.name, "sink", fabricated))
+            disallowed = collect_disallowed_secret_ref_markers(
+                output.options,
+                env_ref_names,
+                additional_allowed_fields=allowed_secret_ref_fields("sink", output.plugin),
+            )
+            if disallowed:
+                disallowed_secret_ref_components.append((output.name, "sink", output.plugin, disallowed))
 
         missing_refs = [ref for ref in all_refs if not secret_service.has_ref(user_id, ref)]
-        if missing_refs or fabricated_components:
+        if missing_refs or fabricated_components or disallowed_secret_ref_components:
             detail_parts: list[str] = []
             if missing_refs:
                 names = ", ".join(missing_refs)
@@ -688,6 +900,7 @@ def validate_pipeline(
                         component_type=None,
                         message=f"Cannot resolve secret references: {names}",
                         suggestion="Add the missing secrets via the Secrets panel before executing.",
+                        error_code="missing_secret_ref",
                     )
                 )
             if fabricated_components:
@@ -708,22 +921,57 @@ def validate_pipeline(
                                 "(produces a {secret_ref: NAME} marker) instead of typing "
                                 "the value directly."
                             ),
+                            error_code="fabricated_secret",
                         )
                     )
+            if disallowed_secret_ref_components:
+                for component_id, component_type, plugin_name, violations in disallowed_secret_ref_components:
+                    violation_text = ", ".join(f"{v.field_path} -> {v.secret_name}" for v in violations)
+                    allowed_text = allowed_secret_ref_fields_text(component_type, plugin_name)
+                    detail_parts.append(f"Disallowed secret_ref for {plugin_name} {component_id}: {violation_text}")
+                    for violation in violations:
+                        errors.append(
+                            ValidationError(
+                                component_id=component_id,
+                                component_type=component_type,
+                                message=(
+                                    f"Plugin '{plugin_name}' field '{violation.field_path}' contains secret_ref "
+                                    f"'{violation.secret_name}', but only credential-bearing fields may carry secret_ref "
+                                    f"markers. Allowed credential-bearing fields for this plugin: {allowed_text}."
+                                ),
+                                suggestion=(
+                                    "Move the secret_ref marker to an actual credential field, or use a literal "
+                                    "non-secret value for wire-visible identity/configuration fields."
+                                ),
+                                error_code="disallowed_secret_ref",
+                            )
+                        )
             checks.append(
                 ValidationCheck(
                     name=_CHECK_SECRET_REFS,
                     passed=False,
                     detail="; ".join(detail_parts),
+                    affected_nodes=(),
+                    outcome_code=CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
                 )
             )
             checks.extend(_skipped_checks(_CHECK_SECRET_REFS))
-            return ValidationResult(is_valid=False, checks=checks, errors=errors)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=errors,
+                readiness=_blocked_readiness(
+                    code="secret_refs",
+                    detail="Secret reference validation failed.",
+                ),
+            )
         checks.append(
             ValidationCheck(
                 name=_CHECK_SECRET_REFS,
                 passed=True,
                 detail=f"All {len(all_refs)} secret reference(s) resolved" if all_refs else "No secret references found",
+                affected_nodes=(),
+                outcome_code=CHECK_OUTCOME_SECRET_REFS_RESOLVED if all_refs else CHECK_OUTCOME_SECRET_REFS_NO_REFS,
             )
         )
     else:
@@ -732,6 +980,8 @@ def validate_pipeline(
                 name=_CHECK_SECRET_REFS,
                 passed=True,
                 detail="No secret service — check skipped",
+                affected_nodes=(),
+                outcome_code=CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
             )
         )
 
@@ -742,6 +992,8 @@ def validate_pipeline(
                 name=_CHECK_SEMANTIC_CONTRACTS,
                 passed=False,
                 detail="Semantic contract check failed",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         for entry in semantic_errors:
@@ -753,6 +1005,7 @@ def validate_pipeline(
                     component_type="transform",
                     message=entry.message,
                     suggestion=assistance_suggestion_for(entry, semantic_contracts),
+                    error_code=None,
                 )
             )
         checks.extend(_skipped_checks(_CHECK_SEMANTIC_CONTRACTS))
@@ -760,6 +1013,10 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="semantic_contracts",
+                detail="Semantic contract check failed.",
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -770,6 +1027,8 @@ def validate_pipeline(
             detail=(
                 f"All {len(semantic_contracts)} semantic contract(s) satisfied" if semantic_contracts else "No semantic contracts to check"
             ),
+            affected_nodes=(),
+            outcome_code=None,
         )
     )
 
@@ -790,6 +1049,8 @@ def validate_pipeline(
                 name=_CHECK_BATCH_TRANSFORM_OPTIONS,
                 passed=False,
                 detail="Batch-aware transform option check failed",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         for node_id, message in batch_option_errors:
@@ -802,6 +1063,7 @@ def validate_pipeline(
                         "Use node_type='aggregation' for batch-aware plugins; remove required_input_fields from batch-aware transform "
                         "options and use schema.required_fields for batch input validation."
                     ),
+                    error_code=None,
                 )
             )
         checks.extend(_skipped_checks(_CHECK_BATCH_TRANSFORM_OPTIONS))
@@ -809,6 +1071,10 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="batch_transform_options",
+                detail="Batch-aware transform option check failed.",
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
     checks.append(
@@ -816,12 +1082,131 @@ def validate_pipeline(
             name=_CHECK_BATCH_TRANSFORM_OPTIONS,
             passed=True,
             detail="Batch-aware transform options are compatible with ADR-013",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    materialized_state = (
+        materialize_state_for_authoring(state) if allow_pending_interpretation_placeholders else materialize_state_for_execution(state)
+    )
+    if isinstance(materialized_state, InterpretationReviewPending):
+        site_detail = _format_interpretation_sites(materialized_state.sites)
+        affected_nodes = tuple(dict.fromkeys(site.component_id for site in materialized_state.sites if site.component_type == "transform"))
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_INTERPRETATION_REVIEW,
+                passed=False,
+                detail=f"Interpretation review is pending for {site_detail}.",
+                affected_nodes=affected_nodes,
+                outcome_code=None,
+            )
+        )
+        errors.extend(
+            ValidationError(
+                component_id=site.component_id,
+                component_type=site.component_type,
+                message=_format_interpretation_site(site),
+                suggestion="Resolve the pending interpretation review before running.",
+                error_code=INTERPRETATION_REVIEW_PENDING_CODE,
+            )
+            for site in materialized_state.sites
+        )
+        checks.extend(_skipped_checks(_CHECK_INTERPRETATION_REVIEW))
+        single_site = materialized_state.sites[0] if len(materialized_state.sites) == 1 else None
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=errors,
+            readiness=_blocked_readiness(
+                code=INTERPRETATION_REVIEW_PENDING_CODE,
+                detail=site_detail,
+                component_id=single_site.component_id if single_site is not None else None,
+                component_type=single_site.component_type if single_site is not None else None,
+                authoring_valid=True,
+                completion_ready=True,
+            ),
+            semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+        )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_INTERPRETATION_REVIEW,
+            passed=True,
+            detail="No pending interpretation review",
+            affected_nodes=(),
+            outcome_code=None,
         )
     )
 
     # Step 2: Generate YAML
-    pipeline_yaml = yaml_generator.generate_yaml(state)
+    pipeline_yaml = yaml_generator.generate_yaml(materialized_state)
     pipeline_yaml = resolve_runtime_yaml_paths(pipeline_yaml, str(settings.data_dir))
+
+    if blob_get_metadata is not None and "blob_ref" in pipeline_yaml and "inline_content" in pipeline_yaml:
+        config_dict = yaml.safe_load(pipeline_yaml)
+        if type(config_dict) is not dict:
+            raise TypeError(
+                f"generate_yaml() produced non-dict YAML (got {type(config_dict).__name__}) — this is a bug in the YAML generator"
+            )
+        blob_violations = _validate_blob_content_refs_sync(
+            blob_get_metadata,
+            config_dict,
+            per_ref_byte_cap=BLOB_INLINE_PER_REF_BYTE_CAP,
+            aggregate_byte_cap=BLOB_INLINE_AGGREGATE_BYTE_CAP,
+        )
+        if blob_violations:
+            detail = _blob_inline_validation_detail(blob_violations)
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_BLOB_INLINE_REFS,
+                    passed=False,
+                    detail=detail,
+                    affected_nodes=(),
+                    outcome_code=None,
+                )
+            )
+            errors.extend(_blob_inline_validation_error(violation) for violation in blob_violations)
+            checks.extend(_skipped_checks(_CHECK_BLOB_INLINE_REFS))
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=errors,
+                readiness=_blocked_readiness(
+                    code="blob_inline_refs",
+                    detail=detail,
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_BLOB_INLINE_REFS,
+                passed=True,
+                detail="All inline-content blob references are valid",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+        )
+        pipeline_yaml = yaml.dump(_substitute_blob_content_refs_for_validation(config_dict), default_flow_style=False)
+    elif blob_get_metadata is None:
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_BLOB_INLINE_REFS,
+                passed=True,
+                detail="No blob metadata service — check skipped",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+        )
+    else:
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_BLOB_INLINE_REFS,
+                passed=True,
+                detail="No inline-content blob references found",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+        )
 
     # Step 3: Settings loading
     #
@@ -858,6 +1243,8 @@ def validate_pipeline(
                 name=_CHECK_SETTINGS,
                 passed=True,
                 detail="Settings loaded successfully",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
     except (PydanticValidationError, ValueError, TypeError) as exc:
@@ -866,6 +1253,8 @@ def validate_pipeline(
                 name=_CHECK_SETTINGS,
                 passed=False,
                 detail=str(exc),
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         errors.append(
@@ -874,6 +1263,7 @@ def validate_pipeline(
                 component_type=None,
                 message=str(exc),
                 suggestion=None,
+                error_code=None,
             )
         )
         checks.extend(_skipped_checks(_CHECK_SETTINGS))
@@ -881,6 +1271,10 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="settings_load",
+                detail="Settings failed to load.",
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -906,6 +1300,8 @@ def validate_pipeline(
                 name=_CHECK_PLUGINS,
                 passed=True,
                 detail="All plugins instantiated",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         checks.append(
@@ -913,6 +1309,8 @@ def validate_pipeline(
                 name=_CHECK_VALUE_SOURCE_COMPLIANCE,
                 passed=True,
                 detail="All declared value sources satisfied",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
     except ValueSourceValidationError as exc:
@@ -924,6 +1322,8 @@ def validate_pipeline(
                 name=_CHECK_PLUGINS,
                 passed=True,
                 detail="All plugins instantiated",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         checks.append(
@@ -931,6 +1331,8 @@ def validate_pipeline(
                 name=_CHECK_VALUE_SOURCE_COMPLIANCE,
                 passed=False,
                 detail=str(exc),
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         # Each finding names a single ``component_id`` field-violation —
@@ -949,6 +1351,7 @@ def validate_pipeline(
                         "model identifier; for Azure transforms, leave 'model' "
                         "empty so it inherits from 'deployment_name'."
                     ),
+                    error_code=None,
                 )
             )
         checks.extend(_skipped_checks(_CHECK_VALUE_SOURCE_COMPLIANCE))
@@ -956,15 +1359,21 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="value_source_compliance",
+                detail="Value-source compliance failed.",
+                component_id=errors[-1].component_id if errors else None,
+                component_type=errors[-1].component_type if errors else None,
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
     except (PluginNotFoundError, PluginConfigError) as exc:
         comp_type = _infer_component_type_from_plugin_error(exc)
-        plugin_name = exc.plugin_name if isinstance(exc, PluginConfigError) else None
+        plugin_error_name: str | None = exc.plugin_name if isinstance(exc, PluginConfigError) else None
         # Prefer cause (validation detail) over str(exc) which includes the
         # internal class name prefix (e.g. "Invalid configuration for CSVSourceConfig: ...").
-        if isinstance(exc, PluginConfigError) and exc.cause is not None and plugin_name is not None:
-            detail = f"Invalid configuration for {comp_type} '{plugin_name}': {exc.cause}"
+        if isinstance(exc, PluginConfigError) and exc.cause is not None and plugin_error_name is not None:
+            detail = f"Invalid configuration for {comp_type} '{plugin_error_name}': {exc.cause}"
         else:
             detail = str(exc)
         checks.append(
@@ -972,14 +1381,17 @@ def validate_pipeline(
                 name=_CHECK_PLUGINS,
                 passed=False,
                 detail=detail,
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         errors.append(
             ValidationError(
-                component_id=plugin_name,
+                component_id=plugin_error_name,
                 component_type=comp_type,
                 message=detail,
                 suggestion=None,
+                error_code=None,
             )
         )
         checks.extend(_skipped_checks(_CHECK_PLUGINS))
@@ -987,13 +1399,19 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="plugin_instantiation",
+                detail="Plugin instantiation failed.",
+                component_id=plugin_error_name,
+                component_type=comp_type,
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
     except FileExistsError as exc:
-        # File-sink collision raised by ``resolve_output_collision_path`` from
-        # within the sink ``__init__`` (json/csv sinks call it eagerly during
-        # plugin construction). Two raise sites in
-        # ``plugins/infrastructure/output_paths.py``:
+        # Belt-and-braces conversion for plugins that still perform filesystem
+        # collision checks during construction. Built-in local file sinks skip
+        # this check during runtime preflight and defer it to first write.
+        # Known raise sites in ``plugins/infrastructure/output_paths.py``:
         #
         # * line 48 — ``collision_policy="fail_if_exists"`` and the target path
         #   already exists.
@@ -1008,15 +1426,14 @@ def validate_pipeline(
         # exception does not carry sink-name attribution at this layer
         # (sinks raise ``FileExistsError`` directly without wrapping); the
         # message text contains the path, which is operator-actionable.
-        # Sink-name attribution is achievable architecturally by deferring
-        # the fs check until write-init time (filed separately) — out of
-        # scope here.
         detail = str(exc)
         checks.append(
             ValidationCheck(
                 name=_CHECK_PLUGINS,
                 passed=False,
                 detail=detail,
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         errors.append(
@@ -1025,6 +1442,7 @@ def validate_pipeline(
                 component_type="sink",
                 message=detail,
                 suggestion=("Set collision_policy='auto_increment' to pick a free sibling path automatically, or choose a different path."),
+                error_code=None,
             )
         )
         checks.extend(_skipped_checks(_CHECK_PLUGINS))
@@ -1032,6 +1450,11 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="plugin_instantiation",
+                detail="Plugin filesystem target validation failed.",
+                component_type="sink",
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -1044,6 +1467,8 @@ def validate_pipeline(
                 name=_CHECK_GRAPH,
                 passed=True,
                 detail="Graph structure is valid",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
     except GraphValidationError as exc:
@@ -1052,6 +1477,8 @@ def validate_pipeline(
                 name=_CHECK_GRAPH,
                 passed=False,
                 detail=str(exc),
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         errors.append(
@@ -1060,6 +1487,7 @@ def validate_pipeline(
                 component_type=exc.component_type,
                 message=str(exc),
                 suggestion=None,
+                error_code=None,
             )
         )
         checks.extend(_skipped_checks(_CHECK_GRAPH))
@@ -1067,6 +1495,12 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="graph_structure",
+                detail="Graph validation failed.",
+                component_id=exc.component_id,
+                component_type=exc.component_type,
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -1100,6 +1534,8 @@ def validate_pipeline(
                 name=_CHECK_ROUTE_TARGETS,
                 passed=True,
                 detail="All route targets resolve to existing sinks",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
     except RouteValidationError as exc:
@@ -1108,6 +1544,8 @@ def validate_pipeline(
                 name=_CHECK_ROUTE_TARGETS,
                 passed=False,
                 detail=str(exc),
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         errors.append(
@@ -1116,6 +1554,7 @@ def validate_pipeline(
                 component_type=None,
                 message=str(exc),
                 suggestion=("Use 'discard' to drop rows without routing, or wire the destination to an existing sink."),
+                error_code=None,
             )
         )
         checks.extend(_skipped_checks(_CHECK_ROUTE_TARGETS))
@@ -1123,6 +1562,10 @@ def validate_pipeline(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="route_target_resolution",
+                detail="Route target validation failed.",
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -1134,6 +1577,8 @@ def validate_pipeline(
                 name=_CHECK_SCHEMA,
                 passed=True,
                 detail="All edge schemas compatible",
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
     except GraphValidationError as exc:
@@ -1147,6 +1592,8 @@ def validate_pipeline(
                 name=_CHECK_SCHEMA,
                 passed=False,
                 detail=str(exc),
+                affected_nodes=(),
+                outcome_code=None,
             )
         )
         if isinstance(exc, EdgeContractError):
@@ -1163,6 +1610,7 @@ def validate_pipeline(
                     component_type=consumer_target.component_type,
                     message=edge_message,
                     suggestion=edge_suggestion,
+                    error_code=None,
                 )
             )
         else:
@@ -1172,12 +1620,19 @@ def validate_pipeline(
                     component_type=exc.component_type,
                     message=str(exc),
                     suggestion=None,
+                    error_code=None,
                 )
             )
         return ValidationResult(
             is_valid=False,
             checks=checks,
             errors=errors,
+            readiness=_blocked_readiness(
+                code="schema_compatibility",
+                detail="Schema compatibility failed.",
+                component_id=errors[-1].component_id if errors else None,
+                component_type=errors[-1].component_type if errors else None,
+            ),
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 
@@ -1204,6 +1659,11 @@ def validate_pipeline(
                     f"Consider removing it and wiring '{identity_finding.upstream_id}'.on_success "
                     f"directly to '{identity_finding.sink_name}'."
                 ),
+                # Structured node attribution for the audit-readiness panel's
+                # provenance row (see docs/composer/ux-redesign-2026-05/14a
+                # §"Six rows — projection mapping").
+                affected_nodes=(identity_finding.node_id,),
+                outcome_code=None,
             )
         )
 
@@ -1211,5 +1671,6 @@ def validate_pipeline(
         is_valid=True,
         checks=checks,
         errors=errors,
+        readiness=_execution_ready(),
         semantic_contracts=serialize_semantic_contracts(semantic_contracts),
     )

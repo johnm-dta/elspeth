@@ -8,10 +8,10 @@ get inferred types, or remove fields (narrowing the contract).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
-from elspeth.contracts.type_normalization import normalize_type_for_contract
+from elspeth.contracts.type_normalization import UNSUPPORTED_CONTRACT_TYPE, normalize_type_for_contract
 
 
 def _infer_new_field_contract(name: str, value: Any) -> FieldContract:
@@ -22,10 +22,12 @@ def _infer_new_field_contract(name: str, value: Any) -> FieldContract:
     propagate ValueError from normalize_type_for_contract(); they are invalid
     audit material and must fail consistently across propagation paths.
     """
-    try:
-        python_type = normalize_type_for_contract(value)
-    except TypeError:
+    normalized_type = normalize_type_for_contract(value)
+    python_type: type
+    if normalized_type is UNSUPPORTED_CONTRACT_TYPE:
         python_type = object
+    else:
+        python_type = cast(type, normalized_type)
 
     # Null-like values normalize to type(None), but for inference that means
     # "type unknown, field is nullable" — not "field is always NoneType".

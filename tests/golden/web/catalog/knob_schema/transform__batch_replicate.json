@@ -1,0 +1,62 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": "copies",
+        "description": "Name of the field containing the number of copies to make",
+        "kind": "text",
+        "label": "Copies Field",
+        "name": "copies_field",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 1,
+        "description": "Default number of copies if copies_field is missing or invalid",
+        "kind": "number-int",
+        "label": "Default Copies",
+        "name": "default_copies",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 10000,
+        "description": "Upper bound on copies per row to prevent unbounded replication",
+        "kind": "number-int",
+        "label": "Max Copies",
+        "name": "max_copies",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": true,
+        "description": "Whether to add a 'copy_index' field (0-based) to each output row",
+        "kind": "checkbox",
+        "label": "Include Copy Index",
+        "name": "include_copy_index",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "batch_replicate"
+}

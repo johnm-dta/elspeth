@@ -18,6 +18,8 @@ class RunExportRecord(TypedDict):
     completed_at: str | None
     canonical_version: str
     config_hash: str
+    initiated_by_user_id: str | None
+    auth_provider_type: str | None
     settings: Any  # Resolved config — structure varies by pipeline
     reproducibility_grade: str | None
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, cast
 from uuid import UUID
 
 import structlog
@@ -31,10 +31,16 @@ from elspeth.web.auth.models import AuthenticationError, UserIdentity
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
+from elspeth.web.composer.service import _BadRequestLLMError
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
-from elspeth.web.execution.errors import BlobSourcePathMismatchError, SemanticContractViolationError
+from elspeth.web.execution.errors import (
+    BlobSourcePathMismatchError,
+    ExecuteRequestValidationError,
+    SemanticContractViolationError,
+    UnresolvedInterpretationPlaceholderError,
+)
 from elspeth.web.execution.fanout_guard import FANOUT_GUARD_ERROR_TYPE, ExecutionFanoutGuardRequired
 from elspeth.web.execution.outputs import (
     RunOutputsAuditUnavailableError,
@@ -55,6 +61,7 @@ from elspeth.web.execution.schemas import (
     RunDiagnosticsResponse,
     RunDiagnosticsWorkingView,
     RunEvent,
+    RunEventType,
     RunOutputArtifactPreview,
     RunOutputsResponse,
     RunResultsResponse,
@@ -62,12 +69,14 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.paths import allowed_sink_directories
+from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     RunRecord,
     SessionServiceProtocol,
     TerminalSessionRunStatus,
 )
+from elspeth.web.sessions.routes._helpers import _litellm_error_detail
 
 slog = structlog.get_logger()
 
@@ -84,23 +93,11 @@ async def _get_session_service(request: Request) -> SessionServiceProtocol:
 
 
 # ── Ownership verification helpers ────────────────────────────────────
-
-
-async def _verify_session_ownership(session_id: UUID, user: UserIdentity, request: Request) -> None:
-    """Verify the session exists and belongs to the current user.
-
-    Returns 404 (not 403) to avoid leaking session existence (IDOR).
-    Matches the pattern in sessions/routes.py.
-    """
-    session_service: SessionServiceProtocol = request.app.state.session_service
-    settings: WebSettings = request.app.state.settings
-    try:
-        session = await session_service.get_session(session_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Session not found") from None
-
-    if session.user_id != user.user_id or session.auth_provider_type != settings.auth_provider:
-        raise HTTPException(status_code=404, detail="Session not found")
+#
+# Session-ownership verification lives in ``web/sessions/ownership.py`` as
+# ``verify_session_ownership`` so ``execution/routes.py`` and
+# ``audit_readiness/routes.py`` share a single IDOR-safe implementation.
+# Run-ownership verification remains here — only execution/ runs care.
 
 
 async def _verify_run_ownership(run_id: UUID, user: UserIdentity, request: Request) -> None:
@@ -233,7 +230,7 @@ def _build_terminal_run_event(current: RunStatusResponse, *, cancelled_run_recor
             raise RuntimeError(
                 f"Completed run {current.run_id} failed CompletedData validation — Tier 1 anomaly (audit trail inconsistent): {exc}"
             ) from exc
-        event_type: Literal["progress", "error", "completed", "cancelled", "failed"] = "completed"
+        event_type: RunEventType = "completed"
     elif current.status == "failed":
         if current.error is None:
             raise RuntimeError(f"Failed run {current.run_id} has no error message — Tier 1 anomaly (error column NULL on terminal failure)")
@@ -418,7 +415,7 @@ def create_execution_router() -> APIRouter:
         service: ExecutionService = Depends(_get_execution_service),  # noqa: B008
     ) -> ValidationResult:
         """Dry-run validation using real engine code paths."""
-        await _verify_session_ownership(session_id, user, request)
+        await verify_session_ownership(session_id, user, request)
         result = await service.validate(session_id, user_id=user.user_id)
         return result
 
@@ -440,13 +437,15 @@ def create_execution_router() -> APIRouter:
         (Seam Contract D) which returns the canonical 409 envelope:
         {"detail": str(exc), "error_type": "run_already_active"}.
         """
-        await _verify_session_ownership(session_id, user, request)
+        await verify_session_ownership(session_id, user, request)
+        settings: WebSettings = request.app.state.settings
         fanout_ack_token = execute_request.fanout_ack_token if execute_request is not None else None
         try:
             run_id = await service.execute(
                 session_id,
                 state_id,
                 user_id=user.user_id,
+                auth_provider_type=settings.auth_provider,
                 fanout_ack_token=fanout_ack_token,
             )
         except StateAccessError:
@@ -557,13 +556,44 @@ def create_execution_router() -> APIRouter:
                     ],
                 },
             ) from exc
+        except UnresolvedInterpretationPlaceholderError as exc:
+            # F-17 / F-21 (Phase 5b Task 5 follow-on). Structured 422 with
+            # the structured interpretation-review sites so the frontend
+            # banner can list every unresolved site without parsing the
+            # message string. The legacy ``placeholders`` field is preserved
+            # for transform/vague-term callers during the contract migration.
+            # 422 mirrors the SemanticContractViolationError precedent
+            # above — the request was syntactically valid but the
+            # composition state is not yet executable until the operator
+            # resolves the surfaced placeholders. Placement: above the
+            # ``except ExecuteRequestValidationError`` (which maps to 400)
+            # and the bare ``except ValueError`` (which maps to 404) so
+            # this 422 path is reached for the specific exception type.
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "kind": "interpretation_placeholder_unresolved",
+                    "message": str(exc),
+                    "placeholders": [{"node_id": node_id, "term": term} for node_id, term in exc.placeholders],
+                    "interpretation_sites": [
+                        {
+                            "component_id": site.component_id,
+                            "component_type": site.component_type,
+                            "kind": site.kind.value,
+                            "user_term": site.user_term,
+                        }
+                        for site in exc.sites
+                    ],
+                },
+            ) from exc
+        except ExecuteRequestValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
         except ValueError as exc:
             # Remaining ValueError sources are non-IDOR: the user's
             # OWN session having no composition state (when state_id
-            # is None), source/sink path-allowlist rejections that
-            # echo the caller's own input, and UUID parse errors on
-            # malformed blob_ref strings.  These are not cross-user
-            # oracles, so the diagnostic body is kept.
+            # is None). Caller-authored request validation failures
+            # (path allowlist, malformed blob_ref) raise
+            # ExecuteRequestValidationError above and return 400.
             raise HTTPException(status_code=404, detail=str(exc)) from None
         return {"run_id": str(run_id)}
 
@@ -662,8 +692,23 @@ def create_execution_router() -> APIRouter:
         )
 
         composer: ComposerService = request.app.state.composer_service
+        settings: WebSettings = request.app.state.settings
         try:
             explanation = await composer.explain_run_diagnostics(diagnostics.model_dump(mode="json"))
+        except _BadRequestLLMError as exc:
+            # Provider rejected the request (400-class). Carrier exposes
+            # `provider_detail` / `provider_status_code` precisely because
+            # `str(exc)` is redacted to the class-name wrap. Delegate to
+            # `_litellm_error_detail` — the same helper sessions routes use
+            # — so the staging-debug surface is symmetric across endpoints.
+            raise HTTPException(
+                status_code=502,
+                detail=_litellm_error_detail(
+                    "run_diagnostics_explanation_failed",
+                    exc,
+                    expose_provider_error=settings.composer_expose_provider_errors,
+                ),
+            ) from exc
         except ComposerServiceError as exc:
             raise HTTPException(
                 status_code=502,

@@ -48,7 +48,7 @@ class SecretRef:
 
     Attributes:
         name: The secret name/identifier
-        fingerprint: HMAC-SHA256 fingerprint of the secret value (if available)
+        fingerprint: Keyed fingerprint of the secret value (if available)
         source: Where the secret was loaded from ("env", "keyvault", etc.)
     """
 

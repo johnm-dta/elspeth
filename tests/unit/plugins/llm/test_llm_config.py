@@ -13,11 +13,17 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from elspeth.contracts.hashing import stable_hash
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.plugins.transforms.llm.base import LLMConfig
 
 # Shared observed schema for test convenience
 _OBSERVED_SCHEMA = SchemaConfig(mode="observed", fields=None)
+
+# A valid OpenRouter catalog model id (the retired anthropic/claude-3-opus was
+# dropped from the litellm-derived catalog; OpenRouterConfig now rejects models
+# absent from it). Mirrors test_openrouter.py.
+_OPENROUTER_MODEL = "anthropic/claude-3.5-sonnet"
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +38,7 @@ class TestLLMConfigBase:
         """model field is optional and defaults to None."""
         config = LLMConfig(
             provider="azure",
-            template="Classify: {{ text }}",
+            prompt_template="Classify: {{ row.text }}",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=["text"],
         )
@@ -42,7 +48,7 @@ class TestLLMConfigBase:
         config = LLMConfig(
             provider="azure",
             model="gpt-4o",
-            template="Classify: {{ text }}",
+            prompt_template="Classify: {{ row.text }}",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=["text"],
         )
@@ -53,7 +59,7 @@ class TestLLMConfigBase:
         with pytest.raises(ValidationError):
             LLMConfig(
                 provider="invalid_provider",
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
             )
@@ -61,7 +67,7 @@ class TestLLMConfigBase:
     def test_provider_azure_accepted(self) -> None:
         config = LLMConfig(
             provider="azure",
-            template="hello {{ text }}",
+            prompt_template="hello {{ row.text }}",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=["text"],
         )
@@ -70,7 +76,7 @@ class TestLLMConfigBase:
     def test_provider_openrouter_accepted(self) -> None:
         config = LLMConfig(
             provider="openrouter",
-            template="hello {{ text }}",
+            prompt_template="hello {{ row.text }}",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=["text"],
         )
@@ -80,11 +86,163 @@ class TestLLMConfigBase:
         """queries is None when not provided (single-query mode)."""
         config = LLMConfig(
             provider="azure",
-            template="hello {{ text }}",
+            prompt_template="hello {{ row.text }}",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=["text"],
         )
         assert config.queries is None
+
+    def test_resolved_prompt_template_hash_must_match_prompt_template(self) -> None:
+        """Phase 5b runtime anchor refuses prompt/hash drift at config load."""
+        resolved_template = "Rate how innovative this is."
+        config = LLMConfig(
+            provider="azure",
+            prompt_template=resolved_template,
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=[],
+            resolved_prompt_template_hash=stable_hash(resolved_template),
+        )
+        assert config.resolved_prompt_template_hash == stable_hash(resolved_template)
+
+        with pytest.raises(ValidationError, match="resolved_prompt_template_hash"):
+            LLMConfig(
+                provider="azure",
+                prompt_template="Rate how boring this is.",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=[],
+                resolved_prompt_template_hash=stable_hash(resolved_template),
+            )
+
+    def test_missing_required_input_fields_error_names_composer_options_repair(self) -> None:
+        """Runtime preflight errors must name the composer patch location."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="URL: {{ row['url'] }}\nContent: {{ row['content'] }}",
+                schema_config=_OBSERVED_SCHEMA,
+            )
+
+        message = str(exc_info.value)
+        assert "options.required_input_fields" in message
+        assert "patch_node_options" in message
+        assert '"patch": {"required_input_fields": ["content", "url"]}' in message
+
+
+class TestRequiredInputFieldsAppearInTemplate:
+    """Dual of `_validate_required_input_fields_declared`: catches the inverse
+    asymmetry where `required_input_fields` is declared but the prompt template
+    interpolates zero `row.*` fields, so every row is sent the same static prompt.
+    """
+
+    def test_declared_fields_without_row_interpolation_rejected(self) -> None:
+        """A non-empty required_input_fields with a static prompt body is rejected."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="Identify primary colours used on the page. Return JSON.",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["url", "content"],
+            )
+
+        message = str(exc_info.value)
+        assert "does not interpolate any row.* fields" in message
+        assert "['content', 'url']" in message
+        assert "{{ row.url }}" in message
+        assert "{{ row.content }}" in message
+
+    def test_declared_fields_with_matching_row_interpolation_accepted(self) -> None:
+        """Canonical case: every declared field appears as a row.* reference."""
+        config = LLMConfig(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            prompt_template="URL: {{ row.url }}\nContent: {{ row.content }}",
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=["url", "content"],
+        )
+        assert sorted(config.required_input_fields or []) == ["content", "url"]
+
+    def test_declared_fields_with_partial_row_interpolation_accepted(self) -> None:
+        """Validator fires only on the empty-row-refs case, not on partial overlap.
+
+        Partial mismatch (declared fields not all interpolated, or extra row refs
+        not declared) is a softer signal; rejecting it would break legitimate
+        cases like "declared a field for downstream cleanup but not used in this
+        specific prompt body." The reciprocity guidance lives in the skill prompt.
+        """
+        config = LLMConfig(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            prompt_template="URL: {{ row.url }}",
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=["url", "content"],
+        )
+        assert config.prompt_template == "URL: {{ row.url }}"
+
+    def test_explicit_opt_out_empty_list_accepted_with_static_prompt(self) -> None:
+        """`required_input_fields: []` is the documented opt-out and must pass."""
+        config = LLMConfig(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            prompt_template="Return a fixed JSON greeting.",
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=[],
+        )
+        assert config.required_input_fields == []
+
+    def test_required_input_fields_none_does_not_fire_this_check(self) -> None:
+        """When `required_input_fields` is undeclared, the dual validator must not fire.
+
+        That case is owned by `_validate_required_input_fields_declared`. With a
+        static prompt that references no row.* fields, neither validator fires,
+        and the config is accepted (audit-philosophy opt-out by omission).
+        """
+        config = LLMConfig(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            prompt_template="Return a fixed JSON greeting.",
+            schema_config=_OBSERVED_SCHEMA,
+        )
+        assert config.required_input_fields is None
+
+    def test_multi_query_mode_is_out_of_scope_for_this_check(self) -> None:
+        """Multi-query mode flows row data via per-query input_fields mappings.
+
+        A top-level template without `row.*` references is therefore not by itself
+        diagnostic in multi-query mode; the dual validator restricts itself to
+        single-query mode where the absence is unambiguous.
+        """
+        config = LLMConfig(
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4.6",
+            prompt_template="Assess each case.",
+            schema_config=_OBSERVED_SCHEMA,
+            required_input_fields=["case_text"],
+            queries={
+                "diagnosis": {
+                    "input_fields": {"input_1": "case_text"},
+                    "template": "Diagnose: {{ row.input_1 }}",
+                }
+            },
+        )
+        assert config.queries is not None
+
+    def test_error_message_names_composer_repair_path(self) -> None:
+        """The error must point the composer at patch_node_options to repair."""
+        with pytest.raises(ValidationError) as exc_info:
+            LLMConfig(
+                provider="openrouter",
+                model="anthropic/claude-sonnet-4.6",
+                prompt_template="Static prompt without interpolation.",
+                schema_config=_OBSERVED_SCHEMA,
+                required_input_fields=["page_body"],
+            )
+
+        message = str(exc_info.value)
+        assert "patch_node_options" in message
+        assert '"prompt_template"' in message
+        assert "{{ row.page_body }}" in message
 
 
 class TestLLMConfigResponseFieldValidation:
@@ -100,7 +258,7 @@ class TestLLMConfigResponseFieldValidation:
         with pytest.raises(ValidationError, match="response_field"):
             LLMConfig(
                 provider="azure",
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
                 response_field="",
@@ -111,7 +269,7 @@ class TestLLMConfigResponseFieldValidation:
         with pytest.raises(ValidationError, match="response_field"):
             LLMConfig(
                 provider="azure",
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
                 response_field="   ",
@@ -122,7 +280,7 @@ class TestLLMConfigResponseFieldValidation:
         with pytest.raises(ValidationError, match="response_field"):
             LLMConfig(
                 provider="azure",
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
                 response_field="my-field",
@@ -132,7 +290,7 @@ class TestLLMConfigResponseFieldValidation:
         """Valid Python identifier response_field is accepted."""
         config = LLMConfig(
             provider="azure",
-            template="hello",
+            prompt_template="hello",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=[],
             response_field="llm_output",
@@ -153,7 +311,7 @@ class TestAzureOpenAIConfig:
 
         with pytest.raises((ValidationError, ValueError)):
             AzureOpenAIConfig(  # type: ignore[call-arg]  # intentionally missing required args
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
                 # Missing deployment_name, endpoint, api_key
@@ -166,7 +324,7 @@ class TestAzureOpenAIConfig:
             deployment_name="gpt-4o-deploy",
             endpoint="https://test.openai.azure.com/",
             api_key="key",
-            template="hello",
+            prompt_template="hello",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=[],
         )
@@ -180,7 +338,7 @@ class TestAzureOpenAIConfig:
             deployment_name="gpt-4o",
             endpoint="https://test.openai.azure.com/",
             api_key="key",
-            template="hello",
+            prompt_template="hello",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=[],
             tracing={"provider": "langfuse", "public_key": "pk"},
@@ -198,7 +356,7 @@ class TestAzureOpenAIConfigTracing:
             "deployment_name": "gpt-4",
             "endpoint": "https://test.openai.azure.com",
             "api_key": "test-key",
-            "template": "Hello {{ row.name }}",
+            "prompt_template": "Hello {{ row.name }}",
             "schema": {"mode": "observed"},
             "required_input_fields": [],
         }
@@ -246,9 +404,9 @@ class TestOpenRouterConfigTracing:
         """Create base config with all required fields for OpenRouter."""
         return {
             "provider": "openrouter",
-            "model": "anthropic/claude-3-opus",
+            "model": _OPENROUTER_MODEL,
             "api_key": "test-key",
-            "template": "Hello {{ row.name }}",
+            "prompt_template": "Hello {{ row.name }}",
             "schema": {"mode": "observed"},
             "required_input_fields": [],
         }
@@ -286,7 +444,7 @@ class TestOpenRouterConfig:
         with pytest.raises((ValidationError, ValueError)):
             OpenRouterConfig(  # type: ignore[call-arg]  # intentionally missing model
                 api_key="key",
-                template="hello",
+                prompt_template="hello",
                 schema_config=_OBSERVED_SCHEMA,
                 required_input_fields=[],
                 # model not provided — should fail because OpenRouter needs it
@@ -298,7 +456,7 @@ class TestOpenRouterConfig:
         config = OpenRouterConfig(
             model="openai/gpt-4o",
             api_key="key",
-            template="hello",
+            prompt_template="hello",
             schema_config=_OBSERVED_SCHEMA,
             required_input_fields=[],
         )
@@ -531,7 +689,7 @@ class TestMultiQueryInputFieldsValidation:
             LLMConfig(
                 provider="openrouter",
                 model="test-model",
-                template="Static template",
+                prompt_template="Static template",
                 schema_config=_OBSERVED_SCHEMA,
                 queries={
                     "q1": {
@@ -546,7 +704,7 @@ class TestMultiQueryInputFieldsValidation:
             LLMConfig(
                 provider="openrouter",
                 model="test-model",
-                template="Static template",
+                prompt_template="Static template",
                 schema_config=_OBSERVED_SCHEMA,
                 queries=[
                     {
@@ -561,7 +719,7 @@ class TestMultiQueryInputFieldsValidation:
         config = LLMConfig(
             provider="openrouter",
             model="test-model",
-            template="Static template",
+            prompt_template="Static template",
             schema_config=_OBSERVED_SCHEMA,
             queries={
                 "q1": {
@@ -577,7 +735,7 @@ class TestMultiQueryInputFieldsValidation:
         config = LLMConfig(
             provider="openrouter",
             model="test-model",
-            template="Static template",
+            prompt_template="Static template",
             schema_config=_OBSERVED_SCHEMA,
             queries={
                 "q1": {

@@ -10,12 +10,14 @@ SessionServiceImpl._ensure_utc() restores UTC on all datetime reads.
 from __future__ import annotations
 
 import pytest
+import structlog
 from sqlalchemy.pool import StaticPool
 
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import CompositionStateData
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 
 @pytest.fixture
@@ -33,7 +35,11 @@ def engine():
 @pytest.fixture
 def service(engine):
     """Create a SessionServiceImpl backed by the in-memory engine."""
-    return SessionServiceImpl(engine)
+    return SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
 
 
 class TestDatetimeTimezoneRoundTrip:
@@ -64,6 +70,7 @@ class TestDatetimeTimezoneRoundTrip:
         state = await service.save_composition_state(
             session_id=session.id,
             state=CompositionStateData(source=None, nodes=[], edges=[], outputs=[], metadata_=None, is_valid=False),
+            provenance="session_seed",
         )
         run = await service.create_run(
             session_id=session.id,
@@ -78,7 +85,7 @@ class TestDatetimeTimezoneRoundTrip:
     async def test_message_created_at_preserves_timezone(self, service) -> None:
         """created_at on a chat message must be timezone-aware after retrieval."""
         session = await service.create_session("alice", "Msg TZ Test", "local")
-        await service.add_message(session.id, "user", "hello")
+        await service.add_message(session.id, "user", "hello", writer_principal="route_user_message")
 
         messages = await service.get_messages(session.id)
         assert len(messages) >= 1

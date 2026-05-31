@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 from elspeth.contracts import (
+    Determinism,
     FieldContract,
     PipelineRow,
     RunStatus,
@@ -51,6 +52,7 @@ class BatchCollectorTransform(BaseTransform):
     """Batch-aware transform that collects rows until flush."""
 
     name = "batch_collector"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
     is_batch_aware = True

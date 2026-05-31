@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.plugins.infrastructure.validation import get_transform_config_model
 
 
@@ -75,7 +76,6 @@ class TestLLMPluginDiscovery:
         assert "llm" in transform_names
 
     def test_llm_plugin_is_non_deterministic(self) -> None:
-        from elspeth.contracts import Determinism
         from elspeth.plugins.transforms.llm.transform import LLMTransform
 
         assert LLMTransform.determinism == Determinism.NON_DETERMINISTIC

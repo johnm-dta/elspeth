@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from elspeth.contracts import NodeType
+from elspeth.contracts import NodeStateCompleted, NodeStateStatus, NodeType
 from elspeth.tui.screens.explain_screen import (
     ExplainScreen,
     InvalidStateTransitionError,
@@ -247,6 +247,43 @@ class TestExplainScreenNodeSelection:
         content = screen.detail_panel.render_content()
         assert "filter" in content
         assert "transform" in content
+
+    def test_select_node_loads_success_reason_and_context_after(self) -> None:
+        """Selecting a node includes execution audit context in details."""
+        from datetime import UTC, datetime
+
+        mock_db = MagicMock()
+        screen = self._make_loaded_screen(mock_db)
+
+        mock_node = self._make_mock_node(node_id="tfm-1", plugin_name="filter", node_type=NodeType.TRANSFORM)
+        state = NodeStateCompleted(
+            state_id="state-success",
+            token_id="token-001",
+            node_id="tfm-1",
+            step_index=1,
+            attempt=0,
+            status=NodeStateStatus.COMPLETED,
+            input_hash="abc123",
+            output_hash="def456",
+            started_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
+            completed_at=datetime(2026, 1, 1, 12, 0, 1, tzinfo=UTC),
+            duration_ms=1000.0,
+            context_after_json='{"route_label": "accepted", "result": "True"}',
+            success_reason_json='{"action": "mapped", "fields_added": ["normalized_name"]}',
+        )
+
+        with patch("elspeth.tui.screens.explain_screen.RecorderFactory") as MockFactory:
+            MockFactory.return_value.data_flow.get_node.return_value = mock_node
+            MockFactory.return_value.query.get_all_node_states_for_run.return_value = [state]
+            screen.on_tree_select("tfm-1")
+
+        content = screen.detail_panel.render_content()
+        assert "state-success" in content
+        assert "token-001" in content
+        assert "Success Reason:" in content
+        assert "mapped" in content
+        assert "Context After:" in content
+        assert "accepted" in content
 
     def test_select_nonexistent_node_clears_panel(self) -> None:
         """Selecting a node that doesn't exist in DB sets panel to None state."""

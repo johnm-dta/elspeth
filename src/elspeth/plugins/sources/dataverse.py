@@ -22,7 +22,9 @@ from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, S
 from elspeth.contracts.contexts import LifecycleContext, SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
+from elspeth.contracts.wire_visible_identity import reject_placeholder_value
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.clients.dataverse import (
     DataverseAuthConfig,
@@ -33,6 +35,7 @@ from elspeth.plugins.infrastructure.clients.dataverse import (
 )
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.sources.field_normalization import (
     FieldResolution,
     normalize_field_name,
@@ -118,13 +121,7 @@ class DataverseSourceConfig(DataPluginConfig):
     @classmethod
     def validate_environment_url_https(cls, v: str) -> str:
         """HTTPS required. Bearer tokens sent over plain HTTP would be unencrypted."""
-        parsed = urllib.parse.urlparse(v)
-        if parsed.scheme != "https":
-            raise ValueError(
-                f"environment_url must use HTTPS scheme, got {parsed.scheme!r}. "
-                f"Bearer tokens are sent in Authorization headers — HTTP would expose them in transit."
-            )
-        return v
+        return validate_credential_safe_https_url(v, field_name="environment_url")
 
     @field_validator("additional_domains")
     @classmethod
@@ -133,6 +130,30 @@ class DataverseSourceConfig(DataPluginConfig):
             for pattern in v:
                 validate_additional_domain(pattern)
         return v
+
+    @field_validator("entity")
+    @classmethod
+    def validate_entity_not_placeholder(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("entity cannot be empty")
+        return reject_placeholder_value(stripped, field_name="entity")
+
+    @field_validator("select")
+    @classmethod
+    def validate_select_not_placeholder(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        stripped_fields: list[str] = []
+        for index, select_name in enumerate(v):
+            if not select_name or not select_name.strip():
+                raise ValueError(f"select[{index}] cannot be empty")
+            stripped = select_name.strip()
+            reject_placeholder_value(stripped, field_name=f"select[{index}]")
+            stripped_fields.append(stripped)
+        return stripped_fields
 
     @model_validator(mode="after")
     def validate_query_mode(self) -> Self:
@@ -185,7 +206,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:3ba64a1228760240"
+    source_file_hash: str | None = "sha256:aa65d9f34a6b1e9a"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -719,3 +740,21 @@ class DataverseSource(BaseSource):
         if self._client is not None:
             self._client.close()
             self._client = None
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="dataverse",
+                issue_code=None,
+                summary="Load rows from a Microsoft Dataverse entity via OData. Paginated, credential-scoped, with audit-recorded query.",
+                composer_hints=(
+                    "Tier-3 boundary: record what Dataverse provided. Don't infer absent fields from siblings — record None and let consumers decide.",
+                    "Authentication is per-environment via DataverseAuthConfig — credentials wire through the secrets store, never inline in YAML.",
+                    "Choose query_mode 'fetchxml' for complex filters, 'odata' for simple field selection.",
+                    "The audit trail records the exact OData/FetchXML query, page count, and quarantine count — verify these are visible before declaring success.",
+                    "If you have been asked to generate source rows yourself, do not pick `dataverse` — this source queries a live Microsoft Dataverse environment. Switch to a local-blob source (`csv`, `json`, or `text`) via `create_blob` plus `set_source_from_blob`.",
+                    "Never synthesise an `environment_url`, entity name, OData filter, or FetchXML for content you authored — Dataverse is the source of truth for the queried entity and the audit row must point at a real environment, not invented identifiers.",
+                ),
+            )
+        return None

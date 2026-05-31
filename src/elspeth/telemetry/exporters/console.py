@@ -116,11 +116,13 @@ class ConsoleExporter:
             output=self._output,
         )
 
-    def export(self, event: TelemetryEvent) -> None:
+    def export(self, event: TelemetryEvent) -> bool | None:
         """Export a single telemetry event to the console.
 
         This method MUST NOT raise exceptions - telemetry failures should not
         crash the pipeline. Errors are logged internally.
+        Handled transport failures return False so TelemetryManager can account
+        for them without crashing the pipeline.
 
         Args:
             event: The telemetry event to export
@@ -142,6 +144,8 @@ class ConsoleExporter:
                 event_type=type(event).__name__,
                 error=str(e),
             )
+            return False
+        return None
 
     def _serialize_event(self, event: TelemetryEvent) -> dict[str, Any]:
         """Serialize event for JSON output with proper type handling.
@@ -219,11 +223,12 @@ class ConsoleExporter:
 
         return ", ".join(details)
 
-    def flush(self) -> None:
+    def flush(self) -> bool | None:
         """Flush any buffered output.
 
         For console output, this flushes the underlying stream to ensure
-        all output is visible immediately.
+        all output is visible immediately. Returns False for a handled
+        transport failure so TelemetryManager can account for it.
         """
         try:
             self._stream.flush()
@@ -235,6 +240,8 @@ class ConsoleExporter:
                 exporter=self._name,
                 error=str(e),
             )
+            return False
+        return None
 
     def close(self) -> None:
         """Release resources (no-op for console exporter).

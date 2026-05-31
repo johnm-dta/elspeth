@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "plugins/sources/stale_hash.py",
+    "fingerprint": "0c930a39a1a56457",
+    "line": 1,
+    "message": "plugins/sources/stale_hash.py (StaleHashSource): stale source_file_hash\n  declared: sha256:0000000000000000\n  expected: sha256:4ec5306f023aea85",
+    "rule_id": "PH3",
+    "severity": "error",
+    "suggestion": "Run the plugin hash fixer to refresh the stale source_file_hash declaration."
+  }
+]

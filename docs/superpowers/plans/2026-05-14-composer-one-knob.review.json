@@ -1,0 +1,238 @@
+{
+  "plan_file": "docs/superpowers/plans/2026-05-14-composer-one-knob.md",
+  "spec_file": "docs/superpowers/specs/2026-05-14-composer-one-knob-design.md",
+  "pass": 2,
+  "reviewed_at": "2026-05-14",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "verdict": "CHANGES_APPLIED_PENDING_REVIEW",
+  "summary": "Pass-2 blocking findings and required warnings were revised in place on 2026-05-14. Spec §7 now requires hidden-field rejection audit emission, the plan defines local helpers/fixtures for the previously undefined test setup, Task 11 uses the real guided emitter test path, the nullable return-path cases are covered by explicit Task 3/Task 14 tests, and Tasks 5/8 now use the same structural getattr/callable discriminated-plugin dispatch pattern. A targeted grep check found no remaining pass-2 no-go strings.",
+  "resolution_status": {
+    "updated_at": "2026-05-14",
+    "status": "pass_2_findings_addressed_pending_targeted_re_review",
+    "notes": [
+      "PASS2-BLK-1 resolved by amending spec §7 case 10 to require guided_hidden_field_rejected before 400.",
+      "PASS2-BLK-2 resolved by adding inline helper/fixture definitions for Tasks 8, 12, 13, and 17.",
+      "PASS2-BLK-3 resolved by replacing Task 11 emitter test path with tests/unit/web/composer/guided/test_emitters.py.",
+      "PASS2-WARN-1 resolved by adding explicit tests for §7 cases 1, 2, and 4 and narrowing the self-review claim.",
+      "PASS2-WARN-2 resolved by using getattr/callable dispatch consistently in Tasks 5 and 8."
+    ]
+  },
+  "prior_pass_summary": {
+    "pass_1_verdict": "CHANGES_REQUESTED",
+    "pass_1_blocking_findings_count": 8,
+    "resolved_in_pass_2": {
+      "reality_hallucinations": "12 of 12 resolved",
+      "architecture_blockers": "3 of 3 resolved (B-1, B-2, B-3)",
+      "systems_blockers": "3 of 3 resolved",
+      "quality_blockers": "4 of 6 fully resolved, 1 partial, 1 contradicted"
+    },
+    "regressions_introduced": "2 new reality blockers, 2 new quality blockers, 0 new architecture or systems blockers"
+  },
+  "blocking_findings": [
+    {
+      "id": "PASS2-BLK-1",
+      "title": "Spec/plan contradiction on hidden-field-rejection audit emission",
+      "sources": ["quality"],
+      "severity": "critical",
+      "likelihood": "certain",
+      "reversibility": "easy",
+      "priority_score": 12,
+      "confidence": "high",
+      "status": "resolved_by_2026_05_14_plan_patch",
+      "description": "Spec §7 case 10 previously contradicted Task 13 on whether hidden-field rejection should emit audit evidence.",
+      "evidence": [
+        "resolved spec §7 case 10: hidden-field rejection now emits guided_hidden_field_rejected before 400",
+        "plan Task 13: assertion that audit row is emitted remains aligned with spec",
+        "plan Task 13: helper call is now emit_hidden_field_rejected"
+      ],
+      "policy_assessment": "Plan's choice (emit audit) aligns with CLAUDE.md audit primacy principle. Spec's choice (no audit) is the divergent position. Recommend amending spec to match plan.",
+      "resolution": "Applied option (a): spec §7 case 10 now requires `guided_hidden_field_rejected` audit emission before the HTTP 400, matching Task 13 and the audit-primacy policy.",
+      "risk_if_not_addressed": "Implementation will diverge from spec; downstream audit-trail completeness claim will be inconsistent between spec text and runtime behavior."
+    },
+    {
+      "id": "PASS2-BLK-2",
+      "title": "Undefined test helper functions across multiple tasks",
+      "sources": ["reality", "quality"],
+      "severity": "high",
+      "likelihood": "certain",
+      "reversibility": "easy",
+      "priority_score": 12,
+      "confidence": "high",
+      "status": "resolved_by_2026_05_14_plan_patch",
+      "description": "Test helpers and fixtures were called in plan pseudocode but not defined. Independently flagged by Reality (WARN-A, WARN-D) and Quality (NEW-BLK-2, NEW-WARN-1).",
+      "instances": [
+        {"task": 8, "helper": "plugin_manager_with_broken_plugin", "line": 1298},
+        {"task": 12, "fixture": "session_with_step1_inspection_facts", "line": 1750},
+        {"task": 13, "helper": "session_at_step_3_llm and audit_events_for_session", "line": 1905},
+        {"task": 17, "helper": "make_plugin_manager_with_missing_metadata", "line": 2867}
+      ],
+      "resolution": "Inline helper/fixture definitions added for Tasks 8, 12, 13, and 17. The stale helper reference was superseded by the explicit `emit_hidden_field_rejected()` implementation target.",
+      "risk_if_not_addressed": "Tasks will fail at execution time with NameError; executor must improvise definitions, defeating plan-as-spec discipline."
+    },
+    {
+      "id": "PASS2-BLK-3",
+      "title": "Wrong file path in Task 11 emitter test references",
+      "sources": ["reality"],
+      "severity": "medium",
+      "likelihood": "certain",
+      "reversibility": "easy",
+      "priority_score": 9,
+      "confidence": "high",
+      "status": "resolved_by_2026_05_14_plan_patch",
+      "description": "Task 11 previously cited the unguided emitter test path; actual file is at `tests/unit/web/composer/guided/test_emitters.py`.",
+      "resolution": "All Task 11 emitter test references now use `tests/unit/web/composer/guided/test_emitters.py`.",
+      "risk_if_not_addressed": "Executor will create or edit the wrong file; tests will not be discovered or will collide with adjacent unrelated tests."
+    }
+  ],
+  "warnings": [
+    {
+      "id": "PASS2-WARN-1",
+      "title": "Self-review §7 case-coverage claim is false (recurrence of pass-1 pattern)",
+      "sources": ["reality", "quality"],
+      "severity": "medium",
+      "status": "resolved_by_2026_05_14_plan_patch",
+      "description": "Plan self-review overstated Task 3 coverage for the nullable return-path cases.",
+      "resolution": "Added Task 3 tests for cases 1 and 2, added Task 14 required-text clear coverage for case 4, and narrowed the self-review row to Task 3 cases 1-3 plus Task 14 case 4."
+    },
+    {
+      "id": "PASS2-WARN-2",
+      "title": "Inconsistent runtime-checkable Protocol dispatch (isinstance vs getattr/callable)",
+      "sources": ["architecture", "quality", "systems"],
+      "severity": "low",
+      "status": "resolved_by_2026_05_14_plan_patch",
+      "description": "Task 5 and Task 8 previously used different runtime detection patterns for discriminated plugins. Three reviewers independently caught this.",
+      "resolution": "Task 8 now uses the same `getattr(..., \"discriminated_variants\", None)` plus `callable(...)` dispatch pattern as Task 5; spec wording now describes structural Protocol behavior.",
+      "mitigation_present": "Defense-in-depth at startup catches mismatches; practical impact is low."
+    },
+    {
+      "id": "PASS2-WARN-3",
+      "title": "Task 8 attribute-name verification deferred to execution time",
+      "sources": ["architecture", "reality"],
+      "severity": "low",
+      "description": "Task 8 pseudocode uses `self._source_classes` before assignment; plan instructs executor to grep service.py before pasting (line 1388). Honest disclosure but execution-time bomb if executor skips the grep step.",
+      "resolution": "Either (a) verify attribute name during plan finalization and inline correct name, or (b) accept the documented mitigation."
+    },
+    {
+      "id": "PASS2-WARN-4",
+      "title": "DB-wipe language does not match project memory policy",
+      "sources": ["systems"],
+      "severity": "low",
+      "status": "resolved_by_2026_05_14_plan_patch",
+      "description": "Plan previously used ambiguous clearing wording instead of the literal sessions-DB deletion policy.",
+      "resolution": "Task 9 now states: existing persisted guided sessions using schema version 3 are intentionally incompatible; the operator deletes the sessions DB before deploy."
+    },
+    {
+      "id": "PASS2-WARN-5",
+      "title": "Stale file-structure reference for hidden-field rejection test",
+      "sources": ["reality"],
+      "severity": "low",
+      "description": "File structure section (line 66) lists wrong path for hidden-field rejection test. Task 13 itself uses correct path. Cosmetic stale reference.",
+      "resolution": "Update line 66 to match Task 13."
+    },
+    {
+      "id": "PASS2-WARN-6",
+      "title": "Task 13 KeyError catch discards triggering key info",
+      "sources": ["architecture"],
+      "severity": "low",
+      "description": "Task 13 line 1824 catches KeyError with `continue`, discarding info about which key triggered. Acceptable for guard pattern but loses diagnostic value.",
+      "resolution": "Capture the key in the except clause and include it in any subsequent emission/log; trivial change."
+    },
+    {
+      "id": "PASS2-WARN-7",
+      "title": "Phase C2 -> Phase D intermediate state not explicitly declared benign",
+      "sources": ["systems"],
+      "severity": "low",
+      "description": "Phase C2 reorder eliminates the regression window from pass 1, but the intermediate state between C2 completion and D start is not explicitly documented as benign. Documentation gap only.",
+      "resolution": "Add a one-line note to Phase C2 describing the intermediate state."
+    },
+    {
+      "id": "PASS2-WARN-8",
+      "title": "Self-review framing of spec §7 cases 5-8 is misleading",
+      "sources": ["quality"],
+      "severity": "low",
+      "description": "Cases 5-8 ARE forward-path tests covered by Tasks 2-3; the self-review framing is wrong but coverage exists. Cosmetic accuracy issue separate from PASS2-WARN-1."
+    }
+  ],
+  "convergence_findings": [
+    {
+      "topic": "Undefined helper functions",
+      "reviewers": ["reality", "quality"],
+      "consolidated_into": "PASS2-BLK-2"
+    },
+    {
+      "topic": "isinstance vs getattr/callable inconsistency",
+      "reviewers": ["architecture", "quality", "systems"],
+      "consolidated_into": "PASS2-WARN-2"
+    },
+    {
+      "topic": "Self-review accuracy as recurring process pattern",
+      "reviewers": ["reality", "quality"],
+      "passes_observed": [1, 2],
+      "consolidated_into": "PASS2-WARN-1 + process observation"
+    }
+  ],
+  "strengths": [
+    "All 12 reality hallucinations from pass 1 resolved",
+    "3 architecture blockers (B-1, B-2, B-3) resolved at root, not papered over",
+    "3 systems blockers resolved including Phase D atomic-commit protocol.py landing in Tasks 10 + 15",
+    "Phase C2 reorder eliminates the regression window flagged in pass 1",
+    "Phase D pre-commit gate complete: ruff + mypy + tier-model + freeze-guards",
+    "Freeze-guard contract honored throughout new dataclass introductions",
+    "4 of 6 quality blockers fully resolved including BLK-1 Hypothesis+golden coverage",
+    "Plan author shipped 86KB -> 106KB of useful expansion without bloat"
+  ],
+  "execution_recommendations": [
+    "Operator decides PASS2-BLK-1 spec/plan contradiction first - preferred direction is amend spec to require audit emission per CLAUDE.md audit primacy",
+    "Plan author resolves PASS2-BLK-2 by inlining helper/fixture definitions in the four named tasks",
+    "Plan author fixes PASS2-BLK-3 file path in Task 11 (3 occurrences)",
+    "Plan author resolves PASS2-WARN-1 by either adding spec §7 case 1/2/4 tests or correcting the self-review claim - strongly recommend adding the tests since the self-review pattern has now recurred",
+    "Plan author selects one DiscriminatedPlugin dispatch pattern (PASS2-WARN-2) and applies uniformly across Tasks 5 and 8",
+    "Other warnings can be addressed in-flight during execution",
+    "Pass 3 is NOT needed if the operator revises in place; the structural spine is sound and remaining defects are correctable without re-architecting"
+  ],
+  "process_observations": [
+    {
+      "observation": "Plan self-review accuracy is a recurring weak point",
+      "evidence": [
+        "Pass 1: §10 Hypothesis claim was false",
+        "Pass 2: §7 case-1-4 claim is still false (only case 3 is tested)"
+      ],
+      "recommendation": "Add a self-review verification step to the planning workflow: before declaring a self-review section complete, grep the plan body for the claimed coverage and confirm it exists. The claims-vs-content mismatch has now appeared in two consecutive passes."
+    }
+  ],
+  "reviewer_summaries": {
+    "reality": {
+      "verdict": "CHANGES_REQUESTED",
+      "prior_blockers_resolved": "12 of 12",
+      "new_blockers": 2,
+      "new_warnings": 4
+    },
+    "architecture": {
+      "verdict": "APPROVED_WITH_WARNINGS",
+      "prior_blockers_resolved": "3 of 3 (B-1, B-2, B-3)",
+      "prior_warnings_resolved": "6 of 7",
+      "new_blockers": 0,
+      "new_warnings": 3
+    },
+    "quality": {
+      "verdict": "CHANGES_REQUESTED",
+      "prior_blockers_resolved": "4 of 6 fully, 1 partial, 1 contradicted",
+      "prior_warnings_resolved": "8 of 10",
+      "new_blockers": 2,
+      "new_warnings": 3
+    },
+    "systems": {
+      "verdict": "APPROVED_WITH_WARNINGS",
+      "prior_blockers_resolved": "3 of 3",
+      "prior_warnings_resolved": "3 of 4",
+      "new_blockers": 0,
+      "new_warnings": 3,
+      "investigation_coverage": {
+        "addressed_at_root": [1, 2, 3, 5],
+        "deferred_explicit": [4, 6],
+        "partially_addressed": [7],
+        "open_not_regression": [8]
+      }
+    }
+  }
+}

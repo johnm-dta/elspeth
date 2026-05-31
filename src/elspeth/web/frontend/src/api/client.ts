@@ -10,14 +10,18 @@
 import type {
   ApiError,
   AuthConfig,
+  BlobCreationModalityWire,
   BlobMetadata,
   ChatMessage,
+  ComposerPreferences,
+  CompositionProposal,
   CompositionState,
   CompositionStateVersion,
   ComposerProgressSnapshot,
   ExecutionFanoutAck,
   ExecutionFanoutGuard,
   CancelRunResponse,
+  InlineSourceProvenance,
   PluginSchemaInfo,
   PluginSummary,
   Run,
@@ -30,7 +34,32 @@ import type {
   UserProfile,
   ValidationResult,
   SystemStatus,
+  MessageWithStateResponse,
 } from "@/types/index";
+import type {
+  GetGuidedResponse,
+  GuidedChatRequest,
+  GuidedChatResponse,
+  GuidedRespondRequest,
+  GuidedRespondResponse,
+} from "@/types/guided";
+import type {
+  InterpretationEvent,
+  InterpretationOptOutResponse,
+  InterpretationResolveRequest,
+  InterpretationResolveResponse,
+  ListInterpretationEventsResponse,
+  OptOutSummaryResponse,
+} from "@/types/interpretation";
+import type { RecoveryTranscriptRow } from "@/types/recovery";
+import type {
+  RunAuditStoryResponse,
+  TutorialOrphanCleanupResponse,
+  TutorialRunRequest,
+  TutorialRunResponse,
+  UserComposerPreferencesPayload,
+  UpdateUserComposerPreferencesPayload,
+} from "@/types/api";
 
 // ── Token Management ────────────────────────────────────────────────────────
 
@@ -44,7 +73,7 @@ function getToken(): string | null {
  * Build headers with auth token injection and optional content type.
  * Every authenticated request includes Authorization: Bearer {token}.
  */
-function authHeaders(contentType?: string): HeadersInit {
+export function authHeaders(contentType?: string): HeadersInit {
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) {
@@ -58,6 +87,20 @@ function authHeaders(contentType?: string): HeadersInit {
 
 // ── Response Parsing ────────────────────────────────────────────────────────
 
+function ownField(source: unknown, field: string): unknown {
+  if (typeof source !== "object" || source === null) {
+    return undefined;
+  }
+  if (!Object.prototype.hasOwnProperty.call(source, field)) {
+    return undefined;
+  }
+  return (source as Record<string, unknown>)[field];
+}
+
+function firstDefined<T>(primary: T | undefined, secondary: T | undefined): T | undefined {
+  return primary !== undefined ? primary : secondary;
+}
+
 /**
  * Parse a response. Throws ApiError for non-2xx status codes.
  *
@@ -70,14 +113,23 @@ function authHeaders(contentType?: string): HeadersInit {
  *   2. HTTP status code -- structural fallback
  *   3. detail text -- human-readable description
  */
-async function parseResponse<T>(response: Response): Promise<T> {
+export async function parseResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     // Global 401 interceptor -- trigger logout on any auth failure.
     // Dynamic import avoids circular dependency at module load time
     // (authStore imports from client, client imports authStore for logout).
+    //
+    // Skip the logout call when the store already shows no token. Otherwise a
+    // 401 from an unauthenticated request (e.g., a pre-login probe) calls
+    // logout() against an already-empty session — harmless on its own, but if
+    // the response arrives AFTER a successful login completes, it would wipe
+    // the freshly-acquired token. Guarding on token!==null defuses that race
+    // without changing the legitimate "token expired mid-session" path.
     if (response.status === 401) {
       const { useAuthStore } = await import("@/stores/authStore");
-      useAuthStore.getState().logout();
+      if (useAuthStore.getState().token !== null) {
+        await useAuthStore.getState().logout();
+      }
     }
 
     // Parse the error envelope. All backend errors use `detail` (not
@@ -89,6 +141,10 @@ async function parseResponse<T>(response: Response): Promise<T> {
     let providerStatusCode: number | undefined;
     let fanoutGuard: ExecutionFanoutGuard | undefined;
     let validationErrors: ApiError["validation_errors"];
+    let partialState: ApiError["partial_state"];
+    let failedTurn: ApiError["failed_turn"];
+    let partialStateSaveFailed: ApiError["partial_state_save_failed"];
+    let partialStateSaveError: ApiError["partial_state_save_error"];
     try {
       const body = await response.json();
       const nestedDetail =
@@ -101,7 +157,9 @@ async function parseResponse<T>(response: Response): Promise<T> {
           ? body.error_type
           : typeof nestedDetail?.error_type === "string"
             ? nestedDetail.error_type
-            : undefined;
+            : typeof nestedDetail?.code === "string"
+              ? nestedDetail.code
+              : undefined;
 
       if (typeof nestedDetail?.detail === "string") {
         detail = nestedDetail.detail;
@@ -131,6 +189,41 @@ async function parseResponse<T>(response: Response): Promise<T> {
 
       validationErrors =
         body.validation_errors ?? nestedDetail?.validation_errors;
+
+      const rawPartialState =
+        firstDefined(
+          ownField(body, "partial_state"),
+          ownField(nestedDetail, "partial_state"),
+        );
+      partialState = rawPartialState as ApiError["partial_state"];
+
+      const rawFailedTurn =
+        firstDefined(
+          ownField(body, "failed_turn"),
+          ownField(nestedDetail, "failed_turn"),
+        );
+      failedTurn = rawFailedTurn as ApiError["failed_turn"];
+
+      const rawPartialStateSaveFailed =
+        firstDefined(
+          ownField(body, "partial_state_save_failed"),
+          ownField(nestedDetail, "partial_state_save_failed"),
+        );
+      partialStateSaveFailed =
+        typeof rawPartialStateSaveFailed === "boolean"
+          ? rawPartialStateSaveFailed
+          : undefined;
+
+      const rawPartialStateSaveError =
+        firstDefined(
+          ownField(body, "partial_state_save_error"),
+          ownField(nestedDetail, "partial_state_save_error"),
+        );
+      partialStateSaveError =
+        typeof rawPartialStateSaveError === "string" ||
+        rawPartialStateSaveError === null
+          ? rawPartialStateSaveError
+          : undefined;
     } catch {
       // Response body wasn't JSON -- use statusText as detail fallback
     }
@@ -139,6 +232,10 @@ async function parseResponse<T>(response: Response): Promise<T> {
       status: response.status,
       detail,
       error_type: errorType,
+      partial_state: partialState,
+      failed_turn: failedTurn,
+      partial_state_save_failed: partialStateSaveFailed,
+      partial_state_save_error: partialStateSaveError,
       fanout_guard: fanoutGuard,
       provider_detail: providerDetail,
       provider_status_code: providerStatusCode,
@@ -208,8 +305,13 @@ export async function fetchSystemStatus(): Promise<SystemStatus> {
 // ── Sessions ────────────────────────────────────────────────────────────────
 
 /** List all sessions for the current user. */
-export async function fetchSessions(): Promise<Session[]> {
-  const response = await fetch("/api/sessions", {
+export async function fetchSessions(includeArchived = true): Promise<Session[]> {
+  const params = new URLSearchParams();
+  if (includeArchived) {
+    params.set("include_archived", "true");
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  const response = await fetch(`/api/sessions${query}`, {
     headers: authHeaders(),
   });
   return parseResponse<Session[]>(response);
@@ -233,6 +335,58 @@ export async function getSession(sessionId: string): Promise<Session> {
   return parseResponse<Session>(response);
 }
 
+/** Update the user-visible title for a session. */
+export async function renameSession(
+  sessionId: string,
+  title: string,
+): Promise<Session> {
+  const response = await fetch(`/api/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ title }),
+  });
+  return parseResponse<Session>(response);
+}
+
+/** Run the tutorial pipeline for an already-built tutorial session.
+ *
+ * Accepts an optional `AbortSignal` so the Turn 4 cancel button can abort
+ * an in-flight LLM call. Matches the signal convention used elsewhere in
+ * this module (see `fetchMessages`, `sendMessage`, etc.). */
+export async function runTutorialPipeline(
+  body: TutorialRunRequest,
+  signal?: AbortSignal,
+): Promise<TutorialRunResponse> {
+  const response = await fetch("/api/tutorial/run", {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse<TutorialRunResponse>(response);
+}
+
+/** Read the audit-story projection for a completed tutorial run. */
+export async function getRunAuditSummary(
+  sessionId: string,
+  runId: string,
+): Promise<RunAuditStoryResponse> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/runs/${runId}/audit-story`,
+    { headers: authHeaders() },
+  );
+  return parseResponse<RunAuditStoryResponse>(response);
+}
+
+/** Clean up orphaned tutorial sessions for the authenticated user. */
+export async function deleteTutorialOrphans(): Promise<TutorialOrphanCleanupResponse> {
+  const response = await fetch("/api/tutorial/orphans", {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  return parseResponse<TutorialOrphanCleanupResponse>(response);
+}
+
 /** Archive (soft-delete) a session. Backend returns 204 No Content. */
 export async function archiveSession(sessionId: string): Promise<void> {
   const response = await fetch(`/api/sessions/${sessionId}`, {
@@ -254,6 +408,25 @@ export async function fetchMessages(sessionId: string): Promise<ChatMessage[]> {
   return parseResponse<ChatMessage[]>(response);
 }
 
+/** Fetch the audit-grade recovery transcript for a failed compose turn. */
+export async function fetchRecoveryTranscript(
+  sessionId: string,
+  opts: { limit?: number; offset?: number } = {},
+): Promise<RecoveryTranscriptRow[]> {
+  const params = new URLSearchParams({
+    include_tool_rows: "true",
+    limit: String(opts.limit ?? 500),
+    offset: String(opts.offset ?? 0),
+  });
+  const response = await fetch(
+    `/api/sessions/${sessionId}/messages?${params}`,
+    {
+      headers: authHeaders(),
+    },
+  );
+  return parseResponse<RecoveryTranscriptRow[]>(response);
+}
+
 /** Get the latest provider-safe composer progress snapshot for a session. */
 export async function fetchComposerProgress(
   sessionId: string,
@@ -265,6 +438,103 @@ export async function fetchComposerProgress(
     },
   );
   return parseResponse<ComposerProgressSnapshot>(response);
+}
+
+/** Get composer trust and display preferences for a session. */
+export async function fetchComposerPreferences(
+  sessionId: string,
+): Promise<ComposerPreferences> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/composer/preferences`,
+    {
+      headers: authHeaders(),
+    },
+  );
+  return parseResponse<ComposerPreferences>(response);
+}
+
+/** Update composer trust and display preferences for a session. */
+export async function updateComposerPreferences(
+  sessionId: string,
+  body: Pick<ComposerPreferences, "trust_mode" | "density_default">,
+): Promise<ComposerPreferences> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/composer/preferences`,
+    {
+      method: "PATCH",
+      headers: authHeaders("application/json"),
+      body: JSON.stringify(body),
+    },
+  );
+  return parseResponse<ComposerPreferences>(response);
+}
+
+// ── Account-level composer preferences (Phase 1B) ──────────────────────────
+// Account-scoped row keyed by user_id. Distinct from the per-session
+// helpers above (trust_mode / density_default).
+
+/** Get the user's account-level composer preferences. */
+export async function fetchUserComposerPreferences(): Promise<UserComposerPreferencesPayload> {
+  const response = await fetch("/api/composer-preferences", {
+    headers: authHeaders(),
+  });
+  return parseResponse<UserComposerPreferencesPayload>(response);
+}
+
+/** Partial-update the user's account-level composer preferences. */
+export async function updateUserComposerPreferences(
+  payload: UpdateUserComposerPreferencesPayload,
+): Promise<UserComposerPreferencesPayload> {
+  const response = await fetch("/api/composer-preferences", {
+    method: "PATCH",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify(payload),
+  });
+  return parseResponse<UserComposerPreferencesPayload>(response);
+}
+
+/** List composition proposals for a session. */
+export async function fetchCompositionProposals(
+  sessionId: string,
+): Promise<CompositionProposal[]> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/proposals?status=pending`,
+    {
+      headers: authHeaders(),
+    },
+  );
+  return parseResponse<CompositionProposal[]>(response);
+}
+
+/** Accept a pending composition proposal and commit its resulting state. */
+export async function acceptCompositionProposal(
+  sessionId: string,
+  proposalId: string,
+): Promise<CompositionProposal> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/proposals/${proposalId}/accept`,
+    {
+      method: "POST",
+      headers: authHeaders("application/json"),
+    },
+  );
+  return parseResponse<CompositionProposal>(response);
+}
+
+/** Reject a pending composition proposal. */
+export async function rejectCompositionProposal(
+  sessionId: string,
+  proposalId: string,
+): Promise<CompositionProposal> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/proposals/${proposalId}/reject`,
+    {
+      method: "POST",
+      headers: authHeaders("application/json"),
+      body: JSON.stringify({ reason: null }),
+    },
+  );
+  return parseResponse<CompositionProposal>(response);
 }
 
 /**
@@ -279,7 +549,7 @@ export async function sendMessage(
   content: string,
   stateId?: string,
   signal?: AbortSignal,
-): Promise<{ message: ChatMessage; state: CompositionState | null }> {
+): Promise<MessageWithStateResponse> {
   const body: { content: string; state_id?: string } = { content };
   if (stateId) {
     body.state_id = stateId;
@@ -290,9 +560,7 @@ export async function sendMessage(
     body: JSON.stringify(body),
     signal,
   });
-  return parseResponse<{ message: ChatMessage; state: CompositionState | null }>(
-    response,
-  );
+  return parseResponse<MessageWithStateResponse>(response);
 }
 
 /** Re-run the composer without inserting a new user message.
@@ -300,15 +568,103 @@ export async function sendMessage(
 export async function recompose(
   sessionId: string,
   signal?: AbortSignal,
-): Promise<{ message: ChatMessage; state: CompositionState | null }> {
+): Promise<MessageWithStateResponse> {
   const response = await fetch(`/api/sessions/${sessionId}/recompose`, {
     method: "POST",
     headers: authHeaders("application/json"),
     signal,
   });
-  return parseResponse<{ message: ChatMessage; state: CompositionState | null }>(
-    response,
-  );
+  return parseResponse<MessageWithStateResponse>(response);
+}
+
+/**
+ * Fetch the current guided-session state for a session.
+ *
+ * Returns the active GuidedSession (step + history + terminal), the
+ * server-emitted next turn payload (if any), and the current composition
+ * state.  When no guided session has started for the session, the server
+ * returns an in-memory initial GuidedSession and Step 1 turn without creating
+ * a composition-state version.
+ */
+export async function getGuided(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<GetGuidedResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided`, {
+    method: "GET",
+    headers: authHeaders(),
+    signal,
+  });
+  return parseResponse<GetGuidedResponse>(response);
+}
+
+/**
+ * Post a user response to the active guided turn.
+ *
+ * Server consumes the response, advances the state machine, and returns
+ * the replacement GuidedSession + next turn (or terminal state).  The
+ * client is expected to atomically replace its cached guided state with
+ * the response shape — no optimistic updates (spec §7.3).
+ */
+export async function respondGuided(
+  sessionId: string,
+  body: GuidedRespondRequest,
+  signal?: AbortSignal,
+): Promise<GuidedRespondResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/respond`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse<GuidedRespondResponse>(response);
+}
+
+/**
+ * Re-enter guided mode after a deliberate user exit to freeform.
+ *
+ * Server clears the reversible exited_to_freeform/user_pressed_exit terminal
+ * and returns the same envelope shape as GET /guided.
+ */
+export async function reenterGuided(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<GetGuidedResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/reenter`, {
+    method: "POST",
+    headers: authHeaders(),
+    signal,
+  });
+  return parseResponse<GetGuidedResponse>(response);
+}
+
+/**
+ * Post a free-text chat message scoped to the user's current wizard step.
+ *
+ * Most chat is advisory: the server invokes the per-step chat solver with
+ * the step-scoped skill briefing and returns the LLM's reply. Step 1 source
+ * chat can also resolve a complete inline source request and return updated
+ * `next_turn` / `composition_state` fields. Server-side: see
+ * _guided_step_chat.solve_step_chat_with_auto_drop; on transient LLM failure
+ * the server returns 200 with a synthetic "I'm unavailable" message rather
+ * than failing the request.
+ *
+ * The `step_index` carried in the body lets the server detect that the
+ * wizard has advanced under the client (returns 409) so a stale chat
+ * does not arrive at the wrong step's skill briefing.
+ */
+export async function chatGuided(
+  sessionId: string,
+  body: GuidedChatRequest,
+  signal?: AbortSignal,
+): Promise<GuidedChatResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/chat`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse<GuidedChatResponse>(response);
 }
 
 /** Fork a session from a specific user message. */
@@ -625,6 +981,44 @@ export async function listBlobs(sessionId: string): Promise<BlobMetadata[]> {
   return parseResponse<BlobMetadata[]>(response);
 }
 
+/**
+ * Wire → display translation for the inline-blob creation modality
+ * (Phase 5a Task 2.5). The server records the modality in snake_case
+ * (matching the SQL CHECK constraint); the frontend's
+ * `InlineSourceSummary.provenance` discriminant uses the hyphenated form
+ * so URL-fragment routing and aria-label rendering work without a
+ * second normalisation step. This adapter is the SINGLE translation
+ * point — no second mapping in the store, no third one in a component.
+ *
+ * The mapping is exhaustive over `BlobCreationModalityWire`; a future
+ * enum extension at the server forces both `BlobCreationModalityWire`
+ * and `InlineSourceProvenance` to widen, and the TypeScript exhaustive
+ * `never` arm here turns into a compile error rather than silently
+ * dropping into the default branch. That's the discoverability
+ * mechanism that lets a future change cascade through both wire and
+ * display layers in the same commit.
+ */
+export function toInlineSourceProvenance(
+  wire: BlobCreationModalityWire,
+): InlineSourceProvenance {
+  switch (wire) {
+    case "verbatim":
+      return "verbatim";
+    case "llm_generated":
+      return "llm-generated";
+    case "disambiguated":
+      return "disambiguated";
+    case "llm_generated_then_amended":
+      return "llm-generated-then-amended";
+    default: {
+      const _exhaustive: never = wire;
+      throw new Error(
+        `Unhandled BlobCreationModalityWire value: ${String(_exhaustive)}`,
+      );
+    }
+  }
+}
+
 /** Get metadata for a single blob. */
 export async function getBlobMetadata(
   sessionId: string,
@@ -717,3 +1111,147 @@ export async function deleteSecret(name: string): Promise<void> {
     await parseResponse<never>(response);
   }
 }
+
+// ── Interpretation events (Phase 5b) ───────────────────────────────────────
+//
+// HTTP surface mirroring the four routes in
+// src/elspeth/web/sessions/routes.py (Phase 5b Tasks 6 + 7):
+//
+//   GET  /api/sessions/{id}/interpretations[?status=pending|all]
+//   POST /api/sessions/{id}/interpretations/{event_id}/resolve
+//   POST /api/sessions/{id}/interpretations/opt_out
+//   GET  /api/sessions/{id}/interpretations/opt_out_summary
+//
+// Error envelopes:
+// - 422 (validation, e.g. amended_value missing when choice="amended") flows
+//   through parseResponse and surfaces as an ApiError with status: 422.
+// - 404 (session or event not found, or 404 on IDOR-deflected access) flows
+//   through parseResponse and surfaces as an ApiError with status: 404.
+// - 409 (already-resolved event, or conflict between concurrent resolves)
+//   flows through parseResponse and surfaces as an ApiError with status: 409.
+//
+// Per the existing client convention, all four functions throw the typed
+// ApiError envelope; callers branch on error_type / status code, not on
+// detail text.
+
+/**
+ * List interpretation events for a session.
+ *
+ * `status` selects the row subset:
+ *   - "pending" — only choice="pending" rows (active review affordances).
+ *   - "all"     — every row regardless of choice (for audit-readiness
+ *                 counts and the post-resolve event list).
+ *
+ * The backend default is "all"; this client mirrors that default so the
+ * common case (fetch everything on session load for the readiness panel)
+ * needs no explicit argument.
+ */
+export async function listInterpretationEvents(
+  sessionId: string,
+  status: "pending" | "all" = "all",
+  signal?: AbortSignal,
+): Promise<InterpretationEvent[]> {
+  // Use URLSearchParams to handle the query-string boundary cleanly: it
+  // does percent-encoding correctly for any future status-value extension
+  // and keeps the call site free of manual string concatenation.
+  const qs = new URLSearchParams({ status });
+  const response = await fetch(
+    `/api/sessions/${sessionId}/interpretations?${qs.toString()}`,
+    {
+      method: "GET",
+      headers: authHeaders(),
+      signal,
+    },
+  );
+  const body = await parseResponse<ListInterpretationEventsResponse>(response);
+  return body.events;
+}
+
+/**
+ * Resolve a single interpretation event.
+ *
+ * `body.choice` is narrowed to the two user-driven values
+ * (accepted_as_drafted, amended) — opt-out goes through a separate route,
+ * and pending/abandoned are not user resolve actions.
+ *
+ * The response returns the resolved event row PLUS the new composition
+ * state produced by patching the affected LLM transform.  Single-envelope
+ * shape so the caller can update its event-list view and
+ * composition-state view atomically.
+ */
+export async function resolveInterpretation(
+  sessionId: string,
+  eventId: string,
+  body: InterpretationResolveRequest,
+  signal?: AbortSignal,
+): Promise<InterpretationResolveResponse> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/interpretations/${eventId}/resolve`,
+    {
+      method: "POST",
+      headers: authHeaders("application/json"),
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return parseResponse<InterpretationResolveResponse>(response);
+}
+
+/**
+ * Record the per-session "stop asking about interpretations" decision.
+ *
+ * No request body: the route is a discrete user decision, parameterised
+ * only by the session ID and the authenticated actor (carried by the
+ * auth middleware).  On success the backend (a) sets the session's
+ * interpretation_review_disabled flag and (b) writes an opt-out row to
+ * interpretation_events_table with choice='opted_out' and
+ * interpretation_source='auto_interpreted_opt_out'.
+ */
+export async function optOutOfInterpretations(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<InterpretationOptOutResponse> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/interpretations/opt_out`,
+    {
+      method: "POST",
+      headers: authHeaders("application/json"),
+      // The route accepts an empty body; sending "{}" rather than omitting
+      // body entirely so the Content-Type: application/json header has a
+      // matching payload (some HTTP intermediaries reject the inverse).
+      body: "{}",
+      signal,
+    },
+  );
+  return parseResponse<InterpretationOptOutResponse>(response);
+}
+
+/**
+ * Retroactive audit of auto-baked interpretations (F-22).
+ *
+ * After a session has opted out, the composer-LLM continues to auto-bake
+ * interpretations.  This route lets the user retroactively review every
+ * auto-baked event whose interpretation_source is auto_interpreted_opt_out
+ * or auto_interpreted_no_surfaces.  user_approved rows are excluded; the
+ * standard list route is the right surface for those.
+ */
+export async function getInterpretationOptOutSummary(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<InterpretationEvent[]> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/interpretations/opt_out_summary`,
+    {
+      method: "GET",
+      headers: authHeaders(),
+      signal,
+    },
+  );
+  const body = await parseResponse<OptOutSummaryResponse>(response);
+  return body.events;
+}
+
+export {
+  fetchAuditReadiness,
+  fetchAuditReadinessExplain,
+} from "./auditReadiness";

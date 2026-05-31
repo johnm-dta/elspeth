@@ -9,13 +9,17 @@ GET /me returns the full UserProfile for any auth provider.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from typing import cast
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from elspeth.contracts.auth import AuthProviderType
 from elspeth.web.async_workers import run_sync_in_worker
+from elspeth.web.auth.audit import AuthAuditWriter, classify_authentication_failure
 from elspeth.web.auth.local import LocalAuthProvider
 from elspeth.web.auth.middleware import get_current_user
-from elspeth.web.auth.models import AuthenticationError, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.protocol import AuthProvider, CredentialAuthProvider
 from elspeth.web.config import WebSettings
 from elspeth.web.middleware.rate_limit import check_auth_rate_limit
@@ -78,11 +82,21 @@ class UserProfileResponse(_StrictResponse):
 class AuthConfigResponse(_StrictResponse):
     """Response for GET /api/auth/config."""
 
-    provider: str
+    provider: AuthProviderType
     registration_mode: str
     oidc_issuer: str | None = None
     oidc_client_id: str | None = None
     authorization_endpoint: str | None = None
+
+
+def _mark_token_response_uncacheable(response: Response) -> None:
+    """Bearer-token responses must not be retained by shared or browser caches."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+
+def _auth_audit_recorder(request: Request) -> AuthAuditWriter:
+    return cast(AuthAuditWriter, request.app.state.auth_audit_recorder)
 
 
 def create_auth_router() -> APIRouter:
@@ -93,6 +107,7 @@ def create_auth_router() -> APIRouter:
     async def login(
         body: LoginRequest,
         request: Request,
+        response: Response,
         _rate_limit: None = Depends(check_auth_rate_limit),
     ) -> TokenResponse:
         """Authenticate with username/password (local auth only).
@@ -112,14 +127,38 @@ def create_auth_router() -> APIRouter:
         try:
             token = await provider.login(body.username, body.password)
         except AuthenticationError as exc:
+            recorder = _auth_audit_recorder(request)
+            recorder.record_login_failure(
+                request,
+                provider=settings.auth_provider,
+                username=body.username,
+                failure_category="invalid_credentials",
+            )
             raise HTTPException(status_code=401, detail=exc.detail) from exc
 
+        recorder = _auth_audit_recorder(request)
+        recorder.record_login_success(
+            request,
+            provider=settings.auth_provider,
+            user_id=body.username,
+            username=body.username,
+        )
+        recorder.record_token_issued(
+            request,
+            provider=settings.auth_provider,
+            user_id=body.username,
+            username=body.username,
+            access_token=token,
+            issuance_path="login",
+        )
+        _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
     @router.post("/register", response_model=TokenResponse)
     async def register(
         body: RegisterRequest,
         request: Request,
+        response: Response,
         _rate_limit: None = Depends(check_auth_rate_limit),
     ) -> TokenResponse:
         """Register a new user account (local auth, open registration only).
@@ -154,12 +193,22 @@ def create_auth_router() -> APIRouter:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         token = await provider.login(body.username, body.password)
+        recorder = _auth_audit_recorder(request)
+        recorder.record_token_issued(
+            request,
+            provider=settings.auth_provider,
+            user_id=body.username,
+            username=body.username,
+            access_token=token,
+            issuance_path="register",
+        )
+        _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=token)
 
     @router.post("/token", response_model=TokenResponse)
     async def refresh_token(
         request: Request,
-        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+        response: Response,
     ) -> TokenResponse:
         """Re-issue a JWT from a valid existing token (local auth only).
 
@@ -169,6 +218,8 @@ def create_auth_router() -> APIRouter:
         settings: WebSettings = request.app.state.settings
         if settings.auth_provider != "local":
             raise HTTPException(status_code=404, detail="Not found")
+
+        user = await get_current_user(request)
 
         # Extract iat from claims parsed by the auth middleware.
         # The middleware decodes claims without signature verification for
@@ -180,13 +231,27 @@ def create_auth_router() -> APIRouter:
         claims = request.state.auth_claims
         if claims is None:
             raise HTTPException(status_code=401, detail="Token claims could not be parsed — re-authenticate")
-        original_iat: int | None = claims.get("iat")
+        if "iat" not in claims:
+            raise HTTPException(status_code=401, detail="Token missing required iat claim — re-authenticate")
+        original_iat = claims["iat"]
+        if type(original_iat) is not int:
+            raise HTTPException(status_code=401, detail="Token missing required iat claim — re-authenticate")
 
         provider: CredentialAuthProvider = request.app.state.auth_provider
         try:
             new_token = await provider.refresh(user.user_id, user.username, original_iat=original_iat)
         except AuthenticationError as exc:
             raise HTTPException(status_code=401, detail=exc.detail) from exc
+        recorder = _auth_audit_recorder(request)
+        recorder.record_token_issued(
+            request,
+            provider=settings.auth_provider,
+            user_id=user.user_id,
+            username=user.username,
+            access_token=new_token,
+            issuance_path="refresh",
+        )
+        _mark_token_response_uncacheable(response)
         return TokenResponse(access_token=new_token)
 
     @router.get("/config", response_model=AuthConfigResponse)
@@ -219,12 +284,35 @@ def create_auth_router() -> APIRouter:
         # get_user_info() decodes it again to extract profile claims.
         # This is intentional — the middleware returns UserIdentity (minimal),
         # while /me needs the full UserProfile with groups/email/display_name.
+        settings: WebSettings = request.app.state.settings
         token: str = request.state.auth_token
         auth_provider: AuthProvider = request.app.state.auth_provider
 
         try:
             profile = await auth_provider.get_user_info(token)
+        except AuthProviderUnavailable as exc:
+            recorder = _auth_audit_recorder(request)
+            recorder.record_auth_failure(
+                request,
+                provider=settings.auth_provider,
+                failure_category="provider_unavailable",
+                failure_stage="profile_lookup",
+                user_id=user.user_id,
+                username=user.username,
+                exception_class=type(exc).__name__,
+            )
+            raise HTTPException(status_code=503, detail=exc.detail) from exc
         except AuthenticationError as exc:
+            recorder = _auth_audit_recorder(request)
+            recorder.record_auth_failure(
+                request,
+                provider=settings.auth_provider,
+                failure_category=classify_authentication_failure(exc),
+                failure_stage="profile_lookup",
+                user_id=user.user_id,
+                username=user.username,
+                exception_class=type(exc).__name__,
+            )
             raise HTTPException(status_code=401, detail=exc.detail) from exc
 
         return UserProfileResponse(

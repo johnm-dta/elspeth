@@ -15,13 +15,9 @@ Trust-tier notes
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from elspeth.contracts.freeze import require_int
-
-if TYPE_CHECKING:
-    from elspeth.contracts.engine import BufferEntry
-    from elspeth.contracts.results import TransformResult
 
 
 class NodeStateContext(Protocol):
@@ -33,6 +29,14 @@ class NodeStateContext(Protocol):
     """
 
     def to_dict(self) -> dict[str, Any]: ...
+
+
+class QueryOrderEntryInput(Protocol):
+    """Structural view of reorder-buffer entries needed for audit ordering."""
+
+    submit_index: int
+    complete_index: int
+    buffer_wait_ms: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +128,7 @@ class PoolExecutionContext:
     def from_executor_stats(
         cls,
         stats: dict[str, Any],
-        entries: list[BufferEntry[TransformResult]],
+        entries: list[QueryOrderEntryInput],
     ) -> PoolExecutionContext:
         """Build from PooledExecutor.get_stats() and reorder buffer entries.
 
@@ -202,18 +206,95 @@ class AggregationFlushContext:
     Replaces the untyped ``dict[str, Any]`` constructed in aggregation
     executor code.  Follows the same pattern as ``PoolExecutionContext``
     (this module) and ``CoalesceMetadata`` (commit 4f7e43be).
+
+    The flush-level counters (``flush_index``, ``rows_seen_total``,
+    ``row_start``, ``row_end``, ``is_end_of_source``) mirror the same
+    fields on :class:`AggregationBatchContext` so the audit trail records
+    the exact pagination metadata that the batch-aware transform saw.
     """
 
     trigger_type: str
     buffer_size: int
     batch_id: str
+    flush_index: int
+    rows_seen_total: int
+    row_start: int
+    row_end: int
+    is_end_of_source: bool
 
     def __post_init__(self) -> None:
         require_int(self.buffer_size, "buffer_size", min_value=0)
+        require_int(self.flush_index, "flush_index", min_value=1)
+        require_int(self.rows_seen_total, "rows_seen_total", min_value=1)
+        require_int(self.row_start, "row_start", min_value=1)
+        require_int(self.row_end, "row_end", min_value=1)
+        if self.row_end < self.row_start:
+            raise ValueError(f"AggregationFlushContext.row_end ({self.row_end}) must be >= row_start ({self.row_start})")
+        if self.rows_seen_total < self.row_end:
+            raise ValueError(f"AggregationFlushContext.rows_seen_total ({self.rows_seen_total}) must be >= row_end ({self.row_end})")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "trigger_type": self.trigger_type,
             "buffer_size": self.buffer_size,
             "batch_id": self.batch_id,
+            "flush_index": self.flush_index,
+            "rows_seen_total": self.rows_seen_total,
+            "row_start": self.row_start,
+            "row_end": self.row_end,
+            "is_end_of_source": self.is_end_of_source,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AggregationBatchContext:
+    """Metadata about the aggregation flush currently executing.
+
+    Injected on :class:`elspeth.contracts.plugin_context.PluginContext`
+    immediately before a batch-aware transform's ``process()`` is called,
+    and cleared afterwards (both on the success cleanup path and on the
+    failure cleanup path). Batch-aware transforms that need durable
+    pagination metadata (flush_index, row_start, row_end, etc.) read it
+    from ``ctx.aggregation_batch`` rather than maintaining their own
+    uncheckpointed counters.
+
+    The counters (``flush_index``, ``rows_seen_total``) are owned by
+    :class:`AggregationExecutor` and are persisted in the aggregation
+    checkpoint so they survive crash recovery.
+    """
+
+    trigger_type: str
+    batch_id: str
+    batch_size: int
+    flush_index: int
+    rows_seen_total: int
+    row_start: int
+    row_end: int
+    is_end_of_source: bool
+
+    def __post_init__(self) -> None:
+        if not self.trigger_type:
+            raise ValueError("AggregationBatchContext.trigger_type must not be empty")
+        if not self.batch_id:
+            raise ValueError("AggregationBatchContext.batch_id must not be empty")
+        require_int(self.batch_size, "batch_size", min_value=1)
+        require_int(self.flush_index, "flush_index", min_value=1)
+        require_int(self.rows_seen_total, "rows_seen_total", min_value=1)
+        require_int(self.row_start, "row_start", min_value=1)
+        require_int(self.row_end, "row_end", min_value=1)
+        if self.row_end < self.row_start:
+            raise ValueError(f"AggregationBatchContext.row_end ({self.row_end}) must be >= row_start ({self.row_start})")
+        if self.rows_seen_total < self.row_end:
+            raise ValueError(f"AggregationBatchContext.rows_seen_total ({self.rows_seen_total}) must be >= row_end ({self.row_end})")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trigger_type": self.trigger_type,
+            "batch_id": self.batch_id,
+            "batch_size": self.batch_size,
+            "flush_index": self.flush_index,
+            "rows_seen_total": self.rows_seen_total,
+            "row_start": self.row_start,
+            "row_end": self.row_end,
+            "is_end_of_source": self.is_end_of_source,
         }

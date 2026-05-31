@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "bad.py",
+    "fingerprint": "d23b59de28e369c8",
+    "line": 5,
+    "message": "Frozen dataclass 'Example' has container fields ['data'] but no __post_init__",
+    "rule_id": "FG3",
+    "severity": "error",
+    "suggestion": "Add __post_init__ with freeze_fields(self, 'field1', 'field2', ...) for container fields"
+  }
+]

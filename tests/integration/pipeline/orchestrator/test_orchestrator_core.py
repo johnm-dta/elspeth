@@ -35,6 +35,7 @@ class DoubleTransform(BaseTransform):
     """Transform that doubles a value field."""
 
     name = "double"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -54,6 +55,7 @@ class AddOneTransform(BaseTransform):
     """Transform that adds 1 to a value field."""
 
     name = "add_one"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -70,6 +72,7 @@ class MultiplyTwoTransform(BaseTransform):
     """Transform that multiplies value by 2."""
 
     name = "multiply_two"
+    determinism = Determinism.DETERMINISTIC
     input_schema = _TestSchema
     output_schema = _TestSchema
 
@@ -108,6 +111,31 @@ class ValidationErrorAfterValidRowSource(_TestSourceBase):
         )
 
 
+class LoadTrackingSource(ListSource):
+    """List source that records whether the processing loop reached load()."""
+
+    determinism = Determinism.IO_READ
+
+    def __init__(self, data: list[dict[str, Any]]) -> None:
+        super().__init__(data)
+        self.load_started = False
+
+    def load(self, ctx: Any) -> Any:
+        self.load_started = True
+        yield from super().load(ctx)
+
+
+class RuntimePreflightFailingTransform(PassTransform):
+    """Transform whose runtime preflight fails before source iteration."""
+
+    name = "runtime_preflight_failing"
+    determinism = Determinism.DETERMINISTIC
+    requires_runtime_preflight = True
+
+    def runtime_preflight(self, ctx: Any) -> None:
+        raise RuntimeError("pre_flight_failed: provider auth exploded")
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -137,6 +165,44 @@ class TestOrchestrator:
         assert run_result.rows_processed == 3
         assert len(sink.results) == 3
         assert sink.results[0] == {"value": 1, "doubled": 2}
+
+    def test_runtime_preflight_failure_aborts_before_source_load(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """Runtime preflight failures must fail the run before any row work starts."""
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        source = LoadTrackingSource([{"value": 1}])
+        transform = RuntimePreflightFailingTransform()
+        transform.on_success = "default"
+        sink = CollectSink()
+        run_id = "run-runtime-preflight-fails-before-load"
+
+        config = PipelineConfig(
+            source=as_source(source),
+            transforms=[as_transform(transform)],
+            sinks={"default": as_sink(sink)},
+        )
+
+        orchestrator = Orchestrator(landscape_db)
+        with pytest.raises(RuntimeError, match="pre_flight_failed: provider auth exploded"):
+            orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store, run_id=run_id)
+
+        assert source.load_started is False
+        assert sink.results == []
+
+        factory = make_factory(landscape_db)
+        run_row = factory.run_lifecycle.get_run(run_id)
+        assert run_row is not None
+        assert run_row.status == RunStatus.FAILED
+
+        operations = factory.execution.get_operations_for_run(run_id)
+        runtime_preflight_ops = [op for op in operations if op.operation_type == "runtime_preflight"]
+        assert len(runtime_preflight_ops) == 1
+        operation = runtime_preflight_ops[0]
+        assert operation.node_id == transform.node_id
+        assert operation.status == "failed"
+        assert operation.error_message is not None
+        assert "pre_flight_failed" in operation.error_message
+        assert "provider auth exploded" in operation.error_message
 
     def test_source_validation_error_after_transform_is_attributed_to_source_node(self, landscape_db: LandscapeDB, payload_store) -> None:
         """Later generator-step validation errors must not inherit transform node_id."""
@@ -290,7 +356,11 @@ class TestOrchestrator:
         """Traversal context must preserve graph step order for non-terminal coalesce nodes."""
         from elspeth.contracts.types import CoalesceName, GateName
         from elspeth.core.config import CoalesceSettings, GateSettings
-        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+        from elspeth.engine.orchestrator import PipelineConfig
+        from elspeth.engine.orchestrator.graph_wiring import (
+            assign_plugin_node_ids,
+            build_dag_traversal_context,
+        )
 
         source = ListSource([{"value": 1}], on_success="source_sink")
         transform = PassTransform()
@@ -332,8 +402,7 @@ class TestOrchestrator:
         source_id = graph.get_source()
         assert source_id is not None
 
-        orchestrator = Orchestrator(landscape_db)
-        orchestrator._assign_plugin_node_ids(
+        assign_plugin_node_ids(
             source=config.source,
             transforms=config.transforms,
             sinks=config.sinks,
@@ -347,7 +416,7 @@ class TestOrchestrator:
         downstream_gate_node_id = graph.get_config_gate_id_map()[GateName("terminal_gate")]
         assert graph_step_map[coalesce_node_id] < graph_step_map[downstream_gate_node_id]
 
-        traversal = orchestrator._build_dag_traversal_context(
+        traversal = build_dag_traversal_context(
             graph=graph,
             config=config,
             config_gate_id_map=graph.get_config_gate_id_map(),
@@ -462,10 +531,13 @@ class TestOrchestratorEmptyPipeline:
         orchestrator = Orchestrator(landscape_db)
         run_result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
 
-        # All rows fail source validation and are quarantined: no
-        # success indicator, only failure indicator (rows_quarantined > 0)
-        # — predicate correctly returns FAILED.
-        assert run_result.status == RunStatus.FAILED
+        # All rows fail source validation and are quarantined. Per
+        # CLAUDE.md Tier-3 data manifesto, quarantine is a clean terminal
+        # outcome — the pipeline made a deliberate classification on every
+        # row. With ``terminal_clean_indicator`` satisfied via quarantine
+        # and no uncaught ``failure_indicator``, the predicate returns
+        # COMPLETED_WITH_FAILURES rather than FAILED.
+        assert run_result.status == RunStatus.COMPLETED_WITH_FAILURES
         assert run_result.rows_processed == 2
         assert run_result.rows_quarantined == 2
         assert len(default_sink.results) == 0

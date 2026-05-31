@@ -263,6 +263,10 @@ class TokenManager:
         # CRITICAL: Use deepcopy to prevent nested mutable objects from being
         # shared across forked children. Shallow copy would cause mutations in
         # one branch to leak to siblings, breaking audit trail integrity.
+        #
+        # resume_attempt_offset and resume_checkpoint_id are intentionally NOT
+        # inherited here. Fork children mint new token_ids with no run-1 node_states,
+        # so attempt=0 is correct and they must not inherit the parent's resume offset.
         child_infos = [
             TokenInfo(
                 row_id=parent_token.row_id,
@@ -306,12 +310,24 @@ class TokenManager:
 
         step = self._step_resolver(node_id)
 
+        # Pass the merged row dict and its contract so the envelope is persisted
+        # atomically with the coalesced token INSERT (epoch 11: token_data_ref).
+        # merged_data is a PipelineRow; .to_dict() is mandated over dict(row).
+        # merged_contract = merged_data.contract — the contract the PipelineRow carries
+        # (set by the coalesce executor after merging the branch contracts).
         merged = self._data_flow.coalesce_tokens(
             parent_refs=[TokenRef(token_id=p.token_id, run_id=run_id) for p in parents],
             row_id=row_id,
+            merged_payload=merged_data.to_dict(),
+            merged_contract=merged_data.contract,
             step_in_pipeline=step,
         )
 
+        # resume_attempt_offset and resume_checkpoint_id are intentionally NOT
+        # inherited here. The merged token is a brand-new token_id with no run-1
+        # node_states, so attempt=0 is correct and it must not inherit the parent
+        # branches' resume offsets. (The branch tokens' coalesce node_states already
+        # carry the provenance marker for the arriving tokens.)
         return TokenInfo(
             row_id=row_id,
             token_id=merged.token_id,
@@ -363,12 +379,18 @@ class TokenManager:
                 f"Contract mode={output_contract.mode}, locked={output_contract.locked}"
             )
 
-        # Delegate to recorder which handles DB operations and parent linking
+        # Delegate to recorder which handles DB operations and parent linking.
+        # Pass expanded_rows as child_payloads and output_contract so each child's
+        # {data, contract} envelope is persisted atomically with its token INSERT
+        # (epoch 11: token_data_ref). output_contract is the locked contract from
+        # TransformResult.contract, shared by all expanded children.
+        # expanded_rows are already plain dicts (transform output) — no .to_dict() needed.
         step = self._step_resolver(node_id)
         db_children, expand_group_id = self._data_flow.expand_token(
             parent_ref=TokenRef(token_id=parent_token.token_id, run_id=run_id),
             row_id=parent_token.row_id,
-            count=len(expanded_rows),
+            child_payloads=expanded_rows,
+            output_contract=output_contract,
             step_in_pipeline=step,
             record_parent_outcome=record_parent_outcome,
         )
@@ -380,6 +402,10 @@ class TokenManager:
         # shared across expanded children. Same reasoning as fork_token - without
         # this, mutations in one sibling leak to others, corrupting audit trail.
         # Bug fix: expand_token was sharing row_data references across tokens
+        #
+        # resume_attempt_offset and resume_checkpoint_id are intentionally NOT
+        # inherited here. Expand children mint new token_ids with no run-1 node_states,
+        # so attempt=0 is correct and they must not inherit the parent's resume offset.
         child_infos = [
             TokenInfo(
                 row_id=parent_token.row_id,

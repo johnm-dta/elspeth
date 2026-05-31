@@ -57,8 +57,14 @@ class TestBatchClassifierMetrics:
         assert result.row["missing_count"] == 0
         assert result.row["accuracy"] == 0.5
         assert tuple(result.row["labels"]) == ("A", "B", "C")
-        assert result.row["macro_f1"] == pytest.approx(0.38888888888888884)
-        assert result.row["weighted_f1"] == pytest.approx(0.4583333333333333)
+        # Label C is never predicted -> its precision (tp/(tp+fp) = 0/0) is UNDEFINED,
+        # reported as None (not a fabricated 0.0). Its f1 is therefore None too. So the
+        # macro/weighted aggregates are computed over the DEFINED per-label values only.
+        # macro_f1 = mean(A=0.6667, B=0.5) = 0.5833 (C's None excluded).
+        # weighted_f1 = (0.6667*2 + 0.5*1) / (2+1) = 0.6111 (C contributes no defined f1).
+        # micro_f1 is unchanged (its denominators are non-zero).
+        assert result.row["macro_f1"] == pytest.approx(0.5833333333333333)
+        assert result.row["weighted_f1"] == pytest.approx(0.6111111111111112)
         assert result.row["micro_f1"] == 0.5
 
         per_label = {entry["label"]: entry for entry in result.row["per_label"]}
@@ -71,7 +77,10 @@ class TestBatchClassifierMetrics:
         assert per_label["B"]["precision"] == pytest.approx(1 / 3)
         assert per_label["B"]["recall"] == 1.0
         assert per_label["B"]["f1"] == 0.5
-        assert per_label["C"]["f1"] == 0.0
+        # C: precision undefined (0/0) -> None; recall defined (0/1) -> 0.0; f1 -> None.
+        assert per_label["C"]["precision"] is None
+        assert per_label["C"]["recall"] == 0.0
+        assert per_label["C"]["f1"] is None
 
         cells = {(entry["actual"], entry["predicted"]): entry["count"] for entry in result.row["confusion_matrix"]}
         assert cells == {("A", "A"): 1, ("A", "B"): 1, ("B", "B"): 1, ("C", "B"): 1}

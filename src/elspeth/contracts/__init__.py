@@ -55,6 +55,7 @@ from elspeth.contracts.audit import (
     TransformErrorRecord,
     ValidationErrorRecord,
 )
+from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.call_data import (
     CallPayload,
     HTTPCallError,
@@ -135,10 +136,13 @@ from elspeth.contracts.data import (
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.engine import BufferEntry, PendingOutcome, RetryPolicy
 from elspeth.contracts.enums import (
+    AuditCharacteristic,
     BackpressureMode,
     BatchStatus,
     CallStatus,
     CallType,
+    DeclaredAuditCharacteristics,
+    DerivedAuditCharacteristics,
     Determinism,
     ExportStatus,
     NodeStateStatus,
@@ -270,7 +274,17 @@ from elspeth.contracts.transform_contract import (
     create_output_contract_from_schema,
     validate_output_against_contract,
 )
-from elspeth.contracts.type_normalization import classify_runtime_type, normalize_type_for_contract
+from elspeth.contracts.trust_boundary import (
+    BoundaryRule,
+    TrustBoundaryMetadata,
+    trust_boundary,
+)
+from elspeth.contracts.type_normalization import (
+    UNSUPPORTED_CONTRACT_TYPE,
+    classify_runtime_type,
+    normalize_type_for_contract,
+    require_supported_contract_type,
+)
 from elspeth.contracts.types import (
     AggregationName,
     BranchName,
@@ -353,6 +367,8 @@ __all__ = [  # Grouped by category for readability
     "TokenParent",
     "TransformErrorRecord",
     "ValidationErrorRecord",
+    # auth
+    "AuthProviderType",
     # config - Runtime protocols (contracts, not core)
     "RuntimeCheckpointProtocol",
     "RuntimeConcurrencyProtocol",
@@ -372,10 +388,13 @@ __all__ = [  # Grouped by category for readability
     # NOTE: Settings classes (RetrySettings, ElspethSettings, etc.) are NOT here
     # Import them from elspeth.core.config to avoid breaking the leaf boundary
     # enums
+    "AuditCharacteristic",
     "BackpressureMode",
     "BatchStatus",
     "CallStatus",
     "CallType",
+    "DeclaredAuditCharacteristics",
+    "DerivedAuditCharacteristics",
     "Determinism",
     "ExportStatus",
     "NodeStateStatus",
@@ -513,6 +532,8 @@ __all__ = [  # Grouped by category for readability
     "map_schema_mode",
     "classify_runtime_type",
     "normalize_type_for_contract",
+    "require_supported_contract_type",
+    "UNSUPPORTED_CONTRACT_TYPE",
     "PipelineRow",
     "PipelineRunner",
     "SchemaContract",
@@ -537,4 +558,8 @@ __all__ = [  # Grouped by category for readability
     "CatalogValueSource",
     "DerivedFromSiblingValueSource",
     "ValueSource",
+    # trust boundary
+    "BoundaryRule",
+    "TrustBoundaryMetadata",
+    "trust_boundary",
 ]

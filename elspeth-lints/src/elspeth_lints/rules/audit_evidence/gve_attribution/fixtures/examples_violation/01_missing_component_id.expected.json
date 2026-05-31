@@ -1,0 +1,12 @@
+[
+  {
+    "column": 4,
+    "file_path": "bad.py",
+    "fingerprint": "46d490ef47bc98fb",
+    "line": 5,
+    "message": "raise GraphValidationError(...) without component_id= at line 5",
+    "rule_id": "GA1",
+    "severity": "error",
+    "suggestion": "Add component_id=<node_id> to the raise site, or allowlist genuinely structural graph errors with no single node at fault"
+  }
+]

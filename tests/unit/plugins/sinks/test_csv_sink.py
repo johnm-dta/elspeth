@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.plugins.infrastructure.preflight import plugin_preflight_mode
 from tests.fixtures.base_classes import inject_write_failure
 from tests.fixtures.factories import make_context
 from tests.fixtures.landscape import make_factory
@@ -63,6 +65,33 @@ class TestCSVSink:
                     "collision_policy": "fail_if_exists",
                 }
             )
+
+        assert output_file.read_text() == "existing\n"
+
+    def test_preflight_mode_defers_fail_if_exists_collision_until_write(
+        self,
+        tmp_path: Path,
+        ctx: PluginContext,
+    ) -> None:
+        """Preflight construction must not observe local sink output collisions."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        output_file.write_text("existing\n")
+
+        with plugin_preflight_mode(True):
+            sink = CSVSink(
+                {
+                    "path": str(output_file),
+                    "schema": STRICT_SCHEMA,
+                    "collision_policy": "fail_if_exists",
+                }
+            )
+
+        assert output_file.read_text() == "existing\n"
+
+        with pytest.raises(FileExistsError, match="already exists"):
+            sink.write([{"id": "1", "name": "alice"}], ctx)
 
         assert output_file.read_text() == "existing\n"
 
@@ -283,7 +312,6 @@ class TestCSVSink:
 
     def test_has_determinism(self) -> None:
         """CSVSink has determinism attribute."""
-        from elspeth.contracts import Determinism
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         sink = inject_write_failure(CSVSink({"path": "/tmp/test.csv", "schema": STRICT_SCHEMA}))
@@ -482,8 +510,16 @@ class TestCSVSinkSchemaValidation:
             reader = csv.DictReader(f)
             assert set(reader.fieldnames or []) == {"a", "b"}
 
-    def test_dynamic_schema_rejects_new_fields_after_lock(self, tmp_path: Path) -> None:
-        """After first write, new fields are rejected (infer-and-lock)."""
+    def test_dynamic_schema_diverts_new_fields_after_lock(self, tmp_path: Path) -> None:
+        """After first write, a row with new fields is DIVERTED, not crash-the-batch.
+
+        Previously this test pinned crash-the-batch behavior: a single row with a
+        field outside the established column lock raised ValueError and aborted the
+        whole write. That pinned audit finding #6 — a per-row-attributable fault
+        (one row's extra field) should not drop the batch. With on_write_failure
+        configured (via inject_write_failure), the offending row is now diverted
+        (recorded + routed) and the surrounding good rows are written.
+        """
         from elspeth.plugins.sinks.csv_sink import CSVSink
 
         factory = make_factory()
@@ -500,11 +536,19 @@ class TestCSVSinkSchemaValidation:
         # First write locks columns to {a, b}
         sink.write([{"a": 1, "b": 2}], ctx)
 
-        # Second write with extra field 'c' should fail
-        with pytest.raises(ValueError, match="c"):
-            sink.write([{"a": 3, "b": 4, "c": 5}], ctx)
+        # Second write with extra field 'c' is diverted, not batch-aborting.
+        result = sink.write([{"a": 3, "b": 4, "c": 5}], ctx)
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 0
+        assert result.diversions[0].row_data == {"a": 3, "b": 4, "c": 5}
 
         sink.close()
+
+        # Only the first (locked) batch's row reached the file.
+        with open(tmp_path / "output.csv") as f:
+            reader = csv.DictReader(f)
+            written = list(reader)
+        assert [r["a"] for r in written] == ["1"]
 
     def test_flexible_mode_includes_extras_from_first_row(self, tmp_path: Path) -> None:
         """Flexible mode includes declared fields + extras from first row.
@@ -579,3 +623,195 @@ class TestCSVSinkSchemaValidation:
         assert fieldnames[1] == "name", "Second declared field should be second"
         # Extras come after (order not guaranteed among extras)
         assert set(fieldnames[2:]) == {"extra1", "extra2"}, "Extra fields should follow declared fields"
+
+
+class _UnstringifiableValue:
+    """A value whose str()/repr() raise — a broken object, not Tier-2 data.
+
+    Used to document the boundary: csv staging coerces values via str(), and a
+    value whose str() raises an arbitrary exception is an upstream-bug-shaped
+    fault, NOT operation-unsafe data. The narrow (ValueError, csv.Error) catch
+    deliberately does not divert it — it propagates and crashes (Plugin
+    Ownership). This mirrors the json_sink reference, which catches only
+    (ValueError, TypeError).
+    """
+
+    def __str__(self) -> str:
+        raise RuntimeError("value cannot be stringified")
+
+    def __repr__(self) -> str:
+        raise RuntimeError("value cannot be reprified")
+
+
+class TestCSVSinkPerRowDiversion:
+    """Per-row write faults are diverted, not batch-aborting.
+
+    A failure attributable to ONE row's value — a row whose fields cannot be
+    staged by csv.DictWriter (an extra field after the column lock, or a value
+    whose str() raises) — is a per-row Tier-2 data fault. With on_write_failure
+    configured the offending row is diverted (recorded + routed) and the
+    remaining rows are written, rather than aborting the whole batch. With no
+    on_write_failure configured the sink fails closed (the framework refuses to
+    guess the operator's discard-vs-preserve intent).
+
+    Batch-integrity failures (file open/permission, disk-full, rollback) remain
+    raises — they are not attributable to a single row.
+    """
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        factory = make_factory()
+        return make_context(landscape=factory.plugin_audit_writer())
+
+    def test_extra_field_after_lock_diverts_row_not_batch(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A second-batch row with an extra field is diverted; good rows still write.
+
+        observed-mode locks columns to the first batch's keys. A later row with a
+        field outside the lock is a per-row structural fault — divert it, keep the
+        rest. Previously this aborted the whole batch.
+        """
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": {"mode": "observed"}}))
+
+        # First batch locks columns to {a, b}
+        sink.write([{"a": 1, "b": 2}], ctx)
+
+        # Second batch: middle row has an extra field 'c' outside the lock.
+        result = sink.write([{"a": 3, "b": 4}, {"a": 5, "b": 6, "c": 7}, {"a": 8, "b": 9}], ctx)
+        sink.close()
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        assert result.diversions[0].row_data == {"a": 5, "b": 6, "c": 7}
+
+        with open(output_file) as f:
+            reader = csv.DictReader(f)
+            written = list(reader)
+        # First batch (a=1) + the two good rows from the second batch (a=3, a=8).
+        assert [r["a"] for r in written] == ["1", "3", "8"]
+
+    def test_extra_field_first_batch_diverts_row_not_batch(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A first-batch row with a fixed-mode extra field is diverted; good rows write.
+
+        In fixed mode the columns are the declared schema fields. A row carrying a
+        field outside that set is rejected by DictWriter — a per-row structural
+        fault. The first row (which determines no columns in fixed mode) and the
+        remaining good rows are still written.
+        """
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
+
+        result = sink.write(
+            [
+                {"id": "1", "name": "alice"},
+                {"id": "2", "name": "bob", "rogue": "x"},
+                {"id": "3", "name": "carol"},
+            ],
+            ctx,
+        )
+        sink.close()
+
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        assert result.diversions[0].row_data == {"id": "2", "name": "bob", "rogue": "x"}
+
+        with open(output_file) as f:
+            reader = csv.DictReader(f)
+            written = list(reader)
+        assert [r["id"] for r in written] == ["1", "3"]
+
+    def test_unstringifiable_value_crashes_not_diverts(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A value whose str() raises an arbitrary error crashes — it is not diverted.
+
+        The narrow (ValueError, csv.Error) catch only diverts serialization-shaped
+        faults. A broken object (str() raises RuntimeError) is an upstream bug, not
+        operation-unsafe Tier-2 data, so it propagates and crashes the run rather
+        than being silently quarantined. Mirrors json_sink's narrow catch.
+        """
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": {"mode": "observed"}}))
+
+        with pytest.raises(RuntimeError, match="cannot be stringified"):
+            sink.write(
+                [
+                    {"id": "1", "name": "alice"},
+                    {"id": "2", "name": _UnstringifiableValue()},
+                ],
+                ctx,
+            )
+        sink.close()
+
+    def test_diversion_hash_reflects_only_written_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """The returned content hash matches the file with diverted rows excluded."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
+
+        result = sink.write(
+            [
+                {"id": "1", "name": "alice"},
+                {"id": "2", "name": "bob", "rogue": "x"},
+            ],
+            ctx,
+        )
+        sink.close()
+
+        expected_hash = hashlib.sha256(output_file.read_bytes()).hexdigest()
+        assert result.artifact.content_hash == expected_hash
+
+    def test_all_rows_diverted_writes_header_only(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """When every row in a fixed-mode batch is bad, the header-only file is written.
+
+        First row determines no columns in fixed mode (they come from the schema),
+        so the file is created with the header and the hash reflects the
+        header-only content. All bad rows are diverted.
+        """
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
+
+        result = sink.write(
+            [
+                {"id": "1", "name": "alice", "rogue": "x"},
+                {"id": "2", "name": "bob", "rogue": "y"},
+            ],
+            ctx,
+        )
+        sink.close()
+
+        assert len(result.diversions) == 2
+        assert [d.row_index for d in result.diversions] == [0, 1]
+
+        with open(output_file) as f:
+            reader = csv.DictReader(f)
+            assert list(reader.fieldnames or []) == ["id", "name"]
+            assert list(reader) == []
+        expected_hash = hashlib.sha256(output_file.read_bytes()).hexdigest()
+        assert result.artifact.content_hash == expected_hash
+
+    def test_per_row_fault_without_on_write_failure_fails_closed(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """With no on_write_failure configured, a per-row write fault fails closed.
+
+        The framework will not silently pick discard-vs-preserve, so _divert_row
+        raises FrameworkBugError directing the operator to configure
+        on_write_failure. (Note: inject_write_failure is intentionally NOT used.)
+        """
+        from elspeth.contracts.tier_registry import FrameworkBugError
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA})
+        assert sink._on_write_failure is None
+
+        with pytest.raises(FrameworkBugError, match="on_write_failure"):
+            sink.write([{"id": "1", "name": "alice", "rogue": "x"}], ctx)
+
+        sink.close()

@@ -16,12 +16,13 @@ import os
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import sqlalchemy as sa
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy.engine import Engine
 
+from elspeth.contracts.auth import AuthProviderType
 from elspeth.contracts.secrets import (
     FingerprintKeyMissingError,
     SecretDecryptionError,
@@ -78,6 +79,21 @@ def _derive_fernet_key(master_key: str, salt: bytes) -> bytes:
     )
     # Fernet requires url-safe base64 encoded 32-byte key
     return base64.urlsafe_b64encode(raw)
+
+
+def _secret_binary_to_bytes(name: str, field_name: str, value: object) -> bytes:
+    """Normalize DB-returned binary column values before cryptographic use."""
+    value_type = type(value)
+    if value_type is bytes:
+        return cast(bytes, value)
+    if value_type is bytearray:
+        return bytes(cast(bytearray, value))
+    if value_type is memoryview:
+        return cast(memoryview, value).tobytes()
+    raise SecretDecryptionError(
+        f"Secret {name!r} is not resolvable — stored {field_name} is not binary data "
+        "(possible row corruption or unsupported database driver result type)"
+    )
 
 
 _UpsertBuilder = Callable[[sa.Table, dict[str, Any]], Any]
@@ -155,7 +171,7 @@ class UserSecretStore:
     # Public API
     # ------------------------------------------------------------------
 
-    def has_secret(self, name: str, *, user_id: str, auth_provider_type: str) -> bool:
+    def has_secret(self, name: str, *, user_id: str, auth_provider_type: AuthProviderType) -> bool:
         """Check if a user secret is resolvable.
 
         Returns True only when the secret exists, the deployment is
@@ -170,11 +186,11 @@ class UserSecretStore:
             return False
         return self._row_is_resolvable(name, row=row)
 
-    def has_secret_record(self, name: str, *, user_id: str, auth_provider_type: str) -> bool:
+    def has_secret_record(self, name: str, *, user_id: str, auth_provider_type: AuthProviderType) -> bool:
         """Check whether a user-scoped secret row exists, regardless of resolvability."""
         return self._fetch_secret_row(name, user_id=user_id, auth_provider_type=auth_provider_type) is not None
 
-    def get_secret(self, name: str, *, user_id: str, auth_provider_type: str) -> tuple[str, SecretRef]:
+    def get_secret(self, name: str, *, user_id: str, auth_provider_type: AuthProviderType) -> tuple[str, SecretRef]:
         """Retrieve and decrypt a user secret.
 
         Returns
@@ -210,7 +226,7 @@ class UserSecretStore:
         ref = SecretRef(name=name, fingerprint=fp, source="user")
         return plaintext, ref
 
-    def set_secret(self, name: str, *, value: str, user_id: str, auth_provider_type: str) -> str:
+    def set_secret(self, name: str, *, value: str, user_id: str, auth_provider_type: AuthProviderType) -> str:
         """Create or update a user secret (atomic upsert).
 
         Eager-fingerprint design: compute the audit fingerprint BEFORE
@@ -265,7 +281,7 @@ class UserSecretStore:
             conn.execute(stmt)
         return fingerprint
 
-    def delete_secret(self, name: str, *, user_id: str, auth_provider_type: str) -> bool:
+    def delete_secret(self, name: str, *, user_id: str, auth_provider_type: AuthProviderType) -> bool:
         """Delete a user secret.
 
         Returns ``True`` if a row was deleted, ``False`` if it did not exist.
@@ -284,7 +300,7 @@ class UserSecretStore:
             )
         return result.rowcount > 0
 
-    def list_secrets(self, *, user_id: str, auth_provider_type: str) -> list[SecretInventoryItem]:
+    def list_secrets(self, *, user_id: str, auth_provider_type: AuthProviderType) -> list[SecretInventoryItem]:
         """List secret metadata for a user (no values returned).
 
         The ``available`` flag reflects full resolvability: the
@@ -356,7 +372,7 @@ class UserSecretStore:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _fetch_secret_row(self, name: str, *, user_id: str, auth_provider_type: str) -> Any | None:
+    def _fetch_secret_row(self, name: str, *, user_id: str, auth_provider_type: AuthProviderType) -> Any | None:
         t = user_secrets_table
         stmt = sa.select(t.c.encrypted_value, t.c.salt).where(
             sa.and_(
@@ -368,20 +384,21 @@ class UserSecretStore:
         with self._engine.connect() as conn:
             return conn.execute(stmt).first()
 
-    def _decrypt_secret_value(self, name: str, *, encrypted_value: bytes, salt: bytes) -> str:
-        key = _derive_fernet_key(self._master_key, salt)
+    def _decrypt_secret_value(self, name: str, *, encrypted_value: object, salt: object) -> str:
+        encrypted_bytes = _secret_binary_to_bytes(name, "encrypted_value", encrypted_value)
+        salt_bytes = _secret_binary_to_bytes(name, "salt", salt)
+        key = _derive_fernet_key(self._master_key, salt_bytes)
         try:
-            return Fernet(key).decrypt(encrypted_value).decode("utf-8")
-        except InvalidToken as exc:
+            return Fernet(key).decrypt(encrypted_bytes).decode("utf-8")
+        except (InvalidToken, UnicodeDecodeError) as exc:
             raise SecretDecryptionError(
                 f"Secret {name!r} is not resolvable — stored value cannot be decrypted "
                 "with the current web secret_key (possible key rotation or row corruption)"
             ) from exc
 
     def _row_is_resolvable(self, name: str, *, row: Any) -> bool:
-        key = _derive_fernet_key(self._master_key, row.salt)
         try:
-            Fernet(key).decrypt(row.encrypted_value)
-        except InvalidToken:
+            self._decrypt_secret_value(name, encrypted_value=row.encrypted_value, salt=row.salt)
+        except SecretDecryptionError:
             return False
         return True

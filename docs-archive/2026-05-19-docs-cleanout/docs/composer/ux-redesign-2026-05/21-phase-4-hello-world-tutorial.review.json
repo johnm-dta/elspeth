@@ -1,0 +1,352 @@
+{
+  "reviewer": "plan-review-synthesizer",
+  "plan": "21-phase-4-hello-world-tutorial",
+  "date": "2026-05-19",
+  "branch": "RC5.2",
+  "files_reviewed": [
+    "docs/composer/ux-redesign-2026-05/21-phase-4-hello-world-tutorial.md",
+    "docs/composer/ux-redesign-2026-05/21a-phase-4-backend.md",
+    "docs/composer/ux-redesign-2026-05/21b1-phase-4-frontend-part-1.md",
+    "docs/composer/ux-redesign-2026-05/21b2-phase-4-frontend-part-2.md"
+  ],
+  "input_reviews": [
+    "21-phase-4-hello-world-tutorial.reality-review.json",
+    "21-phase-4-hello-world-tutorial.architecture-review.json",
+    "21-phase-4-hello-world-tutorial.quality-review.json",
+    "21-phase-4-hello-world-tutorial.systems-review.json"
+  ],
+  "verdict": "CHANGES_REQUESTED",
+  "confidence": "high",
+  "summary": "All four reviewers returned CHANGES_REQUESTED. The plan's design intent (canonical hello-world tutorial gated by tutorial_completed_at, deterministic cache for instant first-run experience) is sound, and the test strategy for the cache and state machine is genuinely strong. However the plan was written against an imagined codebase rather than RC5.2 — recon work is incomplete across at least nine live symbols, the Task 3 service rewrite would regress all five Phase 1A correctness guards, and two architectural defects (cache-hit attribution leak across sessions; Phase 4/Phase 8 PATCH field-name contract collision) require design decisions before implementation. Both blocking architectural findings have converged across reviewers, which is the strongest possible signal. The plan needs moderate revision (roughly half a day) before it is safe to execute.",
+  "reviewer_verdicts": {
+    "reality": {"verdict": "CHANGES_REQUESTED", "blocking": 12, "major": 5, "minor": 4},
+    "architecture": {"verdict": "CHANGES_REQUESTED", "blocking": 2, "major": 6, "minor": 2},
+    "quality": {"verdict": "BLOCKING", "blocking": 4, "major": 7, "minor": 4},
+    "systems": {"verdict": "BLOCKED", "blocking": 2, "major": 6, "minor": 6}
+  },
+
+  "convergent_findings": [
+    {
+      "id": "C1",
+      "title": "Cache-hit returns a foreign run_id, breaking audit attributability",
+      "severity": "BLOCKING",
+      "reviewers": ["architecture:A2", "systems:S2"],
+      "evidence_summary": "TutorialCacheEntry stores run_id and interpretation_event_id from the original (cache-seeding) run. On cache hit, _cached_entry_to_run_response returns that foreign run_id; frontend Turn 5 then calls GET /api/sessions/{current_session}/runs/{original_run_id}/audit-story — a cross-ownership query. Three failure modes: 404 (breaks load-bearing Turn 5), cross-user audit-data leak, or fabricated lineage. CLAUDE.md attributability test fails: explain(recorder, run_id, token_id) cannot prove lineage back to source for the current user's tutorial run.",
+      "resolution": "Adopt S2's framing (which subsumes A2's option 1): the cache stores deterministic content only (rows, scores, source_data_hash, llm_call_count). On hit, the backend replays the run against the current user's session with the cached content, recording a NEW Landscape entry with a NEW run_id owned by the current session. ~ms overhead (no LLM call) but produces a real, correctly-owned audit trail. The cache entry schema must drop run_id and interpretation_event_id."
+    },
+    {
+      "id": "C2",
+      "title": "Task 3 verbatim full-rewrite snippet regresses five Phase 1A correctness guards",
+      "severity": "BLOCKING",
+      "reviewers": ["reality:B-02", "architecture:A3", "architecture:A4", "quality:Q2", "quality:Q3"],
+      "evidence_summary": "Task 3 Step 3 provides a verbatim full replacement of update_composer_preferences that drops: (1) Panel C2 empty-PATCH-on-no-row guard (preferences/service.py line 186, 226-231); (2) wrote_row bool tracking; (3) _PREFERENCES_PATCH_COUNTER OTel telemetry counter (lines 84-88, 293-300); (4) CorruptPreferencesError(user_id, bad_value) named exception (lines 47-69, 151, 259) replaced by bare RuntimeError; (5) Panel S3 cast() pattern in _row_to_prefs. Five reviewers converged on this from three different angles (live-symbol drift, pattern regression, audit integrity).",
+      "resolution": "Rewrite Task 3 as an additive diff, not a rewrite. The snippet should show only the tutorial_completed_at delta, with explicit 'preserve' callouts for each of the five Phase 1A guards. Add tests that assert CorruptPreferencesError (not RuntimeError) is raised on corrupt tutorial_completed_at, and that the C2 empty-PATCH no-op behaviour is preserved when tutorial_completed_at is absent from the payload."
+    },
+    {
+      "id": "C3",
+      "title": "POST /api/tutorial/run and GET /audit-story have zero implementation tasks",
+      "severity": "BLOCKING",
+      "reviewers": ["reality:B-04", "reality:B-11", "quality:Q1", "quality:Q6"],
+      "evidence_summary": "21a § New endpoints declares POST /api/tutorial/run and GET /api/sessions/{id}/runs/{run_id}/audit-story. No backend task (Tasks 1-7) implements route definitions, Pydantic request/response models, service methods, or test coverage. Frontend Tasks 8 and 9 spy on runTutorialPipeline and getRunAuditSummary in client.ts — neither symbol exists in api/client.ts. The frontend cannot function as written.",
+      "resolution": "Either (a) add explicit backend tasks for both endpoints with full Pydantic models, service methods, and tests; or (b) if reuse of existing session-run infrastructure is the intent, delete the dedicated declarations from § New endpoints and rewrite frontend Tasks 8-9 to target the existing endpoints. Also: explicitly task the addition of runTutorialPipeline, getRunAuditSummary, and renameSession to api/client.ts."
+    },
+    {
+      "id": "C4",
+      "title": "SESSION_SCHEMA_EPOCH never bumped — startup will not signal schema drift",
+      "severity": "BLOCKING",
+      "reviewers": ["reality:B-01", "architecture:A1"],
+      "evidence_summary": "Task 1 adds tutorial_completed_at to user_preferences_table but never increments SESSION_SCHEMA_EPOCH (currently 4 at src/elspeth/web/sessions/models.py:58). _assert_schema_version() in schema.py compares PRAGMA user_version against SESSION_SCHEMA_EPOCH and aborts startup on mismatch — this is the canonical 'delete your DB' signal. Without the bump, operators on existing DBs see either silent column-add success on fresh DBs, silent column-missing failures on existing DBs at first column-read, or confusing runtime errors with no signal at startup.",
+      "resolution": "Add an explicit step to Task 1 (or a new preflight Task 0.5): bump SESSION_SCHEMA_EPOCH from 4 to 5 in the same commit as the column addition. Update the epoch history comment to record the Phase 4 reason."
+    },
+    {
+      "id": "C5",
+      "title": "Tutorial cache directory has three conflicting path specifications",
+      "severity": "MAJOR",
+      "reviewers": ["reality:M-02", "quality:Q13", "systems:S4"],
+      "evidence_summary": "Task 5 uses ${ELSPETH_DATA_DIR:-/var/lib/elspeth}/tutorial_cache/. Task 6 references settings.tutorial_cache_dir (a field that does not exist in WebSettings). Live WebSettings has data_dir: Path = Field(default=Path('data')) with env prefix ELSPETH_WEB__. Result: dev environments without ELSPETH_DATA_DIR set will attempt to write to /var/lib/elspeth/ (root-owned, doesn't exist in dev) and fail with PermissionError on first cache write.",
+      "resolution": "Add tutorial_cache_dir: Path | None = Field(default=None) to WebSettings with a validator that defaults to data_dir / 'tutorial_cache' when unset. Inject settings.tutorial_cache_dir into TutorialCache constructor. Delete the ELSPETH_DATA_DIR special-case entirely. This re-anchors the path to the validated config-contracts framework instead of ad-hoc env-var expansion."
+    },
+    {
+      "id": "C6",
+      "title": "Plan's frontend symbol names diverge from live RC5.2 surface in 5+ places",
+      "severity": "BLOCKING",
+      "reviewers": ["reality:B-05", "reality:B-06", "reality:B-07", "reality:B-09", "reality:B-10", "reality:M-01", "reality:M-04"],
+      "evidence_summary": "The plan references symbols/paths that do not match RC5.2: (B-05) api/interpretationEvents.ts module does not exist — Phase 5b shipped interpretationEventsStore Zustand store; (B-06) InterpretationReviewTurn imported from ../interpretation/ but lives at components/chat/guided/; (B-07) InterpretationReviewTurn live props are {event, sessionId, onResolved?} not {sessionId, interpretationEventId, onResolved}; (B-09) test spies use getComposerPreferences/updateComposerPreferences but live names are fetchUserComposerPreferences/updateUserComposerPreferences; (B-10) setBannerDismissed should be dismissDefaultChangedBanner; (M-01) renameSession not in client.ts; (M-04) preferencesStore action is bootstrap() not loadPreferences().",
+      "resolution": "Plan author must do a full recon pass against RC5.2 (HEAD), rewriting every snippet to use live symbol names and paths. Reality reviewer's B-05 through B-12 and M-01/M-04 list the exact replacements needed."
+    }
+  ],
+
+  "punch_list": [
+    {
+      "id": "P1",
+      "group": "cross-plan-contract",
+      "where": "21a Task 1 + Task 3 + Pydantic models; coordinate edit in 20-phase-8-polish-and-telemetry.md Task 6",
+      "what": "Resolve the Phase-4-vs-Phase-8 PATCH field-name contract. Phase 4 ships tutorial_completed_at: datetime | None and states 'no nullification via PATCH'; Phase 8 tests {tutorial_completed: false} as a bool PATCH body. Pick ONE: (a) Phase 4 allows tutorial_completed_at: null nullification via PATCH and Phase 8 calls PATCH {tutorial_completed_at: null}; (b) Phase 4 keeps the column and Phase 8 adds a separate retake mechanism that does not require nulling it. Option (a) is simpler. Record the decision in BOTH plan documents as a shared contract block.",
+      "why": "systems:S1 — cross-plan rupture confirmed by direct quotes from both plan files",
+      "difficulty": "design-decision",
+      "blocks": ["dependency-on-Phase-8-author"]
+    },
+    {
+      "id": "P2",
+      "group": "cache-auditability",
+      "where": "21a Task 5 (TutorialCacheEntry schema), Task 6 (TutorialCacheService), Task 7 (run-path integration), 21b2 Task 9 (Turn 5)",
+      "what": "Restructure the cache to store content not identity. (1) Remove run_id and interpretation_event_id from TutorialCacheEntry. Cache stores rows, scores, source_data_hash, llm_call_count, cached pipeline YAML. (2) Task 7 cache-hit path replays the cached content against the current user's session — synthesizes a real Landscape entry with a new run_id owned by the current session. (3) Task 7 must record a 'seeded from cache' marker on the new Landscape entry so an auditor can distinguish cache-replay from fresh execution. (4) Turn 5's audit-story call now targets a real, current-session run_id — no cross-ownership query.",
+      "why": "architecture:A2 + systems:S2 — convergent BLOCKING; both reviewers independently identified the same attributability failure and converged on the same fix shape",
+      "difficulty": "design-decision",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P3",
+      "group": "service-regression",
+      "where": "21a Task 3 Step 3",
+      "what": "Replace the verbatim full-rewrite snippet of update_composer_preferences with an additive diff. Explicitly preserve and call out by line number: (1) Panel C2 payload_is_empty guard at preferences/service.py:186, 226-231; (2) wrote_row bool tracking; (3) _PREFERENCES_PATCH_COUNTER telemetry at lines 84-88, 293-300; (4) CorruptPreferencesError(user_id, bad_value) raise pattern at lines 151, 259; (5) Panel S3 cast() in _row_to_prefs. The Tier-1 read guard for tutorial_completed_at must raise CorruptPreferencesError, not RuntimeError. Add a test asserting CorruptPreferencesError is raised (not RuntimeError) with user_id and bad_value correctly populated. Add a C2-parity test asserting empty-PATCH on no-row user with tutorial_completed_at absent does not INSERT.",
+      "why": "reality:B-02 + architecture:A3 + architecture:A4 + quality:Q2 + quality:Q3 — 5-reviewer convergence",
+      "difficulty": "moderate",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P4",
+      "group": "missing-endpoints",
+      "where": "21a § New endpoints + new tasks 7.1 and 7.2 (or rewrite of frontend Tasks 8-9)",
+      "what": "Either implement the two endpoints with explicit tasks or delete the declarations. If implementing: add POST /api/tutorial/run with Pydantic request (session_id, prompt) + response (run_id, output) + service method + tests covering cache-hit, cache-miss, freeform-user-bypass (Q11), and completed-user-bypass (Q11). Add GET /api/sessions/{id}/runs/{run_id}/audit-story specifying exactly which Landscape tables it queries, what shape it returns, and asserting in tests that the response is derived entirely from real audit rows (no synthesis — Q6). Add new tasks for adding runTutorialPipeline, getRunAuditSummary, and renameSession to api/client.ts (these are spied in frontend tests but never created).",
+      "why": "reality:B-04 + reality:B-11 + reality:M-01 + quality:Q1 + quality:Q6 — convergence; quality:Q11 adds the bypass tests",
+      "difficulty": "moderate",
+      "blocks": ["P2 (audit-story endpoint depends on cache attribution fix)"]
+    },
+    {
+      "id": "P5",
+      "group": "schema-epoch",
+      "where": "21a Task 1 (or new Task 0.5)",
+      "what": "Add an explicit step: bump SESSION_SCHEMA_EPOCH from 4 to 5 in src/elspeth/web/sessions/models.py in the same commit as the column addition. Update the epoch-history comment with the Phase 4 reason. Add an OPERATOR ACTION note to Task 1 surfacing the required DB delete before downstream tasks can be verified on staging.",
+      "why": "reality:B-01 + architecture:A1 + quality:Q12 — convergence on schema-epoch discipline; Q12 adds the operator-gate framing",
+      "difficulty": "trivial",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P6",
+      "group": "live-symbol-drift",
+      "where": "21b1 Tasks 1, 2, 6, 7 + 21b2 Tasks 8, 9, 10",
+      "what": "Rewrite every frontend snippet to use live RC5.2 symbol names and paths: (1) types: tutorial_completed_at goes on UserComposerPreferencesPayload, not ComposerPreferences (B-08); (2) test spies use fetchUserComposerPreferences / updateUserComposerPreferences (B-09); (3) banner-dismiss action is dismissDefaultChangedBanner not setBannerDismissed (B-10); (4) preferencesStore bootstrap action is bootstrap() not loadPreferences() (M-04); (5) InterpretationReviewTurn imported from '../chat/guided/' with props {event: InterpretationEvent, sessionId, onResolved?} (B-06, B-07); (6) replace api/interpretationEvents import with useInterpretationResolver hook or interpretationEventsStore actions (B-05); (7) the Zustand getter syntax 'get tutorialCompleted() { ... }' must be replaced with a selector function passed to useStore (B-12).",
+      "why": "reality:B-05, B-06, B-07, B-08, B-09, B-10, B-12, M-01, M-04",
+      "difficulty": "moderate",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P7",
+      "group": "live-symbol-drift",
+      "where": "21a Task 2 (Pydantic model snippet) + Task 3",
+      "what": "Correct the ComposerPreferences model snippet: use ConfigDict(strict=True, extra='forbid') NOT ConfigDict(frozen=True); use updated_at: datetime | None NOT datetime (Panel U1 nullable contract is load-bearing); use tutorial_completed_at: datetime | None. Add a Pydantic unit test asserting that constructing ComposerPreferences with an unexpected extra field raises ValidationError. Update both UpdateUserComposerPreferencesPayload (frontend) and UpdateComposerPreferencesRequest (backend) to include the optional tutorial_completed_at field (MN-04).",
+      "why": "reality:B-03 + architecture:A5 + quality:Q4 + reality:MN-04",
+      "difficulty": "trivial",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P8",
+      "group": "operator-runbook",
+      "where": "21a Task 5 (WebSettings + cache module)",
+      "what": "Re-anchor the cache directory to the validated WebSettings model. Add tutorial_cache_dir: Path | None = Field(default=None) to WebSettings with a model_validator that defaults to data_dir / 'tutorial_cache' when unset. Inject settings.tutorial_cache_dir into TutorialCache constructor. Delete all references to ELSPETH_DATA_DIR. Add an explicit Playwright/staging-smoke test that runs from a dev environment without ELSPETH_DATA_DIR set, confirming the cache directory is created under the relative data/ path.",
+      "why": "reality:M-02 + quality:Q13 + systems:S4 — 3-reviewer convergence; quality:Q10 adds the unwritable-dir constructor test",
+      "difficulty": "moderate",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P9",
+      "group": "operator-runbook",
+      "where": "21b2 Task 14 (Playwright spec)",
+      "what": "Move the Playwright spec from project-root tests/e2e/tutorial.e2e.spec.ts to src/elspeth/web/frontend/tests/e2e/tutorial.spec.ts (matching playwright.config.ts testDir AND the existing .spec.ts extension convention). Verify Playwright actually discovers the spec.",
+      "why": "reality:M-03",
+      "difficulty": "trivial",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P10",
+      "group": "test-coverage",
+      "where": "21-phase-4-hello-world-tutorial.md Risks table AND 21b1 Navigation Resilience AND 21b2 Task 12",
+      "what": "Resolve the refresh-restart vs refresh-resume contradiction. Per synthesizer ruling: choose RESTART at turn 1 (see conflicts_resolved below). Delete the sessionStorage scaffolding from Task 12 entirely (PROGRESS_KEY, initialStep, onStepChange). Update the risk table to reflect 'refresh = restart at turn 1 (sessionStorage not used)'. Add a Playwright test that refreshes mid-tutorial and asserts the machine returns to step 1.",
+      "why": "quality:Q5 + systems:S6 — S6 reinforces the choice by showing sessionStorage adds cross-user contamination risk on shared workstations",
+      "difficulty": "design-decision",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P11",
+      "group": "test-coverage",
+      "where": "21a Task 5 (TutorialCache atomicity)",
+      "what": "Strengthen test_store_is_atomic. Either rename to test_store_leaves_exactly_one_json_file (matching what it actually tests) AND add a separate test that patches os.replace to raise OSError mid-write and asserts no .json file is left behind; OR expand the existing test to verify the .tmp file is absent after success. Test name must not claim atomicity when crash-during-write isn't tested.",
+      "why": "quality:Q14",
+      "difficulty": "trivial",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P12",
+      "group": "test-coverage",
+      "where": "21b2 Task 11 (Turn 6 Vitest)",
+      "what": "Replace vi.spyOn(usePreferencesStore.getState(), 'markTutorialCompleted') with a spy that intercepts via the store's live reference (e.g. vi.spyOn(usePreferencesStore, 'getState') with a fresh mocked state, or use the established Zustand test-store-replacement pattern from other tests in this codebase). Assert toHaveBeenCalledOnce and inspect the call argument.",
+      "why": "quality:Q15",
+      "difficulty": "trivial",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P13",
+      "group": "operator-runbook",
+      "where": "21a deployment runbook (overview doc) + Task 5",
+      "what": "Add a cache-warming step to the deployment runbook. After DB-delete and service restart, run a CLI command (e.g. elspeth tutorial warm-cache) that fires the canonical pipeline against the deployed model configuration and writes the cache entry. Document that cache entries are environment-specific (model_id is in the key) so staging-cache cannot be promoted to prod. Without this, the first production user pays the full ~30s LLM cost on every fresh deploy.",
+      "why": "systems:S8 + systems:S14",
+      "difficulty": "moderate",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P14",
+      "group": "test-coverage",
+      "where": "21a tutorial telemetry — new task in 21a",
+      "what": "Add tutorial telemetry at launch, not Phase 8. Per CLAUDE.md primacy: (a) mark_tutorial_completed is a Landscape write — confirm the service emits an OTel counter on that write mirroring _PREFERENCES_PATCH_COUNTER; (b) tutorial.skip_total and tutorial.abandon_total (on session close while tutorial in progress) are operational telemetry counters. Both belong at launch. Per memory feedback_no_slog_recommendations.md, the channel is audit + telemetry, not slog. Tests assert the counter labels include tutorial step.",
+      "why": "quality:Q7 — see conflicts_resolved below; project memory feedback_no_slog_recommendations.md and CLAUDE.md primacy ordering reinforce Q7 over the plan's defer-to-Phase-8 stance",
+      "difficulty": "moderate",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P15",
+      "group": "defensive-programming",
+      "where": "21b1 Tasks 5, 6, 7 (Turn 2b, Turn 3 snippets); tutorialMachine.ts reducer",
+      "what": "Remove defensive optional-chaining on Tier-2 pipeline snapshot fields (Q8): replace snapshot?.nodes ?? [], node?.type, node?.label ?? node?.id ?? 'node' with direct access. If snapshot itself can be null (store not yet populated), guard the null at the top; inner Tier-2 fields are accessed without defensiveness. Replace ((pipelineSnapshot.source as {urls?: string[]}).urls) ?? [] with an explicit assertion that throws a descriptive error if urls is absent (A9). In tutorialMachine.ts tutorialReducer default case, replace silent no-op + console.warn with throw new Error('tutorialReducer: unrecognised action type ...') and add a Vitest test asserting the throw (Q9).",
+      "why": "architecture:A9 + quality:Q8 + quality:Q9 — convergent on defensive-programming policy violation",
+      "difficulty": "trivial",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P16",
+      "group": "service-regression",
+      "where": "21b1 Task 1 (markTutorialCompleted action design)",
+      "what": "Specify three preservation contracts for the new markTutorialCompleted action: (1) MUST NOT reset optedOutAtSessionId watermark (MN-02); (2) MUST honor the writing guard pattern (if (get().writing) return) to serialise concurrent PATCH calls (MN-03); (3) MUST follow the same optimistic-write-then-revert-on-failure pattern as setDefaultMode and dismissDefaultChangedBanner.",
+      "why": "reality:MN-02 + reality:MN-03",
+      "difficulty": "trivial",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P17",
+      "group": "test-coverage",
+      "where": "21b1 Turn 2b (InterpretationReviewTurn integration)",
+      "what": "Add a CI-enforced contract test (not just a preflight check) that asserts the shape of listPendingInterpretationEvents response against Phase 4's expected schema. This is the living contract between Phase 4 and Phase 5b. Without it, Turn 2b is one Phase 5b refactor away from silently breaking for all first-run users.",
+      "why": "systems:S7",
+      "difficulty": "moderate",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P18",
+      "group": "cache-auditability",
+      "where": "21a Task 7 _is_successful_run gating",
+      "what": "Tighten cache-write eligibility. Add _all_rows_succeeded(result) check: ALL rows must have a non-error LLM rating result before the cache is populated. Currently a run with row-level LLM failures still qualifies as 'successful' and bakes the degraded experience into the cache for all subsequent users. Specify the row-success invariant in the plan and add a test that a run with any errored row does not write the cache.",
+      "why": "systems:S5",
+      "difficulty": "moderate",
+      "blocks": ["P2 (resolution should land together with the cache restructure)"]
+    },
+    {
+      "id": "P19",
+      "group": "operator-runbook",
+      "where": "21a Task 7 (model identity in cache key)",
+      "what": "Define _model_id_for_pipeline() explicitly as a compound key '{composer_model}:{transform_model}' so cache invalidation fires when EITHER model changes. Document which WebSettings fields contribute to the key. Add a comment to TutorialCache explaining the key shape.",
+      "why": "systems:S3",
+      "difficulty": "trivial",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P20",
+      "group": "operator-runbook",
+      "where": "21-phase-4-hello-world-tutorial.md Risks section",
+      "what": "Add a retake affordance within Phase 4 itself: a settings preference toggle 'reset tutorial' that clears tutorial_completed_at. Trivial against the same column. OR add a filigree dependency that blocks Phase 4 production rollout until Phase 8 retake ships. Without either, users who skip are permanently locked out of the tutorial until Phase 8 ships (project memory: feedback_no_calendar_shipping_commitments.md — Phase 8 may slip indefinitely).",
+      "why": "architecture:A7",
+      "difficulty": "design-decision",
+      "blocks": ["P1 (retake mechanism interacts with the Phase 4/8 contract)"]
+    },
+    {
+      "id": "P21",
+      "group": "operator-runbook",
+      "where": "21-phase-4-hello-world-tutorial.md PR strategy + 21a/21b1/21b2 headers",
+      "what": "Explicitly split into PR-21a (backend, Tasks 1-7) and PR-21b (frontend, depends on PR-21a merged). The plan already segments along this boundary; just make the PR strategy explicit. Reduces rollback complexity for a Very-High blast-radius change (30 files, weighted score 27).",
+      "why": "architecture:A8",
+      "difficulty": "trivial",
+      "blocks": ["none"]
+    },
+    {
+      "id": "P22",
+      "group": "test-coverage",
+      "where": "21b2 Task 13 (Playwright fresh-user provisioning) + staging-smoke runbook",
+      "what": "Specify the fresh-user provisioning mechanism for the three Playwright scenarios. The 'complete flow' scenario requires tutorial_completed_at IS NULL; the 'second-login (tutorial skipped)' scenario requires tutorial_completed_at IS NOT NULL. Add an explicit test fixture that provisions a fresh user state (e.g. delete-then-recreate user_preferences row before each scenario). Document the operator-gate sequence: DB-delete + service restart + cache-warm + Playwright run.",
+      "why": "systems:S6 + systems:S8 + operator-gate memory feedback_operator_gate_destructive_actions.md",
+      "difficulty": "moderate",
+      "blocks": ["P13"]
+    },
+    {
+      "id": "P23",
+      "group": "cache-auditability",
+      "where": "21a Task 5 (TutorialCache module docs/comments)",
+      "what": "Reclassify the cache as 'server-generated content cache — crash on corrupt, miss on absence (operational rules match Tier 1 but data is derived from external LLM call, not Tier-1 ownership)'. Same behaviour, more precise framing. Avoid setting a precedent that LLM-derived caches are Tier-1 'our data'.",
+      "why": "architecture:A10",
+      "difficulty": "trivial",
+      "blocks": ["none"]
+    }
+  ],
+
+  "conflicts_resolved": [
+    {
+      "tension": "Refresh during tutorial — restart at turn 1 vs resume from sessionStorage (Q5)",
+      "reviewers": ["quality:Q5", "systems:S6"],
+      "resolution": "Choose RESTART at turn 1. Reasons: (1) Tutorial is ~5 minutes — restart cost is acceptable. (2) Resume via sessionStorage adds cross-user contamination risk on shared workstations (S6 — flat 'elspeth_tutorial_progress' key is not user-scoped; mitigating this requires user-scoped keying AND auth-context-change clearing). (3) sessionStorage scaffolding adds Vitest+Playwright surface area that doesn't materially improve the first-run UX. (4) Risk-table copy is the user-facing contract; the implementation should match the documented behaviour, not the other way around. Delete the sessionStorage scaffolding from 21b2 Task 12 entirely; keep the risk-table 'restart at turn 1' wording.",
+      "decision_owner": "synthesizer"
+    },
+    {
+      "tension": "Cache-hit auditability fix — A2 (cache only pipeline YAML, always execute fresh) vs S2 (exclude run_id from cache, replay against current session)",
+      "reviewers": ["architecture:A2", "systems:S2"],
+      "resolution": "The proposals converge architecturally. A2 option 1 ('cache the LLM-generation cost, not the run') and S2 ('cache deterministic content, replay to record new Landscape entry') are the same shape from different angles. Adopt S2's framing because it is more concrete about WHAT to cache (rows, scores, source_data_hash, llm_call_count) and explicit about the cache-hit path producing a real Landscape entry owned by the current session. The architectural invariant: cache stores content, never identity. Marker on the new Landscape entry should record 'seeded from cache' so an auditor can trace lineage to the original generation event if needed.",
+      "decision_owner": "synthesizer"
+    },
+    {
+      "tension": "Telemetry at launch (Q7) vs defer to Phase 8 (plan)",
+      "reviewers": ["quality:Q7"],
+      "resolution": "Q7 is correct. Per CLAUDE.md primacy (audit → telemetry → logger): mark_tutorial_completed is a Landscape write (audit-worthy) — it's already audit-recorded via the tutorial_completed_at timestamp column. The launch-critical NEW signals are operational telemetry counters: tutorial.skip_total, tutorial.abandon_total, tutorial.complete_total. These belong at launch alongside the existing _PREFERENCES_PATCH_COUNTER pattern. Project memory feedback_no_slog_recommendations.md reinforces the channel choice (telemetry, not slog). Without these counters, the team has zero signal on whether the tutorial is working or driving users away — exactly the wrong tradeoff for a launch-critical onboarding surface. Add as P14.",
+      "decision_owner": "synthesizer"
+    }
+  ],
+
+  "headline_fix": "Restructure the cache to store content not identity (P2). This single change resolves the convergent A2/S2 BLOCKING attributability defect, eliminates the cross-user audit-data leak, and produces a real, correctly-owned Landscape entry for every user's tutorial run. Pair it with the field-name contract resolution with the Phase 8 author (P1) and the Task 3 additive-diff rewrite (P3), and the plan moves from CHANGES_REQUESTED to APPROVED.",
+
+  "revision_effort": "moderate",
+  "revision_effort_estimate": "Half a day. The convergent blockers (C1-C6) cluster on three load-bearing structural decisions (P1, P2, P3) plus a mechanical recon pass against RC5.2 symbols (P6, P7). The recon pass is grep-driven and can be done by a fresh reader in ~1 hour. The cache restructure (P2) and the Phase 4/8 contract resolution (P1) require design decisions but the resolutions are now spelled out above — execution should be straightforward. The telemetry-at-launch addition (P14) is one new task. Defensive-programming cleanups (P15) are find-and-replace. No deep recodes are required.",
+
+  "next_steps_for_operator": [
+    "Resolve P1 with the Phase 8 author: agree on a single tutorial-completion field name, type, and nullification contract. Record in BOTH plan documents.",
+    "Approve the cache-restructure design (P2): cache stores content not identity; cache-hit replays against current session. This unblocks Tasks 5-7 in 21a.",
+    "Decide on telemetry-at-launch (P14) — synthesizer recommends accepting Q7 over the plan's defer-to-Phase-8 position.",
+    "Plan author does the live-symbol-drift recon pass (P6, P7) against RC5.2 HEAD before resubmitting for execution review."
+  ],
+
+  "ready_for_execution_when": "All six convergent BLOCKING findings (C1-C6) are resolved in the plan files: (1) C1 cache-restructure design committed (P2); (2) C2 Task 3 rewritten as additive diff with all five Phase 1A guards preserved (P3); (3) C3 endpoints either implemented as new tasks or removed and frontend rewritten (P4); (4) C4 SESSION_SCHEMA_EPOCH bump added to Task 1 (P5); (5) C5 cache-directory consolidated under WebSettings.tutorial_cache_dir (P8); (6) C6 frontend live-symbol drift fixed across at least 7 named symbols (P6). Plus: P1 (cross-plan contract with Phase 8) reconciled. Quality MAJORs (Q5, Q6, Q7, Q8, Q9, Q10, Q11) addressed. Architecture A7 retake-path decision recorded. Re-review trigger: plan author re-runs the four reviewer skills and synthesizer; expected verdict on a clean pass is APPROVED_WITH_WARNINGS (the MINORS S9-S14 and reality MN-01 are operator-tolerable).",
+
+  "verified_correct_carried_forward": [
+    "Phase 5a inline_blob bias in composer skill is accurate (reality:VC-01)",
+    "interpretation_events_table exists with accepted_value column (reality:VC-02)",
+    "source_data_hash exists in Landscape core schema (reality:VC-03)",
+    "app.state.preferences_service injection point exists (reality:VC-04)",
+    "preferencesStore writing-guard and optimistic-revert patterns are correct (reality:VC-06)",
+    "Playwright frontend setup is correct (reality:VC-07)",
+    "Test coverage for the cache layer (corruption crash, miss-fall-through, bypass) and state-machine transitions is genuinely good (quality:tested_correctly section)",
+    "Plan's named acknowledgement of 'Shifting the Burden' archetype is appropriate self-awareness (systems:archetypes_detected) — the mitigation is what's inadequate, not the recognition"
+  ],
+
+  "archetypes_inherited_from_systems_review": [
+    "Shifting the Burden (DB-delete debt) — affects P1, P20",
+    "Cross-Plan Implicit Dependency — affects P1",
+    "Identity/Content Conflation — affects P2",
+    "Optimistic First-User Path (cold-cache deploy) — affects P13",
+    "Ambient Key Convention Divergence — affects P8"
+  ],
+
+  "counts": {
+    "convergent_findings": 6,
+    "punch_list_items": 23,
+    "blocking_convergent": 4,
+    "major_convergent": 1,
+    "design_decisions_required": 4,
+    "trivial_fixes": 9,
+    "moderate_fixes": 9
+  }
+}

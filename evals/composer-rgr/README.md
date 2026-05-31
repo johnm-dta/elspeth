@@ -48,12 +48,17 @@ returns a JSON verdict (`RED`, `AMBER`, or `GREEN`).
    match against the explicit list the skill forbids. Catches the
    "If you want, I can…" pattern.
 
-The persisted `tool_calls` field is **not** a reliable signal: the composer
-drops internal LLM↔tool turns before persisting (service.py:1018-1035 keeps
-them in `llm_messages` only). Successful builds and failed builds both show
-zero persisted tool calls. To inspect the actual tool sequence per session,
-query the `chat_messages.tool_calls` JSON column in `data/sessions.db`
-(role='tool') — that captures every audit-recorded invocation.
+Tool-sequence visibility: `run_scenario.sh` fetches the messages thread with
+`?include_tool_rows=true&include_raw_content=true&limit=500`, which surfaces
+the `role=tool` rows in `messages.json`. Each tool row carries a `success`
+discriminator and the raw JSON tool result, so sequence-aware scoring rules
+(e.g. `red.max_persisted_tool_calls`,
+`green.must_discover_schema_before_first_mutation`) in
+`evals/lib/composer_rgr_score.py` operate directly on this stream. For
+deeper introspection beyond what the API exposes, query the
+`chat_messages.tool_calls` JSON column in `data/sessions.db` (role='tool')
+— that captures every audit-recorded invocation including any internal
+LLM↔tool turns the API path filters out.
 
 ## Usage
 

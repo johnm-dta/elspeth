@@ -9,9 +9,11 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import PluginContractViolation, RowErrorEntry, TransformErrorReason
 from elspeth.contracts.field_collision import detect_field_collisions
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -138,11 +140,28 @@ class BatchOutlierAnnotator(BaseTransform):
     """
 
     name = "batch_outlier_annotator"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5416806e37606b21"
+    source_file_hash: str | None = "sha256:0fb500fc231b82f9"
     config_model = BatchOutlierAnnotatorConfig
     is_batch_aware = True
     passes_through_input = False
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Annotates finite numeric rows with batch z-score and robust-z outlier fields.",
+                composer_hints=(
+                    "Use batch_outlier_annotator under aggregations with a trigger; it needs the batch distribution.",
+                    "value_field must be numeric; missing and non-finite values are skipped and reported.",
+                    "output_prefix creates many annotation fields, so choose a prefix that cannot collide with input fields.",
+                    "It emits one annotated row per finite input value and may drop skipped rows from success output.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

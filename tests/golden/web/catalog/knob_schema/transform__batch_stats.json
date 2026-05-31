@@ -1,0 +1,52 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Name of the numeric field to aggregate (sum/mean)",
+        "kind": "text",
+        "label": "Value Field",
+        "name": "value_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Optional field that partitions the batch and emits one aggregate row per distinct value. The group_by field is included in each output row.",
+        "kind": "text",
+        "label": "Group By",
+        "name": "group_by",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": true,
+        "description": "Whether to compute mean in addition to sum/count",
+        "kind": "checkbox",
+        "label": "Compute Mean",
+        "name": "compute_mean",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "batch_stats"
+}

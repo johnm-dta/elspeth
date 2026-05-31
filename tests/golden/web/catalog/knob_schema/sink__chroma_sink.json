@@ -1,0 +1,108 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "ChromaDB collection name",
+        "kind": "text",
+        "label": "Collection",
+        "name": "collection",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Connection mode",
+        "enum": [
+          "persistent",
+          "client"
+        ],
+        "kind": "enum",
+        "label": "Mode",
+        "name": "mode",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Local persistence directory for persistent Chroma mode.",
+        "kind": "text",
+        "label": "Persist Directory",
+        "name": "persist_directory",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Chroma server host for client mode.",
+        "kind": "text",
+        "label": "Host",
+        "name": "host",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": 8000,
+        "description": "Chroma server port for client mode.",
+        "kind": "number-int",
+        "label": "Port",
+        "name": "port",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": true,
+        "description": "Whether to use TLS when connecting to a Chroma server.",
+        "kind": "checkbox",
+        "label": "SSL",
+        "name": "ssl",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "cosine",
+        "description": "Vector distance function used when creating the Chroma collection.",
+        "enum": [
+          "cosine",
+          "l2",
+          "ip"
+        ],
+        "kind": "enum",
+        "label": "Distance Function",
+        "name": "distance_function",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "Maps row fields to ChromaDB document/id/metadata",
+        "kind": "json-object",
+        "label": "Field Mapping",
+        "name": "field_mapping",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "overwrite",
+        "description": "Behaviour when a document ID already exists",
+        "enum": [
+          "overwrite",
+          "skip",
+          "error"
+        ],
+        "kind": "enum",
+        "label": "On Duplicate",
+        "name": "on_duplicate",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "sink",
+  "plugin_name": "chroma_sink"
+}

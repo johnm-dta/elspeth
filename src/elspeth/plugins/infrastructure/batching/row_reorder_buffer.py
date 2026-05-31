@@ -75,6 +75,12 @@ class _PendingEntry[T]:
     result: Any = field(default=UNFILLED)
     is_complete: bool = False
 
+    def __post_init__(self) -> None:
+        if self.sequence < 0:
+            raise ValueError(f"_PendingEntry.sequence must be non-negative, got {self.sequence}")
+        if not self.row_id:
+            raise ValueError("_PendingEntry.row_id must not be empty")
+
 
 class RowReorderBuffer[T]:
     """Thread-safe buffer for row-level pipelining with FIFO ordering.

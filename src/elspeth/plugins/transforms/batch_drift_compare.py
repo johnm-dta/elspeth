@@ -9,8 +9,10 @@ from typing import Any, Literal, cast
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.errors import TransformErrorReason
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
@@ -123,10 +125,27 @@ class BatchDriftCompare(BaseTransform):
     """Compare baseline and current cohort distributions over a batch."""
 
     name = "batch_drift_compare"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c9350885fc4f8118"
+    source_file_hash: str | None = "sha256:b96cdf96069ddb27"
     config_model = BatchDriftCompareConfig
     is_batch_aware = True
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Compares baseline and current cohort distributions across a batch.",
+                composer_hints=(
+                    "Use batch_drift_compare under aggregations with a trigger; it compares distributions after a batch flush.",
+                    "cohort_field and value_field must differ; baseline_cohort defaults to the first-seen cohort.",
+                    "Set value_type=numeric for mean and KS-style distance, or categorical for category shifts and total variation.",
+                    "Output is cohort comparison rows and does not preserve the original row shape.",
+                ),
+            )
+        return None
 
     @classmethod
     def probe_config(cls) -> dict[str, Any]:

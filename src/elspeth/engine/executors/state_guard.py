@@ -62,6 +62,7 @@ class NodeStateGuard:
         "_execution",
         "_input_data",
         "_node_id",
+        "_resume_checkpoint_id",
         "_run_id",
         "_state",
         "_step_index",
@@ -79,6 +80,7 @@ class NodeStateGuard:
         step_index: int,
         input_data: dict[str, Any],  # Row data (Tier 2 pipeline data)
         attempt: int = 0,
+        resume_checkpoint_id: str | None = None,
     ) -> None:
         self._execution = execution
         self._token_id = token_id
@@ -87,6 +89,7 @@ class NodeStateGuard:
         self._step_index = step_index
         self._input_data = input_data
         self._attempt = attempt
+        self._resume_checkpoint_id = resume_checkpoint_id
         self._enter_time: float = 0.0
         self._state: NodeStateOpen | None = None
         self._completed = False
@@ -103,6 +106,7 @@ class NodeStateGuard:
             step_index=self._step_index,
             input_data=self._input_data,
             attempt=self._attempt,
+            resume_checkpoint_id=self._resume_checkpoint_id,
         )
         return self
 

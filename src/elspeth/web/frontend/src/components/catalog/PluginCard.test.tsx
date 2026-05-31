@@ -20,6 +20,11 @@ function makePlugin(overrides: Partial<PluginSummary> = {}): PluginSummary {
     plugin_type: "transform",
     description: "An example plugin",
     config_fields: [],
+    usage_when_to_use: null,
+    usage_when_not_to_use: null,
+    example_use: null,
+    capability_tags: [],
+    audit_characteristics: [],
     ...overrides,
   };
 }
@@ -86,7 +91,7 @@ describe("PluginCard — collapsed header", () => {
       />,
     );
     expect(screen.getByText("csv")).toBeInTheDocument();
-    expect(screen.getByText("CSV source")).toBeInTheDocument();
+    expect(screen.getByText("CSV source")).toHaveAttribute("title", "CSV source");
     // Expanded content does NOT render while collapsed.
     expect(screen.queryByText(/Loading/)).not.toBeInTheDocument();
   });
@@ -102,7 +107,7 @@ describe("PluginCard — flat single-model schema", () => {
         onExpand={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "csv plugin details" }));
+    await user.click(screen.getByRole("button", { name: /schema for csv/i }));
     expect(screen.getByText("path")).toBeInTheDocument();
     expect(screen.getByText("encoding")).toBeInTheDocument();
     // Required badge appears for ``path`` but not ``encoding``.
@@ -122,7 +127,7 @@ describe("PluginCard — discriminated union", () => {
         onExpand={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "llm plugin details" }));
+    await user.click(screen.getByRole("button", { name: /schema for llm/i }));
     // Labels come from the discriminator mapping (provider: azure / openrouter),
     // NOT the raw $defs class names (AzureOpenAIConfig / OpenRouterConfig).
     expect(screen.getByText("provider: azure")).toBeInTheDocument();
@@ -139,7 +144,7 @@ describe("PluginCard — discriminated union", () => {
         onExpand={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "llm plugin details" }));
+    await user.click(screen.getByRole("button", { name: /schema for llm/i }));
     // Azure variant: deployment_name, endpoint, api_key required (3 badges).
     // OpenRouter variant: model, api_key required (2 badges).
     // Total: 5 required badges across the rendered card.
@@ -169,7 +174,7 @@ describe("PluginCard — discriminated union", () => {
         onExpand={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "example plugin details" }));
+    await user.click(screen.getByRole("button", { name: /schema for example/i }));
     // Without mapping, the $defs class name is the fallback label.
     expect(screen.getByText("provider: AzureOpenAIConfig")).toBeInTheDocument();
     expect(screen.getByText("provider: OpenRouterConfig")).toBeInTheDocument();
@@ -191,7 +196,7 @@ describe("PluginCard — discriminated union", () => {
         onExpand={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "example plugin details" }));
+    await user.click(screen.getByRole("button", { name: /schema for example/i }));
     expect(screen.getByText("variant: A")).toBeInTheDocument();
   });
 
@@ -223,7 +228,7 @@ describe("PluginCard — discriminated union", () => {
         onExpand={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "example plugin details" }));
+    await user.click(screen.getByRole("button", { name: /schema for example/i }));
     expect(screen.getByText("provider: local")).toBeInTheDocument();
     expect(screen.queryByText(/External/)).not.toBeInTheDocument();
   });
@@ -261,7 +266,7 @@ describe("PluginCard — discriminated union", () => {
         onExpand={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "example plugin details" }));
+    await user.click(screen.getByRole("button", { name: /schema for example/i }));
     expect(screen.getByText("provider: present")).toBeInTheDocument();
     expect(screen.queryByText("provider: missing")).not.toBeInTheDocument();
   });
@@ -286,7 +291,7 @@ describe("PluginCard — discriminated union", () => {
         onExpand={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "example plugin details" }));
+    await user.click(screen.getByRole("button", { name: /schema for example/i }));
     expect(screen.getByText("No configuration fields.")).toBeInTheDocument();
   });
 });
@@ -294,27 +299,36 @@ describe("PluginCard — discriminated union", () => {
 describe("PluginCard — error and loading states", () => {
   it("shows schema error message and suppresses content", async () => {
     const user = userEvent.setup();
+    const onRetrySchema = vi.fn();
     render(
       <PluginCard
         plugin={makePlugin()}
         schema={null}
         schemaError
         onExpand={vi.fn()}
+        onRetrySchema={onRetrySchema}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "example plugin details" }));
+    await user.click(screen.getByRole("button", { name: /schema for example/i }));
     expect(
       screen.getByText(/Failed to load schema/),
     ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Retry loading schema" }));
+    expect(onRetrySchema).toHaveBeenCalledTimes(1);
   });
 
-  it("shows Loading when schema is null and no error", async () => {
+  it("announces schema loading with a spinner when schema is null and no error", async () => {
     const user = userEvent.setup();
     render(
       <PluginCard plugin={makePlugin()} schema={null} onExpand={vi.fn()} />,
     );
-    await user.click(screen.getByRole("button", { name: "example plugin details" }));
-    expect(screen.getByText("Loading...")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /schema for example/i }));
+    const status = screen.getByRole("status");
+
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveTextContent("Loading schema");
+    expect(status.querySelector(".spinner")).toHaveAttribute("aria-hidden", "true");
   });
 
   it("calls onExpand exactly once per expand toggle", async () => {
@@ -323,91 +337,92 @@ describe("PluginCard — error and loading states", () => {
     render(
       <PluginCard plugin={makePlugin()} schema={null} onExpand={onExpand} />,
     );
-    await user.click(screen.getByRole("button", { name: "example plugin details" })); // expand
-    await user.click(screen.getByRole("button", { name: "example plugin details" })); // collapse
-    await user.click(screen.getByRole("button", { name: "example plugin details" })); // expand again
+    await user.click(screen.getByRole("button", { name: /schema for example/i })); // expand
+    await user.click(screen.getByRole("button", { name: /schema for example/i })); // collapse
+    await user.click(screen.getByRole("button", { name: /schema for example/i })); // expand again
     // onExpand fires on transitions from collapsed → expanded only (2 times).
     expect(onExpand).toHaveBeenCalledTimes(2);
   });
 });
 
-describe("PluginCard — Use in pipeline action", () => {
-  it("dispatches a chat-prefill event and closes the drawer when clicked", async () => {
-    const user = userEvent.setup();
-    const handler = vi.fn();
-    window.addEventListener("composer:prefill-chat-input", handler);
-
-    const onCloseDrawer = vi.fn();
-    render(
-      <PluginCard
-        plugin={makePlugin({ name: "csv", plugin_type: "source" })}
-        schema={null}
-        onExpand={vi.fn()}
-        onCloseDrawer={onCloseDrawer}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: /use csv in pipeline/i }));
-
-    expect(handler).toHaveBeenCalledOnce();
-    const event = handler.mock.calls[0][0] as CustomEvent<string>;
-    expect(event.detail).toMatch(/csv/);
-    expect(onCloseDrawer).toHaveBeenCalledOnce();
-
-    window.removeEventListener("composer:prefill-chat-input", handler);
+describe("PluginCard — Phase 7B reshape", () => {
+  it("renders the plugin name and one-line description", () => {
+    render(<PluginCard plugin={makePlugin({ name: "csv", description: "Read rows from a CSV file." })} schema={null} onExpand={() => {}} />);
+    expect(screen.getByText("csv")).toBeInTheDocument();
+    expect(screen.getByText(/Read rows from a CSV file/i)).toBeInTheDocument();
   });
 
-  it("does not trigger card expand when 'Use in pipeline' is clicked", async () => {
-    const user = userEvent.setup();
+  it("renders one audit-characteristic icon per flag", () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({ audit_characteristics: ["io_read", "quarantine"] })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+    expect(screen.getByText(/reads i\/?o/i)).toBeInTheDocument();
+    expect(screen.getByText(/quarantines/i)).toBeInTheDocument();
+  });
+
+  it("renders the 'Use when' prose in the details disclosure", async () => {
+    render(<PluginCard plugin={makePlugin({ usage_when_to_use: "When you have a CSV file already." })} schema={null} onExpand={() => {}} />);
+    expect(screen.queryByText(/use when/i)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /reference details for example/i }));
+    expect(screen.getByText(/use when/i)).toBeInTheDocument();
+    expect(screen.getByText(/when you have a csv file/i)).toBeInTheDocument();
+  });
+
+  it("renders the 'Avoid when' prose in the details disclosure", async () => {
+    render(<PluginCard plugin={makePlugin({ usage_when_not_to_use: "When the data is inline." })} schema={null} onExpand={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: /reference details for example/i }));
+    expect(screen.getByText(/avoid when/i)).toBeInTheDocument();
+  });
+
+  it("renders the example use as a code block preserving whitespace in details", async () => {
+    render(<PluginCard plugin={makePlugin({ example_use: "source:\n  plugin: csv" })} schema={null} onExpand={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: /reference details for example/i }));
+    const codeBlock = screen.getByText(/plugin: csv/);
+    expect(codeBlock.tagName.toLowerCase()).toBe("pre");
+  });
+
+  it("falls back to a generic message when prose fields are null in details", async () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({ usage_when_to_use: null, usage_when_not_to_use: null, example_use: null })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /reference details for example/i }));
+    // Per design doc 08-§Risks: "Empty entries fall back to a generic
+    // 'see the technical description' message rather than blocking display."
+    expect(screen.getByText(/see the technical description/i)).toBeInTheDocument();
+  });
+
+  it("does NOT render a 'Use in pipeline' button (toolkit affordance removed)", () => {
+    render(<PluginCard plugin={makePlugin()} schema={null} onExpand={() => {}} />);
+    expect(screen.queryByRole("button", { name: /use in pipeline/i })).not.toBeInTheDocument();
+  });
+
+  it("calls onExpand when the 'Schema →' disclosure is activated", async () => {
     const onExpand = vi.fn();
-    render(
-      <PluginCard
-        plugin={makePlugin({ name: "csv", plugin_type: "source" })}
-        schema={null}
-        onExpand={onExpand}
-        onCloseDrawer={vi.fn()}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: /use csv in pipeline/i }));
-
-    // The card should NOT have expanded (onExpand fires only on card expand, not button)
-    expect(onExpand).not.toHaveBeenCalled();
+    render(<PluginCard plugin={makePlugin({ name: "csv" })} schema={null} onExpand={onExpand} />);
+    const disclosure = screen.getByRole("button", { name: /schema for csv/i });
+    await userEvent.click(disclosure);
+    expect(onExpand).toHaveBeenCalled();
   });
 
-  it("renders 'Use in pipeline' as a sibling of the disclosure header, not a descendant", () => {
-    // Structural invariant for ARIA correctness: the card had a nested-
-    // interactive-content failure when the outer card was role=button and the
-    // action button was inside it.  The fix moved role=button to the
-    // .plugin-card-header div and made the action button a sibling.  This
-    // test pins that structure: a behavioural test (e.g. click handlers) would
-    // still pass if a refactor reintroduced nesting plus stopPropagation.
-    render(
-      <PluginCard
-        plugin={makePlugin({ name: "csv", plugin_type: "source" })}
-        schema={null}
-        onExpand={vi.fn()}
-        onCloseDrawer={vi.fn()}
-      />,
-    );
-
-    const useBtn = screen.getByRole("button", { name: /use csv in pipeline/i });
-    // Must NOT have any role=button ancestor — that would be the
-    // nested-interactive a11y violation the disclosure-header refactor fixes.
-    expect(useBtn.closest('[role="button"]')).toBeNull();
-  });
-
-  it("works without an onCloseDrawer prop (no crash)", async () => {
-    const user = userEvent.setup();
-    render(
-      <PluginCard
-        plugin={makePlugin({ name: "csv", plugin_type: "source" })}
-        schema={null}
-        onExpand={vi.fn()}
-      />,
-    );
-
-    // Should not throw
-    await user.click(screen.getByRole("button", { name: /use csv in pipeline/i }));
+  it("renders the expanded schema after onExpand resolves and schema arrives", () => {
+    const schema: PluginSchemaInfo = {
+      name: "csv",
+      plugin_type: "source",
+      description: "Read CSV files.",
+      json_schema: {
+        properties: { path: { type: "string", description: "Path to file" } },
+        required: ["path"],
+      },
+    } as unknown as PluginSchemaInfo;
+    render(<PluginCard plugin={makePlugin({ name: "csv" })} schema={schema} onExpand={() => {}} initialExpanded />);
+    expect(screen.getByText("path")).toBeInTheDocument();
   });
 });

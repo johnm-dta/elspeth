@@ -11,7 +11,9 @@ from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract import PipelineRow
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import PluginConfigError, TransformDataConfig
@@ -85,8 +87,9 @@ class Truncate(BaseTransform):
     """
 
     name = "truncate"
+    determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:800bbbb5063458fa"
+    source_file_hash: str | None = "sha256:393331d8a6a09fb0"
     config_model = TruncateConfig
     passes_through_input = True
 
@@ -243,3 +246,18 @@ class Truncate(BaseTransform):
     def close(self) -> None:
         """No resources to release."""
         pass
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="truncate",
+                issue_code=None,
+                summary="Truncate string fields to max_length with optional suffix marker. Non-destructive on shorter values.",
+                composer_hints=(
+                    "max_length is character count (Python len()), not bytes. Multi-byte content may exceed byte limits even after truncation.",
+                    "suffix (e.g. '…') counts toward max_length; the truncated portion is shorter than max_length when suffix is set.",
+                    "Use for display preparation, audit-summary fields, or controlling downstream LLM prompt size — not for security boundaries.",
+                ),
+            )
+        return None

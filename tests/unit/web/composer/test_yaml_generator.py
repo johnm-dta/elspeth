@@ -13,7 +13,8 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
-from elspeth.web.composer.yaml_generator import generate_yaml
+from elspeth.web.composer.yaml_generator import generate_pipeline_dict, generate_yaml
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
 
 
 def _make_linear_pipeline() -> CompositionState:
@@ -178,6 +179,113 @@ def _make_fork_coalesce_pipeline() -> CompositionState:
 
 
 class TestGenerateYaml:
+    def test_generate_pipeline_dict_matches_generate_yaml_shape(self) -> None:
+        state = _make_fork_coalesce_pipeline()
+
+        pipeline_dict = generate_pipeline_dict(state)
+
+        assert pipeline_dict == yaml.safe_load(generate_yaml(state))
+        assert set(pipeline_dict) == {"source", "gates", "coalesce", "sinks"}
+
+    def test_generate_pipeline_dict_strips_web_metadata(self) -> None:
+        state = _make_linear_pipeline().with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="transform_1",
+                options={"path": "/data/input.csv", "blob_ref": "web-only"},
+                on_validation_failure="quarantine",
+            )
+        )
+
+        pipeline_dict = generate_pipeline_dict(state)
+
+        assert "blob_ref" not in pipeline_dict["source"]["options"]
+        assert "blob_ref" not in yaml.safe_load(generate_yaml(state))["source"]["options"]
+
+    def test_generate_pipeline_dict_strips_source_authoring_metadata(self) -> None:
+        state = _make_linear_pipeline().with_source(
+            SourceSpec(
+                plugin="csv",
+                on_success="transform_1",
+                options={
+                    "path": "/data/input.csv",
+                    "blob_ref": "web-only",
+                    SOURCE_AUTHORING_KEY: {
+                        "modality": "llm_generated",
+                        "content_hash": "abc123",
+                        "review_event_id": None,
+                        "resolved_kind": None,
+                    },
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="quarantine",
+            )
+        )
+
+        pipeline_dict = generate_pipeline_dict(state)
+        yaml_options = yaml.safe_load(generate_yaml(state))["source"]["options"]
+
+        assert SOURCE_AUTHORING_KEY not in pipeline_dict["source"]["options"]
+        assert SOURCE_AUTHORING_KEY not in yaml_options
+        assert yaml_options["schema"] == {"mode": "observed"}
+
+    def test_generate_pipeline_dict_strips_interpretation_authoring_metadata_from_transforms(self) -> None:
+        state = _make_linear_pipeline().with_node(
+            NodeSpec(
+                id="transform_1",
+                node_type="transform",
+                plugin="llm",
+                input="source_out",
+                on_success="main_output",
+                on_error="discard",
+                options={
+                    "prompt_template": "Rate resolved meaning: {{ row.text }}",
+                    PROMPT_TEMPLATE_PARTS_KEY: [{"kind": "text", "text": "ignored"}],
+                    INTERPRETATION_REQUIREMENTS_KEY: [],
+                    "resolved_prompt_template_hash": "sha256-rfc8785-v1:abc123",
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+
+        pipeline_dict = generate_pipeline_dict(state)
+        options = pipeline_dict["transforms"][0]["options"]
+
+        assert PROMPT_TEMPLATE_PARTS_KEY not in options
+        assert INTERPRETATION_REQUIREMENTS_KEY not in options
+        assert options["prompt_template"] == "Rate resolved meaning: {{ row.text }}"
+        assert options["resolved_prompt_template_hash"] == "sha256-rfc8785-v1:abc123"
+
+    def test_generate_pipeline_dict_rejects_unknown_node_type(self) -> None:
+        """YAML export must not silently drop nodes outside the closed set."""
+        state = _make_linear_pipeline().with_node(
+            NodeSpec.from_dict(
+                {
+                    "id": "mystery",
+                    "node_type": "bogus",
+                    "plugin": "passthrough",
+                    "input": "source_out",
+                    "on_success": "main_output",
+                    "on_error": "discard",
+                    "options": {},
+                    "condition": None,
+                    "routes": None,
+                    "fork_to": None,
+                    "branches": None,
+                    "policy": None,
+                    "merge": None,
+                }
+            )
+        )
+
+        with pytest.raises(ValueError, match="Unknown node_type 'bogus' for node 'mystery'"):
+            generate_pipeline_dict(state)
+
     def test_linear_pipeline(self) -> None:
         state = _make_linear_pipeline()
         yaml_str = generate_yaml(state)

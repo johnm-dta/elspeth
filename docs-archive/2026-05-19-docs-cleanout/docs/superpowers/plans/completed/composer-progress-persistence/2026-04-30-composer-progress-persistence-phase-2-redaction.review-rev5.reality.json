@@ -1,0 +1,82 @@
+{
+  "reviewer": "reality",
+  "verdict": "APPROVED_WITH_WARNINGS",
+  "blocking_issues": [],
+  "warnings": [
+    {
+      "id": "W-OPT-PATHS",
+      "summary": "_TOOL_OPTIONAL_PATHS companion does not exist in service.py",
+      "detail": "Tasks 4, 13, and 14 each instruct the implementer to REMOVE 'any companion _TOOL_OPTIONAL_PATHS[tool]' in the same commit. A grep of service.py confirms no such symbol exists. The plan's parenthetical is not harmful — a non-existent symbol cannot be removed — but the instruction may cause implementers to search for something that isn't there, waste time, or second-guess whether they missed it. The plan should say '(there is no companion _TOOL_OPTIONAL_PATHS; only _TOOL_REQUIRED_PATHS exists)' rather than '(and any companion _TOOL_OPTIONAL_PATHS[tool])'. Not blocking because removing a non-existent entry is a no-op.",
+      "evidence": "grep -n '_TOOL_OPTIONAL_PATHS' service.py produced zero results. _TOOL_REQUIRED_PATHS confirmed at service.py:702."
+    },
+    {
+      "id": "W-TEST-COUNT-UNIT",
+      "summary": "Plan cites 14,948 unit tests; live collection is 14,948 selected out of 14,951 (3 deselected)",
+      "detail": "The preflight says 'verified collection count was 14,948'. Running collect-only today yields '14948/14951 tests collected (3 deselected)' — 14,948 is the selected count, not the raw total. The plan's guidance already says 'verify zero failures, not an exact match', so this is a presentation difference rather than a substantive error. No blocking concern.",
+      "evidence": ".venv/bin/python -m pytest tests/unit --collect-only -q | tail -1 → '14948/14951 tests collected (3 deselected)'"
+    },
+    {
+      "id": "W-TEST-COUNT-INTEGRATION",
+      "summary": "Plan cites 785 integration tests; live collection is 785 selected out of 803 (18 deselected)",
+      "detail": "Same caveat as W-TEST-COUNT-UNIT. The count 785 matches the selected count with the 'not testcontainer' marker applied, so the cited figure is accurate for the command as written. No blocking concern.",
+      "evidence": ".venv/bin/python -m pytest tests/integration -m 'not testcontainer' --collect-only -q | tail -1 → '785/803 tests collected (18 deselected)'"
+    },
+    {
+      "id": "W-MISSINGREQUIREDPATHS-LINE1157",
+      "summary": "test_service.py:1157 is a comment only; full grep reveals no additional assertion pins outside the plan's confirmed list",
+      "detail": "The plan's Task 4 Step 4 lists 'test_service.py:367' as the confirmed pin requiring update in Task 14. Running the plan's own full grep (grep -Rn '\"MissingRequiredPaths\"|MissingRequiredPaths' tests/ src/elspeth/web/ --include='*.py') found four results total: (1) tests/unit/web/composer/test_service.py:367 — assertion, set_pipeline, confirmed plan pin for Task 14; (2) tests/unit/web/composer/test_service.py:1157 — code comment only, references the general pre-dispatch path, does not pin set_source; (3) tests/unit/web/composer/test_required_paths_walker.py:127 — this is a test class name 'TestFindMissingRequiredPaths' testing the lower-level _find_missing_required_paths helper; it contains no string literal 'MissingRequiredPaths' and does not pin error_class emission; (4) src/elspeth/web/composer/service.py:2039 — the emission site; (5) src/elspeth/web/composer/anti_anchor.py:27 — a docstring mention. No additional assertion-level pins exist outside the plan's confirmed list. The plan's grep sweep is complete. The warning is retained only to note that test_required_paths_walker.py:127 exists and is a class name (not a string pin) — implementers who run the grep should not be confused by it.",
+      "evidence": "Full grep: tests/unit/web/composer/test_service.py:367 (assertion), test_service.py:1157 (comment), test_required_paths_walker.py:127 (class name TestFindMissingRequiredPaths — no string literal pin), service.py:2039 (emission site), anti_anchor.py:27 (docstring mention). No integration-test pins and no additional unit-test assertion pins found."
+    }
+  ],
+  "minor": [
+    {
+      "id": "R-M-REDACTION-PREEXISTS",
+      "summary": "redaction.py already exists with redact_source_storage_path; plan correctly states this",
+      "detail": "The plan's File Structure section says 'the file already exists with redact_source_storage_path; Phase 2 adds...' — confirmed accurate. The existing file is 43 lines. No issue.",
+      "evidence": "/home/john/elspeth/.worktrees/composer-progress-1a/src/elspeth/web/composer/redaction.py:1-43"
+    }
+  ],
+  "rev4_closure_verification": {
+    "B1_property_test_rewrite": {
+      "status": "CLOSED",
+      "evidence": "Task 19 plan body (lines ~1735-1932) contains the full test source. Confirmed: no isinstance filter, no 'value_provider is None: continue' skip (replaced with assert), no except fallback, only 'raw_value is None' skip, assert sensitive_nodes non-empty, key-set equality before per-key comparison for container descent. All six items of the implementer cross-check are present in the test body. The parametrize filter 'if entry.argument_model is not None' correctly selects only type-driven manifest entries. MANIFEST import verified as a to-be-created symbol in redaction.py (Task 2/4). NoopRedactionTelemetry import verified as a to-be-created symbol in redaction_telemetry.py (Task 3)."
+    },
+    "M1_unconditional_removal": {
+      "status": "CLOSED",
+      "evidence": "Tasks 4, 13, 14 all use the word 'unconditionally' and cite CLAUDE.md 'No Legacy Code Policy'. Task 4 Step 4 and the Done-When item both require the removal. The parenthetical '(and any companion _TOOL_OPTIONAL_PATHS[tool])' references a symbol that does not exist but is harmlessly a no-op; flagged as W-OPT-PATHS above."
+    },
+    "M2_missing_required_paths_grep": {
+      "status": "CLOSED",
+      "evidence": "Task 4 Step 4 contains the canonical grep command, per-match decision rules, and explicitly flags test_service.py:367 as a set_pipeline pin that belongs to Task 14. The confirmed-pins list correctly identifies that :367 exercises set_pipeline (verified: line 367 asserts 'MissingRequiredPaths' in result.message for a test whose fixture at line 337 calls set_pipeline with missing fields). A second MissingRequiredPaths reference at line 1157 is a comment only and does not pin set_source behavior — flagged as W-MISSINGREQUIREDPATHS-LINE1157 above."
+    },
+    "W1W2_test_counts": {
+      "status": "CLOSED",
+      "evidence": "Preflight cites 14,948 unit and 785 integration. Live collection as of 2026-05-12: 14,948/14,951 unit (3 deselected) and 785/803 integration with 'not testcontainer' (18 deselected). The cited figures match the selected counts for the exact commands specified. Minor presentation note at W-TEST-COUNT-UNIT/W-TEST-COUNT-INTEGRATION."
+    },
+    "W7_per_entry_runtime": {
+      "status": "PARTIAL",
+      "evidence": "Task 16-final-a creates test_declarative_manifest_runtime_smoke.py. The test source in the plan (lines ~1467-1537) parametrises over every 'entry.policy is not None' MANIFEST entry, exercises both redact_tool_call_arguments and redact_tool_call_response. Field names used: policy.handles_no_sensitive_data, policy.sensitive_argument_keys, policy.sensitive_response_keys. The gap: Task 6's constructor test cases (plan lines ~1153-1162) validate 'handles_no_sensitive_data', 'sensitive_argument_keys', 'known_response_keys', and 'handles_no_sensitive_data_reason_struct' — but do NOT include a constructor test for 'sensitive_response_keys' as a distinct field. The smoke test's 'policy.sensitive_response_keys' attribute access is valid if ToolRedactionPolicy declares that field (as spec §4.2.3 intends), but Task 6 has no test case that mechanically pins that field's name. An implementer who mistakenly names it 'response_sensitive_keys' or 'sensitive_keys' would pass all Task 6 tests yet fail at Task 16-final-a runtime. The W7 fix is functionally correct (the smoke test will catch the typo), but Task 6 is missing one constructor test: a 'sensitive_response_keys=('content',)' construction that confirms the field exists and is accessible by that exact name. This is a plan gap, not a code gap — it cannot cause a runtime error, but it weakens the TDD discipline for this field."
+    },
+    "W8a_optional_scalar_arm": {
+      "status": "CLOSED",
+      "evidence": "Task 1 test_walk_model_schema.py includes test_walk_optional_annotated_scalar_arm (plan lines ~343-371). Verified: Python 3.13 + Pydantic 2.13.4 (installed in worktree venv) correctly preserve the Annotated metadata through Optional unwrap — get_args(Optional[Annotated[str, 'marker']]) returns (Annotated[str, 'marker'], NoneType) with the inner Annotated arm intact. The test is satisfiable."
+    },
+    "W8b_atomicity": {
+      "status": "CLOSED",
+      "evidence": "Task 7 test list includes 'Walker atomicity contract (rev-3 W8b / rev-4 W8b)' with the specific sentinel pattern: 'result = sentinel; with pytest.raises(...): result = redact_tool_call_response(...); assert result is sentinel'. Implementation satisfiability: the plan's implementation note instructs the walker to build output in a local variable and only return on success — a mid-walk raise propagates before any return, so the caller assignment is never reached. Satisfiable with straightforward implementation."
+    },
+    "W8c_empty_known_response_keys": {
+      "status": "CLOSED",
+      "evidence": "Task 7 test list includes 'Empty known_response_keys (rev-3 W8c / rev-4 W8c)' with explicit fail-closed semantics: every key → fixed sentinel + telemetry counter. Present in plan lines ~1185."
+    },
+    "A2_freeze_elision_comment": {
+      "status": "CLOSED",
+      "evidence": "Task 1 TraversalNode docstring in plan (lines ~436-462) contains the explicit freeze-elision design assumption with three numbered conditions and a forward-looking note about when freeze_fields must be added. This is the inline-comment the rev-4 A2 finding requested."
+    },
+    "RW3_json_decode_line_citation": {
+      "status": "CLOSED",
+      "evidence": "Plan now cites service.py:1838-1881. Verified: the JSON-decode try/except block begins at line 1838 ('decoded_arguments = json.loads(tool_call.function.arguments)') and the non-dict check at line 1878 falls within 1881 ('if not isinstance(decoded_arguments, dict):'). The range 1838-1881 accurately spans the entire pre-dispatch ARG_ERROR sites (1/3 at 1838 and 2/3 at 1878-1881). The plan also correctly cites 'ARG_ERROR pre-dispatch site (3/3): schema-required paths missing' at service.py:2039 with error_class='MissingRequiredPaths' — verified at line 2039."
+    }
+  },
+  "notes": "Nine of ten rev-4 closure items verified CLOSED; W7 (per-entry runtime smoke) is PARTIAL. Zero blocking issues. Four warnings flagged: W-OPT-PATHS (non-existent _TOOL_OPTIONAL_PATHS referenced in Tasks 4/13/14 — harmless no-op but will confuse implementers), W-TEST-COUNT-UNIT and W-TEST-COUNT-INTEGRATION (cited counts accurate for the specific commands, minor presentation difference between selected and raw counts), W-MISSINGREQUIREDPATHS-LINE1157 (full plan grep run — no additional assertion pins exist beyond test_service.py:367; the test_required_paths_walker.py:127 hit is a class name not a string pin). The B1 property test rewrite is structurally sound: parametrize filter, type-agnostic invariant, six-item cross-check, only-allowed-skip rule all present. The Optional[Annotated[T, Sensitive()]] arm test (W8a) is satisfiable — confirmed empirically with Python 3.13 + Pydantic 2.13.4. The W7 PARTIAL: Task 16-final-a's smoke test will catch a 'sensitive_response_keys' typo at runtime, but Task 6 lacks a constructor-level test case that pins this field name; the TDD chain is weaker for this attribute than for the other ToolRedactionPolicy fields. Recommended: add 'sensitive_response_keys' to Task 6's test cases."
+}

@@ -73,6 +73,7 @@ from elspeth.core.landscape.row_data import CallDataResult, CallDataState, RowDa
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
 from elspeth.core.landscape.schema import (
     artifacts_table,
+    auth_events_table,
     batch_members_table,
     batch_outputs_table,
     batches_table,
@@ -87,6 +88,7 @@ from elspeth.core.landscape.schema import (
     token_parents_table,
     tokens_table,
 )
+from elspeth.core.landscape.write_repository import LandscapeWriteRepository
 
 __all__ = [
     "Artifact",
@@ -108,6 +110,7 @@ __all__ = [
     "JSONFormatter",
     "LandscapeDB",
     "LandscapeExporter",
+    "LandscapeWriteRepository",
     "LineageResult",
     "LineageTextFormatter",
     "Node",
@@ -133,6 +136,7 @@ __all__ = [
     "TokenParent",
     "ValidationErrorWithContract",
     "artifacts_table",
+    "auth_events_table",
     "batch_members_table",
     "batch_outputs_table",
     "batches_table",

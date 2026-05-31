@@ -12,6 +12,7 @@ from pydantic import ConfigDict
 
 from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.plugins.infrastructure.base import BaseSource
 
 
@@ -47,12 +48,29 @@ class NullSource(BaseSource):
 
     name = "null"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d958973b7ed25332"
+    source_file_hash: str | None = "sha256:f3caba5388d96987"
     config_model = None  # NullSource requires no config (resume-only)
     determinism = Determinism.DETERMINISTIC
     output_schema: type[PluginSchema] = NullSourceSchema
     # NullSource yields no rows, so it never quarantines - but set to satisfy protocol
     _on_validation_failure: str = "discard"
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Resume-only source placeholder that emits no rows.",
+                composer_hints=(
+                    "Do not choose null for new ingestion; it yields zero rows by design.",
+                    "Use null only for resume/internal workflows where rows come from stored payloads.",
+                    "Downstream schemas are restored from the original audit trail, not from NullSource output.",
+                    "If you have been asked to generate source rows yourself, do not pick `null` — this source emits zero rows and is reserved for resume operations that read from the payload store.",
+                    "When asked to generate source rows yourself, choose `csv`, `json`, or `text` instead and bind a generated blob via `create_blob` plus `set_source_from_blob`.",
+                ),
+            )
+        return None
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize NullSource.

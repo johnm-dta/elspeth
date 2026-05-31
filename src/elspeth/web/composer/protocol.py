@@ -8,11 +8,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal, Protocol
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
+
+if TYPE_CHECKING:
+    from elspeth.web.composer.guided.state_machine import TerminalState
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall
-from elspeth.web.composer.progress import ComposerProgressSink
+from elspeth.contracts.composer_progress import ComposerProgressReason, ComposerProgressSink
+from elspeth.contracts.errors import FailedTurnMetadata
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.execution.schemas import ValidationResult
 
@@ -43,9 +48,10 @@ class ComposerResult:
             the verbatim LLM response.
 
     Field-pairing invariant:
-        - When ``runtime_preflight`` is non-None and not ``is_valid``,
-          ``raw_assistant_content`` MUST be set (the model's pre-synthesis
-          prose must be recoverable from the audit row).
+        - When ``runtime_preflight`` is non-None, not ``is_valid``, and
+          not a typed authoring-valid handoff, ``raw_assistant_content``
+          MUST be set (the model's pre-synthesis prose must be recoverable
+          from the audit row).
         - When ``raw_assistant_content`` is set with passing preflight,
           ``message`` MUST differ from ``raw_assistant_content``
           (otherwise raw is set spuriously — the audit row would falsely
@@ -103,6 +109,11 @@ class ComposerResult:
     # returned text-only).
     tool_invocations: tuple[ComposerToolInvocation, ...] = ()
     llm_calls: tuple[ComposerLLMCall, ...] = ()
+    # Set when _compose_loop has already committed assistant+tool rows via
+    # SessionServiceProtocol.persist_compose_turn_async. Routes must not drain
+    # tool_invocations again for that turn.
+    persisted_assistant_message_id: str | None = None
+    persisted_tool_call_turn: bool = False
     # Number of forced repair turns the proof step injected into this compose
     # invocation. Capped at 2 by the loop. 0 means first-pass success; 1 or 2
     # means the model was given proof_diagnostics back as a synthesized
@@ -136,7 +147,15 @@ class ComposerResult:
         #    *why* synthesis happened, only on whether it did
         #    (``message.startswith(raw)`` distinguishes augmentation
         #    from replacement structurally).
-        preflight_failed = self.runtime_preflight is not None and not self.runtime_preflight.is_valid
+        preflight_failed = (
+            self.runtime_preflight is not None
+            and not self.runtime_preflight.is_valid
+            and not (
+                self.runtime_preflight.readiness.authoring_valid
+                and self.runtime_preflight.readiness.completion_ready
+                and not self.runtime_preflight.readiness.execution_ready
+            )
+        )
         if preflight_failed and self.raw_assistant_content is None:
             raise ValueError(
                 "ComposerResult field-pairing invariant violated: "
@@ -185,6 +204,18 @@ class ComposerServiceError(Exception):
     """Base exception for composer service errors."""
 
 
+def _convergence_reason_for_budget(
+    budget_exhausted: Literal["composition", "discovery", "timeout"],
+) -> ComposerProgressReason:
+    """Map the private convergence budget discriminator to public reason code."""
+
+    if budget_exhausted == "composition":
+        return "convergence_composition_budget"
+    if budget_exhausted == "discovery":
+        return "convergence_discovery_budget"
+    return "convergence_wall_clock_timeout"
+
+
 class ComposerConvergenceError(ComposerServiceError):
     """Raised when the LLM tool-use loop exhausts its budget or times out.
 
@@ -210,7 +241,9 @@ class ComposerConvergenceError(ComposerServiceError):
             route-handler branches.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"max_turns", "budget_exhausted", "partial_state", "tool_invocations", "llm_calls"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset(
+        {"max_turns", "budget_exhausted", "partial_state", "tool_invocations", "llm_calls", "reason", "evidence", "failed_turn"}
+    )
 
     def __init__(
         self,
@@ -220,6 +253,9 @@ class ComposerConvergenceError(ComposerServiceError):
         partial_state: CompositionState | None = None,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        reason: ComposerProgressReason | None = None,
+        evidence: Mapping[str, Any] | None = None,
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> None:
         super().__init__(
             f"Composer did not converge within {max_turns} turns "
@@ -229,6 +265,8 @@ class ComposerConvergenceError(ComposerServiceError):
         self.max_turns = max_turns
         self.budget_exhausted = budget_exhausted
         self.partial_state = partial_state
+        self.reason = reason or _convergence_reason_for_budget(budget_exhausted)
+        self.evidence = MappingProxyType(dict(evidence or {}))
         # Per-tool-call audit trail accumulated up to the convergence
         # event. Includes the tool calls that did NOT cause a state
         # mutation (cache hits, ARG_ERROR, discovery-only). The route
@@ -237,6 +275,7 @@ class ComposerConvergenceError(ComposerServiceError):
         # an audit gap.
         self.tool_invocations = tool_invocations
         self.llm_calls = llm_calls
+        self.failed_turn = failed_turn
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the declared attributes; exception-chain machinery
@@ -260,6 +299,9 @@ class ComposerConvergenceError(ComposerServiceError):
         initial_version: int,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        reason: ComposerProgressReason | None = None,
+        evidence: Mapping[str, Any] | None = None,
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> ComposerConvergenceError:
         """Build from compose-loop locals, applying the partial-state rule.
 
@@ -286,6 +328,9 @@ class ComposerConvergenceError(ComposerServiceError):
             partial_state=partial,
             tool_invocations=tool_invocations,
             llm_calls=llm_calls,
+            reason=reason,
+            evidence=evidence,
+            failed_turn=failed_turn,
         )
 
 
@@ -329,7 +374,9 @@ class ComposerPluginCrashError(ComposerServiceError):
     precedes one of its ``ComposerServiceError`` subclasses.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class", "tool_invocations", "llm_calls"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset(
+        {"original_exc", "partial_state", "exc_class", "tool_invocations", "llm_calls", "failed_turn"}
+    )
 
     def __init__(
         self,
@@ -338,6 +385,7 @@ class ComposerPluginCrashError(ComposerServiceError):
         partial_state: CompositionState | None = None,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> None:
         super().__init__(f"Composer plugin crash: {type(original_exc).__name__}")
         self.original_exc = original_exc
@@ -349,6 +397,7 @@ class ComposerPluginCrashError(ComposerServiceError):
         # tried that triggered the bug.
         self.tool_invocations = tool_invocations
         self.llm_calls = llm_calls
+        self.failed_turn = failed_turn
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the declared attributes; exception-chain dunders
@@ -374,6 +423,7 @@ class ComposerPluginCrashError(ComposerServiceError):
         initial_version: int,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> ComposerPluginCrashError:
         """Build from compose-loop locals, applying the partial-state rule.
 
@@ -394,13 +444,21 @@ class ComposerPluginCrashError(ComposerServiceError):
         :meth:`ComposerConvergenceError.capture`).
         """
         partial = state if state.version > initial_version else None
-        return cls(original_exc, partial_state=partial, tool_invocations=tool_invocations, llm_calls=llm_calls)
+        return cls(
+            original_exc,
+            partial_state=partial,
+            tool_invocations=tool_invocations,
+            llm_calls=llm_calls,
+            failed_turn=failed_turn,
+        )
 
 
 class ComposerRuntimePreflightError(ComposerServiceError):
     """Unexpected internal failure while running composer runtime preflight."""
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"original_exc", "partial_state", "exc_class", "tool_invocations", "llm_calls"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset(
+        {"original_exc", "partial_state", "exc_class", "tool_invocations", "llm_calls", "failed_turn"}
+    )
 
     def __init__(
         self,
@@ -409,6 +467,7 @@ class ComposerRuntimePreflightError(ComposerServiceError):
         partial_state: CompositionState | None,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> None:
         super().__init__("Composer runtime preflight failed internally.")
         self.original_exc = original_exc
@@ -422,6 +481,7 @@ class ComposerRuntimePreflightError(ComposerServiceError):
         # the caller threading ``result.tool_invocations`` through.
         self.tool_invocations = tool_invocations
         self.llm_calls = llm_calls
+        self.failed_turn = failed_turn
 
     def __setattr__(self, name: str, value: object) -> None:
         if name in type(self)._FROZEN_ATTRS and name in self.__dict__:
@@ -437,9 +497,16 @@ class ComposerRuntimePreflightError(ComposerServiceError):
         initial_version: int,
         tool_invocations: tuple[ComposerToolInvocation, ...] = (),
         llm_calls: tuple[ComposerLLMCall, ...] = (),
+        failed_turn: FailedTurnMetadata | None = None,
     ) -> ComposerRuntimePreflightError:
         partial = state if state.version > initial_version else None
-        return cls(original_exc=exc, partial_state=partial, tool_invocations=tool_invocations, llm_calls=llm_calls)
+        return cls(
+            original_exc=exc,
+            partial_state=partial,
+            tool_invocations=tool_invocations,
+            llm_calls=llm_calls,
+            failed_turn=failed_turn,
+        )
 
 
 class ToolArgumentError(Exception):
@@ -519,7 +586,7 @@ class ToolArgumentError(Exception):
     audit, without leaking into the LLM echo.
     """
 
-    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"argument", "expected", "actual_type"})
+    _FROZEN_ATTRS: ClassVar[frozenset[str]] = frozenset({"argument", "expected", "actual_type", "code"})
 
     def __init__(
         self,
@@ -527,6 +594,7 @@ class ToolArgumentError(Exception):
         argument: str,
         expected: str,
         actual_type: str,
+        code: str | None = None,
     ) -> None:
         # Reject empty strings at construction time: a blank field
         # would produce a nonsensical LLM echo ("'' must be , got ")
@@ -543,6 +611,17 @@ class ToolArgumentError(Exception):
         self.argument = argument
         self.expected = expected
         self.actual_type = actual_type
+        # Optional internal discriminant for compose-loop dispatch logic. The
+        # ``code`` field is operator-controlled (a fixed string constant chosen
+        # by the handler raising the exception, e.g.
+        # ``"RATE_CAP_PER_TERM"``) — it is NEVER an LLM- or user-supplied
+        # value and is NOT included in ``args[0]`` / the LLM echo. The
+        # compose loop reads it to distinguish branches that need extra
+        # bookkeeping (write an AUTO_INTERPRETED_NO_SURFACES row, emit
+        # operational telemetry) from generic ARG_ERROR. ``None`` means
+        # "no specific dispatch hook" — the default for all existing
+        # raise sites pre Phase 5b Task 5 follow-on.
+        self.code = code
 
     def __setattr__(self, name: str, value: object) -> None:
         # Guard only the three declared attributes; exception-chain
@@ -576,6 +655,9 @@ class ComposerSettings(Protocol):
     def composer_max_discovery_turns(self) -> int: ...
 
     @property
+    def composer_max_tool_calls_per_turn(self) -> int: ...
+
+    @property
     def composer_timeout_seconds(self) -> float: ...
 
     @property
@@ -600,6 +682,15 @@ class ComposerSettings(Protocol):
     def composer_advisor_timeout_seconds(self) -> float: ...
 
     @property
+    def composer_interpretation_rate_limit_per_term(self) -> int: ...
+
+    @property
+    def composer_interpretation_rate_limit_per_session_day(self) -> int: ...
+
+    @property
+    def max_blob_storage_per_session_bytes(self) -> int: ...
+
+    @property
     def data_dir(self) -> Any: ...
 
 
@@ -608,8 +699,9 @@ class ComposerService(Protocol):
 
     Accepts a user message, pre-fetched chat history, and current state.
     Runs the LLM tool-use loop. Returns the assistant's response
-    and the (possibly updated) state. Does NOT depend on SessionService —
-    the route handler mediates (seam contract B).
+    and the (possibly updated) state. Tool-call turns may persist their
+    assistant/tool audit rows through SessionServiceProtocol; terminal
+    no-tool assistant messages are still route-persisted (seam contract B).
     """
 
     async def compose(
@@ -618,8 +710,11 @@ class ComposerService(Protocol):
         messages: list[dict[str, Any]],
         state: CompositionState,
         session_id: str | None = None,
+        current_state_id: str | None = None,
         user_id: str | None = None,
         progress: ComposerProgressSink | None = None,
+        guided_terminal: TerminalState | None = None,
+        user_message_id: str | None = None,
     ) -> ComposerResult:
         """Run the LLM composition loop.
 
@@ -628,10 +723,27 @@ class ComposerService(Protocol):
             messages: Chat history as plain dicts (role/content keys).
                 The route handler fetches ChatMessageRecord from
                 session_service.get_messages(), converts each to a dict,
-                and passes the result here. ComposerService does NOT
-                depend on SessionService (seam contract B).
+                and passes the result here. ComposerService may depend on
+                SessionServiceProtocol for tool-call turn persistence (seam
+                contract B), but does not fetch history itself.
             state: The current CompositionState.
+            current_state_id: Database id of ``state`` when it came from a
+                persisted session row. Used as the stale-state guard for
+                compose-loop tool-call audit persistence.
             user_id: Current user ID. Passed through to secret tools.
+            guided_terminal: When set, the resolved TerminalState from the
+                completed guided session; triggers the layered mode-transition
+                prompt for this first freeform turn (spec §8.2).
+            user_message_id: Database id of the just-persisted user
+                ``chat_messages`` row that triggered this compose call
+                (Phase 5a Task 2.5). Threaded through the compose loop into
+                inline-blob writers so any blob materialised by a tool call
+                this turn records ``created_from_message_id`` pointing back
+                at this id. Defaults to ``None`` for test paths and
+                non-route callers; the composite FK on
+                ``(created_from_message_id, session_id)`` in ``blobs_table``
+                rejects cross-session lineage, so a wrong id surfaces as
+                IntegrityError rather than silent provenance corruption.
 
         Returns:
             ComposerResult with assistant message and updated state.

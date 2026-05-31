@@ -18,7 +18,9 @@ from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
+from elspeth.contracts.contexts import RateLimitRegistryProtocol
 from elspeth.contracts.freeze import deep_freeze
+from elspeth.contracts.node_state_context import AggregationBatchContext
 
 if TYPE_CHECKING:
     from elspeth.contracts import Call, CallStatus, CallType, TransformErrorReason
@@ -28,7 +30,6 @@ if TYPE_CHECKING:
     from elspeth.contracts.identity import TokenInfo
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
-    from elspeth.core.rate_limit import RateLimitRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ class PluginContext:
     # === Audit & Infrastructure ===
     landscape: PluginAuditWriter | None = None
     payload_store: PayloadStore | None = None
-    rate_limit_registry: RateLimitRegistry | None = None
+    rate_limit_registry: RateLimitRegistryProtocol | None = None
     concurrency_config: RuntimeConcurrencyConfig | None = None
     shutdown_event: threading.Event | None = None
 
@@ -105,6 +106,14 @@ class PluginContext:
     # use this to pass per-row token_id to audited clients for correct telemetry
     # attribution. When None, the transform falls back to ctx.token (single-token mode).
     batch_token_ids: tuple[str, ...] | None = field(default=None)
+
+    # === Aggregation Batch Context ===
+    # Set by AggregationExecutor.execute_flush() before calling batch-aware transforms.
+    # Carries durable pagination metadata (flush_index, row_start/end, rows_seen_total,
+    # is_end_of_source) sourced from AggregationExecutor's checkpointed counters.
+    # Cleared by execute_flush() in both the success and failure cleanup paths so
+    # stale state never leaks into the next call on the shared context.
+    aggregation_batch: AggregationBatchContext | None = field(default=None)
 
     # === Schema Contract ===
     # Set by executor when processing transforms to enable contract-aware template

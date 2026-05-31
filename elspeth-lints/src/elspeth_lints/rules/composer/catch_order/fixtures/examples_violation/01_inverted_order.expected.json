@@ -1,0 +1,12 @@
+[
+  {
+    "column": 0,
+    "file_path": "web/sessions/routes.py",
+    "fingerprint": "e29326190ba6dadf",
+    "line": 14,
+    "message": "web/sessions/routes.py:14: except ComposerPluginCrashError is unreachable — preceding except ComposerServiceError at line 12 catches the subclass. Move the narrower handler above the broader one.",
+    "rule_id": "CCO1",
+    "severity": "error",
+    "suggestion": "Move the subclass except-handler above the supertype handler. Python evaluates except clauses top-to-bottom; catch narrow first."
+  }
+]

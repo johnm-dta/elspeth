@@ -1,0 +1,12 @@
+[
+  {
+    "column": 1,
+    "file_path": "bad.py",
+    "fingerprint": "987fe7a9ad3531cf",
+    "line": 4,
+    "message": "@trust_boundary(source_param='data') names a parameter of 'foo' but the function body never reads it; the decorator is structurally inert.",
+    "rule_id": "TBS2",
+    "severity": "error",
+    "suggestion": "@trust_boundary(source_param=...) names a parameter the function body never reads. The decorator is structurally inert \u2014 its suppression scope would cover nothing. Either drop the decorator, change source_param to the parameter the function actually treats as external data, or extend the function body to read from the declared boundary."
+  }
+]

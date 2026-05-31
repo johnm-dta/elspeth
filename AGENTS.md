@@ -27,6 +27,17 @@ You are starting this session with zero context. No memory of prior conversation
 
 ---
 
+## Focused Subagents
+
+Use focused subagents when they materially improve confidence or throughput.
+For release reviews, broad audits, multi-surface debugging, and independent
+implementation slices, split the work by boundary and dispatch subagents without
+asking for another permission round. Keep each subagent prompt self-contained,
+give it a narrow scope, avoid overlapping write sets, and integrate its findings
+against the live tree before reporting or closing work.
+
+---
+
 ## Git Safety
 
 **Never run destructive commands without explicit user permission:**
@@ -35,7 +46,7 @@ You are starting this session with zero context. No memory of prior conversation
 - `git push --force` — rewrites remote history
 - `git rebase` (on pushed branches) — rewrites shared history
 
-**No git stash.** The stash/pop cycle has caused repeated data loss in this project — pre-commit hooks that stash/unstash silently destroy unstaged work when `stash pop` encounters conflicts. If you need to preserve work, commit it to a branch.
+**Worktree isolation is the default for new work.** Before starting implementation, ask the operator whether to create a worktree under `.worktrees/`; default yes. Inside a worktree there is nothing to stash, which removes the slip pattern that previously caused data loss in this project via pre-commit-hook `stash`/`pop` cycles (the hooks silently destroy unstaged work when `stash pop` encounters conflicts). In the main checkout — an explicit operator opt-in — `git stash` is available as a normal tool: the prior absolute prohibition was lifted on 2026-05-11 once worktree-default became the upstream control.
 
 ---
 
@@ -130,13 +141,13 @@ systemd path unit. Sudoers alone cannot override the sandbox's
 
 ## Mandatory Coding Standards — Load Before Writing Code
 
-**CRITICAL:** The following skills contain ELSPETH's core coding standards. You MUST invoke these skills (via the Skill tool) before performing any of the activities listed below. CLAUDE.md contains summary rules, but the skills contain the detailed code examples, decision tables, and boundary rules that prevent violations.
+**CRITICAL:** The following skills contain ELSPETH's core coding standards. You MUST invoke these skills (via the Skill tool) before performing any of the activities listed below. This file carries only summary rules; the skills hold the detailed code examples, decision tables, and boundary rules that prevent violations.
 
 ### Required Skills
 
 | Skill | Contains |
 |-------|----------|
-| `engine-patterns-reference` | Composite PKs, schema contracts, header normalization, canonical JSON, retry semantics, secret handling, test path integrity, offensive programming examples, `hasattr` ban, layer architecture & `enforce_tier_model.py` (`check` and `dump-edges`) |
+| `engine-patterns-reference` | Composite PKs, schema contracts, header normalization, canonical JSON, retry semantics, secret handling, test path integrity, offensive programming examples, `hasattr` ban, layer architecture & `trust_tier.tier_model` / `dump-edges` |
 | `tier-model-deep-dive` | External call boundaries in transforms, coercion rules by plugin type, operation wrapping rules, serialization trust preservation, pipeline template error categories |
 | `logging-telemetry-policy` | Audit primacy, permitted/forbidden logger uses, superset rule, telemetry-only exemptions, the primacy test |
 | `config-contracts-guide` | Settings→Runtime mapping, protocol-based verification, `from_settings()` pattern, adding new Settings fields, tier model enforcement allowlist |
@@ -154,143 +165,167 @@ Load **all four skills** before:
 
 ### Why This Exists
 
-These standards interact in non-obvious ways. The tier model's fabrication rule (`None` → `0` is forbidden) is easy to miss without the detailed examples. The logging policy's "never log row-level decisions" contradicts common instinct. The config contracts pattern requires specific file changes that aren't discoverable from CLAUDE.md alone. Loading the skills ensures the detailed rules — not just the summaries — are in context when decisions are made.
+These standards interact in non-obvious ways. The tier model's fabrication rule (`None` → `0` is forbidden) is easy to miss without the detailed examples. The logging policy's "never log row-level decisions" contradicts common instinct. The config contracts pattern requires specific file changes that aren't discoverable from this summary alone. Loading the skills ensures the detailed rules — not just the summaries — are in context when decisions are made.
 
 ---
 
-<!-- filigree:instructions:v1.6.0:84820288 -->
+## CICD Judge Gate — Allowlist Suppressions
+
+When the `trust_tier.tier_model` rule flags an upward import or a defensive
+pattern you believe is legitimate, the suppression goes through the **cicd-judge
+allowlist gate** (`config/cicd/enforce_tier_model/`). An LLM judge reviews the
+rationale; the resulting verdict and its source binding are HMAC-signed.
+
+**Source binding — v2 `scope_fingerprint`, not legacy v1 `file_fingerprint`.**
+New entries created by `justify` bind a v2 `scope_fingerprint` (the enclosing-scope
+AST fingerprint, signature prefix `hmac-sha256:v2:`), which only invalidates when
+the suppressed scope itself changes. The legacy v1 `file_fingerprint` (a whole-file
+hash) is still live on older entries but is being migrated away — it invalidates on
+*any* edit anywhere in the file, which is why editing a source file desyncs every
+signed v1 entry in it. Do not hand-edit judge metadata; production loads verify the
+signature.
+
+**`justify` and `migrate-judge-scope` are OPERATOR-ONLY.** Both write
+HMAC-signed metadata and need `ELSPETH_JUDGE_METADATA_HMAC_KEY`. The key is
+symmetric, so any key holder can forge a valid signature — therefore the key MUST
+NOT be in any autonomous agent's environment. An agent may *propose* a
+`justify` or a `migrate-judge-scope` (the v1→v2 re-sign) invocation; only an
+operator-held environment runs it and signs. This custody rule is the gate's
+entire security model — see the matching section in `CLAUDE.md` for the full
+rationale.
+
+**`--judge-transport {openrouter,agent}` selects the judging LLM** (default
+`openrouter`; accepted on both `justify` and `reaudit`). This is a separate axis
+from the HMAC custody rule — it governs *which LLM* serves the verdict, not who
+signs. The persisted/signed `judge_transport` value is `"openrouter"` or
+`"claude_agent_sdk"`, bound into the signed v2 payload (so a forged or edited
+transport label fails the load-time HMAC recompute). The `agent` transport (Claude
+Agent SDK) additionally needs Claude Code auth (CLI login / `ANTHROPIC_API_KEY` /
+Bedrock-Vertex-Azure) that an agent's environment does not hold — so an agent uses
+the default `openrouter`. `reaudit` is read-only (writes no signed metadata) and is
+agent-runnable with the agent's own OpenRouter key, but again only under
+`openrouter`. The `agent` transport cannot pin `temperature`, so prefer
+`openrouter` for reproducible re-checks regardless of an entry's origin transport.
+
+---
+
+<!-- filigree:instructions:v2.1.0:9dff6e6d -->
 ## Filigree Issue Tracker
 
-Use `filigree` for all task tracking in this project. Data lives in `.filigree/`.
-
-### MCP Tools (Preferred)
-
-When MCP is configured, prefer `mcp__filigree__*` tools over CLI commands — they're
-faster and return structured data. Key tools:
-
-- `get_ready` / `get_blocked` — find available work
-- `get_issue` / `list_issues` / `search_issues` — read issues
-- `create_issue` / `update_issue` / `close_issue` — manage issues
-- `claim_issue` / `claim_next` — atomic claiming
-- `add_comment` / `add_label` — metadata
-- `list_labels` / `get_label_taxonomy` — discover labels and reserved namespaces
-- `create_plan` / `get_plan` — milestone planning
-- `get_stats` / `get_metrics` — project health
-- `get_valid_transitions` — workflow navigation
-- `observe` / `list_observations` / `dismiss_observation` / `promote_observation` — agent scratchpad
-- `trigger_scan` / `trigger_scan_batch` / `get_scan_status` / `preview_scan` / `list_scanners` — automated code scanning
-- `get_finding` / `list_findings` / `update_finding` / `batch_update_findings` — scan finding triage
-- `promote_finding` / `dismiss_finding` — finding lifecycle (promote to issue or dismiss)
-
-Observations are fire-and-forget notes that expire after 14 days. Use `list_issues --label=from-observation` to find promoted observations.
-
-**Observations are ambient.** While doing other work, use `observe` whenever you
-notice something worth noting — a code smell, a potential bug, a missing test, a
-design concern. Don't stop what you're doing; just fire off the observation and
-carry on. They're ideal for "I don't have time to investigate this right now, but
-I want to come back to it." Include `file_path` and `line` when relevant so the
-observation is anchored to code. At session end, skim `list_observations` and
-either `dismiss_observation` (not worth tracking) or `promote_observation`
-(deserves an issue) for anything that's accumulated.
-
-Fall back to CLI (`filigree <command>`) when MCP is unavailable.
-
-### CLI Quick Reference
-
-```bash
-# Finding work
-filigree ready                              # Show issues ready to work (no blockers)
-filigree list --status=open                 # All open issues
-filigree list --status=in_progress          # Active work
-filigree list --label=bug --label=P1        # Filter by multiple labels (AND)
-filigree list --label-prefix=cluster:       # Filter by label namespace prefix
-filigree list --not-label=wontfix           # Exclude issues with label
-filigree show <id>                          # Detailed issue view
-
-# Creating & updating
-filigree create "Title" --type=task --priority=2          # New issue
-filigree update <id> --status=in_progress                # Claim work
-filigree close <id>                                      # Mark complete
-filigree close <id> --reason="explanation"               # Close with reason
-
-# Dependencies
-filigree add-dep <issue> <depends-on>       # Add dependency
-filigree remove-dep <issue> <depends-on>    # Remove dependency
-filigree blocked                            # Show blocked issues
-
-# Comments & labels
-filigree add-comment <id> "text"            # Add comment
-filigree get-comments <id>                  # List comments
-filigree add-label <id> <label>             # Add label
-filigree remove-label <id> <label>          # Remove label
-filigree labels                             # List all labels by namespace
-filigree taxonomy                           # Show reserved namespaces and vocabulary
-
-# Workflow templates
-filigree types                              # List registered types with state flows
-filigree type-info <type>                   # Full workflow definition for a type
-filigree transitions <id>                   # Valid next states for an issue
-filigree packs                              # List enabled workflow packs
-filigree validate <id>                      # Validate issue against template
-filigree guide <pack>                       # Display workflow guide for a pack
-
-# Atomic claiming
-filigree claim <id> --assignee <name>            # Claim issue (optimistic lock)
-filigree claim-next --assignee <name>            # Claim highest-priority ready issue
-
-# Batch operations
-filigree batch-update <ids...> --priority=0      # Update multiple issues
-filigree batch-close <ids...>                    # Close multiple with error reporting
-
-# Planning
-filigree create-plan --file plan.json            # Create milestone/phase/step hierarchy
-
-# Event history
-filigree changes --since 2026-01-01T00:00:00    # Events since timestamp
-filigree events <id>                             # Event history for issue
-filigree explain-state <type> <state>            # Explain a workflow state
-
-# All commands support --json and --actor flags
-filigree --actor bot-1 create "Title"            # Specify actor identity
-filigree list --json                             # Machine-readable output
-
-# Project health
-filigree stats                              # Project statistics
-filigree search "query"                     # Search issues
-filigree doctor                             # Health check
-```
-
-### File Records & Scan Findings (API)
-
-The dashboard exposes REST endpoints for file tracking and scan result ingestion.
-Use `GET /api/files/_schema` for available endpoints and valid field values.
-
-Key endpoints:
-- `GET /api/files/_schema` — Discovery: valid enums, endpoint catalog
-- `POST /api/v1/scan-results` — Ingest scan results (SARIF-lite format)
-- `GET /api/files` — List tracked files with filtering and sorting
-- `GET /api/files/{file_id}` — File detail with associations and findings summary
-- `GET /api/files/{file_id}/findings` — Findings for a specific file
+`filigree` tracks tasks for this project. Data lives in `.filigree/`. Prefer
+the MCP tools (`mcp__filigree__*`) when available; fall back to the `filigree`
+CLI otherwise.
 
 ### Workflow
-1. `filigree ready` to find available work
-2. `filigree show <id>` to review details
-3. `filigree transitions <id>` to see valid state changes
-4. `filigree update <id> --status=in_progress` to claim it
-5. Do the work, commit code
-6. `filigree close <id>` when done
 
-### Session Start
-When beginning a new session, run `filigree session-context` to load the project
-snapshot (ready work, in-progress items, critical path). This provides the
-context needed to pick up where the previous session left off.
+```bash
+# At session start
+filigree session-context                            # ready / in-progress / critical path
 
-### Priority Scale
+# Pick up the next startable issue (atomic claim + transition into its working status)
+filigree start-next-work --assignee <name>
+# ...or claim a specific issue
+filigree start-work <id> --assignee <name>
+
+# Do the work, commit, then
+filigree close <id>
+```
+
+Use the atomic claim+transition verbs — `start_work` / `start_next_work`
+(MCP) or `start-work` / `start-next-work` (CLI). Do **not** chain
+`claim_issue` (MCP) or `filigree claim` (CLI) with a subsequent status
+update — the two-step form races against other agents; the combined verb is
+atomic.
+
+**Ready ≠ startable.** The working status is type-specific (tasks →
+`in_progress`, features → `building`). Bugs start at `triage`, which has no
+single-hop transition into work (`triage → confirmed → fixing`), so a triage
+bug is *ready* but not directly *startable*: `start_work` on one returns
+`INVALID_TRANSITION` naming the next status, and `start_next_work` skips it.
+`get_ready` items carry a `startable` flag (plus a `next_action` hint when
+false). Pass `advance=true` (MCP) / `--advance` (CLI) to walk the soft
+transitions to the nearest working status automatically.
+
+### Observations: when (and when not) to use them
+
+`observe` is a fire-and-forget scratchpad for *incidental* defects — things
+you notice *outside the scope of your current task* (a code smell in a
+neighbouring file, a stale TODO, a missing test for an edge case you happened
+to spot). Notes expire after 14 days unless promoted. Include `file_path` and
+`line` when relevant. At session end, skim `list_observations` and either
+`dismiss_observation` or `promote_observation` for what has accumulated.
+
+**You fix bugs in your currently defined scope. You do NOT use observations
+to finish work prematurely.** If a defect, gap, or follow-up belongs to your
+current task, you own it — handle it as part of that task: fix it now, expand
+the task's scope, file a proper issue with a dependency, or surface it to the
+user. Filing it as an observation and closing the task is *not* completing
+the task; it is shipping known-broken work and hiding the debt in a 14-day
+expiring scratchpad. The test is "would I have noticed this even if I weren't
+working on this task?" If no, it's task scope, not an observation.
+
+### Priority scale
+
 - P0: Critical (drop everything)
 - P1: High (do next)
 - P2: Medium (default)
 - P3: Low
 - P4: Backlog
+
+### Reaching for tools
+
+MCP tool schemas describe each tool; `filigree --help` and `filigree <verb>
+--help` are the authoritative CLI reference. You do not need to memorise
+either catalogue. The verbs you will reach for most:
+
+- **Find work:** `get_ready`, `get_blocked`, `list_issues`, `search_issues`
+- **Claim work:** `start_work`, `start_next_work`
+- **Update:** `add_comment`, `add_label`, `update_issue`, `close_issue`
+- **Admin (irreversible):** `delete_issue` (MCP) / `delete-issue` (CLI) —
+  hard-deletes a terminal issue and its rows; `undo_last` cannot reverse it.
+- **Scratchpad:** `observe`, `list_observations`, `promote_observation`, `dismiss_observation`
+- **Cross-product entity bindings (ADR-029):** `add_entity_association`,
+  `remove_entity_association`, `list_entity_associations`,
+  `list_associations_by_entity`. Used when a sibling tool (e.g.
+  Clarion) needs to bind a Filigree issue to a function, class, or
+  module identifier it owns. The `entity_id` is an opaque string
+  from Filigree's perspective; the consumer (the sibling tool's read
+  path) does drift detection against the stored
+  `content_hash_at_attach`. `list_associations_by_entity` is the
+  reverse-lookup surface — given a Clarion entity ID, return every
+  Filigree issue bound to it (project isolation is by DB file). Also
+  reachable over HTTP as
+  `GET/POST /api/issue/{issue_id}/entity-associations`,
+  `DELETE /api/issue/{issue_id}/entity-associations?entity_id=…`,
+  and `GET /api/entity-associations?entity_id=…`.
+- **Health:** `get_stats`, `get_metrics`, `get_mcp_status`
+
+Pass `--actor <name>` (CLI) so events attribute to your agent identity. It
+works in either position — before the verb (`filigree --actor X update …`) or
+after it (`filigree update … --actor X`); the post-verb value overrides the
+group-level one.
+
+### Error handling
+
+Errors return `{error: str, code: ErrorCode, details?: dict}`. Switch on
+`code`, not on message text. Codes: `VALIDATION`, `NOT_FOUND`, `CONFLICT`,
+`INVALID_TRANSITION`, `PERMISSION`, `NOT_INITIALIZED`, `IO`,
+`INVALID_API_URL`, `FILE_REGISTRY_DISPLACED`, `REGISTRY_UNAVAILABLE`,
+`CLARION_REGISTRY_VERSION_MISMATCH`, `BRIEFING_BLOCKED`, `STOP_FAILED`,
+`SCHEMA_MISMATCH`, `INTERNAL`.
+
+On `INVALID_TRANSITION`, call `get_valid_transitions` (MCP) or
+`filigree transitions <id>` to see what the workflow allows from here.
+
+Two failure modes deserve a specific response:
+
+- **`SCHEMA_MISMATCH`** — the installed `filigree` is older than the project
+  database. The error message contains upgrade guidance. Surface it to the
+  user; do not retry.
+- **`ForeignDatabaseError`** — filigree found a parent project's database
+  but no local `.filigree.conf`. Run `filigree init` in the current
+  directory. Do **not** `cd` upward to a different project unless that was
+  the actual intent.
 <!-- /filigree:instructions -->
 
 ### How We Use Filigree
@@ -301,7 +336,7 @@ Issues should be created at the right granularity from the start, but **retyping
 
 ### Issue Type Usage
 
-Filigree has types across three packs — use the right type for the right granularity:
+Filigree has types across four packs — use the right type for the right granularity:
 
 | Type | When to use | Granularity test |
 | ---- | ----------- | ---------------- |
@@ -311,6 +346,13 @@ Filigree has types across three packs — use the right type for the right granu
 | **feature** | User-facing capability with design decisions | "Does this need a user story, acceptance criteria, or design notes?" |
 | **task** | Atomic unit of work one person can do in one sitting | "Can I start and finish this without needing to decompose further?" |
 | **bug** | Defective behavior in existing code | "Is something broken, or is this a design evaluation?" |
+| **release** | A planned/tested/shipped software release | "What version or release train does this ship in?" |
+| **release_item** | A specific item included in, verified for, or excluded from a release | "Is this a release inclusion decision rather than implementation work?" |
+| **requirement** | A durable product, safety, or compliance requirement | "Does this define what the system must do?" |
+| **acceptance_criterion** | A testable condition proving a requirement or feature is satisfied | "How do we know the requirement is met?" |
+| **deliverable** | A concrete output within a planning milestone | "What artifact or result must be produced?" |
+| **step** | A sequenced planning step | "Is this one ordered step inside a larger plan?" |
+| **work_package** | Assigned execution bundle within a plan | "Is this a package of work being assigned/coordinated?" |
 
 **If a task has 3+ distinct deliverables or an unresolved design decision, promote it** to a feature or epic and create child tasks. XL-effort single tasks are untrackable — you can't mark them 50% done.
 
@@ -330,6 +372,13 @@ Filigree has types across three packs — use the right type for the right granu
 | **feature** | `Capability — what it enables` | "Server mode — persistent API service with REST + WebSocket" |
 | **bug** | `Symptom — observable consequence` | "Coalesce timeouts only fire on next token arrival — no true idle flush" |
 | **task** | `Action phrase — scope boundary` | "Unify reorder buffer implementations — single RowReorderBuffer for batching and pooling" |
+| **release** | `Version or train — release theme` | "RC 5.1 — autonomous pipeline production hardening" |
+| **release_item** | `Ship decision — item scope` | "RC 5.1 inclusion — PostgreSQL/S3 alternate configuration" |
+| **requirement** | `Capability or constraint — required outcome` | "Audit lineage — generated pipelines retain prompt-to-run provenance" |
+| **acceptance_criterion** | `Condition — observable proof` | "Runtime validation parity — composed YAML fails before execution on path-policy drift" |
+| **deliverable** | `Output — delivery boundary` | "Staging runbook — session database recreation procedure" |
+| **step** | `Action phrase — sequence boundary` | "Verify staging health — API and WebSocket smoke checks" |
+| **work_package** | `Workstream — assigned scope` | "Telemetry exporter hardening — OTLP and Azure failure accounting" |
 
 **Rules:**
 

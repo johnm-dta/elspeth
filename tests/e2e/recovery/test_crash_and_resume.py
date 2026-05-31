@@ -491,7 +491,14 @@ class TestResumeIdempotence:
         )
 
         assert result_b.status == RunStatus.COMPLETED
-        assert result_b.rows_processed == 2  # Only rows 3 and 4
+        # F2 (resume-fork-reemit): the resume RunResult now reports CUMULATIVE
+        # counters reconstructed from the audit trail (both resume branches
+        # finalize via derive_resume_terminal_status_from_audit), so a resumed
+        # run matches an uninterrupted run — this test's whole premise. All 5
+        # source rows reached a terminal outcome (3 recorded pre-crash + 2
+        # re-driven), so rows_processed is the cumulative 5, matching run A
+        # (line ~276), NOT the pre-F2 resume-only count of 2 (rows 3 and 4).
+        assert result_b.rows_processed == 5
 
         resumed_output = list(_ResumeSink.results)
         assert len(resumed_output) == 2
@@ -667,6 +674,8 @@ class TestCheckpointRecovery:
                     status=RunStatus.FAILED,
                     schema_contract_json=contract_json,
                     schema_contract_hash=contract_hash,
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 
@@ -783,6 +792,8 @@ class TestCheckpointRecovery:
                     status=RunStatus.FAILED,
                     schema_contract_json=contract_json,
                     schema_contract_hash=contract_hash,
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
                 )
             )
 
@@ -835,7 +846,7 @@ class TestCheckpointRecovery:
             conn.commit()
 
         _agg_state = AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "test_agg": AggregationNodeCheckpoint(
                     tokens=(
@@ -855,6 +866,8 @@ class TestCheckpointRecovery:
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         )
@@ -1028,7 +1041,7 @@ class TestAggregationRecovery:
 
         # Create aggregation state (buffer of 3 rows) — typed DTO
         agg_state = AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "aggregator": AggregationNodeCheckpoint(
                     tokens=tuple(
@@ -1049,6 +1062,8 @@ class TestAggregationRecovery:
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         )

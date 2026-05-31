@@ -17,9 +17,11 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.web.blobs import service as blob_service_module
 from elspeth.web.blobs.protocol import (
     BlobActiveRunError,
     BlobNotFoundError,
@@ -32,6 +34,7 @@ from elspeth.web.blobs.service import (
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.models import sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
+from elspeth.web.sessions.telemetry import _FakeCounter
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -317,6 +320,12 @@ class TestDeleteBlob:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -370,6 +379,12 @@ class TestDeleteBlob:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -395,6 +410,82 @@ class TestDeleteBlob:
         # Should succeed — completed run does not block deletion
         await blob_service.delete_blob(record.id)
 
+        with pytest.raises(BlobNotFoundError):
+            await blob_service.get_blob(record.id)
+
+    @pytest.mark.asyncio
+    async def test_delete_blob_preserves_completed_inline_resolution_audit_rows(self, blob_service, session_id, db_engine) -> None:
+        """Completed inline-content audit rows must not turn blob deletion into a 500."""
+        from elspeth.web.sessions.models import (
+            blob_inline_resolutions_table,
+            blob_run_links_table,
+            composition_states_table,
+            runs_table,
+        )
+
+        record = await blob_service.create_blob(
+            session_id=session_id,
+            filename="prompt.txt",
+            content=b"finished prompt",
+            mime_type="text/plain",
+            created_by="user",
+        )
+
+        state_id = str(uuid4())
+        session_id_str = str(session_id)
+        run_id = str(uuid4())
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+
+        with db_engine.begin() as conn:
+            conn.execute(
+                composition_states_table.insert().values(
+                    id=state_id,
+                    session_id=session_id_str,
+                    version=1,
+                    is_valid=True,
+                    provenance="session_seed",
+                    created_at=now,
+                )
+            )
+            conn.execute(
+                runs_table.insert().values(
+                    id=run_id,
+                    session_id=session_id_str,
+                    state_id=state_id,
+                    status="completed",
+                    started_at=now,
+                    rows_processed=10,
+                    rows_failed=0,
+                )
+            )
+            conn.execute(
+                blob_run_links_table.insert().values(
+                    blob_id=str(record.id),
+                    run_id=run_id,
+                    direction="input",
+                )
+            )
+            conn.execute(
+                blob_inline_resolutions_table.insert().values(
+                    run_id=run_id,
+                    attempt=1,
+                    field_path="node:classify.options.system_prompt",
+                    blob_id=str(record.id),
+                    content_hash=record.content_hash,
+                    byte_length=record.size_bytes,
+                    mime_type=record.mime_type,
+                    encoding="utf-8",
+                    resolved_at=now,
+                )
+            )
+
+        await blob_service.delete_blob(record.id)
+
+        with db_engine.connect() as conn:
+            rows = conn.execute(select(blob_inline_resolutions_table)).fetchall()
+
+        assert len(rows) == 1
+        assert rows[0].blob_id == str(record.id)
         with pytest.raises(BlobNotFoundError):
             await blob_service.get_blob(record.id)
 
@@ -434,9 +525,21 @@ class TestDeleteBlob:
                     # about to link it once link_blob_to_run() fires.
                     source={
                         "plugin": "csv",
+                        "on_success": "output",
+                        "on_validation_failure": "quarantine",
                         "options": {"blob_ref": str(record.id), "path": str(record.storage_path)},
                     },
+                    nodes=[],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -492,9 +595,21 @@ class TestDeleteBlob:
                     # to the blob being deleted.
                     source={
                         "plugin": "csv",
+                        "on_success": "output",
+                        "on_validation_failure": "quarantine",
                         "options": {"path": "/data/external/other.csv"},
                     },
+                    nodes=[],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -515,6 +630,78 @@ class TestDeleteBlob:
 
         with pytest.raises(BlobNotFoundError):
             await blob_service.get_blob(record.id)
+
+    @pytest.mark.asyncio
+    async def test_delete_blob_rejects_when_transform_option_references_blob(self, blob_service, session_id, db_engine) -> None:
+        """Pre-link guard walks canonical pipeline sections beyond source.options."""
+        from elspeth.web.sessions.models import (
+            composition_states_table,
+            runs_table,
+        )
+
+        record = await blob_service.create_blob(
+            session_id=session_id,
+            filename="prompt.txt",
+            content=b"Classify the row.",
+            mime_type="text/plain",
+            created_by="user",
+        )
+
+        state_id = str(uuid4())
+        session_id_str = str(session_id)
+        run_id = str(uuid4())
+
+        with db_engine.begin() as conn:
+            conn.execute(
+                composition_states_table.insert().values(
+                    id=state_id,
+                    session_id=session_id_str,
+                    version=1,
+                    source={
+                        "plugin": "csv",
+                        "on_success": "classify",
+                        "on_validation_failure": "quarantine",
+                        "options": {"path": "/data/external/other.csv"},
+                    },
+                    nodes=[
+                        {
+                            "id": "classify",
+                            "node_type": "transform",
+                            "plugin": "llm",
+                            "input": "source_out",
+                            "on_success": "output",
+                            "on_error": "discard",
+                            "options": {
+                                "system_prompt": {
+                                    "blob_ref": str(record.id),
+                                    "mode": "inline_content",
+                                    "sha256": record.content_hash,
+                                }
+                            },
+                        }
+                    ],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
+                    is_valid=True,
+                    provenance="session_seed",
+                    created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                )
+            )
+            conn.execute(
+                runs_table.insert().values(
+                    id=run_id,
+                    session_id=session_id_str,
+                    state_id=state_id,
+                    status="pending",
+                    started_at=datetime(2026, 1, 1, tzinfo=UTC),
+                    rows_processed=0,
+                    rows_failed=0,
+                )
+            )
+
+        with pytest.raises(BlobActiveRunError):
+            await blob_service.delete_blob(record.id)
 
     @pytest.mark.asyncio
     async def test_delete_blob_rejects_when_active_run_path_matches_storage(self, blob_service, session_id, db_engine) -> None:
@@ -550,9 +737,21 @@ class TestDeleteBlob:
                     # Source references this blob via path, NOT blob_ref.
                     source={
                         "plugin": "csv",
+                        "on_success": "output",
+                        "on_validation_failure": "quarantine",
                         "options": {"path": record.storage_path},
                     },
+                    nodes=[],
+                    edges=[],
+                    outputs=[],
+                    metadata_={"name": "Test", "description": ""},
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -598,6 +797,12 @@ class TestDeleteBlob:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -623,6 +828,21 @@ class TestDeleteBlob:
 # ---------------------------------------------------------------------------
 # finalize_blob — pending lifecycle transitions
 # ---------------------------------------------------------------------------
+
+
+class TestCreatePendingBlob:
+    """Pending blob reservation must enforce the same literal guards as ready writes."""
+
+    @pytest.mark.asyncio
+    async def test_create_pending_blob_rejects_disallowed_mime_type(self, blob_service, session_id) -> None:
+        """Pending rows must not persist MIME values that read guards classify as corruption."""
+        with pytest.raises(RuntimeError, match="Invalid mime_type"):
+            await blob_service.create_pending_blob(
+                session_id=session_id,
+                filename="output.png",
+                mime_type="image/png",  # type: ignore[arg-type]
+                created_by="pipeline",
+            )
 
 
 class TestFinalizeBlob:
@@ -880,6 +1100,32 @@ class TestBlobQuota:
         )
         assert record.status == "ready"
 
+    @pytest.mark.asyncio
+    async def test_finalize_blob_rejects_ready_size_that_exceeds_quota(self, db_engine, session_id, tmp_path) -> None:
+        """Public finalize_blob must enforce quota when pending output size becomes known."""
+        from elspeth.web.blobs.protocol import BlobQuotaExceededError
+
+        service = BlobServiceImpl(db_engine, tmp_path, max_storage_per_session=10)
+        pending = await service.create_pending_blob(
+            session_id=session_id,
+            filename="oversized-output.csv",
+            mime_type="text/csv",
+            created_by="pipeline",
+        )
+
+        with pytest.raises(BlobQuotaExceededError):
+            await service.finalize_blob(
+                blob_id=pending.id,
+                status="ready",
+                size_bytes=100,
+                content_hash=content_hash(b"oversized-output"),
+            )
+
+        record = await service.get_blob(pending.id)
+        assert record.status == "pending"
+        assert record.size_bytes == 0
+        assert record.content_hash is None
+
 
 # ---------------------------------------------------------------------------
 # copy_blobs_for_fork — rollback on partial failure
@@ -1005,6 +1251,7 @@ class TestCopyBlobsForForkRollback:
         blob_service: BlobServiceImpl,
         session_id: UUID,
         target_session_id: UUID,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Rollback delete_blob failures must surface as notes on the primary exception.
 
@@ -1036,9 +1283,13 @@ class TestCopyBlobsForForkRollback:
             created_by="user",
         )
 
+        orphan_counter = _FakeCounter()
+        monkeypatch.setattr(blob_service_module, "_BLOB_COPY_FORK_ORPHAN_ROWS_COUNTER", orphan_counter)
+
         original_create = blob_service.create_blob
         original_delete = blob_service.delete_blob
         create_calls = 0
+        orphan_ids: list[UUID] = []
 
         async def _failing_create(*args, **kwargs):
             nonlocal create_calls
@@ -1051,7 +1302,8 @@ class TestCopyBlobsForForkRollback:
         # narrowly-caught recovery faults; programmer bugs would propagate.
         delete_failure = OSError(5, "I/O error during cleanup")
 
-        async def _failing_delete(*_args, **_kwargs):
+        async def _failing_delete(blob_id: UUID, *_args, **_kwargs):
+            orphan_ids.append(blob_id)
             raise delete_failure
 
         blob_service.create_blob = _failing_create  # type: ignore[method-assign]
@@ -1078,6 +1330,15 @@ class TestCopyBlobsForForkRollback:
         # Note must identify the orphaned blob_id and target session for triage
         assert any("manual cleanup" in n.lower() for n in recovery_notes), "Note must direct operator to manual cleanup"
         assert any(str(target_session_id) in n for n in recovery_notes), "Note must identify the target session containing the orphan row"
+        assert len(orphan_counter.calls) == 1
+        amount, attrs, context = orphan_counter.calls[0]
+        assert amount == 1
+        assert attrs == {
+            "orphan_blob_id": str(orphan_ids[0]),
+            "target_session_id": str(target_session_id),
+            "exc_type": "OSError",
+        }
+        assert context is None
 
 
 # ---------------------------------------------------------------------------
@@ -1107,6 +1368,12 @@ class TestFinalizeRunOutputBlobs:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -1256,6 +1523,12 @@ class TestFinalizeRunOutputBlobsPartialFailure:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -1304,6 +1577,17 @@ class TestFinalizeRunOutputBlobsPartialFailure:
                 )
             )
         return pending
+
+    @staticmethod
+    def _deny_read_bytes(monkeypatch: pytest.MonkeyPatch, denied_path: Path) -> None:
+        original_read_bytes = Path.read_bytes
+
+        def _read_bytes_or_permission_error(path: Path) -> bytes:
+            if path == denied_path:
+                raise PermissionError(f"Permission denied: '{denied_path}'")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", _read_bytes_or_permission_error)
 
     @pytest.mark.asyncio
     async def test_continues_after_concurrent_deletion(
@@ -1389,7 +1673,7 @@ class TestFinalizeRunOutputBlobsPartialFailure:
         session_id,
         db_engine,
         run_env,
-        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When file read raises OSError, loop continues to next blob."""
         run_id, _ = run_env
@@ -1397,17 +1681,8 @@ class TestFinalizeRunOutputBlobsPartialFailure:
         await self._create_linked_blob(blob_service, session_id, run_id, db_engine, "b1.csv", b"data1")
         b2 = await self._create_linked_blob(blob_service, session_id, run_id, db_engine, "b2.csv", b"data2")
 
-        # Make b2's backing file unreadable
-        from pathlib import Path as _Path
-
-        b2_path = _Path(b2.storage_path)
-        b2_path.chmod(0o000)
-
-        try:
-            result = await blob_service.finalize_run_output_blobs(run_id, success=True)
-        finally:
-            # Restore permissions for cleanup
-            b2_path.chmod(0o644)
+        self._deny_read_bytes(monkeypatch, Path(b2.storage_path))
+        result = await blob_service.finalize_run_output_blobs(run_id, success=True)
 
         assert len(result.finalized) == 1
         assert len(result.errors) == 1
@@ -1494,6 +1769,7 @@ class TestFinalizeRunOutputBlobsPartialFailure:
         session_id,
         db_engine,
         run_env,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """When per-blob catch fires, the failed blob is set to 'error' status."""
         from elspeth.web.sessions.models import blobs_table as bt
@@ -1503,16 +1779,8 @@ class TestFinalizeRunOutputBlobsPartialFailure:
         b1 = await self._create_linked_blob(blob_service, session_id, run_id, db_engine, "b1.csv", b"data1")
         b2 = await self._create_linked_blob(blob_service, session_id, run_id, db_engine, "b2.csv", b"data2")
 
-        # Make b1's file unreadable — triggers OSError, caught per-blob
-        from pathlib import Path as _Path
-
-        b1_path = _Path(b1.storage_path)
-        b1_path.chmod(0o000)
-
-        try:
-            result = await blob_service.finalize_run_output_blobs(run_id, success=True)
-        finally:
-            b1_path.chmod(0o644)
+        self._deny_read_bytes(monkeypatch, Path(b1.storage_path))
+        result = await blob_service.finalize_run_output_blobs(run_id, success=True)
 
         # b1 should have been moved to "error" by the best-effort recovery
         with db_engine.connect() as conn:
@@ -1710,6 +1978,12 @@ class TestFinalizeRunOutputBlobsErrorCleanup:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: every test-side direct composition_states
+                    # insert must supply provenance after Task 3's CHECK
+                    # constraint. ``session_seed`` is the broadened-semantics
+                    # default for setup-only rows that don't model a real
+                    # compose-loop transition.
+                    provenance="session_seed",
                     created_at=datetime(2026, 1, 1, tzinfo=UTC),
                 )
             )
@@ -2072,6 +2346,8 @@ class TestLinkBlobToRunDirectionGuard:
                     session_id=session_id_str,
                     version=1,
                     is_valid=True,
+                    # Plan §2294: setup-only row; provenance required.
+                    provenance="session_seed",
                     created_at=now,
                 )
             )
@@ -2131,6 +2407,24 @@ class TestLinkBlobToRunDirectionGuard:
         links = await blob_service.get_blob_run_links(blob.id)
         directions = sorted(link.direction for link in links)
         assert directions == ["input", "output"]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_same_direction_link_is_idempotent(self, blob_service, session_id, db_engine) -> None:
+        """A source bind and inline-content ref can share the same input blob."""
+        run_id = self._make_run(db_engine, session_id)
+        blob = await blob_service.create_blob(
+            session_id=session_id,
+            filename="prompt.csv",
+            content=b"prompt",
+            mime_type="text/csv",
+            created_by="user",
+        )
+
+        await blob_service.link_blob_to_run(blob.id, run_id, "input")
+        await blob_service.link_blob_to_run(blob.id, run_id, "input")
+
+        links = await blob_service.get_blob_run_links(blob.id)
+        assert [(link.run_id, link.direction) for link in links] == [(run_id, "input")]
 
 
 class TestLinkBlobToRunSessionGuard:
@@ -2231,6 +2525,17 @@ class TestRowToRecordTierOneGuards:
             "created_by": "user",
             "source_description": None,
             "status": "ready",
+            # Inline-blob provenance defaults (Phase 5a Task 2.5): the
+            # synthetic row mirrors a verbatim row produced by the
+            # user-upload write path (creation_modality='verbatim',
+            # everything else NULL).
+            "creation_modality": "verbatim",
+            "created_from_message_id": None,
+            "creating_model_identifier": None,
+            "creating_model_version": None,
+            "creating_provider": None,
+            "creating_composer_skill_hash": None,
+            "creating_arguments_hash": None,
         }
         defaults.update(overrides)
         return SimpleNamespace(**defaults)

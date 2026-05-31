@@ -1,0 +1,36 @@
+source:
+  plugin: text
+  on_success: lines
+  options:
+    path: examples/report_assemble/input.txt
+    column: line
+    strip_whitespace: false
+    skip_blank_lines: false
+    schema:
+      mode: observed
+    on_validation_failure: discard
+aggregations:
+- name: pages
+  plugin: report_assemble
+  input: lines
+  on_success: output
+  on_error: discard
+  trigger:
+    count: 2
+  output_mode: transform
+  options:
+    schema:
+      mode: observed
+    text_field: line
+    format: markdown
+    title: "Run report"
+sinks:
+  output:
+    plugin: json
+    on_write_failure: discard
+    options:
+      path: examples/report_assemble/output/reports.json
+      schema:
+        mode: observed
+landscape:
+  url: sqlite:///examples/report_assemble/runs/audit.db

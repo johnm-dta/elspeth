@@ -22,6 +22,16 @@ function makeBlob(overrides: Partial<BlobMetadata> = {}): BlobMetadata {
     created_by: "user",
     source_description: null,
     status: "ready",
+    // Inline-blob provenance (Phase 5a Task 2.5): the fixture defaults
+    // match the user-upload write path (modality=verbatim, all five
+    // creating_* fields null).
+    creation_modality: "verbatim",
+    created_from_message_id: null,
+    creating_model_identifier: null,
+    creating_model_version: null,
+    creating_provider: null,
+    creating_composer_skill_hash: null,
+    creating_arguments_hash: null,
     ...overrides,
   };
 }

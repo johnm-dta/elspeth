@@ -1,0 +1,72 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Filesystem path for the source input or sink output, resolved relative to the run data directory.",
+        "kind": "text",
+        "label": "Path",
+        "name": "path",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Sink name for non-conformant rows, or 'discard' for explicit drop",
+        "kind": "text",
+        "label": "On Validation Failure",
+        "name": "on_validation_failure",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Input JSON format. When omitted, the source auto-detects JSONL from a .jsonl filename and JSON otherwise.",
+        "enum": [
+          "json",
+          "jsonl"
+        ],
+        "kind": "enum",
+        "label": "Format",
+        "name": "format",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Optional top-level object key containing the array of records to read from a JSON document.",
+        "kind": "text",
+        "label": "Data Key",
+        "name": "data_key",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": "utf-8",
+        "description": "Text encoding used to decode the JSON or JSONL file.",
+        "kind": "text",
+        "label": "Encoding",
+        "name": "encoding",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Optional mapping from observed JSON object keys to normalized pipeline field names.",
+        "kind": "json-object",
+        "label": "Field Mapping",
+        "name": "field_mapping",
+        "nullable": true,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "source",
+  "plugin_name": "json"
+}

@@ -14,6 +14,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+OPTIONAL_PLUGIN_IMPORT_MODULES: frozenset[str] = frozenset(
+    {
+        "bs4",
+        "chromadb",
+        "html2text",
+    }
+)
+
 # Files that should never be scanned for plugins
 EXCLUDED_FILES: frozenset[str] = frozenset(
     {
@@ -82,16 +90,29 @@ def discover_plugins_in_directory(
         # is expected when not all extras are installed — skip with a warning.
         try:
             plugins = _discover_in_file(py_file, base_class)
-        except (ImportError, ModuleNotFoundError) as exc:
+        except ModuleNotFoundError as exc:
+            if not _is_optional_plugin_dependency_error(exc):
+                raise
             logger.warning(
                 "Skipping plugin file %s: optional dependency not installed (%s)",
                 py_file.name,
                 exc,
             )
             continue
+        except ImportError:
+            raise
         discovered.extend(plugins)
 
     return discovered
+
+
+def _is_optional_plugin_dependency_error(exc: ModuleNotFoundError) -> bool:
+    """Return whether a missing import is an expected optional plugin extra."""
+    missing_name = exc.name
+    if missing_name is None:
+        return False
+    missing_root = missing_name.split(".", 1)[0]
+    return missing_root in OPTIONAL_PLUGIN_IMPORT_MODULES
 
 
 def _canonical_module_name(py_file: Path) -> str | None:

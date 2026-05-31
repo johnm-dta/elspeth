@@ -1,0 +1,120 @@
+{
+  "verdict": "NO_GO_REV_3",
+  "plan_file": "/home/john/elspeth/docs/superpowers/plans/completed/composer-progress-persistence/2026-04-30-composer-progress-persistence-phase-3-compose-loop.md",
+  "reviewed_at": "2026-05-14",
+  "baseline_reviewed": "RC5.2 current checkout",
+  "reviewers": ["reality", "architecture", "quality", "systems"],
+  "summary": "Rev-3 cleanly resolves the rev-2 reality blocker (symbol-anchored references, correct test-file classification) but leaves three of the four rev-2 blocker classes only partially resolved. The defect pattern recurs: rev-3 fixed the specific defects rev-2 named, then re-introduced the same defect shape on adjacent surfaces. The deletion seam is fixed; the symmetric insertion seam is broken (ComposerServiceImpl has no sessions_service, ComposerResult has no assistant_id field, neither AuditIntegrityError nor StaleComposeStateError has a FastAPI exception handler). Literal-ellipsis red-test snippets returned at Task 7 after being purged from Tasks 4 and 8. The call-site enumeration that rev-2 architecture-1 demanded is now semantic (7 categories) rather than literal (9 line-number sites), reproducing the under-specification defect under cosmetic rephrasing. Property machine for CL-PP-10c is a pass-skeleton with no states, transitions, or invariants. Six convergent blockers across architecture, quality, and systems. Rev-4 required.",
+  "rev2_blocker_resolutions": {
+    "reality-1": {
+      "status": "fully_resolved",
+      "notes": "Reality reviewer's three-check audit reports zero file:line source references in plan (symbol anchors throughout), zero test-file misclassifications across ten spot-checks, and dependency versions consistent with project floors. Only minor warning: tests/property/web/ and tests/property/web/composer/ directories do not exist on disk and the plan does not specify __init__.py scaffolding. Acceptable as a warning."
+    },
+    "architecture-1": {
+      "status": "partially_resolved",
+      "notes": "Rev-3 correctly identifies the deletion seam (routes.py:_persist_tool_invocations) and adds Task 6 with a call-site disposition table. But the symmetric defect on the insertion side is open: ComposerServiceImpl does not accept a sessions_service parameter, ComposerResult does not expose an assistant_id, and Task 6's call-site enumeration is semantic (7 named categories) rather than literal (9 line-numbered sites at 1364/1514/1737/3444/3986/4944/4964/5533/5553). Same defect shape as rev-2 architecture-1, displaced one layer."
+    },
+    "quality-1": {
+      "status": "partially_resolved",
+      "notes": "Rev-3 adds a Task 7 negative assertion for audit_access_log fail-closed, three cancellation arrival points, and an AuditIntegrityError red test. But the FastAPI handler-chain context the tests depend on is unaddressed: web/app.py registers no handler for AuditIntegrityError or StaleComposeStateError, so the body['error_type'] assertions in Tasks 7 and 11 cannot pass from the plan's implementation steps alone. The literal-ellipsis defect rev-3 fixed in Tasks 4 and 8 returned at Task 7. The property machine for CL-PP-10c is a pass-skeleton with no states, transitions, or invariants. Three of nine cancellation arrival points have no injection mechanism specified."
+    },
+    "systems-1": {
+      "status": "partially_resolved",
+      "notes": "Rev-3 added Task 12a's three-bucket assertion-diff procedural gate (shape-now-correct / counter-now-correct / other). This part is genuinely resolved. The semantic-vs-literal call-site enumeration defect that systems-1 originally caught now recurs in Task 6 (rev-3's response to architecture-1) — 7 categories vs 9 literal sites. Same defect shape on a new surface. Also: Task 13 redefines 'ships' to release-branch rather than main, so done-condition #5 (Tier-1 alert/dashboard/runbook in staging) cannot be met; runbook entry can ship in-Phase-3."
+    }
+  },
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "title": "Missing FastAPI exception handlers for AuditIntegrityError and StaleComposeStateError",
+      "sources": ["quality (Q3-2)", "systems (SYS-1)", "systems (SYS-2)"],
+      "severity": "critical",
+      "priority_score": 36,
+      "issue": "Tasks 7 and 11 assert HTTP response bodies of the form body['error_type'] == 'audit_integrity_error' and body['error_type'] == 'audit_access_log_write_failed', and Task 6 assumes StaleComposeStateError surfaces with a defined HTTP shape. None of these handlers are registered in web/app.py. The plan adds no task to register them.",
+      "evidence": "Verified against RC5.2 checkout: src/elspeth/web/app.py registers @app.exception_handler for RunAlreadyActiveError (484), FingerprintKeyMissingError (524), SecretDecryptionError (549), OperationalError (571), OSError (593), RequestValidationError (634). Zero handlers for AuditIntegrityError or StaleComposeStateError. StaleComposeStateError is defined in src/elspeth/web/sessions/protocol.py:420 and raised in src/elspeth/web/sessions/service.py:832. Unhandled exceptions yield {\"detail\": \"Internal Server Error\"} — assertions cannot pass.",
+      "remediation": "Add a new task (Task 6.5 or 7.0) that registers @app.exception_handler(AuditIntegrityError) returning {error_type: 'audit_integrity_error', ...} with the documented shape from §5.2.1, and @app.exception_handler(StaleComposeStateError) returning a 409 Conflict with {error_type: 'stale_compose_state', ...}. Also add a handler for the audit-access-log write-failure path (likely a dedicated exception type, since OperationalError on a different transaction is too broad). Both handlers must run synchronously (audit-primacy) and must fire telemetry before yielding the HTTP response."
+    },
+    {
+      "id": "B2",
+      "title": "ComposerServiceImpl has no sessions_service DI parameter — Task 6 Step 3 unimplementable",
+      "sources": ["architecture (A1)"],
+      "severity": "critical",
+      "priority_score": 32,
+      "issue": "Task 6 Step 3 writes self.sessions_service.persist_compose_turn_async(...) but ComposerServiceImpl.__init__ accepts only session_engine: Engine | None. The seam-contract docstring at composer/protocol.py explicitly documents 'Does NOT depend on SessionService — the route handler mediates.' Plan does not add the DI parameter, does not list app-factory wiring, does not update the seam-contract docstring, and does not consider the alternative (route handler continues to mediate, plan moves persistence orchestration into the route layer).",
+      "evidence": "Verified against RC5.2 checkout: src/elspeth/web/composer/service.py:1132 — only DI parameter for session work is session_engine: Engine | None = None. Stored at self._session_engine (line 1142). All current session-DB usage in ComposerServiceImpl goes through self._session_engine directly (lines 1269, 1660, 2555, 2906, 2913). No self.sessions_service attribute exists.",
+      "remediation": "Pick one of two architectures and document the choice: (a) add sessions_service: SessionServiceProtocol to ComposerServiceImpl.__init__ + app-factory wiring + seam-contract docstring update, OR (b) keep ComposerService session-free and move persist_compose_turn_async orchestration into the route layer (which already has the SessionService instance). Either way, Task 6 Step 3 must be rewritten against the chosen architecture, and the symmetric Task 8 (failed-turn persistence) updated to match."
+    },
+    {
+      "id": "B3",
+      "title": "ComposerResult has no assistant_id source for failed_turn.assistant_message_id",
+      "sources": ["architecture (A2)"],
+      "severity": "critical",
+      "priority_score": 32,
+      "issue": "Task 8 Step 2 writes failed_turn.assistant_message_id = assistant_message_id_or_none but ComposerResult has no field exposing an assistant message id. The plan modifies composer/protocol.py only to add the progress-event reason-code enum. The assistant message row id is generated inside ComposerServiceImpl during persistence — there is no current code path that returns it to the caller.",
+      "evidence": "Verified against RC5.2 checkout: src/elspeth/web/composer/protocol.py:24 ComposerResult dataclass has fields message, state, runtime_preflight, raw_assistant_content, tool_invocations, llm_calls, repair_turns_used. No assistant_id or assistant_message_id field. Grep for assistant_id in composer/protocol.py returns zero matches.",
+      "remediation": "Either (a) extend ComposerResult with assistant_message_id: str | None and document the contract (set after successful persistence, None on early failure paths) — this requires updating ComposerResult's existing invariants block, OR (b) restructure Task 8 so the route layer captures the assistant id at the point of insertion, not from the ComposerResult return value. Choice depends on B2's resolution: option (a) only works if ComposerService owns persistence (B2 path a); option (b) is the only viable path if persistence stays in the route layer (B2 path b)."
+    },
+    {
+      "id": "B4",
+      "title": "Task 6 call-site disposition table is semantic, not literal — 9 sites collapsed to 7 categories",
+      "sources": ["systems (SYS-3)", "architecture (A3)"],
+      "severity": "critical",
+      "priority_score": 24,
+      "issue": "Rev-2 architecture-1 demanded an exact accounting of route-layer call sites; rev-3 replied with Task 6's disposition table organised into 7 named semantic categories. The actual codebase has 9 literal call sites of _persist_tool_invocations (sessions/routes.py:1364, 1514, 1737, 3444, 3986, 4944, 4964, 5533, 5553) plus immediately-preceding service.add_message('assistant', ...) calls at the compose-loop sites (~3431, ~3976). Same defect shape as rev-2 (under-specified call-site enumeration), now on the deletion-disposition surface rather than the seam-identification surface.",
+      "evidence": "Verified against RC5.2 checkout: 9 literal call sites of _persist_tool_invocations confirmed by grep on src/elspeth/web/sessions/routes.py (lines 1364, 1514, 1737, 3444, 3986, 4944, 4964, 5533, 5553). The service.add_message('assistant', ...) calls in the compose-loop path are not enumerated in Task 6.",
+      "remediation": "Replace Task 6's semantic disposition table with a literal per-line table: every line number gets a row, every row gets one of {delete, retain, replace-with-X}. For the two compose-loop sites (~3431/3976 add_message + 3444/3986 persist), the table must explicitly state which of (add_message, persist_tool_invocations) survives — if both survive, the assistant row is inserted twice and §5.2.1 atomicity is violated. The audit_complete envelope dispositions must be enumerated per site, not per category."
+    },
+    {
+      "id": "B5",
+      "title": "Literal `...` ellipsis returned at Task 7 red-test snippet",
+      "sources": ["quality (Q3-1)"],
+      "severity": "high",
+      "priority_score": 18,
+      "issue": "Task 7 contains a literal `...` ellipsis argument in a red-test snippet (composer_service_with_real_sessions._run_one_turn_for_test(...) at plan line ~887). Rev-3 explicitly claimed to have purged this pattern from Tasks 4 and 8. Same defect shape, new task. The red test is unrunnable as written.",
+      "evidence": "Plan markdown at Task 7 — verified from rev-3 reviewer reports; quality reviewer cites plan line ~887.",
+      "remediation": "Expand the call-site to its full argument tuple, matching the pattern rev-3 used for Tasks 4 and 8. Add a CI gate or pre-commit hook that greps plan files for `\\.\\.\\.\\)` patterns inside fenced ```python blocks; this is now a recurring defect class and deserves mechanical enforcement."
+    },
+    {
+      "id": "B6",
+      "title": "CL-PP-10c property machine is a pass-skeleton",
+      "sources": ["quality (Q3-3)", "quality (Q3-4)"],
+      "severity": "high",
+      "priority_score": 18,
+      "issue": "Task 12c's RuleBasedStateMachine is specified only as a class skeleton with nine @example decorators enforcing cancellation arrival-point coverage. The machine body has no states, no transitions, no invariants. The referenced helper run_compose_loop_audit_machine(cancellation_arrival_time) is undefined. Three of nine cancellation arrival points (during_run_sync_between_insert_and_commit, during_advisory_lock_acquisition, after_commit_before_response_yielded) have no injection mechanism specified, and asyncio.shield defeats most of the others. Coverage-by-decorator-count looks complete but several @example values are mechanically indistinguishable.",
+      "evidence": "Plan markdown at Task 12c — confirmed by quality reviewer Q3-3 and Q3-4.",
+      "remediation": "Specify the state machine concretely: state variables (in-flight turn, audit envelope state, DB transaction state), allowed transitions (rule decorators with preconditions), invariants (e.g., assert audit_complete_emitted == db_committed). For each of the nine cancellation arrival points, name the specific injection mechanism (mock seam, asyncio.Event, monkeypatched method) and prove the injection cannot be defeated by asyncio.shield. Where the arrival point is structurally unreachable, drop the @example and document why."
+    }
+  ],
+  "recommended_warnings": [
+    {"id": "W1", "source": "reality", "issue": "tests/property/web/ and tests/property/web/composer/ directories do not exist; plan does not specify __init__.py scaffolding.", "recommendation": "Add an explicit subtask in Task 12 to create the directory tree with __init__.py files, or document that pytest's rootdir-based collection makes this optional."},
+    {"id": "W2", "source": "architecture (A4)", "issue": "raw_assistant_content = assistant_message.content or '' collapses 'LLM said nothing' with 'LLM emitted empty string' — fabrication at the Tier-1 audit boundary per CLAUDE.md fabrication test.", "recommendation": "Use assistant_message.content if assistant_message.content is not None else None and let the audit field be nullable. Absent content is evidence, not an invitation to substitute the empty string."},
+    {"id": "W3", "source": "architecture (A5)", "issue": "audit_access_log error_type taxonomy splits write-failure into multiple values; downstream consumers cannot tell which failure mode without joining additional context."},
+    {"id": "W4", "source": "architecture (A6)", "issue": "transcript_url field is a one-way door — once persisted, format changes break replay of historical audit rows."},
+    {"id": "W5", "source": "architecture (A7)", "issue": "RuleBasedStateMachine added without citing the spec section that authorises it; spec §5 currently lists only Hypothesis @given tests for CL-PP."},
+    {"id": "W6", "source": "architecture (A8)", "issue": "count_tool_responses_for_assistant adds a third method to SessionServiceProtocol for a trivial SELECT; inline the query at the call site or expose via an existing generic-query method."},
+    {"id": "W7", "source": "architecture (A9)", "issue": "audit_access_log CHECK constraint admits 'admin_tool' but no Phase-3 path emits that value; remove from the constraint or document the deferred consumer."},
+    {"id": "W8", "source": "architecture (A10) + quality (W5)", "issue": "References to --no-verify should be dropped from the plan; project policy is to fix hook failures, not bypass them. Procedural gate's three-bucket note belongs in commit messages, not implementer logs."},
+    {"id": "W9", "source": "systems (WARN-SYS-1)", "issue": "Done-condition #8 (end-to-end recovery fidelity) requires Phase 4 work but Phase 3 plan reads as if it closes the condition."},
+    {"id": "W10", "source": "systems (WARN-SYS-2)", "issue": "Task 13 redefines 'ships' to release-branch rather than main; staging deploys from main, so Tier-1 alert/dashboard/runbook in done-condition #5 cannot be met as planned.", "recommendation": "Add docs/runbooks/audit-tier1-violation.md to Phase 3 scope — directly satisfies the literal 'runbook entry' clause without requiring the full alert/dashboard infra."},
+    {"id": "W11", "source": "systems (WARN-SYS-3)", "issue": "audit_access_log fail-closed creates a reinforcing failure loop during recovery: the recovery panel is invoked during incidents, and the same transient DB pressure that triggered the incident will fail the panel."},
+    {"id": "W12", "source": "systems (WARN-SYS-4)", "issue": "CL-PP-10c covers cancellation only via Hypothesis property test; pin at least one integration test at during_run_sync_between_insert_and_commit for regression-suite confidence."},
+    {"id": "W13", "source": "quality (W1)", "issue": "11 fixtures named in red-test snippets are not defined anywhere in the plan or current test tree."},
+    {"id": "W14", "source": "quality (W2)", "issue": "count_tool_responses_for_assistant SELECT does not filter by session_id; cross-session aliasing is possible if assistant_id collides."},
+    {"id": "W15", "source": "quality (W4) + systems", "issue": "No OTel counter specified for audit_access_log write failure; the failure mode is otherwise invisible until someone queries the table."}
+  ],
+  "recurrence_pattern_note": "Rev-3 fixed the specific defects rev-2 named without generalising the underlying failure mode. Reality-1 fully resolved (symbol anchors replace line numbers everywhere). Architecture-1 partially resolved: the deletion seam is correctly relocated to routes.py:_persist_tool_invocations, but the symmetric insertion seam was not examined — ComposerServiceImpl still has no sessions_service parameter, ComposerResult still has no assistant_id field. Quality-1 partially resolved: the three named missing tests were added, but the FastAPI handler-chain those tests transit was not registered, and the literal-ellipsis defect rev-3 purged from Tasks 4 and 8 returned at Task 7. Systems-1 partially resolved: the assertion-churn three-bucket gate is genuine progress, but the semantic-vs-literal call-site enumeration defect (the original surface of systems-1) now recurs in Task 6's response to architecture-1. The pattern is consistent: rev-3 treats each rev-2 finding as a discrete defect to patch, rather than as a symptom of a defect class. For rev-4, the operator should require the planner to (a) sweep for the same defect shape on adjacent surfaces before claiming a fix complete, and (b) treat 'where does the new exception go?' and 'which line number does this dispose of?' as first-class plan obligations, not implementer discretion.",
+  "recommended_split": {
+    "rationale": "Architecture reviewer estimates blast radius at 23 files (12 modify + 9 create + 2 extend), weighted score ~18 (Very High). The plan as written conflates four distinct workstreams: (1) protocol/contract changes, (2) persistence-orchestration migration, (3) audit-access-log infrastructure, (4) property-test machine. Splitting reduces review surface per PR and reduces blast radius of any single revert.",
+    "proposed_split": {
+      "pr1_protocol_and_seams": "Tasks 0-7 — protocol changes, ComposerService DI shape, exception handlers in web/app.py, route-layer call-site disposition, deletion of legacy persist seams. Lands the structural change.",
+      "pr2_audit_log_and_property_tests": "Tasks 8-13 — audit_access_log schema + fail-closed handling, failed-turn persistence, property-test state machine, docs. Lands the auditability and verification work."
+    },
+    "note": "Split is optional but strongly recommended given prior plan rejection count (this is rev-3) and the convergent-reviewer concern about review fatigue masking residual defects."
+  },
+  "reviewer_summaries": {
+    "reality": {"status": "PASS", "blocking": 0, "warnings": 1, "note": "Rev-2 reality-1 fully resolved."},
+    "architecture": {"status": "CHANGES_REQUESTED", "blocking": 3, "warnings": 6, "note": "Three critical blockers all on the insertion seam (ComposerServiceImpl DI, ComposerResult.assistant_id, call-site disposition literalness)."},
+    "quality": {"status": "CHANGES_REQUESTED", "blocking": 4, "warnings": 5, "note": "Four blockers; two converge with architecture and systems on the handler-chain defect."},
+    "systems": {"status": "CHANGES_REQUESTED", "blocking": 3, "warnings": 4, "note": "Three blockers; SYS-1 ≡ Q3-2 (handler-chain); SYS-2 aligns with A1/A2/A3 cluster; SYS-3 is the call-site enumeration recurrence."}
+  }
+}

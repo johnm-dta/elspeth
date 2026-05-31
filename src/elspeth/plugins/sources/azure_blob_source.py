@@ -19,17 +19,24 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 import structlog
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from elspeth.contracts import CallStatus, CallType, PluginSchema, SourceRow
+from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
 from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
+from elspeth.contracts.wire_visible_identity import reject_placeholder_value
 from elspeth.core.identifiers import validate_field_names
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
-from elspeth.plugins.sources.field_normalization import FieldResolution, normalize_field_name, resolve_field_names
+from elspeth.plugins.sources.field_normalization import (
+    ExternalHeaderError,
+    FieldResolution,
+    normalize_field_name,
+    resolve_field_names,
+)
 from elspeth.plugins.sources.json_source import (
     _contains_surrogateescape_chars,
     _reject_nonfinite_constant,
@@ -265,7 +272,7 @@ class AzureBlobSourceConfig(DataPluginConfig):
         """Validate that container is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("container cannot be empty")
-        return v
+        return reject_placeholder_value(v, field_name="container")
 
     @field_validator("blob_path")
     @classmethod
@@ -273,7 +280,7 @@ class AzureBlobSourceConfig(DataPluginConfig):
         """Validate that blob_path is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("blob_path cannot be empty")
-        return v
+        return reject_placeholder_value(v, field_name="blob_path")
 
     @field_validator("on_validation_failure")
     @classmethod
@@ -320,9 +327,29 @@ class AzureBlobSource(BaseSource):
     """
 
     name = "azure_blob"
+    determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:525397539f159571"
+    source_file_hash: str | None = "sha256:c4940c65bdab1236"
     config_model = AzureBlobSourceConfig
+
+    @classmethod
+    def get_agent_assistance(cls, *, issue_code: str | None = None) -> PluginAssistance | None:
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name=cls.name,
+                issue_code=None,
+                summary="Loads CSV, JSON, or JSONL rows from Azure Blob Storage.",
+                composer_hints=(
+                    "Configure exactly one auth path: connection_string, sas_token+account_url, managed identity+account_url, or service principal+account_url.",
+                    "Choose format explicitly; csv uses csv_options, while json/jsonl use json_options and optional data_key.",
+                    "For headerless CSV set csv_options.has_header=false and provide columns; columns is invalid for headered CSV or non-CSV blobs.",
+                    "If you have been asked to generate source rows yourself, do not pick `azure_blob` — this source reads pre-existing storage blobs, not LLM-authored content. Switch to a local-blob source (`csv`, `json`, or `text`) via `create_blob` plus `set_source_from_blob`.",
+                    "Never synthesise an Azure container name, blob path, account URL, or credential for content you authored — the audit trail must reference a real, addressable blob.",
+                    "Use field_mapping only to override normalized field names at the source boundary.",
+                    "Set on_validation_failure to a quarantine sink unless deliberate discard is acceptable.",
+                ),
+            )
+        return None
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
@@ -594,11 +621,35 @@ class AzureBlobSource(BaseSource):
                     )
                 return
 
-            self._field_resolution = resolve_field_names(
-                raw_headers=raw_headers,
-                field_mapping=self._field_mapping,
-                columns=None,
-            )
+            # External-header faults (normalization collision, empty/duplicate headers)
+            # are Tier 3 (the blob's own header bytes are bad): record + quarantine/
+            # discard like the sibling csv.Error header path above. Config faults (a bad
+            # field_mapping) raise plain ValueError and crash — they are ours.
+            try:
+                self._field_resolution = resolve_field_names(
+                    raw_headers=raw_headers,
+                    field_mapping=self._field_mapping,
+                    columns=None,
+                )
+            except ExternalHeaderError as e:
+                raw_row = {
+                    "__raw_blob_preview__": text_data[:200],
+                    "__encoding__": encoding,
+                }
+                error_msg = f"CSV header could not be resolved: {e}"
+                ctx.record_validation_error(
+                    row=raw_row,
+                    error=error_msg,
+                    schema_mode="parse",
+                    destination=self._on_validation_failure,
+                )
+                if self._on_validation_failure != "discard":
+                    yield SourceRow.quarantined(
+                        row=raw_row,
+                        error=error_msg,
+                        destination=self._on_validation_failure,
+                    )
+                return
             headers = self._field_resolution.final_headers
         elif self._columns is not None:
             self._field_resolution = resolve_field_names(

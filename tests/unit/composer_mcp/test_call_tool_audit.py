@@ -21,6 +21,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.composer_mcp.server import create_server
 from elspeth.contracts.composer_audit import ComposerToolInvocation, ComposerToolStatus
+from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.dependencies import create_catalog_service
 
 
@@ -41,6 +42,17 @@ class _StrictPreflightProbe(BaseModel):
     model_config = ConfigDict(strict=True)
 
     enabled: bool
+
+
+def _empty_state_dict() -> dict[str, object]:
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    ).to_dict()
 
 
 def _preflight_validation_error() -> PydanticValidationError:
@@ -88,17 +100,15 @@ async def test_arg_error_path_records_before_return() -> None:
         scratch = Path(td)
         probe = _ProbeRecorder()
         server = create_server(catalog, scratch, recorder=probe)
-        # NOT_HEX is rejected by InvalidSessionIdError (a ValueError subclass).
-        await _call_handler(server.request_handlers, "load_session", {"session_id": "NOT_HEX"})
+        response = await _call_handler(server.request_handlers, "load_session", {"session_id": "NOT_HEX"})
+    assert response.root.isError is True
+    assert "session_id" in response.root.content[0].text
     assert len(probe.invocations) == 1
     inv = probe.invocations[0]
     assert inv.status == ComposerToolStatus.ARG_ERROR
     assert inv.tool_name == "load_session"
-    assert inv.error_class == "InvalidSessionIdError"
-    # Per the redaction discipline: error_message is the class name only,
-    # NOT exc.args[0] (which could carry filesystem paths via
-    # CorruptSessionFileError). This pins the Python-W1 fix.
-    assert inv.error_message == "InvalidSessionIdError"
+    assert inv.error_class == "ToolArgumentError"
+    assert inv.error_message == "ToolArgumentError"
     # ARG_ERROR ⇒ version_after is None (the dispatch did not complete).
     assert inv.version_after is None
 
@@ -112,7 +122,8 @@ async def test_arg_error_payload_recorded_for_audit_replay() -> None:
         scratch = Path(td)
         probe = _ProbeRecorder()
         server = create_server(catalog, scratch, recorder=probe)
-        await _call_handler(server.request_handlers, "load_session", {"session_id": "NOT_HEX"})
+        response = await _call_handler(server.request_handlers, "load_session", {"session_id": "NOT_HEX"})
+    assert response.root.isError is True
     inv = probe.invocations[0]
     assert inv.status == ComposerToolStatus.ARG_ERROR
     # H4 fix: result_canonical mirrors what the LLM saw.
@@ -121,7 +132,7 @@ async def test_arg_error_payload_recorded_for_audit_replay() -> None:
 
     payload = _json.loads(inv.result_canonical)
     assert payload["isError"] is True
-    assert "Tool error" in payload["error"]
+    assert "session_id" in payload["error"]
 
 
 @pytest.mark.asyncio
@@ -261,6 +272,76 @@ async def test_plugin_crash_path_records_before_reraise() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bare_dispatch_value_error_is_plugin_crash_not_arg_error() -> None:
+    """Internal ValueError escaping dispatch is a plugin bug, not bad LLM args."""
+    catalog = create_catalog_service()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(catalog, scratch, recorder=probe)
+        with patch(
+            "elspeth.composer_mcp.server._dispatch_tool",
+            side_effect=ValueError("synthetic internal bug"),
+        ):
+            response = await _call_handler(
+                server.request_handlers,
+                "new_session",
+                {"name": "CrashTest"},
+            )
+
+    call_result = response.root
+    assert call_result.isError is True
+
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_name == "new_session"
+    assert inv.error_class == "ValueError"
+    assert inv.error_message == "ValueError"
+    assert inv.version_after is None
+    assert inv.result_canonical is None
+    assert inv.result_hash is None
+
+
+@pytest.mark.asyncio
+async def test_response_json_serialization_failure_is_plugin_crash_not_success() -> None:
+    """Failure while producing the MCP-visible response must not audit SUCCESS."""
+    catalog = create_catalog_service()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(catalog, scratch, recorder=probe)
+
+        bad_result = {
+            "success": True,
+            "data": object(),
+            "state": _empty_state_dict(),
+        }
+        with patch(
+            "elspeth.composer_mcp.server._dispatch_tool",
+            return_value=bad_result,
+        ):
+            response = await _call_handler(
+                server.request_handlers,
+                "list_sessions",
+                {},
+            )
+
+    call_result = response.root
+    assert call_result.isError is True
+
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.PLUGIN_CRASH
+    assert inv.tool_name == "list_sessions"
+    assert inv.error_class == "TypeError"
+    assert inv.error_message == "TypeError"
+    assert inv.version_after is None
+    assert inv.result_canonical is None
+    assert inv.result_hash is None
+
+
+@pytest.mark.asyncio
 async def test_preview_runtime_preflight_failure_records_before_transport_error() -> None:
     """preview_pipeline runtime preflight failure must land an audit row.
 
@@ -375,15 +456,9 @@ async def test_preview_runtime_preflight_missing_settings_hash_is_plugin_crash_n
 
 
 @pytest.mark.asyncio
-async def test_delete_session_does_not_orphan_sidecar() -> None:
-    """C1 fix: delete_session must not recreate an orphan sidecar.
-
-    After delete_session succeeds, session_id_ref is cleared; the
-    deletion record buffers (in process memory) and dies with the
-    process. The previously-active sidecar file is unlinked (by
-    SessionManager.delete) and stays unlinked.
-    """
-    from elspeth.composer_mcp.audit import events_sidecar_path
+async def test_delete_session_persists_deletion_audit_record() -> None:
+    """Successful delete_session must leave a durable audit tombstone."""
+    from elspeth.composer_mcp.audit import events_sidecar_path, verify_events_sidecar_integrity
 
     catalog = create_catalog_service()
     with tempfile.TemporaryDirectory() as td:
@@ -401,6 +476,14 @@ async def test_delete_session_does_not_orphan_sidecar() -> None:
         await _call_handler(server.request_handlers, "save_session", {"session_id": sid})
         assert sidecar.exists()
         await _call_handler(server.request_handlers, "delete_session", {"session_id": sid})
-        # Pre-fix bug: the deletion record would recreate the sidecar.
-        # Post-fix: session_id_ref cleared, delete record buffers, no recreation.
-        assert not sidecar.exists()
+        assert not (scratch / f"{sid}.json").exists()
+        assert sidecar.exists()
+        lines = sidecar.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        deletion_record = _json.loads(lines[0])
+        assert deletion_record["tool_name"] == "delete_session"
+        assert deletion_record["status"] == ComposerToolStatus.SUCCESS.value
+        verify_events_sidecar_integrity(sidecar)
+
+        await _call_handler(server.request_handlers, "list_sessions", {})
+        assert len(sidecar.read_text(encoding="utf-8").splitlines()) == 1

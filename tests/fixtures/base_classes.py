@@ -202,6 +202,7 @@ class _TestTransformBase(BaseTransform):
     """
 
     name: str
+    determinism = Determinism.DETERMINISTIC
     input_schema: type[PluginSchema] = _TestSchema
     output_schema: type[PluginSchema] = _TestSchema
     plugin_version = "1.0.0"

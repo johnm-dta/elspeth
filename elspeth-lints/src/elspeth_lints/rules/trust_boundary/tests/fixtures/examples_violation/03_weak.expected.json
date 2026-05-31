@@ -1,0 +1,12 @@
+[
+  {
+    "column": 1,
+    "file_path": "bad.py",
+    "fingerprint": "c0a6e800e09e4ff6",
+    "line": 4,
+    "message": "@trust_boundary test_ref 'tests/test_boundary.py::test_no_raise' resolves to 'test_no_raise' but the test body has no pytest.raises / with pytest.raises / assertRaises pattern.",
+    "rule_id": "TBE3",
+    "severity": "error",
+    "suggestion": "The referenced test does not assert on raising behaviour. The honesty gate requires the test body to contain at least one pytest.raises(...) context manager, pytest.raises(...) call, or unittest assertRaises(...) call."
+  }
+]

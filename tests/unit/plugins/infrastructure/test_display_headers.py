@@ -104,6 +104,25 @@ class TestGetEffectiveDisplayHeaders:
         assert get_effective_display_headers(sink) is None
 
 
+class TestDisplayNameFor:
+    """Test display-name lookup helper."""
+
+    def test_returns_field_when_no_mapping(self) -> None:
+        from elspeth.plugins.infrastructure.display_headers import display_name_for
+
+        assert display_name_for(None, "amount_usd") == "amount_usd"
+
+    def test_returns_mapped_display_name(self) -> None:
+        from elspeth.plugins.infrastructure.display_headers import display_name_for
+
+        assert display_name_for({"amount_usd": "Amount USD"}, "amount_usd") == "Amount USD"
+
+    def test_returns_field_when_mapping_omits_transform_added_field(self) -> None:
+        from elspeth.plugins.infrastructure.display_headers import display_name_for
+
+        assert display_name_for({"amount_usd": "Amount USD"}, "derived_score") == "derived_score"
+
+
 class TestResolveContractFromContext:
     """Test resolve_contract_from_context_if_needed."""
 

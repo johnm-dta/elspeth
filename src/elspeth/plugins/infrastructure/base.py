@@ -37,7 +37,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from elspeth.contracts import Determinism, PluginSchema, SourceRow
+from elspeth.contracts import (
+    DeclaredAuditCharacteristics,
+    Determinism,
+    PluginSchema,
+    SourceRow,
+)
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -119,14 +124,18 @@ class BaseTransform(ABC):
         process() with list[PipelineRow]. Use this for transforms inside
         aggregation nodes (batch LLM calls, statistical aggregations).
 
+        The engine dispatches single-row vs. batch from the class-level
+        ``is_batch_aware`` flag; the transform never inspects the runtime
+        argument shape. A runtime ``isinstance(row, list)`` branch in
+        process() is a forbidden defensive type-check — it duplicates a
+        decision the dispatcher has already made.
+
         class MyBatchTransform(BaseTransform):
             name = "my_batch"
             is_batch_aware = True
 
-            def process(self, row, ctx):  # row is list[PipelineRow] in batch mode
-                if isinstance(row, list):
-                    return self._process_batch(row, ctx)
-                return self._process_single(row, ctx)
+            def process(self, rows: list[PipelineRow], ctx: TransformContext) -> TransformResult:
+                return self._process_batch(rows, ctx)
 
     When to Use Which
     -----------------
@@ -146,6 +155,84 @@ class BaseTransform(ABC):
     determinism: Determinism = Determinism.DETERMINISTIC
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
+
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # These fields populate the catalog's reference cards. They are
+    # documentation, not configuration — authors fill them in to explain
+    # to a human reader (compliance, research, ops) what this plugin
+    # does, when it's the right choice, when it isn't, and what audit
+    # characteristics it has. Empty / None values render as a generic
+    # "see the technical description" fallback in the catalog UI rather
+    # than blocking display. See docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md for the per-field semantics and the
+    # canonical csv_source.py example.
+
+    usage_when_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    pick this plugin?" — written for compliance / research / ops readers,
+    not for plugin developers. Avoid restating the technical
+    description; that's what the docstring is for."""
+
+    usage_when_not_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    *not* pick this plugin?" — gracefully redirecting users with the
+    wrong shape of problem to the right plugin. The Marcus persona (per
+    project_composer_personas) reads this to discover the plugin isn't
+    a fit for his Zapier-shaped expectations."""
+
+    example_use: str | None = None
+    """One-or-two-line YAML snippet showing realistic use. Format
+    matches the pipeline YAML so a developer (Dev persona) can copy and
+    paste into a composer session as a starting point. Indent under
+    `source:` / `transform:` / `sink:` as appropriate for the plugin
+    kind. Renders inside a <pre> block in the UI; preserve whitespace."""
+
+    capability_tags: tuple[str, ...] = ()
+    """Short lowercase tags that drive catalog filter chips and fuzzy
+    search. Examples: ("csv", "file", "batch") for csv_source;
+    ("http", "network", "scraping") for a web-scrape transform. Tags
+    are non-exhaustive; pick the two or three most useful for a user
+    who is searching the catalog.
+
+    **Open vocabulary — deliberate.** ``capability_tags`` is typed as
+    bare ``tuple[str, ...]`` rather than a closed-vocabulary enum (cf.
+    ``audit_characteristics`` below, which uses ``AuditCharacteristic``).
+    The asymmetry is intentional:
+
+      - ``audit_characteristics`` drives compliance-relevant rendering
+        (the chip vocabulary an auditor reads). A typo silently
+        degrades the audit signal, so the vocabulary is closed and
+        typos fail at the type-check + registration boundary.
+      - ``capability_tags`` drives discovery affordances (filter chips,
+        fuzzy search ranking) for an operator browsing for a plugin
+        that fits a use case. A new tag like ``"streaming"`` or
+        ``"webhook"`` is meaningful to a human reader without a
+        centrally-coordinated enum bump, and an "unrecognised" tag
+        renders fine — it just doesn't join an existing filter cluster.
+
+    Keep tags lowercase, short, and aligned with existing tags
+    (``grep`` ``capability_tags`` for current usage) so the filter
+    chip strip clusters related plugins. A new tag is fine; a typo on
+    an existing tag fragments the chip strip and is the failure mode
+    to avoid.
+
+    The BaseSink and BaseSource declarations of this attribute share
+    the same open-vocabulary rationale; treat this docstring as
+    canonical."""
+
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset()
+    """Declared audit characteristics that the framework cannot derive
+    from other attributes. The catalog service composes this set with
+    the characteristic derived from `determinism` at summary-build time.
+    Declare members of the :class:`~elspeth.contracts.enums.AuditCharacteristic`
+    enum (e.g. ``AuditCharacteristic.SIGNED``, ``AuditCharacteristic.CREDENTIALS``,
+    ``AuditCharacteristic.QUARANTINE``, ``AuditCharacteristic.PROVENANCE``) —
+    the enum itself is the closed vocabulary; typos fail mypy at the
+    declaration site rather than disappearing silently from the rendered
+    catalog card. The build-time test
+    ``tests/unit/web/catalog/test_audit_characteristics_declaration_typed.py``
+    additionally rejects bare-string members that pass mypy under
+    StrEnum/str inference."""
 
     # Config model — each subclass sets this to its Pydantic config class.
     # get_config_model() is the public API; override it for dynamic dispatch
@@ -221,6 +308,11 @@ class BaseTransform(ABC):
     # transform declares no pre-emission required-input contract.
     declared_input_fields: frozenset[str] = frozenset()
 
+    # Runtime preflight opt-in. Transforms that need an engine-time external
+    # readiness check before source iteration set this True and override
+    # runtime_preflight(). The default remains closed and side-effect free.
+    requires_runtime_preflight: bool = False
+
     # Error routing configuration.
     # Transforms extending TransformDataConfig override this from config.
     # Always non-None at runtime (TransformSettings requires on_error).
@@ -241,6 +333,37 @@ class BaseTransform(ABC):
     # None = no output contract provided (acceptable for shape-preserving transforms).
     _output_schema_config: SchemaConfig | None
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Enforces the contract documented in contracts/enums.py:Determinism —
+        # every plugin MUST declare a Determinism value at registration. The
+        # class-level default on BaseTransform exists only to satisfy typing
+        # (descendants assign on top of it); the inheritance chain is not a
+        # legitimate way to acquire a determinism classification. An author who
+        # adds a new transform that makes external calls and forgets to write
+        # `determinism = Determinism.EXTERNAL_CALL` would otherwise silently
+        # record the wrong determinism in the Landscape legal record, misclassify
+        # the node in the readiness panel, render the wrong audit-characteristic
+        # chips in the catalog, and produce a wrong ReproducibilityGrade.
+        # Intermediate ABCs (e.g. BaseAzureSafetyTransform) redeclare too —
+        # the contract is uniform, not "concrete classes only".
+        super().__init_subclass__(**kwargs)
+        if "determinism" not in cls.__dict__:
+            raise TypeError(
+                f"{cls.__qualname__} inherits from BaseTransform but does not "
+                f"explicitly declare a `determinism` class attribute. Every "
+                f"plugin MUST declare its determinism classification at "
+                f"registration; there is no default (see "
+                f"elspeth.contracts.enums.Determinism). Add one of: "
+                f"`determinism = Determinism.DETERMINISTIC`, "
+                f"`Determinism.SEEDED`, `Determinism.IO_READ`, "
+                f"`Determinism.IO_WRITE`, `Determinism.EXTERNAL_CALL`, or "
+                f"`Determinism.NON_DETERMINISTIC` to the class body. "
+                f"Redeclaring the same value as the parent is acceptable — "
+                f"the point is explicit author declaration, so that an audit "
+                f"reader can read the source and see which value the author "
+                f"chose, rather than tracing inheritance to find it."
+            )
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration.
 
@@ -248,7 +371,22 @@ class BaseTransform(ABC):
             config: Plugin configuration
         """
         self.config = config
-        # Per-instance, not per-class — class-level defaults would be shared across instances.
+        # Per-instance lifecycle-guard initialization.
+        #
+        # `_on_start_called` and `_on_complete_called` are the
+        # falsifiable post-conditions that contract tests use to detect
+        # missing-super() bugs in subclass lifecycle overrides: a stub
+        # `on_start()` that forgets to call `super().on_start()` leaves
+        # the flag False after construction-then-invocation, breaking
+        # the contract test. The flags MUST be per-instance — declaring
+        # them at class level (`_on_start_called: bool = False`) would
+        # make the True/False state shared across every plugin instance
+        # of the same class, so a single completed run would mask
+        # missing super() calls in every subsequent instance.
+        #
+        # Mirrored on BaseSink and BaseSource; see those `__init__`
+        # comments referring back here for the lifecycle-guard
+        # rationale.
         self._on_start_called: bool = False
         self._on_complete_called: bool = False
         self.declared_input_fields = frozenset()
@@ -620,6 +758,15 @@ class BaseTransform(ABC):
         """
         self._on_complete_called = True
 
+    def runtime_preflight(self, ctx: LifecycleContext) -> None:  # noqa: B027 - optional override, not abstract
+        """Run an optional transform readiness check before source iteration.
+
+        Only called when requires_runtime_preflight is True. Implementations may
+        make bounded external calls through the injected audit context; failures
+        abort the run before any source rows are loaded.
+        """
+        pass
+
     # ── Plugin-declared semantics (Phase 1: optional, default empty) ──
     # Override on a subclass to declare what the plugin emits / requires.
     # The generic semantic validator compares producer facts to consumer
@@ -654,14 +801,53 @@ class BaseTransform(ABC):
         *,
         issue_code: str | None = None,
     ) -> PluginAssistance | None:
-        """Return deterministic guidance keyed by an issue code.
+        """Return deterministic guidance for this plugin.
 
-        Default returns None: the plugin offers no specific guidance.
-        Override to return a PluginAssistance instance describing fixes
-        for this plugin's issue codes. Validators attach the issue
-        code; the plugin owns the prose.
+        Dual-use by ``issue_code``:
+
+        * ``issue_code is None`` — discovery-time guidance for an LLM
+          or operator selecting this plugin. Override to return a
+          ``PluginAssistance`` with a one-line ``summary`` of what the
+          plugin does and 1-5 short ``composer_hints`` imperatives
+          (≤140 chars each). ``suggested_fixes`` and ``examples`` may
+          be empty.
+        * ``issue_code is not None`` — failure-time guidance. The
+          validator attached the code; the plugin owns the prose.
+          Return a ``PluginAssistance`` with ``suggested_fixes`` and,
+          where useful, before/after ``examples``.
+
+        Default returns None for both branches: the plugin offers no
+        guidance. The catalog uses the ``None`` return as a signal to
+        emit empty ``composer_hints`` on the discovery DTO.
         """
         return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Return forward-looking hints conditional on the just-set config.
+
+        Called by the composer MCP tool layer after a successful
+        mutation (``set_source``, ``upsert_node``, ``patch_*_options``).
+        The plugin inspects its *own* configuration and returns 0-N
+        short imperatives the operator/LLM should consider before
+        moving on. Examples: "you declared schema.mode: fixed — did
+        you call inspect_source first?" or "your prompt contains a
+        subjective term — did you call request_interpretation_review?"
+
+        Two-parameter contract is deliberate. Plugins do not see
+        composer state or sibling nodes — cross-node concerns belong
+        in the validator subsystem. Hints are local to the plugin's
+        own config.
+
+        Default returns an empty tuple. Same audit-hash discipline as
+        ``get_agent_assistance``: advisory coaching, not contract.
+        """
+        return ()
 
 
 class BaseSink(ABC):
@@ -728,6 +914,59 @@ class BaseSink(ABC):
     determinism: Determinism = Determinism.IO_WRITE
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
+
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # These fields populate the catalog's reference cards. They are
+    # documentation, not configuration — authors fill them in to explain
+    # to a human reader (compliance, research, ops) what this plugin
+    # does, when it's the right choice, when it isn't, and what audit
+    # characteristics it has. Empty / None values render as a generic
+    # "see the technical description" fallback in the catalog UI rather
+    # than blocking display. See docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md for the per-field semantics and the
+    # canonical csv_source.py example.
+
+    usage_when_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    pick this plugin?" — written for compliance / research / ops readers,
+    not for plugin developers. Avoid restating the technical
+    description; that's what the docstring is for."""
+
+    usage_when_not_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    *not* pick this plugin?" — gracefully redirecting users with the
+    wrong shape of problem to the right plugin. The Marcus persona (per
+    project_composer_personas) reads this to discover the plugin isn't
+    a fit for his Zapier-shaped expectations."""
+
+    example_use: str | None = None
+    """One-or-two-line YAML snippet showing realistic use. Format
+    matches the pipeline YAML so a developer (Dev persona) can copy and
+    paste into a composer session as a starting point. Indent under
+    `source:` / `transform:` / `sink:` as appropriate for the plugin
+    kind. Renders inside a <pre> block in the UI; preserve whitespace."""
+
+    capability_tags: tuple[str, ...] = ()
+    """Short lowercase tags that drive catalog filter chips and fuzzy
+    search. Examples: ("csv", "file", "batch") for csv_source;
+    ("http", "network", "scraping") for a web-scrape transform. Tags
+    are non-exhaustive; pick the two or three most useful for a user
+    who is searching the catalog.
+
+    See ``BaseTransform.capability_tags`` for the open-vocabulary
+    rationale (why this is bare ``tuple[str, ...]`` rather than a
+    closed-vocabulary enum like ``audit_characteristics`` below)."""
+
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset()
+    """Declared audit characteristics that the framework cannot derive
+    from other attributes. The catalog service composes this set with
+    the characteristic derived from `determinism` at summary-build time.
+    Declare members of the :class:`~elspeth.contracts.enums.AuditCharacteristic`
+    enum (e.g. ``AuditCharacteristic.SIGNED``, ``AuditCharacteristic.CREDENTIALS``,
+    ``AuditCharacteristic.QUARANTINE``, ``AuditCharacteristic.PROVENANCE``) —
+    the enum itself is the closed vocabulary; typos fail mypy at the
+    declaration site rather than disappearing silently from the rendered
+    catalog card."""
 
     # Config model — each subclass sets this to its Pydantic config class.
     config_model: ClassVar[type[PluginConfig] | None] = None
@@ -811,13 +1050,17 @@ class BaseSink(ABC):
     def set_resume_field_resolution(self, resolution_mapping: dict[str, str]) -> None:
         """Set field resolution mapping for resume validation.
 
-        Default is a no-op. Only sinks with headers: original mode
+        Default is a no-op unless the sink declares that resume field
+        resolution is required. Sinks with headers: original mode must
         override this to use the mapping for validation.
 
         Args:
             resolution_mapping: Dict mapping original header name -> normalized field name.
         """
-        # Intentional no-op - most sinks don't use headers: original
+        if self.needs_resume_field_resolution:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} requires resume field resolution but does not implement set_resume_field_resolution()."
+            )
         _ = resolution_mapping  # Explicitly consume the argument
 
     # Output contract for schema-aware sinks
@@ -831,6 +1074,33 @@ class BaseSink(ABC):
     _display_headers_resolved: bool
     _needs_resume_field_resolution: bool
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Enforces the contract documented in contracts/enums.py:Determinism —
+        # every plugin MUST declare a Determinism value at registration. See
+        # BaseTransform.__init_subclass__ for the rationale; this hook is the
+        # sink-side mirror. A sink that performs IO_WRITE inherits the right
+        # value by accident today; one whose semantics differ (e.g. an
+        # idempotent metrics sink that author classifies DETERMINISTIC, or
+        # an EXTERNAL_CALL sink that posts to a webhook) would silently
+        # mis-record without this guard.
+        super().__init_subclass__(**kwargs)
+        if "determinism" not in cls.__dict__:
+            raise TypeError(
+                f"{cls.__qualname__} inherits from BaseSink but does not "
+                f"explicitly declare a `determinism` class attribute. Every "
+                f"plugin MUST declare its determinism classification at "
+                f"registration; there is no default (see "
+                f"elspeth.contracts.enums.Determinism). Add one of: "
+                f"`determinism = Determinism.DETERMINISTIC`, "
+                f"`Determinism.SEEDED`, `Determinism.IO_READ`, "
+                f"`Determinism.IO_WRITE`, `Determinism.EXTERNAL_CALL`, or "
+                f"`Determinism.NON_DETERMINISTIC` to the class body. "
+                f"Redeclaring the same value as the parent is acceptable — "
+                f"the point is explicit author declaration, so that an audit "
+                f"reader can read the source and see which value the author "
+                f"chose, rather than tracing inheritance to find it."
+            )
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration.
 
@@ -838,7 +1108,9 @@ class BaseSink(ABC):
             config: Plugin configuration
         """
         self.config = config
-        # Per-instance, not per-class — class-level defaults would be shared across instances.
+        # Per-instance lifecycle guards — see BaseTransform.__init__ for
+        # the full rationale (lifecycle-guard contract, missing-super()
+        # detection, why class-level state would mask bugs).
         self._on_start_called: bool = False
         self._on_complete_called: bool = False
         self._on_write_failure: str | None = None
@@ -962,6 +1234,30 @@ class BaseSink(ABC):
         """
         self._on_complete_called = True
 
+    @classmethod
+    def get_agent_assistance(
+        cls,
+        *,
+        issue_code: str | None = None,
+    ) -> PluginAssistance | None:
+        """Return deterministic guidance for this sink. See ``BaseTransform.get_agent_assistance``."""
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Return forward-looking hints conditional on the just-set sink config.
+
+        See ``BaseTransform.get_post_call_hints`` for the full contract.
+        Sinks typically hint on collision policy, write mode (insert /
+        upsert / replace), and serialization format choices.
+        """
+        return ()
+
 
 class BaseSource(ABC):
     """Base class for source plugins.
@@ -1016,6 +1312,59 @@ class BaseSource(ABC):
     plugin_version: str = "0.0.0"
     source_file_hash: str | None = None
 
+    # ── Reference content (Phase 7A) ────────────────────────────────────
+    # These fields populate the catalog's reference cards. They are
+    # documentation, not configuration — authors fill them in to explain
+    # to a human reader (compliance, research, ops) what this plugin
+    # does, when it's the right choice, when it isn't, and what audit
+    # characteristics it has. Empty / None values render as a generic
+    # "see the technical description" fallback in the catalog UI rather
+    # than blocking display. See docs/composer/ux-redesign-2026-05/
+    # 08-catalog-reshape.md for the per-field semantics and the
+    # canonical csv_source.py example.
+
+    usage_when_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    pick this plugin?" — written for compliance / research / ops readers,
+    not for plugin developers. Avoid restating the technical
+    description; that's what the docstring is for."""
+
+    usage_when_not_to_use: str | None = None
+    """Persona-facing prose. One short paragraph answering "when should I
+    *not* pick this plugin?" — gracefully redirecting users with the
+    wrong shape of problem to the right plugin. The Marcus persona (per
+    project_composer_personas) reads this to discover the plugin isn't
+    a fit for his Zapier-shaped expectations."""
+
+    example_use: str | None = None
+    """One-or-two-line YAML snippet showing realistic use. Format
+    matches the pipeline YAML so a developer (Dev persona) can copy and
+    paste into a composer session as a starting point. Indent under
+    `source:` / `transform:` / `sink:` as appropriate for the plugin
+    kind. Renders inside a <pre> block in the UI; preserve whitespace."""
+
+    capability_tags: tuple[str, ...] = ()
+    """Short lowercase tags that drive catalog filter chips and fuzzy
+    search. Examples: ("csv", "file", "batch") for csv_source;
+    ("http", "network", "scraping") for a web-scrape transform. Tags
+    are non-exhaustive; pick the two or three most useful for a user
+    who is searching the catalog.
+
+    See ``BaseTransform.capability_tags`` for the open-vocabulary
+    rationale (why this is bare ``tuple[str, ...]`` rather than a
+    closed-vocabulary enum like ``audit_characteristics`` below)."""
+
+    audit_characteristics: DeclaredAuditCharacteristics = frozenset()
+    """Declared audit characteristics that the framework cannot derive
+    from other attributes. The catalog service composes this set with
+    the characteristic derived from `determinism` at summary-build time.
+    Declare members of the :class:`~elspeth.contracts.enums.AuditCharacteristic`
+    enum (e.g. ``AuditCharacteristic.SIGNED``, ``AuditCharacteristic.CREDENTIALS``,
+    ``AuditCharacteristic.QUARANTINE``, ``AuditCharacteristic.PROVENANCE``) —
+    the enum itself is the closed vocabulary; typos fail mypy at the
+    declaration site rather than disappearing silently from the rendered
+    catalog card."""
+
     # Config model — each subclass sets this to its Pydantic config class.
     # NullSource sets this to None (no config validation needed).
     config_model: ClassVar[type[PluginConfig] | None] = None
@@ -1057,6 +1406,32 @@ class BaseSource(ABC):
     # Schema contract for row validation
     _schema_contract: SchemaContract | None = None
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Enforces the contract documented in contracts/enums.py:Determinism —
+        # every plugin MUST declare a Determinism value at registration. See
+        # BaseTransform.__init_subclass__ for the rationale; this hook is the
+        # source-side mirror. A new source plugin that reads from a live REST
+        # API (EXTERNAL_CALL) but inherits the IO_READ default would record
+        # the wrong determinism per-node in Landscape and produce a wrong
+        # ReproducibilityGrade for any run using it.
+        super().__init_subclass__(**kwargs)
+        if "determinism" not in cls.__dict__:
+            raise TypeError(
+                f"{cls.__qualname__} inherits from BaseSource but does not "
+                f"explicitly declare a `determinism` class attribute. Every "
+                f"plugin MUST declare its determinism classification at "
+                f"registration; there is no default (see "
+                f"elspeth.contracts.enums.Determinism). Add one of: "
+                f"`determinism = Determinism.DETERMINISTIC`, "
+                f"`Determinism.SEEDED`, `Determinism.IO_READ`, "
+                f"`Determinism.IO_WRITE`, `Determinism.EXTERNAL_CALL`, or "
+                f"`Determinism.NON_DETERMINISTIC` to the class body. "
+                f"Redeclaring the same value as the parent is acceptable — "
+                f"the point is explicit author declaration, so that an audit "
+                f"reader can read the source and see which value the author "
+                f"chose, rather than tracing inheritance to find it."
+            )
+
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize with configuration.
 
@@ -1064,7 +1439,9 @@ class BaseSource(ABC):
             config: Plugin configuration
         """
         self.config = config
-        # Per-instance, not per-class — class-level defaults would be shared across instances.
+        # Per-instance lifecycle guards — see BaseTransform.__init__ for
+        # the full rationale (lifecycle-guard contract, missing-super()
+        # detection, why class-level state would mask bugs).
         self._on_start_called: bool = False
         self._on_complete_called: bool = False
         self._schema_contract = None
@@ -1186,3 +1563,29 @@ class BaseSource(ABC):
             is a dict mapping original header name → final field name.
         """
         return None  # Default: no field resolution metadata
+
+    # === Composer assistance hooks ===
+
+    @classmethod
+    def get_agent_assistance(
+        cls,
+        *,
+        issue_code: str | None = None,
+    ) -> PluginAssistance | None:
+        """Return deterministic guidance for this source. See ``BaseTransform.get_agent_assistance``."""
+        return None
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        """Return forward-looking hints conditional on the just-set source config.
+
+        See ``BaseTransform.get_post_call_hints`` for the full contract.
+        Sources typically hint on Tier 3 absence-vs-fabrication semantics,
+        schema-mode selection, and encoding handling.
+        """
+        return ()

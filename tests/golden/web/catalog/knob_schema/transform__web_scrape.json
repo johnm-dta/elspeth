@@ -1,0 +1,103 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema_config",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Name of the row field whose value is the absolute URL to fetch. Values MUST include an explicit 'http://' or 'https://' scheme; bare hostnames (e.g. 'www.example.gov.au') are rejected at fetch time by the SSRF guard. If the upstream source emits scheme-less values, normalize them in the source data or add an upstream value_transform that prepends 'https://' before this transform.",
+        "kind": "text",
+        "label": "URL Field",
+        "name": "url_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Output field that receives the fetched page content.",
+        "kind": "text",
+        "label": "Content Field",
+        "name": "content_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Output field that receives the page fingerprint.",
+        "kind": "text",
+        "label": "Fingerprint Field",
+        "name": "fingerprint_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "markdown",
+        "description": "Content extraction format to emit: markdown, plain text, or raw HTML.",
+        "enum": [
+          "markdown",
+          "text",
+          "raw"
+        ],
+        "kind": "enum",
+        "label": "Format",
+        "name": "format",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": " ",
+        "description": "Separator inserted between DOM text nodes when format is text.",
+        "kind": "text",
+        "label": "Text Separator",
+        "name": "text_separator",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": "content",
+        "description": "Whether fingerprints cover processed content only or the full fetch response context.",
+        "enum": [
+          "content",
+          "full"
+        ],
+        "kind": "enum",
+        "label": "Fingerprint Mode",
+        "name": "fingerprint_mode",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "HTML element names to remove before extracting page text.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Strip Elements",
+        "name": "strip_elements",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "HTTP fetching policy, timeout, contact, and host allowlist settings.",
+        "kind": "json-object",
+        "label": "HTTP",
+        "name": "http",
+        "nullable": false,
+        "required": true
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "web_scrape"
+}

@@ -80,6 +80,7 @@ class TestEndToEndPipelineExecution:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         app = create_app(settings=settings)
 
@@ -160,7 +161,7 @@ class TestEndToEndPipelineExecution:
                 validation_errors=None,
             )
             session_service = app.state.session_service
-            await session_service.save_composition_state(UUID(session_id), state_data)
+            await session_service.save_composition_state(UUID(session_id), state_data, provenance="session_seed")
 
             # 3. Execute via REST
             resp = await client.post(
@@ -270,6 +271,7 @@ class TestGateRoutedPipelineExecution:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         app = create_app(settings=settings)
 
@@ -382,7 +384,7 @@ class TestGateRoutedPipelineExecution:
                 validation_errors=None,
             )
             session_service = app.state.session_service
-            await session_service.save_composition_state(UUID(session_id), state_data)
+            await session_service.save_composition_state(UUID(session_id), state_data, provenance="session_seed")
 
             resp = await client.post(
                 f"/api/sessions/{session_id}/execute",

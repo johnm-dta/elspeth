@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from elspeth.contracts import Determinism
 from elspeth.contracts.enums import RunStatus, TelemetryGranularity
 from elspeth.contracts.events import RunStarted
 from elspeth.core.landscape import LandscapeDB
@@ -112,6 +113,7 @@ class TestOrchestratorWiresTelemetryToContext:
             """Transform that captures the telemetry_emit callback."""
 
             name = "callback_capturing"
+            determinism = Determinism.DETERMINISTIC
 
             def process(self, row: Any, ctx: Any) -> TransformResult:
                 return TransformResult.success(row, success_reason={"action": "passthrough"})
@@ -229,6 +231,7 @@ class TestNoTelemetryWithoutManager:
 
         class CallbackCapturingTransform(PassTransform):
             name = "callback_capturing"
+            determinism = Determinism.DETERMINISTIC
 
             def on_start(self, ctx: Any) -> None:
                 super().on_start(ctx)

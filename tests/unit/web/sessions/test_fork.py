@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import structlog
 from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
 
@@ -22,6 +24,7 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
+from elspeth.web.sessions.telemetry import build_sessions_telemetry
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
@@ -38,7 +41,11 @@ def engine():
 
 @pytest.fixture
 def service(engine):
-    return SessionServiceImpl(engine)
+    return SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
 
 
 class TestForkSession:
@@ -48,9 +55,9 @@ class TestForkSession:
     async def test_fork_creates_new_session_with_provenance(self, service) -> None:
         """Forked session has forked_from fields set."""
         session = await service.create_session("alice", "Original", "local")
-        await service.add_message(session.id, "user", "Hello")
-        await service.add_message(session.id, "assistant", "Hi there")
-        msg2 = await service.add_message(session.id, "user", "Do something")
+        await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
+        await service.add_message(session.id, "assistant", "Hi there", writer_principal="compose_loop")
+        msg2 = await service.add_message(session.id, "user", "Do something", writer_principal="route_user_message")
 
         new_session, _messages, _state = await service.fork_session(
             source_session_id=session.id,
@@ -69,10 +76,10 @@ class TestForkSession:
     async def test_fork_copies_messages_before_fork_point(self, service) -> None:
         """Only messages before the fork message are copied."""
         session = await service.create_session("alice", "Original", "local")
-        await service.add_message(session.id, "user", "First")
-        await service.add_message(session.id, "assistant", "Response 1")
-        fork_msg = await service.add_message(session.id, "user", "Second")
-        await service.add_message(session.id, "assistant", "Response 2")
+        await service.add_message(session.id, "user", "First", writer_principal="route_user_message")
+        await service.add_message(session.id, "assistant", "Response 1", writer_principal="compose_loop")
+        fork_msg = await service.add_message(session.id, "user", "Second", writer_principal="route_user_message")
+        await service.add_message(session.id, "assistant", "Response 2", writer_principal="compose_loop")
 
         _, messages, _ = await service.fork_session(
             source_session_id=session.id,
@@ -105,6 +112,7 @@ class TestForkSession:
                 source={"plugin": "csv", "options": {"path": "data.csv"}},
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
 
         # User message records pre-send state = v1
@@ -113,6 +121,7 @@ class TestForkSession:
             "user",
             "Build a pipeline",
             composition_state_id=state_v1.id,
+            writer_principal="route_user_message",
         )
 
         # Assistant responds and mutates state to v2
@@ -123,12 +132,14 @@ class TestForkSession:
                 nodes=[{"id": "n1", "plugin": "llm"}],
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
         await service.add_message(
             session.id,
             "assistant",
             "Done!",
             composition_state_id=state_v2.id,
+            writer_principal="compose_loop",
         )
 
         # Fork from the user message — should get state v1, not v2
@@ -168,8 +179,9 @@ class TestForkSession:
                 source={"plugin": "csv", "options": {"path": "a.csv"}},
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
-        fork_msg = await service.add_message(session_b.id, "user", "Fork me")
+        fork_msg = await service.add_message(session_b.id, "user", "Fork me", writer_principal="route_user_message")
 
         raw = engine.raw_connection()
         try:
@@ -204,8 +216,8 @@ class TestForkSession:
     async def test_fork_preserves_original_session(self, service) -> None:
         """Original session is unchanged after fork."""
         session = await service.create_session("alice", "Original", "local")
-        await service.add_message(session.id, "user", "Hello")
-        msg2 = await service.add_message(session.id, "user", "World")
+        await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
+        msg2 = await service.add_message(session.id, "user", "World", writer_principal="route_user_message")
 
         original_messages_before = await service.get_messages(session.id)
 
@@ -226,7 +238,7 @@ class TestForkSession:
     async def test_fork_from_nonexistent_message_raises(self, service) -> None:
         """Fork fails if message doesn't exist in session."""
         session = await service.create_session("alice", "Test", "local")
-        await service.add_message(session.id, "user", "Hello")
+        await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
 
         with pytest.raises(ValueError, match="not found"):
             await service.fork_session(
@@ -241,8 +253,8 @@ class TestForkSession:
     async def test_fork_from_assistant_message_raises(self, service) -> None:
         """Fork fails if target message is not a user message."""
         session = await service.create_session("alice", "Test", "local")
-        await service.add_message(session.id, "user", "Hello")
-        assistant_msg = await service.add_message(session.id, "assistant", "Hi")
+        await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
+        assistant_msg = await service.add_message(session.id, "assistant", "Hi", writer_principal="compose_loop")
 
         with pytest.raises(InvalidForkTargetError):
             await service.fork_session(
@@ -257,8 +269,8 @@ class TestForkSession:
     async def test_fork_from_first_message(self, service) -> None:
         """Forking from the first message copies no prior history."""
         session = await service.create_session("alice", "Test", "local")
-        first_msg = await service.add_message(session.id, "user", "First")
-        await service.add_message(session.id, "assistant", "Response")
+        first_msg = await service.add_message(session.id, "user", "First", writer_principal="route_user_message")
+        await service.add_message(session.id, "assistant", "Response", writer_principal="compose_loop")
 
         _, messages, _ = await service.fork_session(
             source_session_id=session.id,
@@ -277,7 +289,7 @@ class TestForkSession:
     async def test_fork_without_composition_state(self, service) -> None:
         """Fork works even when no composition state exists."""
         session = await service.create_session("alice", "Test", "local")
-        msg = await service.add_message(session.id, "user", "Hello")
+        msg = await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
 
         new_session, _messages, state = await service.fork_session(
             source_session_id=session.id,
@@ -294,8 +306,8 @@ class TestForkSession:
     async def test_fork_new_messages_have_new_ids(self, service) -> None:
         """Copied messages get new IDs, not the originals."""
         session = await service.create_session("alice", "Test", "local")
-        original_msg = await service.add_message(session.id, "user", "Hello")
-        fork_msg = await service.add_message(session.id, "user", "World")
+        original_msg = await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
+        fork_msg = await service.add_message(session.id, "user", "World", writer_principal="route_user_message")
 
         _, messages, _ = await service.fork_session(
             source_session_id=session.id,
@@ -312,14 +324,15 @@ class TestForkSession:
     async def test_fork_preserves_assistant_raw_content_for_copied_history(self, service) -> None:
         """Fork copies raw model provenance for historical assistant messages."""
         session = await service.create_session("alice", "Original", "local")
-        await service.add_message(session.id, "user", "Build it")
+        await service.add_message(session.id, "user", "Build it", writer_principal="route_user_message")
         await service.add_message(
             session.id,
             "assistant",
             "I cannot mark this pipeline complete yet because runtime preflight failed: bad config.",
             raw_content="The pipeline is complete and valid.",
+            writer_principal="compose_loop",
         )
-        fork_msg = await service.add_message(session.id, "user", "Try again")
+        fork_msg = await service.add_message(session.id, "user", "Try again", writer_principal="route_user_message")
 
         _, messages, _ = await service.fork_session(
             source_session_id=session.id,
@@ -333,6 +346,265 @@ class TestForkSession:
         assert copied_assistant.content.startswith("I cannot mark this pipeline complete")
         assert copied_assistant.raw_content == "The pipeline is complete and valid."
         assert all(message.raw_content is None for message in messages if message.role in {"system", "user"})
+
+    # ── §14.6 fork sweep regressions ────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_fork_session_preserves_copied_writer_principal(self, service) -> None:
+        """Copied rows must keep the source row's stored ``writer_principal``;
+        fork-time inserts (system notice + new edited user) use ``session_fork``."""
+        from sqlalchemy import select
+
+        from elspeth.web.sessions import models
+
+        session = await service.create_session("alice", "Original", "local")
+        await service.add_message(session.id, "user", "Build it", writer_principal="route_user_message")
+        await service.add_message(session.id, "assistant", "OK", writer_principal="compose_loop")
+        fork_msg = await service.add_message(session.id, "user", "Try again", writer_principal="route_user_message")
+
+        new_session, _new_messages, _ = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=fork_msg.id,
+            new_message_content="Different approach",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        with service._engine.begin() as conn:
+            rows = conn.execute(
+                select(
+                    models.chat_messages_table.c.role,
+                    models.chat_messages_table.c.writer_principal,
+                    models.chat_messages_table.c.sequence_no,
+                )
+                .where(models.chat_messages_table.c.session_id == str(new_session.id))
+                .order_by(models.chat_messages_table.c.sequence_no)
+            ).fetchall()
+
+        # Copied: user (route_user_message), assistant (compose_loop).
+        # Synthetic: system (session_fork), user (session_fork).
+        assert [(r.role, r.writer_principal) for r in rows] == [
+            ("user", "route_user_message"),
+            ("assistant", "compose_loop"),
+            ("system", "session_fork"),
+            ("user", "session_fork"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_fork_session_assigns_contiguous_sequence_no(self, service) -> None:
+        """``sequence_no`` for the new session must be ``[1, 2, ..., N+2]``
+        with no gaps — N copied rows plus 2 fork-time inserts (system + user)."""
+        from sqlalchemy import select
+
+        from elspeth.web.sessions import models
+
+        session = await service.create_session("alice", "Original", "local")
+        await service.add_message(session.id, "user", "1", writer_principal="route_user_message")
+        await service.add_message(session.id, "assistant", "2", writer_principal="compose_loop")
+        await service.add_message(session.id, "user", "3", writer_principal="route_user_message")
+        await service.add_message(session.id, "assistant", "4", writer_principal="compose_loop")
+        fork_msg = await service.add_message(session.id, "user", "5", writer_principal="route_user_message")
+
+        new_session, _, _ = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=fork_msg.id,
+            new_message_content="edit",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        with service._engine.begin() as conn:
+            seqs = (
+                conn.execute(
+                    select(models.chat_messages_table.c.sequence_no)
+                    .where(models.chat_messages_table.c.session_id == str(new_session.id))
+                    .order_by(models.chat_messages_table.c.sequence_no)
+                )
+                .scalars()
+                .all()
+            )
+
+        # 4 copied + system fork notice + new user message = 6 rows.
+        assert seqs == [1, 2, 3, 4, 5, 6]
+
+    @pytest.mark.asyncio
+    async def test_fork_session_preserves_tool_call_id_and_parent(self, service) -> None:
+        """Tool-row fork: ``tool_call_id`` is carried verbatim; ``parent_assistant_id``
+        is REWRITTEN from the source assistant id to the COPIED assistant id."""
+        from sqlalchemy import select
+
+        from elspeth.web.sessions import models
+
+        session = await service.create_session("alice", "Original", "local")
+        user_msg = await service.add_message(session.id, "user", "go", writer_principal="route_user_message")  # noqa: F841
+        assistant_msg = await service.add_message(session.id, "assistant", "ok", writer_principal="compose_loop")
+        await service.add_message(
+            session.id,
+            "tool",
+            '{"ok":true}',
+            writer_principal="compose_loop",
+            tool_call_id="call_abc",
+            parent_assistant_id=assistant_msg.id,
+        )
+        fork_msg = await service.add_message(session.id, "user", "again", writer_principal="route_user_message")
+
+        new_session, _, _ = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=fork_msg.id,
+            new_message_content="retry",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        with service._engine.begin() as conn:
+            assistant_row = conn.execute(
+                select(models.chat_messages_table.c.id)
+                .where(models.chat_messages_table.c.session_id == str(new_session.id))
+                .where(models.chat_messages_table.c.role == "assistant")
+            ).scalar_one()
+            tool_row = conn.execute(
+                select(
+                    models.chat_messages_table.c.tool_call_id,
+                    models.chat_messages_table.c.parent_assistant_id,
+                )
+                .where(models.chat_messages_table.c.session_id == str(new_session.id))
+                .where(models.chat_messages_table.c.role == "tool")
+            ).first()
+
+        assert tool_row is not None
+        assert tool_row.tool_call_id == "call_abc"
+        # parent_assistant_id was rewritten to point at the COPIED assistant,
+        # not the source assistant id.
+        assert tool_row.parent_assistant_id == assistant_row
+        assert tool_row.parent_assistant_id != str(assistant_msg.id)
+
+    @pytest.mark.asyncio
+    async def test_fork_session_rejects_tool_with_out_of_slice_parent(self, service) -> None:
+        """If the slice ``[:fork_idx]`` excludes the assistant message a tool
+        row depends on, fork must crash with the precise named error rather
+        than letting the FK fire generically.
+
+        The natural production flow can't easily produce this state (the
+        compose loop always writes the assistant before its tool rows, and
+        fork_idx is a user message), so we synthesize the slice by injecting
+        a synthetic tool row into ``get_messages``' return whose
+        ``parent_assistant_id`` is a UUID outside the slice. This exercises
+        the offensive-programming guard directly, parallel to
+        ``_assert_state_in_session``.
+        """
+        from uuid import uuid4
+
+        from elspeth.web.sessions.protocol import ChatMessageRecord
+
+        session = await service.create_session("alice", "Original", "local")
+        await service.add_message(session.id, "user", "first", writer_principal="route_user_message")
+        fork_msg = await service.add_message(session.id, "user", "edit", writer_principal="route_user_message")
+
+        original_get_messages = service.get_messages
+
+        async def patched_get_messages(*args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+            real = await original_get_messages(*args, **kwargs)
+            synthetic_tool = ChatMessageRecord(
+                id=uuid4(),
+                session_id=session.id,
+                role="tool",
+                content="{}",
+                created_at=real[0].created_at,
+                writer_principal="compose_loop",
+                tool_call_id="call_orphan",
+                parent_assistant_id=uuid4(),
+            )
+            # Place the synthetic tool BEFORE fork_msg so it falls inside
+            # the [:fork_idx] slice.
+            return [real[0], synthetic_tool, real[1]]
+
+        service.get_messages = patched_get_messages  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError, match="fork slice excludes parent assistant"):
+                await service.fork_session(
+                    source_session_id=session.id,
+                    fork_message_id=fork_msg.id,
+                    new_message_content="retry",
+                    user_id="alice",
+                    auth_provider_type="local",
+                )
+        finally:
+            service.get_messages = original_get_messages  # type: ignore[method-assign]
+
+    @pytest.mark.asyncio
+    async def test_fork_session_preserves_admin_tool_writer_principal_on_copied_rows(self, service) -> None:
+        """Source rows with non-default ``writer_principal`` (e.g. ``admin_tool``)
+        must be copied verbatim — fork-time provenance fabrication via role-
+        keyed defaults is forbidden."""
+        from sqlalchemy import select
+
+        from elspeth.web.sessions import models
+
+        session = await service.create_session("alice", "Original", "local")
+        await service.add_message(session.id, "user", "admin annotation", writer_principal="admin_tool")
+        fork_msg = await service.add_message(session.id, "user", "fork here", writer_principal="route_user_message")
+
+        new_session, _, _ = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=fork_msg.id,
+            new_message_content="ok",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        with service._engine.begin() as conn:
+            principals = (
+                conn.execute(
+                    select(models.chat_messages_table.c.writer_principal)
+                    .where(models.chat_messages_table.c.session_id == str(new_session.id))
+                    .where(models.chat_messages_table.c.content == "admin annotation")
+                )
+                .scalars()
+                .all()
+            )
+        assert principals == ["admin_tool"]
+
+    @pytest.mark.asyncio
+    async def test_fork_session_excludes_audit_rows_from_response_but_preserves_in_db(self, service) -> None:
+        """Plan §2909: copied ``role="audit"`` rows live in the DB for audit
+        fidelity, but must be excluded from the fork response payload."""
+        from sqlalchemy import select
+
+        from elspeth.web.sessions import models
+
+        session = await service.create_session("alice", "Original", "local")
+        await service.add_message(session.id, "user", "go", writer_principal="route_user_message")
+        await service.add_message(
+            session.id,
+            "audit",
+            '{"_kind":"llm_call_audit","status":"ok"}',
+            writer_principal="compose_loop",
+        )
+        fork_msg = await service.add_message(session.id, "user", "again", writer_principal="route_user_message")
+
+        new_session, new_messages, _ = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=fork_msg.id,
+            new_message_content="retry",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        # Response payload — no audit row should be visible.
+        assert all(m.role != "audit" for m in new_messages)
+
+        # DB — audit row must still be persisted in the new session.
+        with service._engine.begin() as conn:
+            audit_rows = (
+                conn.execute(
+                    select(models.chat_messages_table.c.id)
+                    .where(models.chat_messages_table.c.session_id == str(new_session.id))
+                    .where(models.chat_messages_table.c.role == "audit")
+                )
+                .scalars()
+                .all()
+            )
+        assert len(audit_rows) == 1
 
 
 # ── Route-level tests ───────────────────────────────────────────────────
@@ -349,7 +621,11 @@ def _make_fork_app(
         connect_args={"check_same_thread": False},
     )
     initialize_session_schema(engine)
-    session_service = SessionServiceImpl(engine)
+    session_service = SessionServiceImpl(
+        engine,
+        telemetry=build_sessions_telemetry(),
+        log=structlog.get_logger("test"),
+    )
     blob_service = BlobServiceImpl(engine, tmp_path)
 
     app = FastAPI()
@@ -369,6 +645,7 @@ def _make_fork_app(
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
+        shareable_link_signing_key=b"\x00" * 32,
     )
     app.state.composer_service = None
 
@@ -391,7 +668,7 @@ class TestForkEndpoint:
         client = TestClient(app)
 
         session = await service.create_session("alice", "Original", "local")
-        msg = await service.add_message(session.id, "user", "Hello world")
+        msg = await service.add_message(session.id, "user", "Hello world", writer_principal="route_user_message")
 
         response = client.post(
             f"/api/sessions/{session.id}/fork",
@@ -420,7 +697,7 @@ class TestForkEndpoint:
 
         # Create a session as "bob" directly in the service (bypassing auth)
         bob_session = await service.create_session("bob", "Bob's Session", "local")
-        msg = await service.add_message(bob_session.id, "user", "Hello")
+        msg = await service.add_message(bob_session.id, "user", "Hello", writer_principal="route_user_message")
 
         # Alice tries to fork Bob's session
         response = client.post(
@@ -439,7 +716,7 @@ class TestForkEndpoint:
         client = TestClient(app)
 
         session = await service.create_session("alice", "Test", "local")
-        await service.add_message(session.id, "user", "Hello")
+        await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
 
         response = client.post(
             f"/api/sessions/{session.id}/fork",
@@ -458,8 +735,8 @@ class TestForkEndpoint:
         client = TestClient(app)
 
         session = await service.create_session("alice", "Original", "local")
-        await service.add_message(session.id, "user", "First")
-        msg2 = await service.add_message(session.id, "user", "Second")
+        await service.add_message(session.id, "user", "First", writer_principal="route_user_message")
+        msg2 = await service.add_message(session.id, "user", "Second", writer_principal="route_user_message")
 
         # Get message count before fork
         msgs_before = await service.get_messages(session.id)
@@ -489,7 +766,7 @@ class TestForkEndpoint:
             b"a,b,c\n1,2,3",
             "text/csv",
         )
-        msg = await service.add_message(session.id, "user", "Process this")
+        msg = await service.add_message(session.id, "user", "Process this", writer_principal="route_user_message")
 
         response = client.post(
             f"/api/sessions/{session.id}/fork",
@@ -545,12 +822,14 @@ class TestForkEndpoint:
                 },
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
         msg = await service.add_message(
             session.id,
             "user",
             "Process this",
             composition_state_id=source_state.id,
+            writer_principal="route_user_message",
         )
 
         response = client.post(
@@ -577,14 +856,154 @@ class TestForkEndpoint:
         assert options[source_key] != original_blob.storage_path
 
     @pytest.mark.asyncio
+    async def test_fork_rewrites_inline_content_markers_to_copied_blobs(self, tmp_path) -> None:
+        """Forked inline_content refs must point at copied blobs in the target session."""
+        app, service, blob_service = _make_fork_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Original", "local")
+        original_blob = await blob_service.create_blob(
+            session.id,
+            "prompt.txt",
+            b"Classify this row.",
+            "text/plain",
+        )
+        marker = {
+            "blob_ref": str(original_blob.id),
+            "mode": "inline_content",
+            "sha256": original_blob.content_hash,
+            "encoding": "utf-16",
+        }
+        source_state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={
+                    "plugin": "csv",
+                    "options": {
+                        "path": original_blob.storage_path,
+                    },
+                },
+                nodes=[
+                    {
+                        "id": "classify",
+                        "node_type": "transform",
+                        "plugin": "llm",
+                        "options": {"prompt_template": marker},
+                    }
+                ],
+                outputs=[
+                    {
+                        "name": "results",
+                        "plugin": "json",
+                        "options": {"header": marker},
+                    }
+                ],
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+        msg = await service.add_message(
+            session.id,
+            "user",
+            "Process this",
+            composition_state_id=source_state.id,
+            writer_principal="route_user_message",
+        )
+
+        response = client.post(
+            f"/api/sessions/{session.id}/fork",
+            json={
+                "from_message_id": str(msg.id),
+                "new_message_content": "Process that instead",
+            },
+        )
+
+        assert response.status_code == 201
+        new_session_id = uuid.UUID(response.json()["session"]["id"])
+        copied_blob = (await blob_service.list_blobs(new_session_id))[0]
+
+        copied_state = await service.get_current_state(new_session_id)
+        assert copied_state is not None
+        assert copied_state.nodes is not None
+        assert copied_state.outputs is not None
+        copied_node_marker = copied_state.nodes[0]["options"]["prompt_template"]
+        copied_output_marker = copied_state.outputs[0]["options"]["header"]
+
+        assert copied_node_marker == {
+            "blob_ref": str(copied_blob.id),
+            "mode": "inline_content",
+            "sha256": original_blob.content_hash,
+            "encoding": "utf-16",
+        }
+        assert copied_output_marker == copied_node_marker
+        state_blob_refs = repr((copied_state.source, copied_state.nodes, copied_state.outputs))
+        assert str(original_blob.id) not in state_blob_refs
+
+    @pytest.mark.asyncio
+    async def test_fork_inline_content_marker_without_copied_blob_fails_closed(self, tmp_path) -> None:
+        """Inline-content refs must be audited even when no source blobs are copied."""
+        app, service, _blob_service = _make_fork_app(tmp_path)
+
+        session = await service.create_session("alice", "Original", "local")
+        missing_blob_id = uuid.uuid4()
+        source_state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                nodes=[
+                    {
+                        "id": "classify",
+                        "node_type": "transform",
+                        "plugin": "llm",
+                        "options": {
+                            "prompt_template": {
+                                "blob_ref": str(missing_blob_id),
+                                "mode": "inline_content",
+                                "sha256": "a" * 64,
+                            }
+                        },
+                    }
+                ],
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+        msg = await service.add_message(
+            session.id,
+            "user",
+            "Process this",
+            composition_state_id=source_state.id,
+            writer_principal="route_user_message",
+        )
+
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        client = TestClient(app)
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            client.post(
+                f"/api/sessions/{session.id}/fork",
+                json={
+                    "from_message_id": str(msg.id),
+                    "new_message_content": "Process that instead",
+                },
+            )
+
+        message = str(exc_info.value)
+        assert "Tier 1" in message
+        assert str(missing_blob_id) in message
+        assert "source blob was not copied" in message
+
+        sessions = await service.list_sessions("alice", "local")
+        assert len(sessions) == 1
+
+    @pytest.mark.asyncio
     async def test_fork_preserves_original_messages_status_check(self, tmp_path) -> None:
         """Fork endpoint returns 201 and original session is unchanged."""
         app, service, _ = _make_fork_app(tmp_path)
         client = TestClient(app)
 
         session = await service.create_session("alice", "Original", "local")
-        await service.add_message(session.id, "user", "First")
-        msg2 = await service.add_message(session.id, "user", "Second")
+        await service.add_message(session.id, "user", "First", writer_principal="route_user_message")
+        msg2 = await service.add_message(session.id, "user", "Second", writer_principal="route_user_message")
 
         msgs_before = await service.get_messages(session.id)
 
@@ -607,8 +1026,8 @@ class TestForkEndpoint:
         client = TestClient(app)
 
         session = await service.create_session("alice", "Test", "local")
-        await service.add_message(session.id, "user", "Hello")
-        assistant_msg = await service.add_message(session.id, "assistant", "Hi")
+        await service.add_message(session.id, "user", "Hello", writer_principal="route_user_message")
+        assistant_msg = await service.add_message(session.id, "assistant", "Hi", writer_principal="compose_loop")
 
         response = client.post(
             f"/api/sessions/{session.id}/fork",
@@ -632,7 +1051,11 @@ class TestForkEndpoint:
             poolclass=StaticPool,
         )
         initialize_session_schema(engine)
-        session_service = SessionServiceImpl(engine)
+        session_service = SessionServiceImpl(
+            engine,
+            telemetry=build_sessions_telemetry(),
+            log=structlog.get_logger("test"),
+        )
         # Source blob service has generous quota; we'll swap to a tight one for the fork
         blob_service = BlobServiceImpl(engine, tmp_path, max_storage_per_session=500)
 
@@ -652,6 +1075,7 @@ class TestForkEndpoint:
             composer_max_discovery_turns=10,
             composer_timeout_seconds=85.0,
             composer_rate_limit_per_minute=10,
+            shareable_link_signing_key=b"\x00" * 32,
         )
         app.state.composer_service = None
 
@@ -676,7 +1100,7 @@ class TestForkEndpoint:
         # so the fork's copy will exceed the target session quota
         tight_blob_service = BlobServiceImpl(engine, tmp_path, max_storage_per_session=50)
         app.state.blob_service = tight_blob_service
-        msg = await session_service.add_message(session.id, "user", "Go")
+        msg = await session_service.add_message(session.id, "user", "Go", writer_principal="route_user_message")
 
         response = client.post(
             f"/api/sessions/{session.id}/fork",
@@ -721,6 +1145,7 @@ class TestForkEndpoint:
                 },
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
 
         current_state = await service.get_current_state(session.id)
@@ -730,6 +1155,7 @@ class TestForkEndpoint:
             "user",
             "Hello",
             composition_state_id=current_state.id,
+            writer_principal="route_user_message",
         )
 
         # Create a blob so blob_map is non-empty (triggers the rewrite path).
@@ -770,6 +1196,64 @@ class TestForkEndpoint:
         assert len(sessions) == 1
 
     @pytest.mark.asyncio
+    async def test_fork_with_non_string_blob_ref_raises_audit_integrity_error_and_archives(self, tmp_path) -> None:
+        """Tier 1 anomaly: blob_ref must be the composer-written UUID string."""
+        app, service, blob_service = _make_fork_app(tmp_path)
+
+        session = await service.create_session("alice", "Original", "local")
+
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                source={
+                    "plugin": "csv",
+                    "options": {"blob_ref": 123, "path": "/data/x.csv"},
+                },
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+
+        current_state = await service.get_current_state(session.id)
+        assert current_state is not None
+        msg = await service.add_message(
+            session.id,
+            "user",
+            "Hello",
+            composition_state_id=current_state.id,
+            writer_principal="route_user_message",
+        )
+
+        await blob_service.create_blob(
+            session.id,
+            "data.csv",
+            b"a,b\n1,2",
+            "text/csv",
+        )
+
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        client = TestClient(app)
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            client.post(
+                f"/api/sessions/{session.id}/fork",
+                json={
+                    "from_message_id": str(msg.id),
+                    "new_message_content": "Hello edited",
+                },
+            )
+
+        message = str(exc_info.value)
+        assert "Tier 1" in message
+        assert "blob_ref" in message
+        assert "int" in message
+        assert "UUID string" in message
+        assert exc_info.value.__cause__ is None
+
+        sessions = await service.list_sessions("alice", "local")
+        assert len(sessions) == 1
+
+    @pytest.mark.asyncio
     async def test_fork_non_quota_blob_error_archives_session(self, tmp_path) -> None:
         """Non-quota blob failures during fork must archive the new session.
 
@@ -781,7 +1265,7 @@ class TestForkEndpoint:
 
         session = await service.create_session("alice", "Original", "local")
         await blob_service.create_blob(session.id, "data.csv", b"a,b\n1,2", "text/csv")
-        msg = await service.add_message(session.id, "user", "Go")
+        msg = await service.add_message(session.id, "user", "Go", writer_principal="route_user_message")
 
         # Use raise_server_exceptions=False so the 500 is returned as an
         # HTTP response rather than propagated as a Python exception.
@@ -833,6 +1317,7 @@ class TestForkEndpoint:
                 },
                 is_valid=True,
             ),
+            provenance="session_seed",
         )
 
         current_state = await service.get_current_state(session.id)
@@ -842,6 +1327,7 @@ class TestForkEndpoint:
             "user",
             "Go",
             composition_state_id=current_state.id,
+            writer_principal="route_user_message",
         )
 
         # Use raise_server_exceptions=False so the 500 is returned as an
@@ -884,7 +1370,7 @@ class TestForkEndpoint:
 
         session = await service.create_session("alice", "Original", "local")
         await blob_service.create_blob(session.id, "data.csv", b"a,b\n1,2", "text/csv")
-        msg = await service.add_message(session.id, "user", "Go")
+        msg = await service.add_message(session.id, "user", "Go", writer_principal="route_user_message")
 
         primary = RuntimeError("disk I/O error during blob copy")
         cleanup = OSError("permission denied removing blob dir")

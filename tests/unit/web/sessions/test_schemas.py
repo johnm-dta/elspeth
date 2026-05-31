@@ -105,6 +105,20 @@ class TestSendMessageRequest:
         req = SendMessageRequest(content="hello", state_id=None)
         assert req.state_id is None
 
+    def test_accepts_content_at_max_length(self) -> None:
+        # Phase 5b.0.5 (F-3): max_length=65536 cap on chat message content.
+        # Exact-boundary value must validate to confirm the cap is set at
+        # 64 KiB rather than at an off-by-one neighbour.
+        req = SendMessageRequest(content="x" * 65536)
+        assert len(req.content) == 65536
+
+    def test_rejects_content_exceeding_max_length(self) -> None:
+        # Phase 5b.0.5 (F-3): one byte over the cap must raise.  Defense
+        # against unbounded payload allocation before interpretation events
+        # can be triggered.
+        with pytest.raises(ValidationError, match="content"):
+            SendMessageRequest(content="x" * 65537)
+
 
 class TestForkSessionRequest:
     def test_rejects_invalid_uuid(self) -> None:

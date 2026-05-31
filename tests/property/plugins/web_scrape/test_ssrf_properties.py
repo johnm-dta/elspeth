@@ -378,6 +378,12 @@ class TestSchemeValidation:
         with pytest.raises(SSRFBlockedError, match=rf"Forbidden URL scheme '{scheme.lower()}'"):
             validate_url_scheme(f"{scheme}://payload")
 
+    @pytest.mark.parametrize("url", [None, 123, ["https://example.com"]])
+    def test_non_string_urls_raise_type_error(self, url: object) -> None:
+        """Non-string URL values fail before urllib.parse internals leak through."""
+        with pytest.raises(TypeError, match=rf"url must be str, got {type(url).__name__}"):
+            validate_url_scheme(url)  # type: ignore[arg-type]
+
 
 # =============================================================================
 # Property Tests: Full Path Validation

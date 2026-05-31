@@ -15,7 +15,9 @@ import pytest
 from elspeth.contracts.type_normalization import (
     ALLOWED_CONTRACT_TYPES,
     CONTRACT_TYPE_MAP,
+    UNSUPPORTED_CONTRACT_TYPE,
     normalize_type_for_contract,
+    require_supported_contract_type,
 )
 
 
@@ -146,37 +148,37 @@ class TestNormalizeTypeForContract:
             normalize_type_for_contract(np.float64("inf"))
 
     # -------------------------------------------------------------------------
-    # Unknown types are rejected (fail-fast for checkpoint compatibility)
+    # Unknown types return an explicit signal
     # -------------------------------------------------------------------------
 
-    def test_decimal_raises_typeerror(self) -> None:
-        """Decimal raises TypeError - not serializable in checkpoint."""
-        with pytest.raises(TypeError, match=r"Unsupported type.*Decimal"):
-            normalize_type_for_contract(Decimal("100.50"))
+    def test_decimal_returns_unsupported_signal(self) -> None:
+        """Decimal returns sentinel - not serializable in checkpoint."""
+        assert normalize_type_for_contract(Decimal("100.50")) is UNSUPPORTED_CONTRACT_TYPE
 
-    def test_list_raises_typeerror(self) -> None:
-        """list raises TypeError - use 'any' type for complex fields."""
-        with pytest.raises(TypeError, match=r"Unsupported type.*list"):
-            normalize_type_for_contract([1, 2, 3])
+    def test_list_returns_unsupported_signal(self) -> None:
+        """list returns sentinel - use 'any' type for complex fields."""
+        assert normalize_type_for_contract([1, 2, 3]) is UNSUPPORTED_CONTRACT_TYPE
 
-    def test_dict_raises_typeerror(self) -> None:
-        """dict raises TypeError - use 'any' type for complex fields."""
-        with pytest.raises(TypeError, match=r"Unsupported type.*dict"):
-            normalize_type_for_contract({"a": 1})
+    def test_dict_returns_unsupported_signal(self) -> None:
+        """dict returns sentinel - use 'any' type for complex fields."""
+        assert normalize_type_for_contract({"a": 1}) is UNSUPPORTED_CONTRACT_TYPE
 
-    def test_uuid_raises_typeerror(self) -> None:
-        """UUID raises TypeError - not serializable in checkpoint."""
-        with pytest.raises(TypeError, match=r"Unsupported type.*UUID"):
-            normalize_type_for_contract(UUID("12345678-1234-5678-1234-567812345678"))
+    def test_uuid_returns_unsupported_signal(self) -> None:
+        """UUID returns sentinel - not serializable in checkpoint."""
+        assert normalize_type_for_contract(UUID("12345678-1234-5678-1234-567812345678")) is UNSUPPORTED_CONTRACT_TYPE
 
-    def test_custom_class_raises_typeerror(self) -> None:
-        """Custom class raises TypeError - not serializable in checkpoint."""
+    def test_custom_class_returns_unsupported_signal(self) -> None:
+        """Custom class returns sentinel - not serializable in checkpoint."""
 
         class CustomClass:
             pass
 
-        with pytest.raises(TypeError, match=r"Unsupported type.*CustomClass"):
-            normalize_type_for_contract(CustomClass())
+        assert normalize_type_for_contract(CustomClass()) is UNSUPPORTED_CONTRACT_TYPE
+
+    def test_require_supported_contract_type_raises_typeerror(self) -> None:
+        """Fail-fast callers can still request a TypeError for unsupported types."""
+        with pytest.raises(TypeError, match=r"Unsupported type.*Decimal"):
+            require_supported_contract_type(Decimal("100.50"))
 
 
 class TestContractTypeMapConsistency:
@@ -207,10 +209,9 @@ class TestEdgeCases:
         result = normalize_type_for_contract(np.str_("hello"))
         assert result is str
 
-    def test_numpy_bytes_raises_unsupported_type(self) -> None:
-        """numpy.bytes_ is not silently coerced to str — raises TypeError."""
-        with pytest.raises(TypeError, match="Unsupported type 'bytes_'"):
-            normalize_type_for_contract(np.bytes_(b"hello"))
+    def test_numpy_bytes_returns_unsupported_signal(self) -> None:
+        """numpy.bytes_ is not silently coerced to str."""
+        assert normalize_type_for_contract(np.bytes_(b"hello")) is UNSUPPORTED_CONTRACT_TYPE
 
     def test_zero_float_is_valid(self) -> None:
         """0.0 is a valid float (not NaN/Infinity)."""

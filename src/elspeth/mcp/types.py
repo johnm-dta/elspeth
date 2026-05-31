@@ -17,18 +17,37 @@ Design decisions:
   - Functional TypedDict form for ``DAGEdge`` (``"from"`` is a Python keyword)
 """
 
-from typing import Any, Required, TypedDict
+from typing import Any, Literal, Required, TypedDict
+
+RunStatusValue = Literal["running", "completed", "completed_with_failures", "failed", "empty", "interrupted"]
+ExportStatusValue = Literal["pending", "completed", "failed"]
+OperationTypeValue = Literal["source_load", "sink_write", "runtime_preflight"]
+OPERATION_TYPE_VALUES: tuple[OperationTypeValue, ...] = ("source_load", "sink_write", "runtime_preflight")
+OperationStatusValue = Literal["open", "completed", "failed", "pending"]
+OPERATION_STATUS_VALUES: tuple[OperationStatusValue, ...] = ("open", "completed", "failed", "pending")
+CallTypeValue = Literal["llm", "http", "http_redirect", "sql", "vector", "filesystem"]
+CallStatusValue = Literal["success", "error"]
+NodeStateStatusValue = Literal["open", "pending", "completed", "failed"]
+NodeTypeValue = Literal["source", "transform", "gate", "aggregation", "coalesce", "sink"]
+RoutingModeValue = Literal["move", "copy", "divert"]
+DAGFlowTypeValue = Literal["normal", "divert"]
+SchemaModeValue = Literal["fixed", "flexible", "observed", "parse"]
+ContractModeValue = Literal["FIXED", "FLEXIBLE", "OBSERVED"]
+ContractViolationTypeValue = Literal["type_mismatch", "missing_field", "extra_field"]
+DiagnosticSeverityValue = Literal["CRITICAL", "WARNING", "INFO"]
+DiagnosticStatusValue = Literal["OK", "WARNING", "CRITICAL"]
+DivertTypeValue = Literal["quarantine", "error"]
 
 
 class RunRecord(TypedDict):
     """A run record as returned by ``list_runs``."""
 
     run_id: str
-    status: str
+    status: RunStatusValue
     started_at: str | None
     completed_at: str | None
     config_hash: str
-    export_status: str | None
+    export_status: ExportStatusValue | None
 
 
 class RowRecord(TypedDict):
@@ -81,8 +100,8 @@ class OperationRecord(TypedDict):
     run_id: str
     node_id: str
     plugin_name: str
-    operation_type: str
-    status: str
+    operation_type: OperationTypeValue
+    status: OperationStatusValue
     started_at: str | None
     completed_at: str | None
     duration_ms: float | None
@@ -95,8 +114,8 @@ class OperationCallRecord(TypedDict):
     call_id: str
     operation_id: str
     call_index: int
-    call_type: str
-    status: str
+    call_type: CallTypeValue
+    status: CallStatusValue
     latency_ms: float | None
     request_hash: str
     response_hash: str | None
@@ -116,7 +135,7 @@ class NodeStateRecord(TypedDict, total=False):
     node_id: Required[str]
     step_index: Required[int]
     attempt: Required[int]
-    status: Required[str]
+    status: Required[NodeStateStatusValue]
     input_hash: Required[str]
     output_hash: str | None
     duration_ms: float | None
@@ -160,7 +179,7 @@ class CollisionRecord(TypedDict):
     token_id: str
     node_id: str
     plugin_name: str
-    status: str
+    status: NodeStateStatusValue
     """Node state status: COMPLETED if merge succeeded, FAILED if it aborted."""
     completed_at: str | None
     collision_fields: list[CollisionFieldRecord]
@@ -214,7 +233,7 @@ class RunSummaryReport(TypedDict):
     """Return type for ``get_run_summary``."""
 
     run_id: str
-    status: str
+    status: RunStatusValue
     started_at: str | None
     completed_at: str | None
     run_duration_seconds: float | None
@@ -229,7 +248,7 @@ class DAGNode(TypedDict):
 
     node_id: str
     plugin_name: str
-    node_type: str
+    node_type: NodeTypeValue
     sequence: int | None
 
 
@@ -240,8 +259,8 @@ DAGEdge = TypedDict(
         "from": str,
         "to": str,
         "label": str,
-        "mode": str,
-        "flow_type": str,
+        "mode": RoutingModeValue,
+        "flow_type": DAGFlowTypeValue,
     },
 )
 
@@ -263,7 +282,7 @@ class NodePerformance(TypedDict):
 
     node_id: str
     plugin: str
-    type: str
+    type: NodeTypeValue
     executions: int
     avg_ms: float | None
     min_ms: float | None
@@ -288,7 +307,7 @@ class ValidationErrorGroup(TypedDict):
     """Validation error group by source plugin."""
 
     source_plugin: str
-    schema_mode: str
+    schema_mode: SchemaModeValue
     count: int
 
 
@@ -413,7 +432,7 @@ class ValidationErrorDetail(TypedDict):
     node_id: str | None
     row_hash: str
     row_data: dict[str, Any] | None
-    schema_mode: str
+    schema_mode: SchemaModeValue
     created_at: str | None
 
 
@@ -447,7 +466,7 @@ class DiagnosticProblem(TypedDict, total=False):
     different fields (``run_ids``, ``runs``, ``operations``, ``count``).
     """
 
-    severity: Required[str]
+    severity: Required[DiagnosticSeverityValue]
     type: Required[str]
     message: Required[str]
     count: int
@@ -460,14 +479,14 @@ class RecentRunSummary(TypedDict):
     """A recent run in the diagnose summary."""
 
     run_id: str
-    status: str
+    status: RunStatusValue
     started: str | None
 
 
 class DiagnosticReport(TypedDict):
     """Return type for ``diagnose``."""
 
-    status: str
+    status: DiagnosticStatusValue
     problems: list[DiagnosticProblem]
     recent_runs: list[RecentRunSummary]
     recommendations: list[str]
@@ -480,7 +499,7 @@ class FailedNodeState(TypedDict):
     state_id: str
     token_id: str
     plugin: str
-    type: str
+    type: NodeTypeValue
     step: int
     attempt: int
     started: str | None
@@ -516,7 +535,7 @@ class FailureContextReport(TypedDict):
     """Return type for ``get_failure_context``."""
 
     run_id: str
-    run_status: str
+    run_status: RunStatusValue
     failed_node_states: list[FailedNodeState]
     transform_errors: list[FailureTransformError]
     validation_errors: list[FailureValidationError]
@@ -529,7 +548,7 @@ class RecentRunDetail(TypedDict):
 
     run_id: str
     full_run_id: str
-    status: str
+    status: RunStatusValue
     started: str | None
     duration_seconds: float | None
     rows_processed: int
@@ -560,7 +579,7 @@ class RunContractReport(TypedDict):
     """Return type for ``get_run_contract``."""
 
     run_id: str
-    mode: str
+    mode: ContractModeValue
     locked: bool
     fields: list[ContractField]
     field_count: int
@@ -577,20 +596,20 @@ class FieldExplanation(TypedDict):
     required: bool
     nullable: bool
     source: str
-    contract_mode: str
+    contract_mode: ContractModeValue
 
 
 class ContractViolationRecord(TypedDict):
     """A single contract violation."""
 
     error_id: str
-    violation_type: str
+    violation_type: ContractViolationTypeValue
     normalized_field_name: str | None
     original_field_name: str | None
     expected_type: str | None
     actual_type: str | None
     error: str
-    schema_mode: str
+    schema_mode: SchemaModeValue
     destination: str
     created_at: str
 
@@ -608,7 +627,7 @@ class DivertSummary(TypedDict):
     """Summary of a divert (quarantine/error routing)."""
 
     diverted: bool
-    divert_type: str
+    divert_type: DivertTypeValue
     from_node: str
     to_sink: str
     edge_label: str

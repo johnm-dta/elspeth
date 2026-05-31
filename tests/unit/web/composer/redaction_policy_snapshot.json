@@ -1,0 +1,212 @@
+{
+  "apply_pipeline_recipe": {
+    "hash": "3c3f8b1011102f0b057e272346bd2a7eba7bd4036f9f2727967cdbb5094e6068",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "clear_source": {
+    "hash": "532534b6bb708a7ab2fbcfe0ad68bdd15380d744852cf863af44810206313daf",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "create_blob": {
+    "hash": "6f198f67975af9752789ce05f645fcacbe7c8e567764a1b209915f5b19dca040",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "delete_blob": {
+    "hash": "f8fc60d599d435c05c7de139a3aeb28f163201a32215639b66e20451a5e59b8b",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "diff_pipeline": {
+    "hash": "eabad0f0d5aa93bad4c22b45203b038d5fe2d11046774b77379e9fc5d9c44a93",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "explain_validation_error": {
+    "hash": "bb127a5522352bc4ebeefaa02a230e7238a17c169f29291edc20470d6b12083e",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "get_audit_info": {
+    "hash": "a14b1c0637cc79b679f4eda157fe781cb37ef468aca0cb3269d14762423a0faa",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "get_blob_content": {
+    "hash": "5473809b0520507c4084fb16228559c91e7204be2b098c7c0bfdb067fe709a44",
+    "sensitive_path_count": 2,
+    "shape": "type_driven"
+  },
+  "get_blob_metadata": {
+    "hash": "e8e798584c161c69129ca96b8b1b52335a18409d2ebe820df1c29766990e734d",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "get_expression_grammar": {
+    "hash": "708846bf2c908fe45e14c8ea30283721765fb05927d810f818594fc8df11f2ae",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "get_pipeline_state": {
+    "hash": "5fed6cfceaa748d98419ad06eb56c17dc7b75a3e08811814ed902f6a5b9e30af",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "get_plugin_assistance": {
+    "hash": "aa1f472c9153f63b48cfa7b938d047d88958e6a227fbb417b9f84e90dcbf33cf",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "get_plugin_schema": {
+    "hash": "5207f589904bd4d47e69008dda61fefa0ed17aea4734c03088f708708a7a1c67",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "inspect_source": {
+    "hash": "5059b1a7101259b0a44d4da9f1ea4f2fa4599052614d2a4429ba73267e7ef7bd",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "list_blobs": {
+    "hash": "10c660e563118c6eeb85a5ba0e2f0ce44f154a6b5c60f9691dc85013ff0996de",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "list_composer_blobs": {
+    "hash": "bb080f67d70ae3e37cb7b2fc1ec8c490a94eb476b81c1eb3d34acfbc78714ea5",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "list_models": {
+    "hash": "38b0221d701f20df921941354c8947ddbe0ec98ddc0febe9a7b0830e140be9ac",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "list_recipes": {
+    "hash": "f6c34d6695a0757b828bc7635f053129e2da1b39f9439763f4b71093897639cd",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "list_secret_refs": {
+    "hash": "cc9fc8773cbd375c6ac2387b48326bf2388233c1f597b505ec1d5f3fcb4e7796",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "list_sinks": {
+    "hash": "8e9c0b39e5c09e4f02de92e94198ef00f8e39ba4cef1a964a3af16c811cfb078",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "list_sources": {
+    "hash": "309327086d2299ed97296f7a2af4e0a89a908e6c7216754715250551176aebc8",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "list_transforms": {
+    "hash": "6d080cb9400198a1bd91774f73e7c2dc0f0c45c2b7ba12b4e0c66e4fc7f64226",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "patch_node_options": {
+    "hash": "3b1f3b0d29fb353ff0d14cd29f44a6696c2c782c352d390e5c9f7082d7d916e4",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "patch_output_options": {
+    "hash": "9814a33f89e0c73c1bd70a20f0befbf001627d50fc5219ccb3e57bd450003fe7",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "patch_source_options": {
+    "hash": "0abdc57fc2d25ef0b7d16966e8c6b424beed0ab45d7ae3a40f20844b434be5f0",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "preview_pipeline": {
+    "hash": "469432d16dba9d8868122c66c007e17d45ab65dc4cd6de6e037cf7f48391f255",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "remove_edge": {
+    "hash": "6f3e2b44174a8ddd8a8b0e8dfb8fa41035dfd31501061df401b4f6785cddbce7",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "remove_node": {
+    "hash": "f74b36a961bd53fa1a27f2715df3685035ba4d51286ad9b5189cfd7c50737ddf",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "remove_output": {
+    "hash": "a26a9e9d1b159cb3e49683b1f9740b76851d0eee96bbe1db910491b5bad493fb",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "request_advisor_hint": {
+    "hash": "4ee76e6f5c8f38065693d036ec50f484d0e3595c73ea60b8b8bc441779f49dae",
+    "sensitive_path_count": 5,
+    "shape": "declarative"
+  },
+  "request_interpretation_review": {
+    "hash": "e2fb0747986bbc5e23b0de7f8e380508abc4b6caecf9bdbaf5d3737de2ad9c30",
+    "sensitive_path_count": 2,
+    "shape": "type_driven"
+  },
+  "set_metadata": {
+    "hash": "e9adb16a2a8634efefd5ca357030bf20f0effe8884e8cfcd479a15509793ccdc",
+    "sensitive_path_count": 1,
+    "shape": "declarative"
+  },
+  "set_output": {
+    "hash": "26cdabfa4a9f6b6616c14ce58c89b2ece85303bee99bfeb45b2ed6b09f0b4767",
+    "sensitive_path_count": 1,
+    "shape": "declarative"
+  },
+  "set_pipeline": {
+    "hash": "53019b00866c3a2959fc50d547326648889c1f687d487cd9932a92c38adf5b8f",
+    "sensitive_path_count": 4,
+    "shape": "type_driven"
+  },
+  "set_source": {
+    "hash": "1dab572ac60198108d065fac6a27e270b320d80a07e3624fd820ac8ff3b05586",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "set_source_from_blob": {
+    "hash": "aefd3830cd86e58c16654a8344e19acbd56206ba9bf73ab3420324a2225f0ed3",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "update_blob": {
+    "hash": "3f642aeebd8e082f2f2a19ff34d2a3c6167be908e59e9a1f874f8c43ce6040f0",
+    "sensitive_path_count": 1,
+    "shape": "type_driven"
+  },
+  "upsert_edge": {
+    "hash": "db4fb70abc53fac52bffbc521ba48d510e52ac88cd29f9b8dbaabe74155581e0",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "upsert_node": {
+    "hash": "ccba300792fb254df7686473ed5ef10da215a28d9819f2dde886aad635dd5e25",
+    "sensitive_path_count": 3,
+    "shape": "declarative"
+  },
+  "validate_secret_ref": {
+    "hash": "2d863c05bea8111f5bbabcf8e78cd03936843e9ee83af01173344b356ea45191",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "wire_blob_inline_ref": {
+    "hash": "8eebedf2cdfff2202f6f9f16db56c3c9215530d8be593302cc5eaa7531fcd5ad",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  },
+  "wire_secret_ref": {
+    "hash": "4c4729df3511c3cbbf5e95eaef3d435a1ed50c79108fa9d8d9d12f963ae13dcb",
+    "sensitive_path_count": 0,
+    "shape": "declarative"
+  }
+}

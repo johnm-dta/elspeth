@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import bcrypt
@@ -16,6 +18,18 @@ from jwt.exceptions import PyJWTError
 
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import AuthenticationError, UserIdentity, UserProfile
+from elspeth.web.validation import has_visible_content
+
+
+def _required_visible_string_claim(payload: dict[str, object], claim_name: str) -> str:
+    """Extract a required local-JWT claim as a visible string."""
+    try:
+        value = payload[claim_name]
+    except KeyError as exc:
+        raise AuthenticationError("Invalid token") from exc
+    if not isinstance(value, str) or not has_visible_content(value):
+        raise AuthenticationError("Invalid token")
+    return value
 
 
 class LocalAuthProvider:
@@ -47,9 +61,19 @@ class LocalAuthProvider:
         """Open a connection to the SQLite database."""
         return sqlite3.connect(str(self._db_path))
 
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """Open a transaction-scoped SQLite connection and always close it."""
+        conn = self._get_conn()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _ensure_schema(self) -> None:
         """Create the users table if it does not exist."""
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -76,7 +100,7 @@ class LocalAuthProvider:
         if not display_name:
             raise ValueError("display_name must not be empty")
         password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             try:
                 conn.execute(
                     "INSERT INTO users (user_id, password_hash, display_name, email) VALUES (?, ?, ?, ?)",
@@ -106,7 +130,7 @@ class LocalAuthProvider:
         if not username or not password:
             raise AuthenticationError("Invalid credentials")
 
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT password_hash FROM users WHERE user_id = ?",
                 (username,),
@@ -130,7 +154,7 @@ class LocalAuthProvider:
         token: str = jwt.encode(payload, self._secret_key, algorithm="HS256")
         return token
 
-    async def refresh(self, user_id: str, username: str, *, original_iat: int | None = None) -> str:
+    async def refresh(self, user_id: str, username: str, *, original_iat: int) -> str:
         """Issue a new JWT for an already-authenticated user.
 
         Verifies the user still exists in the database — a deleted
@@ -144,7 +168,7 @@ class LocalAuthProvider:
         """
         return await run_sync_in_worker(self._refresh_sync, user_id, username, original_iat)
 
-    def _refresh_sync(self, user_id: str, username: str, original_iat: int | None = None) -> str:
+    def _refresh_sync(self, user_id: str, username: str, original_iat: int | None) -> str:
         """Synchronous refresh — called via run_sync_in_worker."""
         now = int(time.time())
 
@@ -152,12 +176,13 @@ class LocalAuthProvider:
         # long ago.  This bounds how long a stolen token can be refreshed
         # indefinitely without re-authentication.  Without a session DB
         # (Sub-2c/2d), this is the only revocation-like mechanism.
-        if original_iat is not None:
-            chain_age_hours = (now - original_iat) / 3600
-            if chain_age_hours > self._max_refresh_chain_hours:
-                raise AuthenticationError("Token refresh chain expired — please re-authenticate")
+        if original_iat is None:
+            raise AuthenticationError("Token missing iat — please re-authenticate")
+        chain_age_hours = (now - original_iat) / 3600
+        if chain_age_hours > self._max_refresh_chain_hours:
+            raise AuthenticationError("Token refresh chain expired — please re-authenticate")
 
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM users WHERE user_id = ?",
                 (user_id,),
@@ -167,11 +192,10 @@ class LocalAuthProvider:
 
         # Carry forward the original iat so the chain age accumulates.
         # New logins get a fresh iat; refreshes preserve the original.
-        token_iat = original_iat if original_iat is not None else now
         payload = {
             "sub": user_id,
             "username": username,
-            "iat": token_iat,
+            "iat": original_iat,
             "exp": now + self._token_expiry_hours * 3600,
         }
         token: str = jwt.encode(payload, self._secret_key, algorithm="HS256")
@@ -188,7 +212,8 @@ class LocalAuthProvider:
         except PyJWTError as exc:
             raise AuthenticationError("Invalid token") from exc
 
-        user_id = payload["sub"]
+        user_id = _required_visible_string_claim(payload, "sub")
+        username = _required_visible_string_claim(payload, "username")
 
         # Verify user still exists — deleted users must not retain access
         exists = await run_sync_in_worker(self._user_exists, user_id)
@@ -197,12 +222,12 @@ class LocalAuthProvider:
 
         return UserIdentity(
             user_id=user_id,
-            username=payload["username"],
+            username=username,
         )
 
     def _user_exists(self, user_id: str) -> bool:
         """Check if a user still exists in auth.db (sync, called via to_thread)."""
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM users WHERE user_id = ?",
                 (user_id,),
@@ -211,7 +236,7 @@ class LocalAuthProvider:
 
     def _query_user(self, user_id: str) -> tuple[str, str | None] | None:
         """Synchronous DB lookup — called via run_sync_in_worker."""
-        with self._get_conn() as conn:
+        with self._connect() as conn:
             row: tuple[str, str | None] | None = conn.execute(
                 "SELECT display_name, email FROM users WHERE user_id = ?",
                 (user_id,),

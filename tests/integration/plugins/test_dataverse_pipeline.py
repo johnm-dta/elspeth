@@ -17,8 +17,6 @@ import hashlib
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from elspeth.contracts import CallStatus
 from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.plugins.infrastructure.clients.dataverse import (
@@ -529,8 +527,14 @@ class TestDataverseSinkUpsert:
         assert mock_client.upsert.call_count == 3
         assert len(ctx.calls) == 3  # One audit record per row
 
-    def test_upsert_failure_raises_and_records(self) -> None:
-        """Failure on second row raises RuntimeError after recording audit entry."""
+    def test_upsert_per_row_409_diverts_and_records(self) -> None:
+        """A 409 (conflict) on the second row is per-row-attributable: the row's
+        data conflicts and a retry won't help, so it is diverted via
+        on_write_failure while the first (already-written) row stands. The ERROR
+        audit record is written before diverting. Previously this asserted a bare
+        raise that aborted the batch; the dataverse sink now honours the per-row
+        on_write_failure routing it advertises in its composer hint.
+        """
         sink = inject_write_failure(DataverseSink(_make_sink_config()))
 
         call_count = 0
@@ -574,13 +578,23 @@ class TestDataverseSinkUpsert:
             {"email": "bob@test.com", "name": "Bob"},
         ]
 
-        with pytest.raises(DataverseClientError, match="Conflict"):
-            sink.write(rows, ctx)  # type: ignore[arg-type]  # test fake context
+        result = sink.write(rows, ctx)  # type: ignore[arg-type]  # test fake context
 
-        # First row succeeded, second failed — both recorded
+        # Second row diverted, first row stands.
+        assert len(result.diversions) == 1
+        assert result.diversions[0].row_index == 1
+        assert result.diversions[0].row_data == {"email": "bob@test.com", "name": "Bob"}
+        assert "409" in result.diversions[0].reason
+
+        # First row succeeded, second failed — both recorded.
         assert len(ctx.calls) == 2
         assert ctx.calls[0]["status"] == CallStatus.SUCCESS
         assert ctx.calls[1]["status"] == CallStatus.ERROR
+
+        # Only the written row counts toward the artifact — the diverted row was
+        # never written to Dataverse, so it is excluded from row_count.
+        assert result.artifact.metadata is not None
+        assert result.artifact.metadata["row_count"] == 1
 
 
 class TestDataverseSinkLookupBindings:

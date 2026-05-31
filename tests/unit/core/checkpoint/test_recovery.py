@@ -34,7 +34,7 @@ from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.core.checkpoint import CheckpointCorruptionError, CheckpointManager, RecoveryManager
 from elspeth.core.checkpoint.manager import IncompatibleCheckpointError
-from elspeth.core.checkpoint.recovery import _DELEGATION_PATHS
+from elspeth.core.checkpoint.recovery import _DELEGATION_PATHS, IncompleteTokenSpec
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -113,6 +113,8 @@ def _insert_run(
             status=status,
             schema_contract_json=schema_contract_json,
             schema_contract_hash=schema_contract_hash,
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
         )
     )
 
@@ -362,7 +364,7 @@ def test_get_resume_point_restores_aggregation_state(
         checkpoint_manager,
         run_id,
         aggregation_state=AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -382,6 +384,8 @@ def test_get_resume_point_restores_aggregation_state(
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         ),
@@ -394,6 +398,66 @@ def test_get_resume_point_restores_aggregation_state(
     assert resume_point.sequence_number == 1
     assert resume_point.aggregation_state is not None
     assert "agg-node" in resume_point.aggregation_state.nodes
+
+
+def test_get_unprocessed_rows_reuses_resume_point_aggregation_state_parse(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume inspection should not parse the same aggregation checkpoint twice."""
+    import importlib
+
+    recovery_module: Any = importlib.import_module("elspeth.core.checkpoint.recovery")
+
+    run_id = "run-buffered-state-parse"
+    graph = _create_failed_run_with_checkpoint(
+        db,
+        checkpoint_manager,
+        run_id,
+        aggregation_state=AggregationCheckpointState(
+            version="5.0",
+            nodes={
+                "agg-node": AggregationNodeCheckpoint(
+                    tokens=(
+                        AggregationTokenCheckpoint(
+                            token_id="tok-buffered",
+                            row_id="row-buffered",
+                            branch_name=None,
+                            fork_group_id=None,
+                            join_group_id=None,
+                            expand_group_id=None,
+                            row_data={"id": 5},
+                            contract_version="test",
+                            contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
+                        ),
+                    ),
+                    batch_id="batch-001",
+                    elapsed_age_seconds=0.0,
+                    count_fire_offset=None,
+                    condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
+                ),
+            },
+        ),
+    )
+
+    original_checkpoint_loads = recovery_module.checkpoint_loads
+    parsed_payloads: list[str] = []
+
+    def counting_checkpoint_loads(payload: str) -> Any:
+        parsed_payloads.append(payload)
+        return original_checkpoint_loads(payload)
+
+    monkeypatch.setattr(recovery_module, "checkpoint_loads", counting_checkpoint_loads)
+
+    resume_point = recovery_manager.get_resume_point(run_id, graph)
+    assert resume_point is not None
+    assert resume_point.aggregation_state is not None
+    assert recovery_manager.get_unprocessed_rows(run_id) == ["row-0"]
+    assert parsed_payloads == [resume_point.checkpoint.aggregation_state_json]
 
 
 def test_get_unprocessed_rows_returns_empty_when_no_checkpoint(recovery_manager: RecoveryManager) -> None:
@@ -487,7 +551,7 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
         sequence_number=10,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -518,6 +582,8 @@ def test_get_unprocessed_rows_handles_fork_and_excludes_buffered_rows(
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         ),
@@ -567,7 +633,7 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
         sequence_number=1,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -598,6 +664,8 @@ def test_get_unprocessed_rows_chunks_buffered_token_query(
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         ),
@@ -707,7 +775,7 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
         sequence_number=1,
         graph=graph,
         aggregation_state=AggregationCheckpointState(
-            version="4.0",
+            version="5.0",
             nodes={
                 "agg-node": AggregationNodeCheckpoint(
                     tokens=(
@@ -727,6 +795,8 @@ def test_get_unprocessed_rows_combines_aggregation_and_coalesce_buffered(
                     elapsed_age_seconds=0.0,
                     count_fire_offset=None,
                     condition_fire_offset=None,
+                    accepted_count_total=0,
+                    completed_flush_count=0,
                 ),
             },
         ),
@@ -1082,10 +1152,34 @@ def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
 ) -> None:
     run_id = "run-latest-checkpoint"
     graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id)
+    checkpoint_manager.create_checkpoint(
+        run_id=run_id,
+        token_id="tok-0",
+        node_id="checkpoint-node",
+        sequence_number=99,
+        graph=graph,
+    )
+
+    # Force can_resume to succeed so we exercise the second get_latest_checkpoint call path.
+    monkeypatch.setattr(recovery_manager, "can_resume", lambda _run_id, _graph: type("Check", (), {"can_resume": True})())
+    point = recovery_manager.get_resume_point(run_id, graph)
+
+    assert point is not None
+    assert point.sequence_number == 99
+
+
+def test_get_resume_point_revalidates_checkpoint_loaded_after_can_resume(
+    db: LandscapeDB,
+    checkpoint_manager: CheckpointManager,
+    recovery_manager: RecoveryManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "run-latest-checkpoint-revalidate"
+    graph = _create_failed_run_with_checkpoint(db, checkpoint_manager, run_id)
     with db.connection() as conn:
         conn.execute(
             checkpoints_table.insert().values(
-                checkpoint_id="cp-later",
+                checkpoint_id="cp-later-incompatible",
                 run_id=run_id,
                 token_id="tok-0",
                 node_id="checkpoint-node",
@@ -1098,12 +1192,10 @@ def test_get_resume_point_reads_latest_checkpoint_after_can_resume(
             )
         )
 
-    # Force can_resume to succeed so we exercise the second get_latest_checkpoint call path.
+    # Simulate a checkpoint appearing after can_resume validated an earlier checkpoint.
     monkeypatch.setattr(recovery_manager, "can_resume", lambda _run_id, _graph: type("Check", (), {"can_resume": True})())
-    point = recovery_manager.get_resume_point(run_id, graph)
 
-    assert point is not None
-    assert point.sequence_number == 99
+    assert recovery_manager.get_resume_point(run_id, graph) is None
 
 
 def test_get_unprocessed_rows_excludes_diverted_rows(
@@ -1147,3 +1239,68 @@ def test_get_unprocessed_rows_excludes_diverted_rows(
 
     assert "row-diverted" not in unprocessed, "DIVERTED row should be excluded — it is terminal"
     assert "row-pending" in unprocessed
+
+
+# ── IncompleteTokenSpec construction-time identity validation ───────────────
+# IncompleteTokenSpec is a Tier-1-sourced identity type (built directly from
+# tokens_table columns) that reaches reconstruct_token_row BEFORE any TokenInfo
+# guard fires. NOT NULL (the DB constraint) is not the same as non-empty, so an
+# empty-string identity could produce valid-looking but meaningless audit work.
+# Mirrors TokenInfo.__post_init__ (contracts/identity.py) — see tests/unit/
+# contracts/test_identity.py for the sibling pattern.
+
+
+def _valid_incomplete_token_spec_kwargs() -> dict[str, Any]:
+    return {
+        "token_id": "tok-1",
+        "row_id": "row-1",
+        "branch_name": None,
+        "fork_group_id": None,
+        "join_group_id": None,
+        "expand_group_id": None,
+        "token_data_ref": None,
+        "step_in_pipeline": 1,
+        "max_attempt": -1,
+    }
+
+
+def test_incomplete_token_spec_accepts_valid_identity() -> None:
+    spec = IncompleteTokenSpec(**_valid_incomplete_token_spec_kwargs())
+    assert spec.token_id == "tok-1"
+    assert spec.row_id == "row-1"
+
+
+@pytest.mark.parametrize("field", ["token_id", "row_id"])
+def test_incomplete_token_spec_rejects_empty_identity(field: str) -> None:
+    kwargs = _valid_incomplete_token_spec_kwargs()
+    kwargs[field] = ""
+    with pytest.raises(ValueError, match=f"{field} must not be empty"):
+        IncompleteTokenSpec(**kwargs)
+
+
+@pytest.mark.parametrize("field", ["token_id", "row_id"])
+def test_incomplete_token_spec_rejects_non_str_identity(field: str) -> None:
+    kwargs = _valid_incomplete_token_spec_kwargs()
+    kwargs[field] = 123
+    with pytest.raises(TypeError, match=f"{field} must be str"):
+        IncompleteTokenSpec(**kwargs)
+
+
+@pytest.mark.parametrize("field", ["branch_name", "fork_group_id", "join_group_id", "expand_group_id", "token_data_ref"])
+def test_incomplete_token_spec_rejects_empty_optional_string(field: str) -> None:
+    # NULL is the legitimate "not applicable" value for these columns; an empty
+    # string is anomalous. token_data_ref in particular is used as a payload-store
+    # key in reconstruct_token_row before any TokenInfo exists, so "" must crash
+    # here rather than surface as a misleading "payload purged" error.
+    kwargs = _valid_incomplete_token_spec_kwargs()
+    kwargs[field] = ""
+    with pytest.raises(ValueError, match=f"{field} must be None or non-empty"):
+        IncompleteTokenSpec(**kwargs)
+
+
+@pytest.mark.parametrize("field", ["branch_name", "fork_group_id", "join_group_id", "expand_group_id", "token_data_ref"])
+def test_incomplete_token_spec_accepts_none_optional_string(field: str) -> None:
+    kwargs = _valid_incomplete_token_spec_kwargs()
+    kwargs[field] = None
+    spec = IncompleteTokenSpec(**kwargs)
+    assert getattr(spec, field) is None

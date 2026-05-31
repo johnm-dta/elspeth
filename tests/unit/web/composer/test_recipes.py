@@ -331,7 +331,7 @@ class TestClassifyRecipe:
     def test_llm_node_wires_template_and_response_field(self) -> None:
         result = self._apply(label_field="urgency")
         llm = next(n for n in result["nodes"] if n["plugin"] == "llm")
-        assert llm["options"]["template"] == "Classify {{ row['subject'] }}"
+        assert llm["options"]["prompt_template"] == "Classify {{ row['subject'] }}"
         assert llm["options"]["response_field"] == "urgency"
 
     def test_output_is_jsonl(self) -> None:
@@ -422,15 +422,15 @@ class TestForkCoalesceTruncateRecipe:
         a ``fork_to`` list naming the per-branch published connections.
         Both must be present together — either alone misroutes.
 
-        ``fork_to`` entries are derived from the user-facing keys with an
-        ``_in`` suffix to differentiate the upstream-of-path connection
-        from the downstream-of-path connection (which carries the user's
-        bare key name).
+        ``fork_to`` entries are the user-facing branch keys. The coalesce
+        branch mapping points those keys at the post-transform output
+        connections.
         """
         result = self._apply()
         gate = next(n for n in result["nodes"] if n["node_type"] == "gate")
+        assert gate["condition"] == "'all'"
         assert gate["routes"] == {"all": "fork"}
-        assert gate["fork_to"] == ["path_a_in", "path_b_in"]
+        assert gate["fork_to"] == ["path_a", "path_b"]
 
     def test_path_a_passthrough_consumes_branch_a_input_and_publishes_key_a(self) -> None:
         """Path A's ``input`` must equal one of ``gate.fork_to`` entries
@@ -441,30 +441,27 @@ class TestForkCoalesceTruncateRecipe:
         result = self._apply()
         path_a = next(n for n in result["nodes"] if n["id"] == "path_a_passthrough")
         assert path_a["plugin"] == "passthrough"
-        assert path_a["input"] == "path_a_in"
-        assert path_a["on_success"] == "path_a"
+        assert path_a["input"] == "path_a"
+        assert path_a["on_success"] == "path_a_out"
         assert path_a["options"]["schema"] == {"mode": "observed"}
 
     def test_path_b_truncate_consumes_branch_b_input_and_publishes_key_b(self) -> None:
         result = self._apply(truncate_field="notes", max_chars=42, truncation_suffix="…")
         path_b = next(n for n in result["nodes"] if n["id"] == "path_b_truncate")
         assert path_b["plugin"] == "truncate"
-        assert path_b["input"] == "path_b_in"
-        assert path_b["on_success"] == "path_b"
+        assert path_b["input"] == "path_b"
+        assert path_b["on_success"] == "path_b_out"
         assert path_b["options"]["fields"] == {"notes": 42}
         assert path_b["options"]["suffix"] == "…"
         assert path_b["options"]["schema"] == {"mode": "observed"}
 
     def test_coalesce_branches_list_form_uses_user_keys(self) -> None:
-        """``NodeSpec.branches`` is ``tuple[str, ...]`` (list form only),
-        so branch names ARE the connection names. With ``merge: nested``
-        those branch names become the top-level keys of the merged output
-        row, so the user-facing ``key_a`` / ``key_b`` slots drive both
-        the wiring and the output shape.
+        """Mapping-form branches preserve output keys separately from
+        the post-transform connections consumed by coalesce.
         """
         result = self._apply(key_a="original", key_b="truncated")
         coalesce = next(n for n in result["nodes"] if n["node_type"] == "coalesce")
-        assert coalesce["branches"] == ["original", "truncated"]
+        assert coalesce["branches"] == {"original": "original_out", "truncated": "truncated_out"}
         assert coalesce["policy"] == "require_all"
         assert coalesce["merge"] == "nested"
         assert coalesce["on_success"] == "merged_rows"
@@ -474,20 +471,22 @@ class TestForkCoalesceTruncateRecipe:
         assert coalesce["input"] == "branches"
 
     def test_custom_keys_propagate_to_gate_fork_to_and_path_publishers(self) -> None:
-        """Renaming the user keys cascades through the entire wiring —
-        gate.fork_to gets ``<key>_in`` suffixes, path-transforms publish
-        the bare keys, and coalesce.branches lists the bare keys. This
-        pins the cross-node naming-correspondence invariant at one place.
+        """Renaming the user keys cascades through the entire wiring.
+
+        Gate branches use the bare keys, path-transforms consume the bare
+        keys and publish suffixed output connections, and coalesce maps
+        bare keys to those suffixed connections. This pins the cross-node
+        naming-correspondence invariant at one place.
         """
         result = self._apply(key_a="raw", key_b="trimmed")
         gate = next(n for n in result["nodes"] if n["node_type"] == "gate")
         path_a = next(n for n in result["nodes"] if n["id"] == "path_a_passthrough")
         path_b = next(n for n in result["nodes"] if n["id"] == "path_b_truncate")
         coalesce = next(n for n in result["nodes"] if n["node_type"] == "coalesce")
-        assert gate["fork_to"] == ["raw_in", "trimmed_in"]
-        assert path_a["input"] == "raw_in" and path_a["on_success"] == "raw"
-        assert path_b["input"] == "trimmed_in" and path_b["on_success"] == "trimmed"
-        assert coalesce["branches"] == ["raw", "trimmed"]
+        assert gate["fork_to"] == ["raw", "trimmed"]
+        assert path_a["input"] == "raw" and path_a["on_success"] == "raw_out"
+        assert path_b["input"] == "trimmed" and path_b["on_success"] == "trimmed_out"
+        assert coalesce["branches"] == {"raw": "raw_out", "trimmed": "trimmed_out"}
 
     def test_default_keys_match_scenario_request(self) -> None:
         """Scenario fork_and_coalesce asks for keys 'path_a' and 'path_b';
@@ -843,7 +842,7 @@ class TestApplyRecipeEndToEnd:
                     status="ready",
                 )
             )
-        return engine, session_id, blob_id
+        return engine, session_id, blob_id, tmp_path
 
     def _catalog(self):
         # Real PluginManager so set_pipeline's prevalidation sees authentic
@@ -875,7 +874,7 @@ class TestApplyRecipeEndToEnd:
         from elspeth.web.composer.state import CompositionState, PipelineMetadata
         from elspeth.web.composer.tools import compute_proof_diagnostics, execute_tool
 
-        engine, session_id, blob_id = _seeded
+        engine, session_id, blob_id, _data_dir = _seeded
         empty = CompositionState(
             source=None,
             nodes=(),
@@ -951,7 +950,7 @@ class TestApplyRecipeEndToEnd:
         from elspeth.web.composer.state import CompositionState, PipelineMetadata
         from elspeth.web.composer.tools import compute_proof_diagnostics, execute_tool
 
-        engine, session_id, blob_id = _seeded
+        engine, session_id, blob_id, _data_dir = _seeded
         empty = CompositionState(
             source=None,
             nodes=(),
@@ -998,6 +997,59 @@ class TestApplyRecipeEndToEnd:
             {"field": "price", "to": "float"}
         ]
 
+    def test_fork_coalesce_recipe_passes_runtime_equivalent_validation(self, _seeded) -> None:
+        """The fork/coalesce recipe must survive the runtime DAG builder.
+
+        This pins the live RGR failure where composer Stage 1 accepted
+        list-form coalesce branches, but runtime rejected transformed fork
+        branches because ``gate.fork_to`` branch names were not present as
+        coalesce branch identities.
+        """
+        from types import SimpleNamespace
+
+        from elspeth.web.composer import yaml_generator
+        from elspeth.web.composer.state import CompositionState, PipelineMetadata
+        from elspeth.web.composer.tools import execute_tool
+        from elspeth.web.execution.validation import validate_pipeline
+
+        engine, session_id, blob_id, data_dir = _seeded
+        empty = CompositionState(
+            source=None,
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = execute_tool(
+            "apply_pipeline_recipe",
+            {
+                "recipe_name": "fork-coalesce-truncate-jsonl",
+                "slots": {
+                    "source_blob_id": blob_id,
+                    "truncate_field": "customer",
+                    "max_chars": 5,
+                    "output_path": "outputs/merged.jsonl",
+                    "key_a": "path_a",
+                    "key_b": "path_b",
+                },
+            },
+            empty,
+            self._catalog(),
+            session_engine=engine,
+            session_id=session_id,
+        )
+        assert result.success, getattr(result, "data", result)
+        assert result.updated_state.validate().is_valid is True
+
+        runtime = validate_pipeline(
+            result.updated_state,
+            SimpleNamespace(data_dir=data_dir),
+            yaml_generator,
+        )
+        assert runtime.is_valid is True, runtime.errors
+
     def test_apply_recipe_over_populated_state_emits_replacement_note(self, _seeded) -> None:
         """When the operator has hand-iterated state and the LLM applies a
         recipe, the destructive full-state replacement must be visible.
@@ -1019,7 +1071,7 @@ class TestApplyRecipeEndToEnd:
         )
         from elspeth.web.composer.tools import execute_tool
 
-        engine, session_id, blob_id = _seeded
+        engine, session_id, blob_id, _data_dir = _seeded
 
         # Prior state: a hand-iterated pipeline the operator was building
         # (source set, two transforms, one output). Applying a recipe on
@@ -1131,7 +1183,7 @@ class TestApplyRecipeEndToEnd:
         from elspeth.web.composer.state import CompositionState, PipelineMetadata
         from elspeth.web.composer.tools import compute_proof_diagnostics, execute_tool
 
-        engine, session_id, blob_id = _seeded
+        engine, session_id, blob_id, _data_dir = _seeded
         empty = CompositionState(
             source=None,
             nodes=(),
@@ -1193,7 +1245,7 @@ class TestApplyRecipeEndToEnd:
         from elspeth.web.composer.state import CompositionState, PipelineMetadata
         from elspeth.web.composer.tools import execute_tool
 
-        engine, session_id, blob_id = _seeded
+        engine, session_id, blob_id, _data_dir = _seeded
         empty = CompositionState(
             source=None,
             nodes=(),

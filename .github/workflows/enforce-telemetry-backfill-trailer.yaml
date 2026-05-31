@@ -1,0 +1,45 @@
+# CI backstop for telemetry-backfill cohort attribution.
+#
+# Local enforcement is via .githooks/commit-msg-telemetry-backfill installed
+# by scripts/git-hooks/install-commit-msg-dispatcher.sh, but contributors
+# may forget the install step.  This workflow runs the same predicate
+# against every commit in the PR diff and fails the build if any commit
+# touched a cohort directory without the required trailer.  Belt-and-
+# braces, same pattern as the elspeth-lints policy gates.
+#
+# Spec: docs/composer/ux-redesign-2026-05/20-phase-8-polish-and-telemetry.md
+#       §"Cohort attribution via commit trailers (A4 — load-bearing)"
+
+name: enforce-telemetry-backfill-trailer
+
+on:
+  pull_request:
+    branches: [main, master, "RC*"]
+
+jobs:
+  check:
+    name: Check cohort-attribution trailers on PR commits
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout PR head with full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0   # full history so merge-base resolves correctly
+
+      - name: Determine merge base against PR target
+        id: merge_base
+        run: |
+          set -euo pipefail
+          target="origin/${{ github.event.pull_request.base.ref }}"
+          base=$(git merge-base "$target" HEAD)
+          echo "base=${base}" >> "$GITHUB_OUTPUT"
+          echo "Using merge base: ${base}"
+
+      - name: Check trailer on every cohort-touching commit
+        env:
+          BASE: ${{ steps.merge_base.outputs.base }}
+        run: |
+          set -euo pipefail
+          script=.githooks/check-commit-range-telemetry-backfill.sh
+          chmod +x "$script"
+          "$script" "${BASE}..HEAD"

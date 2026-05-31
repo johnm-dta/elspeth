@@ -1,0 +1,12 @@
+[
+  {
+    "column": 1,
+    "file_path": "bad.py",
+    "fingerprint": "bad.py:TDE2:4",
+    "line": 4,
+    "message": "missing caller_module kwarg (require caller_module=__name__)",
+    "rule_id": "TDE2",
+    "severity": "error",
+    "suggestion": "Pass caller_module=__name__ literally at every tier_1_error call site"
+  }
+]

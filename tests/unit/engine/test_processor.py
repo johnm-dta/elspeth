@@ -16,7 +16,7 @@ This avoids the anti-pattern of testing mocks instead of behavior.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -279,7 +279,7 @@ class TestConstructorErrorEdgeMap:
             },
             restored_aggregation_state={
                 NodeID("agg-1"): AggregationCheckpointState(
-                    version="4.0",
+                    version="5.0",
                     nodes={},
                 ),
             },
@@ -573,11 +573,16 @@ class TestProcessRowNoTransforms:
         from elspeth.core.landscape.schema import node_states_table
 
         with db.connection() as conn:
-            states = conn.execute(select(node_states_table).where(node_states_table.c.run_id == "test-run")).fetchall()
+            states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.node_id == "source-0",
+                )
+            ).fetchall()
 
-        # At minimum, the source node_state should exist
-        assert len(states) >= 1
-        source_state = states[0]
+        assert len(states) == 1
+        [source_state] = states
+        assert source_state.node_id == "source-0"
         assert source_state.status == NodeStateStatus.COMPLETED
 
     def test_source_boundary_violation_records_failed_outcome_and_failed_source_state(self) -> None:
@@ -623,11 +628,18 @@ class TestProcessRowNoTransforms:
         from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
 
         with db.connection() as conn:
-            states = conn.execute(select(node_states_table).where(node_states_table.c.run_id == "test-run")).fetchall()
+            states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.node_id == "source-0",
+                )
+            ).fetchall()
             outcomes = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.run_id == "test-run")).fetchall()
 
-        assert len(states) >= 1
-        assert states[0].status == NodeStateStatus.FAILED
+        assert len(states) == 1
+        [source_state] = states
+        assert source_state.node_id == "source-0"
+        assert source_state.status == NodeStateStatus.FAILED
         assert len(outcomes) == 1
         _assert_outcome_pair(outcomes[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
@@ -843,11 +855,18 @@ class TestProcessRowNoTransforms:
         from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
 
         with db.connection() as conn:
-            states = conn.execute(select(node_states_table).where(node_states_table.c.run_id == "test-run")).fetchall()
+            states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.node_id == "source-0",
+                )
+            ).fetchall()
             outcomes = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.run_id == "test-run")).fetchall()
 
-        assert len(states) >= 1
-        assert states[0].status == NodeStateStatus.FAILED
+        assert len(states) == 1
+        [source_state] = states
+        assert source_state.node_id == "source-0"
+        assert source_state.status == NodeStateStatus.FAILED
         assert len(outcomes) == 1
         _assert_outcome_pair(outcomes[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
@@ -880,11 +899,18 @@ class TestProcessRowNoTransforms:
         from elspeth.core.landscape.schema import node_states_table, token_outcomes_table
 
         with db.connection() as conn:
-            states = conn.execute(select(node_states_table).where(node_states_table.c.run_id == "test-run")).fetchall()
+            states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.node_id == "source-0",
+                )
+            ).fetchall()
             outcomes = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.run_id == "test-run")).fetchall()
 
-        assert len(states) >= 1
-        assert states[0].status == NodeStateStatus.FAILED
+        assert len(states) == 1
+        [source_state] = states
+        assert source_state.node_id == "source-0"
+        assert source_state.status == NodeStateStatus.FAILED
         assert len(outcomes) == 1
         _assert_outcome_pair(outcomes[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
 
@@ -1999,6 +2025,57 @@ class TestTransformModeOutcomeOrdering:
         assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) not in recorded_pairs, (
             f"CONSUMED_IN_BATCH was recorded before expand_token failed — recovery would skip this row. Recorded pairs: {recorded_pairs}"
         )
+
+    def test_parent_terminal_outcome_recorder_failure_raises_audit_integrity_error(self) -> None:
+        """Recorder failure after expansion must surface as audit corruption, not a raw DB error."""
+        _db, factory, processor, transform, agg_node = self._setup_batch_processor()
+        first_token = make_token_info(row_id="row-a", token_id="token-a", data={"value": 10})
+        second_token = make_token_info(row_id="row-b", token_id="token-b", data={"value": 20})
+        child_token = make_token_info(row_id="row-child", token_id="token-child", data={"value": 999})
+        fctx = _FlushContext(
+            node_id=agg_node,
+            transform=transform,
+            settings=AggregationSettings(
+                name="batch_agg",
+                plugin="agg-transform",
+                input="default",
+                on_error="discard",
+                trigger={"count": 2},
+                output_mode="transform",
+            ),
+            buffered_tokens=(first_token, second_token),
+            batch_id="batch-1",
+            error_msg="Batch transform failed",
+            expand_parent_token=first_token,
+            triggering_token=second_token,
+            coalesce_node_id=None,
+            coalesce_name=None,
+        )
+        flush_result = TransformResult.success(
+            make_row({"value": 999}, contract=_make_contract()),
+            success_reason={
+                "action": "batch_processed",
+                "metadata": {"quarantined_indices": [1]},
+            },
+        )
+
+        with (
+            patch.object(
+                processor._token_manager,
+                "expand_token",
+                return_value=([child_token], "expand-group-1"),
+            ),
+            patch.object(
+                factory.data_flow,
+                "record_token_outcome",
+                side_effect=[None, LandscapeRecordError("audit DB down")],
+            ),
+            patch.object(processor, "_emit_token_completed"),
+            pytest.raises(AuditIntegrityError, match="Failed to record batch parent terminal outcome") as exc_info,
+        ):
+            processor._route_transform_results(fctx, flush_result)
+
+        assert isinstance(exc_info.value.__cause__, LandscapeRecordError)
 
 
 class TestProcessRowGateBranching:
@@ -4572,109 +4649,12 @@ class TestGateJumpPastCoalesceInvariant:
                 coalesce_name=CoalesceName("merge"),
             )
 
-        # Token should have been held at coalesce
-        assert result is None or (hasattr(result, "outcome") and result is not None)
-
-
-# ---------------------------------------------------------------------------
-# T18: Processor outcome type tests
-# ---------------------------------------------------------------------------
-
-
-class TestProcessorOutcomeTypes:
-    """Test the private discriminated union types for _process_single_token extraction."""
-
-    def test_transform_continue(self) -> None:
-        from elspeth.engine.processor import _TransformContinue
-
-        outcome = _TransformContinue(
-            updated_token=Mock(),
-            updated_sink="output",
-        )
-        assert outcome.updated_sink == "output"
-        assert outcome.updated_token is not None
-
-    def test_transform_terminal_single(self) -> None:
-        from elspeth.engine.processor import _TransformTerminal
-
-        mock_result = Mock()
-        outcome = _TransformTerminal(result=mock_result)
-        assert outcome.result is mock_result
-
-    def test_transform_terminal_list(self) -> None:
-        from elspeth.engine.processor import _TransformTerminal
-
-        mock_results = cast("list[RowResult]", [Mock(spec=RowResult), Mock(spec=RowResult)])
-        outcome = _TransformTerminal(result=mock_results)  # type: ignore[arg-type]  # intentionally passing list to test runtime behavior
-        assert isinstance(outcome.result, list)  # type: ignore[unreachable]
-        assert len(outcome.result) == 2  # type: ignore[unreachable]
-
-    def test_transform_outcome_isinstance_dispatch(self) -> None:
-        """Verify isinstance works for discriminated union dispatch."""
-        from elspeth.engine.processor import _TransformContinue, _TransformTerminal
-
-        continue_outcome = _TransformContinue(updated_token=Mock(), updated_sink="out")
-        terminal_outcome = _TransformTerminal(result=Mock())
-
-        assert isinstance(continue_outcome, _TransformContinue)
-        assert not isinstance(continue_outcome, _TransformTerminal)  # type: ignore[unreachable]  # exhaustiveness verification — disjoint dataclasses
-        assert isinstance(terminal_outcome, _TransformTerminal)
-        assert not isinstance(terminal_outcome, _TransformContinue)  # type: ignore[unreachable]  # exhaustiveness verification — disjoint dataclasses
-
-    def test_gate_continue_default_next_node(self) -> None:
-        from elspeth.engine.processor import _GateContinue
-
-        outcome = _GateContinue(updated_token=Mock(), updated_sink="output")
-        assert outcome.next_node_id is None
-
-    def test_gate_continue_explicit_next_node(self) -> None:
-        from elspeth.engine.processor import _GateContinue
-
-        outcome = _GateContinue(updated_token=Mock(), updated_sink="output", next_node_id=NodeID("jump_target"))
-        assert outcome.next_node_id == NodeID("jump_target")
-
-    def test_gate_terminal(self) -> None:
-        from elspeth.engine.processor import _GateTerminal
-
-        mock_result = Mock()
-        outcome = _GateTerminal(result=mock_result)
-        assert outcome.result is mock_result
-
-    def test_gate_outcome_isinstance_dispatch(self) -> None:
-        from elspeth.engine.processor import _GateContinue, _GateTerminal
-
-        continue_outcome = _GateContinue(updated_token=Mock(), updated_sink="out")
-        terminal_outcome = _GateTerminal(result=Mock())
-
-        assert isinstance(continue_outcome, _GateContinue)
-        assert not isinstance(continue_outcome, _GateTerminal)  # type: ignore[unreachable]  # exhaustiveness verification — disjoint dataclasses
-        assert isinstance(terminal_outcome, _GateTerminal)
-        assert not isinstance(terminal_outcome, _GateContinue)  # type: ignore[unreachable]  # exhaustiveness verification — disjoint dataclasses
-
-    def test_all_outcome_types_are_frozen(self) -> None:
-        from elspeth.engine.processor import (
-            _GateContinue,
-            _GateTerminal,
-            _TransformContinue,
-            _TransformTerminal,
-        )
-
-        # Verify frozen by attempting to mutate each type's own field
-        tc = _TransformContinue(updated_token=Mock(), updated_sink="out")
-        with pytest.raises(AttributeError):
-            tc.updated_sink = "other"  # type: ignore[misc]
-
-        tt = _TransformTerminal(result=Mock())
-        with pytest.raises(AttributeError):
-            tt.result = Mock()  # type: ignore[misc]
-
-        gc = _GateContinue(updated_token=Mock(), updated_sink="out")
-        with pytest.raises(AttributeError):
-            gc.updated_sink = "other"  # type: ignore[misc]
-
-        gt = _GateTerminal(result=Mock())
-        with pytest.raises(AttributeError):
-            gt.result = Mock()  # type: ignore[misc]
+        # Token should be held at the coalesce node without emitting a terminal result.
+        assert result is None
+        assert _child_items == []
+        coalesce_exec.accept.assert_called_once()
+        assert coalesce_exec.accept.call_args.kwargs["token"].token_id == "tok-1"
+        assert coalesce_exec.accept.call_args.kwargs["coalesce_name"] == CoalesceName("merge")
 
 
 class TestFlushContextImmutability:

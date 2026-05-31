@@ -335,14 +335,8 @@ class TestResumeWithOriginalHeaders:
         validation = sink.validate_output_target()
         assert validation.valid is True, f"Validation failed: {validation.error_message}"
 
-    def test_csv_resume_with_original_headers_defers_without_resolution(self, tmp_path: Path):
-        """Resume defers validation when field_resolution is not yet available.
-
-        When headers=original but no field_resolution mapping exists,
-        comparing normalized schema names against display-name file headers
-        would produce false negatives. The sink correctly defers validation
-        (returns success) until resolution is available.
-        """
+    def test_csv_resume_with_original_headers_fails_without_resolution(self, tmp_path: Path):
+        """Resume fails closed when field_resolution is not available."""
         csv_path = tmp_path / "output.csv"
 
         with open(csv_path, "w", newline="") as f:
@@ -362,7 +356,9 @@ class TestResumeWithOriginalHeaders:
         sink.configure_for_resume()
 
         validation = sink.validate_output_target()
-        assert validation.valid is True
+        assert validation.valid is False
+        assert validation.error_message is not None
+        assert "field resolution" in validation.error_message
 
     def test_jsonl_resume_with_original_headers_succeeds(self, tmp_path: Path):
         """JSONL resume succeeds when CLI provides field resolution."""

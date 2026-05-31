@@ -16,6 +16,7 @@ Audit Trail:
 """
 
 import ipaddress
+from collections.abc import Mapping
 from ipaddress import IPv4Network, IPv6Network
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -29,6 +30,7 @@ from elspeth.contracts.contract_propagation import narrow_contract_to_output
 from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.schema import FieldDefinition, SchemaConfig
 from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.contracts.wire_visible_identity import is_wire_visible_placeholder
 from elspeth.core.security.web import (
     NetworkError as SSRFNetworkError,
 )
@@ -100,6 +102,11 @@ class WebScrapeHTTPConfig(BaseModel):
     def _reject_empty(cls, v: str, info: Any) -> str:
         if not v.strip():
             raise ValueError(f"{info.field_name} must not be empty")
+        if is_wire_visible_placeholder(v):
+            raise ValueError(
+                f"{info.field_name} must be supplied by the operator or deployment identity; "
+                "placeholder values are not valid for wire-visible HTTP headers"
+            )
         return v
 
     @field_validator("allowed_hosts")
@@ -132,18 +139,27 @@ class WebScrapeConfig(TransformDataConfig):
             "value_transform that prepends 'https://' before this transform."
         ),
     )
-    content_field: str
-    fingerprint_field: str
-    format: Literal["markdown", "text", "raw"] = "markdown"
+    content_field: str = Field(description="Output field that receives the fetched page content.")
+    fingerprint_field: str = Field(description="Output field that receives the page fingerprint.")
+    format: Literal["markdown", "text", "raw"] = Field(
+        default="markdown",
+        description="Content extraction format to emit: markdown, plain text, or raw HTML.",
+    )
     text_separator: str = Field(
         default=" ",
         min_length=1,
         max_length=16,
         description="Separator inserted between DOM text nodes when format is text.",
     )
-    fingerprint_mode: Literal["content", "full"] = "content"
-    strip_elements: list[str] = Field(default_factory=lambda: ["script", "style"])
-    http: WebScrapeHTTPConfig
+    fingerprint_mode: Literal["content", "full"] = Field(
+        default="content",
+        description="Whether fingerprints cover processed content only or the full fetch response context.",
+    )
+    strip_elements: list[str] = Field(
+        default_factory=lambda: ["script", "style"],
+        description="HTML element names to remove before extracting page text.",
+    )
+    http: WebScrapeHTTPConfig = Field(description="HTTP fetching policy, timeout, contact, and host allowlist settings.")
 
     @field_validator("url_field", "content_field", "fingerprint_field")
     @classmethod
@@ -152,11 +168,83 @@ class WebScrapeConfig(TransformDataConfig):
             raise ValueError(f"{info.field_name} must not be empty")
         return v
 
+    @property
+    def declared_input_fields(self) -> frozenset[str]:
+        return super().declared_input_fields | frozenset({self.url_field})
+
     @model_validator(mode="after")
     def _reject_field_collisions(self) -> "WebScrapeConfig":
         if self.content_field == self.fingerprint_field:
             raise ValueError(f"content_field and fingerprint_field must differ, both are '{self.content_field}'")
         return self
+
+    @model_validator(mode="after")
+    def _reject_option_key_names_in_schema_field_lists(self) -> "WebScrapeConfig":
+        """Catch the LLM-composer footgun of listing option-key names in schema column lists.
+
+        A bad config emitted by upstream composers has been observed listing the
+        literal strings ``"url_field"``, ``"content_field"``, and
+        ``"fingerprint_field"`` inside ``schema.guaranteed_fields``. Those are
+        *names of WebScrapeConfig options*, not column names — what the author
+        meant was to list the *values* of those options (i.e. the actual column
+        names the transform reads from or writes to). The same hallucination is
+        equally likely in ``schema.required_fields`` and ``schema.audit_fields``,
+        which are sibling ``tuple[str, ...] | None`` column-name lists on
+        ``SchemaConfig``, so this guard scans all three. At runtime the
+        SchemaConfigModeContract correctly rejects the offending names, but the
+        misconfiguration is detectable at plugin-validate time, so we surface it
+        here for early, actionable feedback to composer authors (human or LLM).
+
+        Degenerate case: an operator may legitimately configure a knob so that
+        its value equals its key name (e.g. ``content_field: "content_field"``),
+        meaning the column on the row is literally called ``content_field``. In
+        that case the schema list entry is correct — the row really does carry
+        a column of that name — so the guard skips entries where the configured
+        value matches the key.
+        """
+        option_key_to_value: dict[str, str] = {
+            "url_field": self.url_field,
+            "content_field": self.content_field,
+            "fingerprint_field": self.fingerprint_field,
+        }
+
+        list_name_to_entries: dict[str, tuple[str, ...] | None] = {
+            "guaranteed_fields": self.schema_config.guaranteed_fields,
+            "required_fields": self.schema_config.required_fields,
+            "audit_fields": self.schema_config.audit_fields,
+        }
+
+        # Collect offenders per list so the error message can tell the author
+        # which list each bad entry came from.
+        offenders_by_list: dict[str, list[str]] = {}
+        for list_name, entries in list_name_to_entries.items():
+            if entries is None:
+                continue
+            list_offenders = [entry for entry in entries if entry in option_key_to_value and option_key_to_value[entry] != entry]
+            if list_offenders:
+                offenders_by_list[list_name] = list_offenders
+
+        if not offenders_by_list:
+            return self
+
+        bullet_lines: list[str] = []
+        offender_summary_parts: list[str] = []
+        for list_name, list_offenders in offenders_by_list.items():
+            offender_summary_parts.append(f"{list_name}=[{', '.join(repr(entry) for entry in list_offenders)}]")
+            for entry in list_offenders:
+                bullet_lines.append(
+                    f"  - schema.{list_name}: '{entry}' is the name of the '{entry}' "
+                    f"option, not a column name; substitute the configured value "
+                    f"'{option_key_to_value[entry]}'."
+                )
+        offender_summary = "; ".join(offender_summary_parts)
+        message = (
+            f"schema field-name lists contain option-key names ({offender_summary}), "
+            "not column names; those strings are WebScrapeConfig option keys whose "
+            "values are the actual column names this transform reads from or writes "
+            "to. Replace each with the configured column name:\n" + "\n".join(bullet_lines)
+        )
+        raise ValueError(message)
 
 
 def _parse_allowed_ranges(entries: list[str]) -> tuple[IPv4Network | IPv6Network, ...]:
@@ -330,7 +418,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c63323732f35c0f4"
+    source_file_hash: str | None = "sha256:c5faf7a4a9af9a81"
     config_model = WebScrapeConfig
     passes_through_input = True
 
@@ -440,6 +528,28 @@ class WebScrapeTransform(BaseTransform):
             PluginAssistanceExample,
         )
 
+        if issue_code is None:
+            return PluginAssistance(
+                plugin_name="web_scrape",
+                issue_code=None,
+                summary="Fetch a URL over HTTP(S) with SSRF protection, audit recording, and content-fingerprinting for change detection. Output formats: raw HTML, text, markdown.",
+                composer_hints=(
+                    "web_scrape is a transform, not a source: it consumes URL rows from csv/json/text/blob via url_field and writes content_field.",
+                    "If you saw Unknown source plugin: web_scrape, use a URL row source first, then add web_scrape as a transform.",
+                    "URLs MUST include explicit scheme (http:// or https://). Bare hostnames are rejected by the SSRF guard at fetch time.",
+                    "schema is required; use schema: {mode: observed} unless you need fixed/flexible field contracts. For raw HTML, set format to raw, not html.",
+                    "web_scrape passes through upstream row fields that the input schema guarantees, and also guarantees content_field, fingerprint_field, fetch_status, fetch_url_final, and fetch_url_final_ip.",
+                    "Do not make downstream LLM templates require a URL field unless the upstream source schema or web_scrape schema guarantees that field. If the final fetched URL is acceptable, use fetch_url_final; if the original URL is required, preserve and guarantee that source field upstream.",
+                    "If validation says a downstream URL field is missing, do not patch web_scrape guaranteed_fields by guess; repair the producer schema, add an explicit mapper, or narrow the downstream template requirements.",
+                    "http.abuse_contact and http.scraping_reason are mandatory and recorded in the audit trail — operator must declare them, not the model.",
+                    "If the user-facing output should exclude raw scraped content, route the final path through field_mapper with select_only: true before the sink; a sink name or output name is not cleanup.",
+                    "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete when raw scraped-content cleanup is required; insert or restore the final field_mapper before the sink.",
+                    "If scraped public internet content flows into an LLM, surface prompt-injection shielding as an important recommendation. Use azure_prompt_shield or the deployment's equivalent; continuing without it is allowed.",
+                    "For prompt-injection shielding when scraped content flows into an LLM, recommendation is not permission to add a node; do not substitute azure_content_safety; do not insert it automatically unless requested or policy-required.",
+                    "If no prompt shield is authorized, surface a pipeline_decision warning on the LLM node using user_term prompt_injection_shield_recommendation.",
+                    "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
+                ),
+            )
         if issue_code != "web_scrape.content.compact_text":
             return None
         return PluginAssistance(
@@ -467,6 +577,27 @@ class WebScrapeTransform(BaseTransform):
                 ),
             ),
         )
+
+    @classmethod
+    def get_post_call_hints(
+        cls,
+        *,
+        tool_name: str,
+        config_snapshot: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        hints: list[str] = []
+        # format=text with whitespace separator → flag the compact_text issue.
+        if "format" not in config_snapshot or "text_separator" not in config_snapshot:
+            return ()
+        if config_snapshot["format"] != "text":
+            return ()
+        sep = config_snapshot["text_separator"]
+        if isinstance(sep, str) and "\n" not in sep:
+            hints.append(
+                "format: 'text' with a non-newline text_separator collapses page lines into one string. "
+                "Downstream line_explode cannot recover boundaries. Either set text_separator: '\\n' or switch format: 'markdown'."
+            )
+        return tuple(hints)
 
     def forward_invariant_probe_rows(self, probe: PipelineRow) -> list[PipelineRow]:
         """Inject a deterministic public-IP URL for invariant probing."""
@@ -557,14 +688,13 @@ class WebScrapeTransform(BaseTransform):
             WebScrapeError: For retryable failures (5xx, 429, network)
                 Engine RetryManager handles these with exponential backoff
         """
-        url = row[self._url_field]
-
         # Validate URL and pin resolved IP (SSRF prevention with DNS rebinding defense)
         try:
+            url = row[self._url_field]
             safe_request = validate_url_for_ssrf(url, allowed_ranges=self._allowed_ranges)
-        except (SSRFBlockedError, SSRFNetworkError, TypeError) as e:
-            # Security violations, DNS failures, and invalid url types (e.g. None)
-            # are non-retryable
+        except (KeyError, SSRFBlockedError, SSRFNetworkError, TypeError) as e:
+            # Missing row fields, security violations, DNS failures, and invalid
+            # URL value types are row-level validation failures, not retries.
             return TransformResult.error(
                 {
                     "reason": "validation_failed",

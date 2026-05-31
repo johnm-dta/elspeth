@@ -91,7 +91,7 @@ class TestLLMTransformTelemetryWiring:
                 "deployment_name": "gpt-4o",
                 "endpoint": "https://test.openai.azure.com",
                 "api_key": "test-key",
-                "template": "Analyze: {{ row.text }}",
+                "prompt_template": "Analyze: {{ row.text }}",
                 "schema": {"mode": "observed"},
                 "required_input_fields": [],
             }

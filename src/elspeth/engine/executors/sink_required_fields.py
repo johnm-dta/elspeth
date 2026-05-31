@@ -116,6 +116,7 @@ class SinkRequiredFieldsContract(DeclarationContract):
 
     name: ClassVar[str] = "sink_required_fields"
     payload_schema: ClassVar[type] = SinkRequiredFieldsPayload
+    violation_class: ClassVar[type[SinkRequiredFieldsViolation]] = SinkRequiredFieldsViolation
 
     def applies_to(self, plugin: Any) -> bool:
         return bool(sink_declared_required_fields(plugin))

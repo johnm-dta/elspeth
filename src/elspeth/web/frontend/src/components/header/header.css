@@ -1,0 +1,320 @@
+/* header.css — App header chrome and session switcher.
+   Primary: .app-root, .alert-banner*, .app-main, .app-header*, .user-menu*,
+   .header-session-switcher* + .header-session-switcher-rename-form.
+   Tenants (execution-domain rules, co-located here by historical source order;
+   rendered from RunsHistoryDrawer.tsx, mounted via InlineRunResults.tsx):
+     .runs-history-item-summary, .run-diagnostics*, .run-failure-detail*.
+   Cleanly extractable to execution.css as a follow-up — no specificity contests. */
+
+/* ---------------------------------------------------------------------------
+   App Root & Alert Banners
+   --------------------------------------------------------------------------- */
+.app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.alert-banner {
+  padding: 10px 14px;
+  background-color: var(--color-error-bg);
+  color: var(--color-error);
+  border-bottom: 1px solid var(--color-error-border);
+  font-size: var(--font-size-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.alert-banner-action {
+  background: none;
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--color-error);
+  font-size: var(--font-size-xs);
+  padding: var(--space-xs) var(--space-sm);
+  min-height: var(--size-control-compact);
+  margin-left: var(--space-md);
+  flex-shrink: 0;
+}
+
+.alert-banner--info {
+  background-color: var(--color-info-bg);
+  color: var(--color-info);
+  border-bottom-color: var(--color-info-border);
+}
+
+.alert-banner--info .alert-banner-action {
+  border-color: var(--color-info-border);
+  color: var(--color-info);
+}
+
+.app-main {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 40px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-nav);
+  flex-shrink: 0;
+}
+
+.app-header-left,
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.app-header-brand {
+  /* Use the mono face with wider tracking for the wordmark. The body of the
+     app stays Inter (DTA Foundation typeface) — this is a 1-element exception
+     that gives the brand mark a distinct register without breaking AGDS
+     register elsewhere. JetBrains Mono reads as "audit/forensic" which
+     matches the product positioning. */
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: var(--font-size-sm);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.app-header-separator {
+  width: 1px;
+  height: 20px;
+  background-color: var(--color-border);
+}
+
+.header-session-switcher {
+  position: relative;
+}
+
+/* .header-session-switcher-trigger composes .btn-compact in the TSX — the
+   visual base (background, border, padding, font, min-height) all come from
+   the design system, so this selector only carries header-specific concerns
+   if any are added later. No declarations here is correct. */
+
+.header-session-switcher-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--color-surface-nav-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  min-width: 240px;
+  z-index: 100;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.header-session-switcher-item {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  min-height: var(--size-control-compact);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.header-session-switcher-item:hover,
+.header-session-switcher-item:focus,
+.header-session-switcher-action:hover,
+.header-session-switcher-action:focus {
+  background: var(--color-bg-hover, rgba(143, 200, 200, 0.08));
+}
+
+.header-session-switcher-item[aria-current="page"] {
+  font-weight: 600;
+}
+
+.header-session-switcher-item-new {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.header-session-switcher-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto auto;
+  align-items: center;
+}
+
+/* Menu-item action (Rename / Archive) inside the dropdown. NOT a chrome button
+   — link-like styling, transparent background, no border. min-height meets
+   WCAG 2.5.8 AA target-size via the compact control token. */
+.header-session-switcher-action {
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-xs);
+  padding: var(--space-xs) var(--space-sm);
+  min-height: var(--size-control-compact);
+  cursor: pointer;
+}
+
+.user-menu {
+  position: relative;
+}
+
+.user-menu-trigger {
+  min-height: var(--size-control-compact);
+  padding: var(--space-xs) var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.user-menu-trigger:hover,
+.user-menu-trigger:focus-visible {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-hover);
+}
+
+.user-menu-trigger:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.user-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  min-width: 200px;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.user-menu-item {
+  margin: 0;
+}
+
+.user-menu-action {
+  display: block;
+  width: 100%;
+  min-height: var(--size-control);
+  padding: var(--space-sm) var(--space-md);
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.user-menu-action:hover,
+.user-menu-action:focus-visible {
+  background: var(--color-surface-hover);
+}
+
+.user-menu-action:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+/* Destructive variant — applied to actions like Sign out that end a session
+   or otherwise have a meaningful "you'll lose state" consequence. The error
+   colour keeps the action visually subordinate to neutral items above it
+   while signalling the consequence; full --color-error background would
+   over-emphasise it as a primary CTA, which it isn't. */
+.user-menu-action--danger {
+  color: var(--color-error);
+}
+
+.user-menu-action--danger:hover,
+.user-menu-action--danger:focus-visible {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.header-session-switcher-rename-form {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto auto;
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+.runs-history-item-summary {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.run-diagnostics-panel {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+  font-size: var(--font-size-xs);
+}
+
+.run-diagnostics-panel-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  color: var(--color-text-muted);
+}
+
+.run-diagnostics-actions,
+.run-diagnostics-operations {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.run-failure-detail {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-error-border);
+  border-left: 3px solid var(--color-error);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+.run-failure-detail pre {
+  margin: 4px 0 0;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-2xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.run-diagnostics-tokens {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.run-diagnostics-working-view,
+.run-diagnostics-explanation {
+  padding: 7px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}

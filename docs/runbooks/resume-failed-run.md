@@ -55,16 +55,24 @@ sqlite3 runs/audit.db "
 
 If no checkpoints exist, the run cannot be resumed - you must start fresh.
 
-### Step 3: Resume the Run
+### Step 3: Check Resume Compatibility
 
 ```bash
 elspeth resume <RUN_ID>
 ```
 
+Without `--execute`, the resume command checks whether the run can be resumed,
+reports the resume point, and validates checkpoint compatibility. To actually
+continue processing:
+
+```bash
+elspeth resume <RUN_ID> --execute
+```
+
 The resume command:
-1. Loads the original run's configuration from the audit trail
+1. Loads the settings needed to validate checkpoint compatibility
 2. Finds the last valid checkpoint
-3. Continues processing from that point
+3. Continues processing from that point when `--execute` is present
 4. Records all events with the same run ID
 
 ### Step 4: Verify Completion
@@ -75,15 +83,17 @@ After the run completes:
 # Check run status
 sqlite3 runs/audit.db "SELECT status, completed_at FROM runs WHERE run_id = '<RUN_ID>';"
 
-# Verify row counts
+# Verify row and terminal-token counts
 sqlite3 runs/audit.db "
   SELECT
     (SELECT COUNT(*) FROM rows WHERE run_id = '<RUN_ID>') as source_rows,
-    (SELECT COUNT(*) FROM token_outcomes WHERE run_id = '<RUN_ID>' AND is_terminal = 1) as terminal_tokens;
+    (SELECT COUNT(*) FROM token_outcomes WHERE run_id = '<RUN_ID>' AND completed = 1) as terminal_tokens;
 "
 ```
 
-Terminal rows should equal source rows (all rows reached a terminal state).
+In linear pipelines the terminal-token count usually matches source rows. In
+fork, expand, batch, or coalesce pipelines, use `elspeth explain` for a sample
+row and confirm every live token reached an expected terminal path.
 
 ---
 
@@ -97,8 +107,8 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/johnm-dta/elspeth:v0.1.0 \
-  resume <RUN_ID>
+  ghcr.io/johnm-dta/elspeth:latest \
+  resume <RUN_ID> --execute
 ```
 
 **Important:** Mount the same `state/` directory that contains the original run's checkpoints.
@@ -111,7 +121,13 @@ docker run --rm \
 
 All checkpoints created before 2026-01-24 are invalid due to node ID format changes introduced in the routing refactor. Attempting to resume from a pre-2026-01-24 checkpoint will fail. Delete old checkpoint files and re-run affected pipelines.
 
-See [RC-2 Checkpoint Fix](../release/rc-2-checkpoint-fix.md) for full details on the checkpoint format migration.
+The useful migration rule from the old RC-2 checkpoint note is:
+
+1. Checkpoints from the old `token_ids`-only format cannot be restored.
+2. Delete old checkpoint files for the affected run.
+3. Re-run the pipeline so new checkpoints store full token metadata.
+
+For full historical context see the [RC-2 Checkpoint Fix Post-Mortem](../../docs-archive/2026-05-19-docs-cleanout/docs/release/rc-2-checkpoint-fix-postmortem.md) in the 2026-05-19 docs archive.
 
 ### "Run not found"
 
@@ -132,13 +148,16 @@ elspeth run --settings pipeline.yaml --execute
 
 ### "Configuration mismatch"
 
-The resume command uses the configuration stored in the audit trail, not the current config file. If you need different settings, start a new run.
+The resume command validates the checkpoint against the settings it loads for
+the resume attempt. If you need different settings, start a new run instead of
+resuming the old one.
 
 ### "Duplicate row_id"
 
 The checkpoint was corrupted or source data changed. Options:
-1. Start a fresh run with `--force-new` (if available)
-2. Manually mark the run as failed and start fresh
+1. Start a fresh run.
+2. Preserve the failed run's audit database and checkpoint files if they are
+   needed for incident evidence.
 
 ---
 

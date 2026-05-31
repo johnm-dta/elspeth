@@ -289,8 +289,10 @@ class TestRebindCheckpointBatchIds:
             elapsed_age_seconds=0.0,
             count_fire_offset=None,
             condition_fire_offset=None,
+            accepted_count_total=0,
+            completed_flush_count=0,
         )
-        state = AggregationCheckpointState(version="4.0", nodes={"agg-0": node})
+        state = AggregationCheckpointState(version="5.0", nodes={"agg-0": node})
 
         rebound = rebind_checkpoint_batch_ids(state, {"old-batch": "new-batch"})
 
@@ -309,11 +311,13 @@ class TestRebindCheckpointBatchIds:
         node = AggregationNodeCheckpoint(
             tokens=(),
             batch_id="draft-batch",
-            elapsed_age_seconds=1.5,
+            elapsed_age_seconds=0.0,
             count_fire_offset=None,
             condition_fire_offset=None,
+            accepted_count_total=0,
+            completed_flush_count=0,
         )
-        state = AggregationCheckpointState(version="4.0", nodes={"agg-0": node})
+        state = AggregationCheckpointState(version="5.0", nodes={"agg-0": node})
 
         rebound = rebind_checkpoint_batch_ids(state, {"other-batch": "retry-batch"})
 
@@ -333,8 +337,10 @@ class TestRebindCheckpointBatchIds:
             elapsed_age_seconds=0.0,
             count_fire_offset=None,
             condition_fire_offset=None,
+            accepted_count_total=0,
+            completed_flush_count=0,
         )
-        state = AggregationCheckpointState(version="4.0", nodes={"agg-0": node})
+        state = AggregationCheckpointState(version="5.0", nodes={"agg-0": node})
 
         rebound = rebind_checkpoint_batch_ids(state, {})
 
@@ -354,15 +360,19 @@ class TestRebindCheckpointBatchIds:
             elapsed_age_seconds=0.0,
             count_fire_offset=None,
             condition_fire_offset=None,
+            accepted_count_total=0,
+            completed_flush_count=0,
         )
         node_b = AggregationNodeCheckpoint(
             tokens=(),
             batch_id="batch-b",
-            elapsed_age_seconds=2.0,
+            elapsed_age_seconds=0.0,
             count_fire_offset=None,
             condition_fire_offset=None,
+            accepted_count_total=0,
+            completed_flush_count=0,
         )
-        state = AggregationCheckpointState(version="4.0", nodes={"agg-0": node_a, "agg-1": node_b})
+        state = AggregationCheckpointState(version="5.0", nodes={"agg-0": node_a, "agg-1": node_b})
 
         rebound = rebind_checkpoint_batch_ids(state, {"batch-a": "retry-a", "batch-b": "retry-b"})
 

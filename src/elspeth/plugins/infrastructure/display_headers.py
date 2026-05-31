@@ -105,6 +105,20 @@ def get_effective_display_headers(sink: DisplayHeaderHost) -> dict[str, str] | N
     return None
 
 
+def display_name_for(display_map: dict[str, str] | None, field: str) -> str:
+    """Return the configured display name for a field, preserving identity on miss.
+
+    ORIGINAL mode allows transform-added fields that have no original source
+    header, so identity-on-miss is the intended behavior there. CUSTOM mode
+    must validate full coverage before using this helper.
+    """
+    if display_map is None:
+        return field
+    if field in display_map:
+        return display_map[field]
+    return field
+
+
 def resolve_contract_from_context_if_needed(sink: DisplayHeaderHost, ctx: SinkContext) -> None:
     """Lazily resolve output contract from context for headers: original mode.
 

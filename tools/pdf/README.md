@@ -5,21 +5,18 @@ Builds the ELSPETH Architecture Pack as a single professional PDF.
 ## Pipeline
 
 ```text
-docs/arch-pack-YYYY-MM-DD-HHMM/    →  build-arch-pack.sh
-                                       │
-   markdown chapters (4 tracks)    →   els_concat_chapters    →  COMBINED
-                                       │
-                                       preprocess.py          →  PROCESSED
-                                       (mermaid render, hrule strip,
-                                        intra-pack link rewrite)
-                                       │
-                                       pandoc + fix-tables.lua →  *.typ
-                                       (template.typ, metadata.yaml)
-                                       │
-                                       postprocess.py         →  *.typ
-                                       (per-cell alignment strip)
-                                       │
-                                       typst compile          →  PDF
+docs/arch-pack-* or archived docs-archive/*/docs/arch-pack-*
+                                      -> build-arch-pack.sh
+                                      |
+markdown chapters (4 tracks)      -> els_concat_chapters -> COMBINED
+                                      |
+                                      preprocess.py       -> PROCESSED
+                                      |
+                                      pandoc + filters    -> *.typ
+                                      |
+                                      postprocess.py      -> *.typ
+                                      |
+                                      typst compile       -> PDF
 ```
 
 ## Requirements
@@ -43,14 +40,14 @@ TeX Gyre Heros, Liberation Mono); no system font installation is needed.
 
 Outputs:
 
-- Intermediate: `tools/pdf/elspeth-arch-pack.typ`  (gitignored)
-- Final PDF:    `docs/assets/elspeth-arch-pack.pdf`
+- Intermediate: `tools/pdf/elspeth-arch-pack.typ` (gitignored)
+- Final PDF: `tools/pdf/out/elspeth-arch-pack.pdf` (gitignored)
 
 ## Environment overrides
 
 | Variable                  | Effect |
 |---------------------------|--------|
-| `ELSPETH_ARCH_PACK_DIR`   | Use a specific arch-pack source directory instead of the latest `docs/arch-pack-*`. |
+| `ELSPETH_ARCH_PACK_DIR`   | Use a specific arch-pack source directory instead of discovering the latest active or archived `arch-pack-*`. |
 | `FORCE_DATE`              | Override the title-page date (defaults to today). |
 
 ## Files

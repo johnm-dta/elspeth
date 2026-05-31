@@ -395,9 +395,9 @@ def _is_fresh_judge_record_after_binding_drift(entry: AllowlistEntry, baseline_e
     return all(_judge_binding_identity(baseline_entry) != head_binding for baseline_entry in judged_baseline_entries)
 
 
-def _judge_binding_identity(entry: AllowlistEntry) -> tuple[str, str | None, str | None]:
+def _judge_binding_identity(entry: AllowlistEntry) -> tuple[str, str | None, str | None, str | None]:
     """Return source-binding fields that a fresh ``justify`` run may legitimately change."""
-    return (entry.key, entry.file_fingerprint, entry.ast_path)
+    return (entry.key, entry.file_fingerprint, entry.scope_fingerprint, entry.ast_path)
 
 
 def _judge_metadata_payload(entry: AllowlistEntry) -> tuple[object, ...] | None:
@@ -415,11 +415,14 @@ def _judge_metadata_payload(entry: AllowlistEntry) -> tuple[object, ...] | None:
         and entry.judge_policy_hash is None
         and entry.judge_rationale is None
         and entry.judge_metadata_signature is None
+        and entry.scope_fingerprint is None
     ):
         return None
     return (
         entry.key,
         entry.file_fingerprint,
+        entry.scope_fingerprint,
+        entry.judge_signature_version,
         entry.ast_path,
         entry.judge_verdict,
         entry.judge_model_verdict,

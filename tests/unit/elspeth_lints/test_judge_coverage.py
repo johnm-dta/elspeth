@@ -51,6 +51,7 @@ from elspeth_lints.core.judge_coverage import (
     JudgeCoverageReport,
     _discriminator,
     _git_show,
+    _judge_binding_identity,
     _ls_tree_yaml_files,
     _missing_judge_fields,
     check_judge_coverage,
@@ -249,6 +250,35 @@ def test_missing_judge_fields_empty_for_complete_entry() -> None:
         judge_metadata_signature=_FAKE_JUDGE_METADATA_SIGNATURE,
     )
     assert _missing_judge_fields(entry) == ()
+
+
+def test_judge_binding_identity_includes_scope_fingerprint_for_v2_entry() -> None:
+    """A v2 entry's binding identity carries scope_fingerprint (v2 binds via scope)."""
+    from datetime import UTC, datetime
+
+    from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict
+
+    scope_fp = "a" * 64
+    entry = AllowlistEntry(
+        key="web/x.py:R1:fn:fp=aa",
+        owner="alice",
+        reason="permitted boundary",
+        safety="contained",
+        expires=None,
+        file_fingerprint=None,
+        scope_fingerprint=scope_fp,
+        judge_signature_version=2,
+        ast_path="Module.body[0]",
+        pattern=None,
+        source_file="test.yaml",
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime(2026, 5, 23, tzinfo=UTC),
+        judge_model=DEFAULT_JUDGE_MODEL,
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        judge_rationale="rationale",
+        judge_metadata_signature="hmac-sha256:v2:" + "0" * 64,
+    )
+    assert scope_fp in _judge_binding_identity(entry)
 
 
 # =========================================================================

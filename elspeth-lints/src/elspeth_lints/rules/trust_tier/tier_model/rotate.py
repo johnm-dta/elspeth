@@ -71,7 +71,11 @@ from typing import Final, cast
 import yaml
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
-from elspeth_lints.core.allowlist import AllowlistEntry, PerFileRule
+from elspeth_lints.core.allowlist import (
+    JUDGE_METADATA_SIGNATURE_PREFIXES,
+    AllowlistEntry,
+    PerFileRule,
+)
 from elspeth_lints.core.atomic_io import atomic_update_text
 
 from .rule import (
@@ -85,7 +89,10 @@ from .rule import (
 
 _FP_TAG: Final = ":fp="
 DEFAULT_ROTATION_LOG_PATH: Final = Path(".elspeth/rotations.log")
-_JUDGE_METADATA_SIGNATURE_PREFIX: Final = "hmac-sha256:v1:"
+# Non-binding judge-cluster fields that every complete (re)judged entry must
+# carry regardless of signature version. The version-dependent binding field
+# (v1: file_fingerprint, v2: scope_fingerprint) is checked separately in
+# _has_complete_rejudge_metadata.
 _REJUDGE_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "judge_verdict",
@@ -93,7 +100,6 @@ _REJUDGE_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
         "judge_model",
         "judge_policy_hash",
         "judge_rationale",
-        "file_fingerprint",
         "ast_path",
         "judge_metadata_signature",
     }
@@ -133,8 +139,9 @@ def _refuse_rotation_of_judge_gated_entry(entry: AllowlistEntry) -> None:
 
     Rotation rebinds an entry's canonical key (and its embedded
     fingerprint) to a new AST signature. For a judge-gated entry the
-    persisted ``file_fingerprint`` + ``ast_path`` bind the quartet to
-    the exact bytes and AST node the judge inspected; the rotated key
+    persisted binding fields (v1: ``file_fingerprint``; v2:
+    ``scope_fingerprint``) + ``ast_path`` bind the quartet to the exact
+    bytes/scope and AST node the judge inspected; the rotated key
     would point at different code while the binding fields still
     described the original code. Auto-rotating the binding fields
     requires re-running the judge against the new code — which defeats
@@ -154,7 +161,7 @@ def _refuse_rotation_of_judge_gated_entry(entry: AllowlistEntry) -> None:
     raise RuntimeError(
         f"refusing to rotate judge-gated allowlist entry in {entry.source_file}: "
         f"{entry.key!r} carries judge_verdict={entry.judge_verdict.value!r}. "
-        "Rotation would silently rebind the persisted file_fingerprint + ast_path "
+        "Rotation would silently rebind the persisted binding fields + ast_path "
         "to different code than the judge actually inspected. Re-run justify against "
         "the rotated location (deleting this entry first) so the new quartet records "
         "what the judge says about the new code."
@@ -808,6 +815,17 @@ def _allow_hit_key_records_by_prefix(text: str, *, source_label: str) -> dict[st
     return by_prefix
 
 
+def _binding_field_for(raw_entry: dict[object, object]) -> str:
+    """Return the version-appropriate binding-field NAME for a raw allow_hit dict.
+
+    v2 entries bind via scope_fingerprint; v1 (or version-absent legacy) via
+    file_fingerprint. Returns the key name only — the caller decides .get()
+    (completeness check) vs [] (post-completeness required read).
+    """
+    version = raw_entry.get("judge_signature_version", 1)
+    return "scope_fingerprint" if version == 2 else "file_fingerprint"
+
+
 def _allow_hit_key_record(*, key: str, raw_entry: dict[object, object]) -> _AllowHitKeyRecord:
     if not _has_complete_rejudge_metadata(raw_entry):
         return _AllowHitKeyRecord(
@@ -815,9 +833,14 @@ def _allow_hit_key_record(*, key: str, raw_entry: dict[object, object]) -> _Allo
             source_binding=None,
             judge_metadata_signature=None,
         )
+    # Runs only after _has_complete_rejudge_metadata returned True, so the
+    # version-appropriate binding key is present. Bracket-index (not .get): a
+    # missing required-given-version key here is corruption, not an expected
+    # "incomplete" signal — crash (correct Tier-1 response).
+    binding_field = _binding_field_for(raw_entry)
     return _AllowHitKeyRecord(
         key=key,
-        source_binding=(key, raw_entry["file_fingerprint"], raw_entry["ast_path"]),
+        source_binding=(key, raw_entry[binding_field], raw_entry["ast_path"]),
         judge_metadata_signature=raw_entry["judge_metadata_signature"],
     )
 
@@ -827,13 +850,22 @@ def _has_complete_rejudge_metadata(raw_entry: dict[object, object]) -> bool:
         value = raw_entry.get(field)
         if value is None or value == "":
             return False
+    # The binding field is version-dependent: v1 binds via file_fingerprint,
+    # v2 via scope_fingerprint. Absent version key => v1 (rotate.py's
+    # established completeness-check idiom for deliberately-possibly-incomplete
+    # raw YAML dicts — a missing field is an expected "incomplete" signal).
+    binding_field = _binding_field_for(raw_entry)
+    binding_value = raw_entry.get(binding_field)
+    if binding_value is None or binding_value == "":
+        return False
     signature = raw_entry.get("judge_metadata_signature")
     if not isinstance(signature, str):
         return False
-    digest = signature.removeprefix(_JUDGE_METADATA_SIGNATURE_PREFIX)
-    return (
-        signature.startswith(_JUDGE_METADATA_SIGNATURE_PREFIX) and len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
-    )
+    matched_prefix = next((p for p in JUDGE_METADATA_SIGNATURE_PREFIXES if signature.startswith(p)), None)
+    if matched_prefix is None:
+        return False
+    digest = signature.removeprefix(matched_prefix)
+    return len(digest) == 64 and all(char in "0123456789abcdef" for char in digest)
 
 
 def _is_rejudged_key_change(old_record: _AllowHitKeyRecord, new_record: _AllowHitKeyRecord) -> bool:

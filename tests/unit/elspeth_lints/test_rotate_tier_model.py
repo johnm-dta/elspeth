@@ -20,6 +20,8 @@ from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.rules.trust_tier.tier_model.rotate import (
     AmbiguousGroup,
     Rotation,
+    _allow_hit_key_record,
+    _has_complete_rejudge_metadata,
     apply_plan,
     check_rotation_audit_coverage,
     fingerprint_of,
@@ -108,6 +110,52 @@ def test_identity_prefix_raises_without_fp_marker() -> None:
 def test_fingerprint_of_raises_without_fp_marker() -> None:
     with pytest.raises(ValueError, match=":fp="):
         fingerprint_of("not-a-canonical-key")
+
+
+_V2_KEY = "web/x.py:R1:fn:fp=" + "a" * 64
+_V2_RAW_ENTRY = {
+    "key": _V2_KEY,
+    "judge_verdict": "accepted",
+    "judge_recorded_at": "2026-05-23T00:00:00+00:00",
+    "judge_model": DEFAULT_JUDGE_MODEL,
+    "judge_policy_hash": JUDGE_POLICY_HASH,
+    "judge_rationale": "rationale",
+    "ast_path": "Module.body[0]",
+    "scope_fingerprint": "a" * 64,
+    "judge_signature_version": 2,
+    "judge_metadata_signature": "hmac-sha256:v2:" + "0" * 64,
+}
+
+_V1_KEY = "web/x.py:R1:fn:fp=" + "b" * 64
+_V1_RAW_ENTRY = {
+    "key": _V1_KEY,
+    "judge_verdict": "accepted",
+    "judge_recorded_at": "2026-05-23T00:00:00+00:00",
+    "judge_model": DEFAULT_JUDGE_MODEL,
+    "judge_policy_hash": JUDGE_POLICY_HASH,
+    "judge_rationale": "rationale",
+    "ast_path": "Module.body[0]",
+    "file_fingerprint": "b" * 64,
+    "judge_metadata_signature": "hmac-sha256:v1:" + "1" * 64,
+}
+
+
+def test_v2_raw_entry_is_complete_and_binds_via_scope_fingerprint() -> None:
+    """A v2 raw entry (scope_fingerprint, no file_fingerprint) reads COMPLETE and
+    binds via scope_fingerprint."""
+    assert _has_complete_rejudge_metadata(_V2_RAW_ENTRY) is True
+    record = _allow_hit_key_record(key=_V2_KEY, raw_entry=_V2_RAW_ENTRY)
+    assert record.source_binding == (_V2_KEY, "a" * 64, "Module.body[0]")
+    assert record.judge_metadata_signature == "hmac-sha256:v2:" + "0" * 64
+
+
+def test_v1_raw_entry_still_complete_and_binds_via_file_fingerprint() -> None:
+    """A v1 raw entry (file_fingerprint, no version key) stays COMPLETE and binds
+    via file_fingerprint."""
+    assert _has_complete_rejudge_metadata(_V1_RAW_ENTRY) is True
+    record = _allow_hit_key_record(key=_V1_KEY, raw_entry=_V1_RAW_ENTRY)
+    assert record.source_binding == (_V1_KEY, "b" * 64, "Module.body[0]")
+    assert record.judge_metadata_signature == "hmac-sha256:v1:" + "1" * 64
 
 
 # ---------- plan_rotations classifications ----------

@@ -25,7 +25,7 @@ _JUDGE_METADATA_SIGNATURE_VERIFY_REQUIRED = "required"
 _JUDGE_METADATA_SIGNATURE_VERIFY_SHAPE_ONLY_WHEN_KEY_MISSING = "shape-only-when-key-missing"
 _JUDGE_METADATA_SIGNATURE_PREFIX_V1 = "hmac-sha256:v1:"
 _JUDGE_METADATA_SIGNATURE_PREFIX_V2 = "hmac-sha256:v2:"
-_JUDGE_METADATA_SIGNATURE_PREFIXES = (_JUDGE_METADATA_SIGNATURE_PREFIX_V1, _JUDGE_METADATA_SIGNATURE_PREFIX_V2)
+JUDGE_METADATA_SIGNATURE_PREFIXES = (_JUDGE_METADATA_SIGNATURE_PREFIX_V1, _JUDGE_METADATA_SIGNATURE_PREFIX_V2)
 _MIN_JUDGE_METADATA_HMAC_KEY_BYTES = 32
 _MAX_ALLOWLIST_YAML_BYTES = 5 * 1024 * 1024
 _MIN_AUDIT_ANCHOR_ALNUM_CHARS = 2
@@ -729,11 +729,11 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
 
 
 def _validate_judge_metadata_signature_shape(signature: str, *, context: str) -> None:
-    if not signature.startswith(_JUDGE_METADATA_SIGNATURE_PREFIXES):
+    if not signature.startswith(JUDGE_METADATA_SIGNATURE_PREFIXES):
         raise ValueError(
-            f"{context}: judge_metadata_signature must start with one of {_JUDGE_METADATA_SIGNATURE_PREFIXES}; got {signature!r}"
+            f"{context}: judge_metadata_signature must start with one of {JUDGE_METADATA_SIGNATURE_PREFIXES}; got {signature!r}"
         )
-    prefix = next(p for p in _JUDGE_METADATA_SIGNATURE_PREFIXES if signature.startswith(p))
+    prefix = next(p for p in JUDGE_METADATA_SIGNATURE_PREFIXES if signature.startswith(p))
     digest = signature.removeprefix(prefix)
     if len(digest) != 64:
         raise ValueError(f"{context}: judge_metadata_signature digest must be 64 lowercase hex characters")

@@ -72,7 +72,7 @@ orientation, not a substitute (verdict enums and flags evolve).
 | `justify` | Propose a new entry; the judge (Opus) returns `ACCEPTED`/`BLOCKED`; signs accepted entries. | Yes — new entry |
 | `audit-verdict` | Human post-review of a judge-**ACCEPTED** entry — confirm or reverse the judge. | Yes — review block |
 | `reaudit` | Re-run the judge across existing entries to detect decay. **Read-only on YAML**; emits a triage report. | No |
-| `migrate-judge-scope` | **Operator-only** (signs; needs the HMAC key). Re-signs currently-valid v1 (`file_fingerprint`) entries as v2 (`scope_fingerprint`) **without re-running the judge**, gated on integrity (existing v1 signature must verify) + relevance (key still matches a live finding). | Yes — re-signed entries |
+| `migrate-judge-scope` | **Operator-only** (signs; needs the HMAC key). Re-signs v1 (`file_fingerprint`) entries whose signature verifies and whose node still matches a live finding as v2 (`scope_fingerprint`) **without re-running the judge** — it deliberately skips the file_fingerprint byte-freshness gate, so byte-drifted-but-scope-stable entries are the target set, not "CI-green" ones. Gated on integrity (existing v1 signature must verify) + relevance (key still matches a live finding). | Yes — re-signed entries |
 | `check-judge-coverage` (C1) | CI gate: every new entry must carry signed judge metadata (pre-judge entries grandfathered, rotation-stable). | No |
 | `check-override-rate` (C3) | CI gate: rolling-30d operator-override rate must stay under `--max-rate` (workflow-pinned 0.10). | No |
 | `check-judge-quality` (VAL) | CI gate, trusted contexts only: judge accuracy on a labelled corpus ≥ 0.90 (regression tripwire, not a guarantee). | No |

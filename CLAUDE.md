@@ -207,7 +207,11 @@ env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli reau
 # with --render-incomplete <run_id>. When C3 override-rate fails, reaudit the
 # override-heavy directories before considering an ADR to change the threshold.
 
-# Migrate currently-valid v1 (file_fingerprint) entries to v2 (scope_fingerprint)
+# Migrate signature-valid v1 (file_fingerprint) entries to v2 (scope_fingerprint)
+# — "signature-valid" means the existing signature still verifies AND the node
+# still matches a live finding; this deliberately SKIPS the file_fingerprint
+# byte-freshness gate, so byte-drifted-but-scope-stable entries are exactly the
+# target set (not "CI-green" entries).
 # OPERATOR-ONLY (writes signed metadata; requires ELSPETH_JUDGE_METADATA_HMAC_KEY,
 # same custody constraint as justify — an agent may PROPOSE, only an operator-held
 # environment runs and signs). Re-signs WITHOUT re-running the LLM judge, gated on

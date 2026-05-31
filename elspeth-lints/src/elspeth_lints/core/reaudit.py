@@ -266,15 +266,44 @@ _DIVERGENCE_ORDER: dict[ReauditDivergence, int] = {
 class ReauditOutcome:
     """One entry's reaudit result.
 
-    ``fresh_verdict`` / ``fresh_recorded_at`` / ``fresh_model_id`` are ``None`` for
-    ``ENTRY_OBSOLETE`` (no judge call was made), ``FUTURE_DATED_ENTRY``
-    (the timestamp failed before the judge call), and for
-    ``JUDGE_CALL_FAILED`` (judge call was attempted but raised a
-    transport/contract error). ``fresh_rationale`` is ``None`` for
-    ``ENTRY_OBSOLETE`` but carries the captured exception classname +
-    message for ``JUDGE_CALL_FAILED`` so the failure diagnostic is
-    durable on the report. All other divergence values carry a fully
-    populated fresh-verdict triple.
+    ``fresh_verdict`` / ``fresh_recorded_at`` / ``fresh_model_id`` are
+    ``None`` for every divergence that aborts before a judge verdict
+    lands — i.e. no row in the triple was produced by a model. These are:
+
+    * ``ENTRY_OBSOLETE`` — no judge call was made (malformed key, source
+      file gone, or no live finding matches).
+    * ``FUTURE_DATED_ENTRY`` — the timestamp guard failed before the
+      judge call.
+    * ``SOURCE_EXCERPT_REJECTED`` — the path-containment gate rejected
+      the entry's file_path before the judge call.
+    * ``AMBIGUOUS_FINDING_MATCH`` — the scanner returned multiple
+      findings for the key, so no single finding could be judged.
+    * ``BINDING_DRIFT`` — the v2 match-time scope/ast binding check
+      failed, so the entry was recorded for re-justify without a judge
+      call.
+    * ``JUDGE_CALL_FAILED`` — the judge call was attempted but raised a
+      transport/contract error, so no verdict came back.
+
+    ``fresh_rationale`` is ``None`` only for ``ENTRY_OBSOLETE`` (there is
+    nothing to diagnose — the suppression is simply dead). The other
+    no-verdict divergences carry a diagnostic string in
+    ``fresh_rationale``: a clock-skew message for ``FUTURE_DATED_ENTRY``,
+    the path-rejection message for ``SOURCE_EXCERPT_REJECTED``, the
+    duplicate-match message for ``AMBIGUOUS_FINDING_MATCH``, the
+    binding-mismatch message for ``BINDING_DRIFT``, and the captured
+    exception classname + message for ``JUDGE_CALL_FAILED`` — so the
+    failure diagnostic is durable on the report.
+
+    The remaining divergences carry a fully populated fresh-verdict
+    triple because the judge *did* return a verdict. These are the
+    verdict-comparison outcomes — ``STILL_AGREES``,
+    ``WAS_ACCEPTED_NOW_BLOCKED``, ``OVERRIDE_NO_LONGER_NEEDED``,
+    ``OVERRIDE_STILL_NEEDED``, ``PRE_JUDGE_FRESH_ACCEPT``, and
+    ``PRE_JUDGE_FRESH_BLOCK`` — plus ``JUDGE_CLASSIFICATION_FAILED``,
+    where the model returned a verdict but the stored/fresh verdict
+    tuple could not be mapped by the divergence matrix (so
+    ``fresh_verdict`` holds the model's verdict and ``fresh_rationale``
+    holds the mapping-failure diagnostic).
 
     ``code_snapshot`` is the surrounding code the judge saw, recorded
     verbatim so the report is independently re-readable months later

@@ -730,8 +730,12 @@ def handler(payload):
         "--format",
         "json",
     ]
-    with _mock_judge_call(verdict="ACCEPTED", rationale="narrow trust-boundary false positive"):
+    with _mock_judge_call(verdict="ACCEPTED", rationale="narrow trust-boundary false positive") as client_class:
         exit_code = main(argv)
+        # Fail-fast: the binding-precondition check is hoisted ABOVE the
+        # judge call, so an unjustifiable finding never reaches the paid
+        # transport. The OpenAI client is never even constructed.
+        client_class.assert_not_called()
 
     assert exit_code == 2
     captured = capsys.readouterr()

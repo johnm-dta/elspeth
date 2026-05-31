@@ -1266,6 +1266,25 @@ def _run_justify(args: argparse.Namespace) -> int:
     finding = matching[0]
     finding_key = _finding_canonical_key(finding)
 
+    # Binding preconditions, hoisted BEFORE the paid judge call and the
+    # source-excerpt read. Both accessors depend only on ``finding`` (just
+    # bound above), not on the excerpt or the judge verdict, so we evaluate
+    # them here to fail fast: a finding that can't bind a v2 entry is
+    # unjustifiable regardless of what the judge would say.
+    try:
+        scope_fingerprint = _finding_scope_fingerprint(finding)
+        ast_path = _finding_ast_path(finding)
+    except ValueError as exc:
+        # Fail-closed BEFORE the paid judge call: a finding that can't bind
+        # a v2 entry (no scope_fingerprint — e.g. a trust_boundary
+        # ``protocols.Finding``, which its scanner does not stamp — or an
+        # ast_path-absent finding) is unjustifiable, so reject it before
+        # spending a judge call or reading the source excerpt. We do NOT
+        # fall back to a v1 whole-file binding, which would defeat the
+        # migration; v2 justify is tier-model-only today.
+        sys.stderr.write(f"Cannot justify finding: {exc}\n")
+        return 2
+
     # Cross-check the operator-asserted --rule against the rule_id the
     # scanner actually reported for the chosen symbol. The default
     # ``trust_tier.tier_model`` is a rule-PACKAGE selector (the same
@@ -1376,33 +1395,21 @@ def _run_justify(args: argparse.Namespace) -> int:
 
     # C8-3 binding (v2 scheme): bind the persisted entry to the
     # enclosing-scope AST fingerprint the judge inspected, not the whole
-    # file. ``scope_fingerprint`` is stamped on the finding by the
-    # tier-model scanner; it survives edits elsewhere in the same file
-    # that the v1 whole-file ``file_fingerprint`` did not (an unrelated
-    # edit to a neighbouring function invalidated a v1 binding and
-    # crashed the load — see the v2 migration). The single read-and-hash
-    # ``extract_safe_excerpt`` already performed remains the source of
-    # truth for the per-file scrubber salt baked into
+    # file. ``scope_fingerprint`` and ``ast_path`` were computed up-front
+    # (the fail-closed precondition block above the judge call) because
+    # they depend only on ``finding``. They survive edits elsewhere in the
+    # same file that the v1 whole-file ``file_fingerprint`` did not (an
+    # unrelated edit to a neighbouring function invalidated a v1 binding
+    # and crashed the load — see the v2 migration). The single
+    # read-and-hash ``extract_safe_excerpt`` performed remains the source
+    # of truth for the per-file scrubber salt baked into
     # ``RedactionRecord.redacted_hash``; that salt is independent of the
-    # binding scheme and is unchanged here. The persisted entry stays
-    # cryptographically bound to the scope + AST node the judge
-    # inspected; the loader/matcher pair (allowlist.load_allowlist and
+    # binding scheme. The persisted entry stays cryptographically bound to
+    # the scope + AST node the judge inspected; the loader/matcher pair
+    # (allowlist.load_allowlist and
     # allowlist.verify_entry_binding_against_finding) reads the
     # scope_fingerprint back and asserts the binding still holds at match
-    # time, closing the entry-transplant attack vector. v2 justify is
-    # tier-model-only today: ``_finding_scope_fingerprint`` raises
-    # fail-closed on a trust_boundary finding (whose scanner does not yet
-    # stamp the field).
-    try:
-        scope_fingerprint = _finding_scope_fingerprint(finding)
-    except ValueError as exc:
-        # Fail-closed: v2 justify is tier-model-only today. A
-        # trust_boundary finding lacks scope_fingerprint, so we cannot
-        # mint a v2 entry for it. Surface a clean diagnostic (no
-        # traceback) rather than crashing — and do NOT fall back to a v1
-        # whole-file binding, which would defeat the migration.
-        sys.stderr.write(f"Cannot justify finding: {exc}\n")
-        return 2
+    # time, closing the entry-transplant attack vector.
     target_yaml = _suggest_yaml_target(finding=finding, allowlist_dir=allowlist_dir)
 
     def build_signed_yaml_entry() -> str:
@@ -1418,7 +1425,7 @@ def _run_justify(args: argparse.Namespace) -> int:
             policy_hash=response.policy_hash,
             model_verdict=model_verdict,
             scope_fingerprint=scope_fingerprint,
-            ast_path=_finding_ast_path(finding),
+            ast_path=ast_path,
             excerpt_redactions=safe_excerpt.redactions,
         )
 

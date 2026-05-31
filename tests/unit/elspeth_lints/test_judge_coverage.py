@@ -281,6 +281,70 @@ def test_judge_binding_identity_includes_scope_fingerprint_for_v2_entry() -> Non
     assert scope_fp in _judge_binding_identity(entry)
 
 
+def _v2_entry(*, judge_transport: str | None = None):
+    """Construct a judged v2 AllowlistEntry, mirroring the binding-identity test above."""
+    from datetime import UTC, datetime
+
+    from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict
+
+    return AllowlistEntry(
+        key="web/x.py:R1:fn:fp=aa",
+        owner="alice",
+        reason="permitted boundary",
+        safety="contained",
+        expires=None,
+        file_fingerprint=None,
+        scope_fingerprint="a" * 64,
+        judge_signature_version=2,
+        ast_path="Module.body[0]",
+        pattern=None,
+        source_file="test.yaml",
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime(2026, 5, 23, tzinfo=UTC),
+        judge_model=DEFAULT_JUDGE_MODEL,
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        judge_rationale="rationale",
+        judge_transport=judge_transport,
+        judge_metadata_signature="hmac-sha256:v2:" + "0" * 64,
+    )
+
+
+def test_judge_metadata_payload_includes_transport() -> None:
+    """``judge_transport`` (how the verdict was produced) is authenticity-bearing metadata.
+
+    It must appear in the coverage/rotation diff identity so a re-justify under a
+    different transport surfaces as a metadata change rather than silently passing.
+    """
+    from elspeth_lints.core.judge_coverage import _judge_metadata_payload
+
+    entry = _v2_entry(judge_transport="claude_agent_sdk")
+    payload = _judge_metadata_payload(entry)
+    assert payload is not None
+    assert "claude_agent_sdk" in payload
+
+
+def test_judge_transport_is_metadata_not_binding() -> None:
+    """``judge_transport`` lives in the metadata cluster, not the source-binding cluster.
+
+    Two entries differing ONLY in ``judge_transport`` must share an identical
+    ``_judge_binding_identity`` (source binding unchanged — a fresh justify may
+    legitimately change transport without that being a binding-diff) while their
+    ``_judge_metadata_payload`` differs (the change is an authenticity-bearing
+    metadata-diff the coverage/rotation gate protects).
+    """
+    from elspeth_lints.core.judge_coverage import _judge_metadata_payload
+
+    openrouter = _v2_entry(judge_transport="openrouter")
+    agent_sdk = _v2_entry(judge_transport="claude_agent_sdk")
+
+    # Source binding is unchanged by a transport difference.
+    assert _judge_binding_identity(openrouter) == _judge_binding_identity(agent_sdk)
+    assert "openrouter" not in _judge_binding_identity(openrouter)
+
+    # Metadata identity reflects the transport difference.
+    assert _judge_metadata_payload(openrouter) != _judge_metadata_payload(agent_sdk)
+
+
 # =========================================================================
 # End-to-end: git diff over a real fixture repo
 # =========================================================================

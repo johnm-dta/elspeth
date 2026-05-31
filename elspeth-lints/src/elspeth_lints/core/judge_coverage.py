@@ -428,6 +428,7 @@ def _judge_metadata_payload(entry: AllowlistEntry) -> tuple[object, ...] | None:
         entry.judge_model_verdict,
         entry.judge_recorded_at,
         entry.judge_model,
+        entry.judge_transport,
         entry.judge_policy_hash,
         entry.judge_confidence,
         entry.judge_rationale,

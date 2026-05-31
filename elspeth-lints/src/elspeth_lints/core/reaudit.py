@@ -53,7 +53,13 @@ from elspeth_lints.core.allowlist import (
     load_allowlist,
     verify_entry_binding_against_finding,
 )
-from elspeth_lints.core.judge import JudgeContractError, JudgeRequest, JudgeTransportError, call_judge
+from elspeth_lints.core.judge import (
+    TRANSPORT_OPENROUTER,
+    JudgeContractError,
+    JudgeRequest,
+    JudgeTransportError,
+    call_judge,
+)
 
 if TYPE_CHECKING:
     # ``RedactionRecord`` is the audit primitive emitted by the
@@ -665,6 +671,7 @@ def reaudit_entries(
     pre_classified_outcomes: Sequence[ReauditOutcome] = (),
     reference_time: datetime | None = None,
     progress_callback: Callable[[ReauditProgress], None] | None = None,
+    transport: str = TRANSPORT_OPENROUTER,
 ) -> ReauditReport:
     """Re-judge entries in ``allowlist_dir`` against current source in ``root``.
 
@@ -803,6 +810,7 @@ def reaudit_entries(
                 findings_cache=findings_cache,
                 reference_time=reference_time,
                 judge_call_budget=judge_call_budget,
+                transport=transport,
             )
         except _JudgeCallBudgetExhausted:
             # This is a graceful operator-requested stop, not a
@@ -900,6 +908,7 @@ def _reaudit_one_entry(
     findings_cache: dict[str, list[Any]],
     reference_time: datetime,
     judge_call_budget: _JudgeCallBudget,
+    transport: str = TRANSPORT_OPENROUTER,
 ) -> ReauditOutcome:
     """Classify one entry, calling the judge unless the entry is obsolete."""
     if entry.judge_recorded_at is not None and entry.judge_recorded_at > reference_time:
@@ -1107,7 +1116,7 @@ def _reaudit_one_entry(
 
     judge_call_budget.reserve_call()
     try:
-        response = call_judge(request)
+        response = call_judge(request, transport=transport)
     except JudgeConfigurationError:
         # JudgeConfigurationError is NOT a transport failure — it's an
         # operator misconfiguration (missing API key, missing SDK). Keep

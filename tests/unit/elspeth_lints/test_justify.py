@@ -22,6 +22,7 @@ import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -36,13 +37,17 @@ from elspeth_lints.core.cli import (
     main,
 )
 from elspeth_lints.core.judge import (
+    DEFAULT_AGENT_JUDGE_MODEL,
     DEFAULT_JUDGE_MODEL,
     JUDGE_EXCERPT_CONTEXT_LINES,
     JUDGE_POLICY_HASH,
     JUDGE_SURROUNDING_CODE_CHAR_LIMIT,
+    TRANSPORT_AGENT,
+    TRANSPORT_OPENROUTER,
     JudgeConfigurationError,
     JudgeContractError,
     JudgeRequest,
+    JudgeResponse,
     JudgeTransportError,
     SimilarAllowlistEntry,
     call_judge,
@@ -699,6 +704,117 @@ def test_justify_writes_judge_transport(tmp_path: Path) -> None:
     assert len(loaded.entries) == 1
     assert loaded.entries[0].judge_transport == "openrouter"
     assert loaded.entries[0].judge_signature_version == 2
+
+
+@contextmanager
+def _capture_call_judge_transport(captured: dict[str, str], *, response_transport: str, model_id: str) -> Iterator[None]:
+    """Patch ``call_judge`` to record its ``transport`` kwarg.
+
+    Returns a real ``JudgeResponse`` whose ``judge_transport`` is
+    ``response_transport`` so the justify write+sign+reload path exercises
+    the resolved transport value end-to-end (rather than the OpenRouter
+    default the live transport would otherwise produce). The HMAC key is
+    set so the signed v2 entry can be written and reloaded.
+    """
+
+    def _fake_call_judge(request: JudgeRequest, **kwargs: Any) -> JudgeResponse:
+        captured["transport"] = kwargs["transport"]
+        return JudgeResponse(
+            verdict=JudgeVerdict.ACCEPTED,
+            model_id=model_id,
+            judge_rationale="genuine Tier-3 boundary",
+            recorded_at=datetime.now(UTC),
+            should_use_decorator=None,
+            confidence=0.91,
+            prompt_tokens_total=4000,
+            prompt_tokens_cached=0,
+            policy_hash=JUDGE_POLICY_HASH,
+            judge_transport=response_transport,
+        )
+
+    with (
+        patch.dict(
+            os.environ,
+            {"ELSPETH_JUDGE_METADATA_HMAC_KEY": "test-judge-metadata-hmac-key-2026-05-24"},
+            clear=False,
+        ),
+        patch("elspeth_lints.core.judge.call_judge", side_effect=_fake_call_judge),
+    ):
+        yield
+
+
+def _justify_argv(root: Path, allowlist_dir: Path, *, owner: str) -> list[str]:
+    return [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "payload is Tier-3 external data from upstream tool-call",
+        "--owner",
+        owner,
+    ]
+
+
+def test_justify_agent_transport_flag_selects_agent(tmp_path: Path) -> None:
+    """``--judge-transport agent`` resolves to the stored ``claude_agent_sdk``.
+
+    The flag's CLI spelling ``agent`` maps to ``TRANSPORT_AGENT`` at the
+    ``call_judge`` boundary, and the written (signed v2) entry carries the
+    agent transport label and reloads clean.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    captured: dict[str, str] = {}
+
+    argv = [*_justify_argv(root, allowlist_dir, owner="test-agent-transport-agent"), "--judge-transport", "agent"]
+    with _capture_call_judge_transport(captured, response_transport=TRANSPORT_AGENT, model_id=DEFAULT_AGENT_JUDGE_MODEL):
+        assert main(argv) == 0
+
+    # call_judge saw the stored identity, not the CLI spelling.
+    assert captured["transport"] == TRANSPORT_AGENT
+    assert captured["transport"] == "claude_agent_sdk"
+
+    target_yaml = allowlist_dir / "plugins.yaml"
+    text = target_yaml.read_text(encoding="utf-8")
+    assert "judge_transport: claude_agent_sdk" in text
+
+    # End-to-end: the signed v2 entry reloads clean with the agent transport.
+    with patch.dict(
+        os.environ,
+        {"ELSPETH_JUDGE_METADATA_HMAC_KEY": "test-judge-metadata-hmac-key-2026-05-24"},
+        clear=False,
+    ):
+        loaded = load_allowlist(target_yaml, valid_rule_ids={"R1"}, source_root=root)
+    assert len(loaded.entries) == 1
+    assert loaded.entries[0].judge_transport == "claude_agent_sdk"
+    assert loaded.entries[0].judge_signature_version == 2
+
+
+def test_justify_default_transport_is_openrouter(tmp_path: Path) -> None:
+    """No ``--judge-transport`` flag → ``call_judge`` receives ``openrouter``.
+
+    Pins the no-opt-in-no-change contract: omitting the flag keeps the
+    prior OpenRouter behaviour exactly.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    captured: dict[str, str] = {}
+
+    argv = _justify_argv(root, allowlist_dir, owner="test-agent-transport-default")
+    with _capture_call_judge_transport(captured, response_transport=TRANSPORT_OPENROUTER, model_id=DEFAULT_JUDGE_MODEL):
+        assert main(argv) == 0
+
+    assert captured["transport"] == TRANSPORT_OPENROUTER
+    assert captured["transport"] == "openrouter"
+
+    target_yaml = allowlist_dir / "plugins.yaml"
+    assert "judge_transport: openrouter" in target_yaml.read_text(encoding="utf-8")
 
 
 def test_justify_signed_confidence_round_trips_through_source_root_loader(tmp_path: Path) -> None:

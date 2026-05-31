@@ -27,7 +27,15 @@ import pytest
 
 from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict, compute_judge_metadata_signature
 from elspeth_lints.core.cli import main
-from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
+from elspeth_lints.core.judge import (
+    DEFAULT_AGENT_JUDGE_MODEL,
+    DEFAULT_JUDGE_MODEL,
+    JUDGE_POLICY_HASH,
+    TRANSPORT_AGENT,
+    TRANSPORT_OPENROUTER,
+    JudgeRequest,
+    JudgeResponse,
+)
 from elspeth_lints.core.reaudit import (
     ReauditCause,
     ReauditDivergence,
@@ -583,6 +591,90 @@ def test_cli_reaudit_exits_1_on_verdict_divergence(tmp_path: Path, capsys: pytes
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "WAS_ACCEPTED_NOW_BLOCKED" in captured.out
+
+
+@contextmanager
+def _capture_reaudit_call_judge_transport(captured: dict[str, str], *, model_id: str) -> Iterator[None]:
+    """Patch reaudit's ``call_judge`` to record its ``transport`` kwarg.
+
+    Returns a real ACCEPTED ``JudgeResponse`` so a stays-accepted sweep
+    exits 0; the test only cares which transport the boundary received.
+    """
+
+    def _fake_call_judge(request: JudgeRequest, **kwargs: Any) -> JudgeResponse:
+        captured["transport"] = kwargs["transport"]
+        return JudgeResponse(
+            verdict=JudgeVerdict.ACCEPTED,
+            model_id=model_id,
+            judge_rationale="still a genuine Tier-3 boundary",
+            recorded_at=datetime.now(UTC),
+            should_use_decorator=None,
+            confidence=0.91,
+            prompt_tokens_total=4000,
+            prompt_tokens_cached=0,
+            policy_hash=JUDGE_POLICY_HASH,
+            judge_transport=kwargs["transport"],
+        )
+
+    with patch("elspeth_lints.core.reaudit.call_judge", side_effect=_fake_call_judge):
+        yield
+
+
+def _reaudit_argv(root: Path, allowlist_dir: Path) -> list[str]:
+    return ["reaudit", "--root", str(root), "--allowlist-dir", str(allowlist_dir), "--format", "text"]
+
+
+def test_reaudit_agent_transport_flag_threads_to_call_judge(tmp_path: Path) -> None:
+    """``--judge-transport agent`` threads ``claude_agent_sdk`` to ``call_judge``.
+
+    The operator-facing ``agent`` spelling resolves to ``TRANSPORT_AGENT``
+    in ``_run_reaudit`` and is threaded through ``reaudit_entries`` →
+    ``_reaudit_one_entry`` to the per-entry judge boundary.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-01T00:00:00+00:00",
+    )
+    captured: dict[str, str] = {}
+
+    argv = [*_reaudit_argv(root, allowlist_dir), "--judge-transport", "agent"]
+    with _capture_reaudit_call_judge_transport(captured, model_id=DEFAULT_AGENT_JUDGE_MODEL):
+        exit_code = main(argv)
+
+    assert exit_code == 0
+    assert captured["transport"] == TRANSPORT_AGENT
+    assert captured["transport"] == "claude_agent_sdk"
+
+
+def test_reaudit_default_transport_is_openrouter(tmp_path: Path) -> None:
+    """No ``--judge-transport`` flag → the judge boundary receives ``openrouter``.
+
+    Pins the no-opt-in-no-change contract for the reaudit threading.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    _write_widget_lookup_entry(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        judge_verdict="ACCEPTED",
+        judge_recorded_at="2024-01-01T00:00:00+00:00",
+    )
+    captured: dict[str, str] = {}
+
+    with _capture_reaudit_call_judge_transport(captured, model_id=DEFAULT_JUDGE_MODEL):
+        exit_code = main(_reaudit_argv(root, allowlist_dir))
+
+    assert exit_code == 0
+    assert captured["transport"] == TRANSPORT_OPENROUTER
+    assert captured["transport"] == "openrouter"
 
 
 def test_override_no_longer_needed(tmp_path: Path) -> None:

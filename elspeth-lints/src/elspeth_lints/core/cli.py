@@ -27,6 +27,7 @@ from elspeth_lints.core.emitters.github import render_github
 from elspeth_lints.core.emitters.json import render_json
 from elspeth_lints.core.emitters.sarif import render_sarif
 from elspeth_lints.core.emitters.text import render_text
+from elspeth_lints.core.judge import TRANSPORT_AGENT, TRANSPORT_OPENROUTER
 from elspeth_lints.core.protocols import Finding, Rule, RuleContext, RuleScope, Severity
 from elspeth_lints.core.registry import DEFAULT_REGISTRY, RuleRegistry
 
@@ -41,6 +42,36 @@ OPERATOR_OVERRIDE_MIN_TOKEN_BYTES = 20
 
 
 _MAX_AUDIT_IDENTITY_LENGTH = 200
+
+
+# CLI spelling -> stored transport identity. The operator types the short
+# ``agent`` form; the persisted/threaded value is the canonical
+# ``claude_agent_sdk`` (TRANSPORT_AGENT). ``openrouter`` is the default so
+# unopted-in invocations keep the prior behaviour exactly.
+_CLI_TRANSPORT_CHOICES: dict[str, str] = {"openrouter": TRANSPORT_OPENROUTER, "agent": TRANSPORT_AGENT}
+
+
+def _add_judge_transport_arg(parser: argparse.ArgumentParser) -> None:
+    """Attach the shared ``--judge-transport`` flag to ``parser``.
+
+    Used by both ``justify`` and ``reaudit`` so the operator-facing spelling
+    and help text stay identical. The flag selects which provider produces
+    the verdict; the resolved stored value is looked up via
+    ``_CLI_TRANSPORT_CHOICES[args.judge_transport]`` at the call site.
+    """
+    parser.add_argument(
+        "--judge-transport",
+        choices=tuple(_CLI_TRANSPORT_CHOICES),
+        default="openrouter",
+        help=(
+            "Which transport produces the verdict. 'openrouter' (default) uses "
+            "the OpenAI-compatible SDK with temperature=0 (reproducible). 'agent' "
+            "uses the Claude Agent SDK (claude_code preset, no tools, cheaper via a "
+            "Claude subscription); it cannot pin temperature, so agent verdicts are "
+            "less reproducible (see reaudit). Requires the [judge-agent] extra and "
+            "Claude Code auth."
+        ),
+    )
 
 
 def _non_empty_string(value: str) -> str:
@@ -382,6 +413,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="text",
         help="Output format for the verdict",
     )
+    _add_judge_transport_arg(justify)
 
     audit_verdict = subparsers.add_parser(
         "audit-verdict",
@@ -535,6 +567,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "definition (a clean sweep would not need this flag)."
         ),
     )
+    _add_judge_transport_arg(reaudit)
 
     migrate_judge_scope = subparsers.add_parser(
         "migrate-judge-scope",
@@ -1176,7 +1209,6 @@ def _run_justify(args: argparse.Namespace) -> int:
     from elspeth_lints.core.allowlist import JudgeVerdict, _judge_metadata_hmac_key
     from elspeth_lints.core.judge import (
         DEFAULT_JUDGE_MAX_TOKENS,
-        DEFAULT_JUDGE_MODEL,
         JUDGE_EXCERPT_CONTEXT_LINES,
         JudgeConfigurationError,
         JudgeContractError,
@@ -1401,8 +1433,8 @@ def _run_justify(args: argparse.Namespace) -> int:
     try:
         response: JudgeResponse = call_judge(
             request,
-            model_id=DEFAULT_JUDGE_MODEL,
             max_tokens=args.max_tokens or DEFAULT_JUDGE_MAX_TOKENS,
+            transport=_CLI_TRANSPORT_CHOICES[args.judge_transport],
         )
     except JudgeConfigurationError as exc:
         sys.stderr.write(f"Judge configuration error: {exc}\n")
@@ -2578,6 +2610,10 @@ def _run_reaudit(args: argparse.Namespace) -> int:
     )
 
     allowlist_dir: Path = args.allowlist_dir
+    # Resolve the operator-facing CLI spelling to the stored transport
+    # identity once; threaded down to the per-entry judge boundary so an
+    # ``--judge-transport agent`` sweep re-judges through the Agent SDK.
+    transport: str = _CLI_TRANSPORT_CHOICES[args.judge_transport]
 
     if args.render_incomplete_run_id is not None:
         sidecar_path = sidecar_path_for(allowlist_dir, args.render_incomplete_run_id)
@@ -2753,6 +2789,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
                 pre_classified_outcomes=pre_classified_outcomes,
                 reference_time=(resume_state["header"].started_at if is_resume else header.started_at),
                 progress_callback=_emit_reaudit_progress,
+                transport=transport,
             )
             if report.entries_dispatched >= report.total_entries:
                 writer.commit_trailer()

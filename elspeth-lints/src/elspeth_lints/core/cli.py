@@ -164,6 +164,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_audit_verdict(args)
     if args.command == "reaudit":
         return _run_reaudit(args)
+    if args.command == "migrate-judge-scope":
+        return _run_migrate_judge_scope(args)
     if args.command == "check-judge-coverage":
         return _run_check_judge_coverage(args)
     if args.command == "check-judge-quality":
@@ -531,6 +533,44 @@ def _build_parser() -> argparse.ArgumentParser:
             "Exits non-zero because the rendered sweep is incomplete by "
             "definition (a clean sweep would not need this flag)."
         ),
+    )
+
+    migrate_judge_scope = subparsers.add_parser(
+        "migrate-judge-scope",
+        help=(
+            "Re-sign currently-valid v1 (file_fingerprint) judge-gated entries as "
+            "v2 (scope_fingerprint) without re-running the LLM judge. OPERATOR-ONLY: "
+            "writes signed metadata; requires ELSPETH_JUDGE_METADATA_HMAC_KEY (same "
+            "custody constraint as `justify` — an agent may PROPOSE this invocation, "
+            "only an operator-held environment runs and signs it)."
+        ),
+    )
+    migrate_judge_scope.add_argument(
+        "--root",
+        type=Path,
+        default=Path("src/elspeth"),
+        help="Source tree to scan for the entries' underlying findings",
+    )
+    migrate_judge_scope.add_argument(
+        "--allowlist-dir",
+        type=Path,
+        default=Path("config/cicd/enforce_tier_model"),
+        help="Directory of per-module allowlist YAML files to migrate in place",
+    )
+    migrate_judge_scope.add_argument(
+        "--owner",
+        type=_non_empty_string,
+        required=True,
+        help=(
+            "Audit identity (operator) running the mechanical migration. Recorded "
+            "verbatim in the report; the migration carries each entry's existing "
+            "`owner` field forward unchanged (it does not rewrite ownership)."
+        ),
+    )
+    migrate_judge_scope.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute and report what WOULD migrate; write nothing.",
     )
 
     dump_edges = subparsers.add_parser("dump-edges", help="Dump import edges for architecture review")
@@ -2746,6 +2786,401 @@ def _emit_reaudit_progress(progress: Any) -> None:
         f"prompt_tokens_cached={cached} "
         f"prompt_tokens_uncached={uncached}\n"
     )
+
+
+def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
+    """Mechanically re-sign currently-valid v1 judge-gated entries as v2.
+
+    v1 entries bind the whole-file ``file_fingerprint``: any byte edit
+    anywhere in the source file invalidates the binding at load time and
+    forces an operator-only re-sign. v2 entries bind only the enclosing-
+    scope ``scope_fingerprint``, so an unrelated edit elsewhere in the file
+    no longer churns the entry. This command migrates the byte-drifted-but-
+    scope-stable v1 entries to v2 WITHOUT re-running the (paid) LLM judge:
+    the judge already inspected and accepted this exact suppressed node, and
+    the suppressed node is unchanged, so re-judging would add no information.
+
+    Two INDEPENDENT gates run per v1 entry — they are not conflated:
+
+    * **Integrity gate (always, first):** the entry's EXISTING v1
+      ``judge_metadata_signature`` is verified with the operator HMAC key.
+      A mismatch (or missing/malformed signature) means the persisted
+      verdict/rationale/binding was edited without the key — i.e. tampering.
+      A key-holder running this migration must NEVER mint a clean v2
+      signature over content whose v1 signature was never checked, so any
+      integrity failure STOPS THE WHOLE RUN (not a per-entry skip): the
+      offending entry is reported as TAMPERED and nothing is written.
+
+    * **Relevance gate:** the entry's canonical key must locate a live
+      finding in a fresh scan of ``--root``. If it does, the suppressed
+      node is unchanged (the judge's inspection still applies) and the
+      entry is migrated. If it does not, the entry is already stale and is
+      refused (re-justify required) — left untouched.
+
+    We deliberately do NOT gate on byte-freshness (``file_fingerprint`` ==
+    live source hash). That would refuse exactly the byte-drifted-but-scope-
+    stable entries this command exists to relieve. Selection is
+    ``judge_signature_version in (None, 1)``; the integrity gate proves no
+    tampering; the relevance gate proves the suppressed node is unchanged.
+    Byte equality is irrelevant to either.
+    """
+    from elspeth_lints.core.allowlist import (
+        _file_path_from_canonical_key,
+        _judge_metadata_hmac_key,
+        _verify_judge_metadata_signature_at_load,
+        compute_judge_metadata_signature,
+        load_allowlist,
+    )
+    from elspeth_lints.core.source_excerpt import (
+        SourceExcerptPathOutsideRootError,
+        resolve_safe_excerpt_path,
+    )
+    from elspeth_lints.rules.trust_tier.tier_model.rule import (
+        RULES,
+        scan_file,
+        scan_layer_imports_file,
+    )
+
+    root: Path = args.root.resolve()
+    if not root.is_dir():
+        sys.stderr.write(f"--root: {root} is not a directory\n")
+        return 2
+    allowlist_dir: Path = args.allowlist_dir
+    if not allowlist_dir.is_dir():
+        sys.stderr.write(f"--allowlist-dir: {allowlist_dir} is not a directory\n")
+        return 2
+
+    # Operator-only fail-closed gate, hoisted to the front (mirrors justify
+    # at the top of its write path). Two reasons it MUST run before any
+    # entry is inspected:
+    #   1. The migration writes signed metadata; without the key it cannot
+    #      sign and must not pretend to succeed.
+    #   2. The integrity gate below depends on real HMAC recomputation.
+    #      ``_verify_judge_metadata_signature_at_load`` has a documented
+    #      escape hatch that no-ops when the key is absent AND verify-mode is
+    #      shape-only (the fork-PR degradation). If we let the command run
+    #      keyless, that escape hatch would silently turn the integrity gate
+    #      into a no-op and we could launder tampering into a clean v2
+    #      signature. Requiring the key here guarantees the gate actually
+    #      recomputes the HMAC. (Even --dry-run requires it: a dry run that
+    #      cannot verify integrity reports a verdict it did not actually
+    #      check, which is dishonest audit output.)
+    try:
+        _judge_metadata_hmac_key()
+    except ValueError as exc:
+        sys.stderr.write(f"Judge metadata signature configuration error: {exc}\n")
+        return 2
+
+    valid_rule_ids = frozenset(RULES.keys())
+
+    # Load WITHOUT source_root. With source_root set, the loader fires BOTH
+    # the v1 file_fingerprint live-source gate AND the HMAC signature gate
+    # (allowlist._parse_allow_hits: ``if source_root is not None and
+    # judge_verdict is not None``). We are deliberately migrating byte-
+    # drifted-but-scope-stable entries, so the file_fingerprint live gate
+    # must NOT block us. But loading without source_root ALSO skips the HMAC
+    # check — therefore this command MUST verify each v1 signature itself
+    # (the integrity gate below) before re-signing, or it would launder
+    # tampering into a clean v2 signature.
+    try:
+        allowlist = load_allowlist(allowlist_dir, valid_rule_ids=valid_rule_ids, source_root=None)
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        sys.stderr.write(f"migrate-judge-scope error: {exc}\n")
+        return 2
+
+    # Select judge-gated v1 entries. Pre-judge entries (judge_verdict is
+    # None) carry no signature and no binding — they are neither migratable
+    # nor tamperable here, so they are skipped silently. A v1 entry is one
+    # whose judge_signature_version is unset (legacy default == 1) or
+    # explicitly 1; v2 entries are already migrated.
+    v1_entries = [
+        entry
+        for entry in allowlist.entries
+        if entry.judge_verdict is not None and (entry.judge_signature_version is None or entry.judge_signature_version == 1)
+    ]
+
+    # Per-file finding cache for the relevance gate: scanning a file is
+    # expensive, and several entries may target the same file. Keyed by the
+    # resolved target file.
+    findings_by_file: dict[Path, list[Any]] = {}
+
+    def _findings_for_file(target_file: Path) -> list[Any]:
+        cached = findings_by_file.get(target_file)
+        if cached is None:
+            cached = _scan_single_file_findings(
+                target_file=target_file,
+                root=root,
+                scan_file=scan_file,
+                scan_layer_imports_file=scan_layer_imports_file,
+            )
+            findings_by_file[target_file] = cached
+        return cached
+
+    migrated: list[str] = []  # canonical keys migrated (or would-migrate under --dry-run)
+    refused: list[tuple[str, str]] = []  # (key, reason) for relevance-gate refusals
+
+    # ---- Pass 1: integrity gate over EVERY selected v1 entry ----------------
+    # The integrity gate runs to completion across all entries BEFORE any
+    # write happens. This makes tamper-detection atomic: on tampering the
+    # allowlist is left wholly untouched (zero writes), so the "NO entries
+    # were written" claim below is true in production (where the command
+    # iterates the whole ~hundreds-of-entry allowlist), not just in
+    # single-entry tests. A one-pass integrity→write loop would re-sign and
+    # write entries 1..N-1 before discovering tampering at entry N, then
+    # falsely report that nothing was written — an audit-broken lie in a tool
+    # held to the withstands-formal-inquiry bar.
+    #
+    # Each verify uses the EXISTING v1 signature and the operator key (present
+    # in env, gated above so the HMAC recompute cannot be silently skipped).
+    # Any ValueError — signature mismatch, missing signature, or malformed
+    # shape — is an integrity failure: a key-holder must never re-sign content
+    # whose prior signature did not verify (that would launder tampering into
+    # a clean v2 signature). This is qualitatively different from the
+    # relevance-gate's routine "stale" refusal: tampering is an attack /
+    # corruption signal, not benign development drift.
+    for entry in v1_entries:
+        try:
+            _verify_judge_metadata_signature_at_load(entry, context=f"migrate-judge-scope {entry.key!r}")
+        except ValueError as exc:
+            sys.stderr.write(
+                f"migrate-judge-scope: TAMPERED entry refused — {entry.key!r}: {exc}\n"
+                "The existing v1 judge_metadata_signature does not verify. Refusing to "
+                "re-sign content whose prior signature was never validated (that would "
+                "launder tampering into a clean v2 signature). Investigate the entry's "
+                "edit history before any migration. Stopping the run; NO entries were "
+                "written.\n"
+            )
+            return 1
+
+    # ---- Pass 2: relevance gate + re-sign + write ---------------------------
+    # Reached only when every selected v1 entry's existing signature verified.
+    for entry in v1_entries:
+        # ---- Relevance gate ----------------------------------------------
+        # Re-locate the suppressed finding by canonical key in a fresh scan of
+        # the source tree. The file path is the key's leading segment; resolve
+        # it through the path-containment guard (a forged ``../../etc/passwd``
+        # key must not be scanned).
+        try:
+            file_path = _file_path_from_canonical_key(entry.key)
+        except ValueError as exc:
+            refused.append((entry.key, f"entry key is not in canonical form ({exc})"))
+            continue
+        candidate = root / file_path
+        try:
+            target_file = resolve_safe_excerpt_path(root=root, target_file=candidate)
+        except FileNotFoundError:
+            refused.append((entry.key, f"source file {file_path!r} no longer exists → re-justify required"))
+            continue
+        except SourceExcerptPathOutsideRootError as exc:
+            refused.append((entry.key, f"source path escapes --root ({exc}) → re-justify required"))
+            continue
+
+        findings = _findings_for_file(target_file)
+        matching = [f for f in findings if _finding_canonical_key(f) == entry.key]
+        if not matching:
+            refused.append((entry.key, "no matching finding → re-justify required"))
+            continue
+        if len(matching) > 1:
+            # The canonical key includes the finding fingerprint, so a unique
+            # key SHOULD match a unique finding. More than one is a scanner /
+            # allowlist invariant violation: refuse rather than guess which
+            # finding the judge inspected.
+            refused.append((entry.key, f"{len(matching)} findings match this key (expected exactly one) → re-justify required"))
+            continue
+        finding = matching[0]
+
+        # Both gates passed. Bind v2 to the LIVE finding's scope_fingerprint
+        # and ast_path — these are the values the next CI run's match-time
+        # check (verify_entry_binding_against_finding) will compare against.
+        try:
+            scope_fingerprint = _finding_scope_fingerprint(finding)
+            ast_path = _finding_ast_path(finding)
+        except ValueError as exc:
+            refused.append((entry.key, f"cannot bind v2 entry: {exc} → re-justify required"))
+            continue
+
+        migrated.append(entry.key)
+        if args.dry_run:
+            continue
+
+        # The judge-metadata cluster is co-present-or-co-absent (loader
+        # invariant 8) and ``judge_verdict is not None`` was already filtered
+        # for; ``_verify_judge_metadata_signature_at_load`` re-asserted every
+        # member non-None above. Assert it here too so the invariant is
+        # load-bearing at the signing site (offensive programming: a future
+        # refactor that broke the filter would crash here, not silently sign a
+        # None-bearing payload) and so the static types narrow.
+        assert entry.judge_verdict is not None
+        assert entry.judge_recorded_at is not None
+        assert entry.judge_model is not None
+        assert entry.judge_rationale is not None
+        assert entry.judge_policy_hash is not None
+
+        # Re-sign as v2 from the LOADED ENTRY's parsed audit fields, so the
+        # non-binding lines on disk stay byte-identical and the reload
+        # re-verifies. (verdict/model_verdict/recorded_at/model/rationale/
+        # policy_hash/confidence/excerpt_redactions are unchanged audit data;
+        # only the binding flips from file_fingerprint to scope_fingerprint.)
+        v2_signature = compute_judge_metadata_signature(
+            key=entry.key,
+            signature_version=2,
+            scope_fingerprint=scope_fingerprint,
+            ast_path=ast_path,
+            judge_verdict=entry.judge_verdict,
+            judge_model_verdict=entry.judge_model_verdict,
+            judge_recorded_at=entry.judge_recorded_at,
+            judge_model=entry.judge_model,
+            judge_rationale=entry.judge_rationale,
+            judge_policy_hash=entry.judge_policy_hash,
+            judge_confidence=entry.judge_confidence,
+            judge_excerpt_redactions=entry.judge_excerpt_redactions,
+        )
+        target_yaml = allowlist_dir / entry.source_file
+        _rewrite_v1_entry_as_v2_in_yaml(
+            target_yaml,
+            entry_key=entry.key,
+            scope_fingerprint=scope_fingerprint,
+            ast_path=ast_path,
+            v2_signature=v2_signature,
+        )
+
+    _emit_migrate_report(args=args, migrated=migrated, refused=refused)
+
+    # Exit-code policy: 1 if anything was refused (the integrity-gate
+    # tampering path returns 1 above before reaching here). 0 only when every
+    # selected v1 entry migrated cleanly (or, under --dry-run, would).
+    return 1 if refused else 0
+
+
+def _emit_migrate_report(
+    *,
+    args: argparse.Namespace,
+    migrated: list[str],
+    refused: list[tuple[str, str]],
+) -> None:
+    """Write the migrate-judge-scope summary to stdout.
+
+    ``migrated`` lists the keys that were re-signed as v2 (or, under
+    ``--dry-run``, would be). ``refused`` lists ``(key, reason)`` pairs for
+    relevance-gate refusals (already-stale entries needing re-justify). The
+    integrity-gate tampering path reports to stderr and stops the run before
+    this is reached, so the only refusals surfaced here are stale entries.
+    """
+    verb = "WOULD migrate" if args.dry_run else "migrated"
+    sys.stdout.write(f"migrate-judge-scope (owner={args.owner}, dry_run={args.dry_run})\n")
+    sys.stdout.write(f"  {verb}: {len(migrated)} entr{'y' if len(migrated) == 1 else 'ies'}\n")
+    for key in migrated:
+        sys.stdout.write(f"    + {key}\n")
+    sys.stdout.write(f"  refused / re-justify required: {len(refused)} entr{'y' if len(refused) == 1 else 'ies'}\n")
+    for key, reason in refused:
+        sys.stdout.write(f"    - {key}: {reason}\n")
+
+
+def _rewrite_v1_entry_as_v2_in_yaml(
+    target_yaml: Path,
+    *,
+    entry_key: str,
+    scope_fingerprint: str,
+    ast_path: str,
+    v2_signature: str,
+) -> None:
+    """Rewrite one v1 allow_hits entry's binding lines to the v2 scheme, in place.
+
+    Byte-preserving line surgery (the established pattern in this file — see
+    ``_upsert_audit_review_in_yaml``): we locate the entry by its ``- key:``
+    line and operate ONLY on its line range, leaving every other byte of the
+    file — and every non-binding line of the entry, including multi-line
+    block-scalar rationale — untouched. The three binding mutations are:
+
+    * the ``file_fingerprint:`` line is REPLACED in place by two lines —
+      ``judge_signature_version: 2`` then ``scope_fingerprint: …`` — matching
+      the canonical field order ``_build_yaml_entry_text`` emits for a fresh
+      v2 entry, so a migrated entry is indistinguishable from a justified one;
+    * the ``ast_path:`` line is rewritten to the live finding's ast_path (a
+      binding field; in the no-drift case it is byte-identical, so the line
+      does not actually change); and
+    * the ``judge_metadata_signature:`` line's value is replaced with the
+      recomputed v2 signature.
+
+    New scalar values go through ``_yaml_inline_scalar`` so quoting matches
+    the writer exactly. The whole read→edit→write runs under
+    ``atomic_update_text`` so concurrent invocations cannot compute updates
+    from the same stale YAML.
+    """
+
+    def rewrite_in(current: str | None) -> str:
+        if current is None:
+            raise ValueError(f"{target_yaml}: allowlist YAML file is required")
+
+        lines = current.splitlines(keepends=True)
+        header_index = None
+        for idx, line in enumerate(lines):
+            if line.rstrip("\r\n") == "allow_hits:":
+                header_index = idx
+                break
+        if header_index is None:
+            raise ValueError(f"{target_yaml}: no allow_hits block found")
+
+        block_end = len(lines)
+        for idx in range(header_index + 1, len(lines)):
+            line = lines[idx]
+            if not line.strip():
+                continue
+            if _is_allow_hits_block_line(line):
+                continue
+            block_end = idx
+            break
+
+        key_line = f"- key: {entry_key}"
+        matching_ranges = [
+            (entry_start, entry_end)
+            for entry_start, entry_end in _allow_hit_entry_ranges(lines, start=header_index + 1, end=block_end)
+            if lines[entry_start].rstrip("\r\n") == key_line
+        ]
+        if not matching_ranges:
+            raise ValueError(f"{target_yaml}: no allow_hits entry found for key {entry_key!r}")
+        if len(matching_ranges) > 1:
+            raise ValueError(f"{target_yaml}: duplicate allow_hits entries found for key {entry_key!r}")
+
+        entry_start, entry_end = matching_ranges[0]
+        entry_lines = lines[entry_start:entry_end]
+
+        # The line ending used by this entry; preserve it so we don't switch
+        # the file between \n and \r\n mid-stream.
+        sample = entry_lines[0]
+        newline = "\r\n" if sample.endswith("\r\n") else "\n"
+
+        rewritten: list[str] = []
+        saw_file_fingerprint = False
+        saw_signature = False
+        for line in entry_lines:
+            stripped = line.strip()
+            if stripped.startswith("file_fingerprint:"):
+                saw_file_fingerprint = True
+                rewritten.append(f"  judge_signature_version: 2{newline}")
+                rewritten.append(f"  scope_fingerprint: {_yaml_inline_scalar(scope_fingerprint)}{newline}")
+                continue
+            if stripped.startswith("ast_path:"):
+                rewritten.append(f"  ast_path: {_yaml_inline_scalar(ast_path)}{newline}")
+                continue
+            if stripped.startswith("judge_metadata_signature:"):
+                saw_signature = True
+                rewritten.append(f"  judge_metadata_signature: {_yaml_inline_scalar(v2_signature)}{newline}")
+                continue
+            rewritten.append(line)
+
+        if not saw_file_fingerprint:
+            raise ValueError(
+                f"{target_yaml}: entry {entry_key!r} has no file_fingerprint line; "
+                "migrate-judge-scope only rewrites v1 (file_fingerprint-bound) entries."
+            )
+        if not saw_signature:
+            raise ValueError(f"{target_yaml}: entry {entry_key!r} has no judge_metadata_signature line to re-sign.")
+
+        new_lines = [*lines[:entry_start], *rewritten, *lines[entry_end:]]
+        return "".join(new_lines)
+
+    atomic_update_text(target_yaml, rewrite_in, encoding="utf-8", create_parent=False)
 
 
 def _write_report(report: Any, args: argparse.Namespace) -> None:

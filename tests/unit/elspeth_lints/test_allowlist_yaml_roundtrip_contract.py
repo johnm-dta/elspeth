@@ -521,9 +521,10 @@ def test_yaml_inline_scalar_call_sites_are_inventoried() -> None:
     it through the helper or add a written rationale.
 
     The check is byte-grep over ``cli.py`` for the helper's name. The
-    expected count is 10:
-      6 entry-level scalars (owner, judge_model, judge_policy_hash,
-        scope_fingerprint, ast_path, judge_metadata_signature)
+    expected count is 13:
+      6 entry-level scalars in ``_build_yaml_entry_text`` (owner,
+        judge_model, judge_policy_hash, scope_fingerprint, ast_path,
+        judge_metadata_signature)
       2 redaction-record fields per nested ``judge_excerpt_redactions``
         entry (pattern, redacted_hash) — these route through the same
         helper because a maliciously-crafted source file could in
@@ -531,6 +532,11 @@ def test_yaml_inline_scalar_call_sites_are_inventoried() -> None:
         token, and ``pattern_name`` is a fixed vocabulary today but a
         future addition could trigger the same.
       2 nested ``audit_review`` scalars (reviewer, reviewed_at)
+      3 binding-line rewrites in ``_rewrite_v1_entry_as_v2_in_yaml`` (the
+        migrate-judge-scope v1→v2 re-sign surgery): scope_fingerprint,
+        ast_path, judge_metadata_signature. These are the same three v2
+        binding scalars ``_build_yaml_entry_text`` emits, re-routed through
+        the helper so a migrated entry quotes identically to a justified one.
     Update this number deliberately when the inventory legitimately
     grows.
     """
@@ -541,8 +547,8 @@ def test_yaml_inline_scalar_call_sites_are_inventoried() -> None:
     total_token_matches = text.count("_yaml_inline_scalar(")
     definition_count = text.count("def _yaml_inline_scalar(")
     call_count = total_token_matches - definition_count
-    assert call_count == 10, (
-        f"expected 10 _yaml_inline_scalar(...) call sites in cli.py, found "
+    assert call_count == 13, (
+        f"expected 13 _yaml_inline_scalar(...) call sites in cli.py, found "
         f"{call_count}; if a new field was added, also extend "
         "the helper-routed field round-trip tests above."
     )

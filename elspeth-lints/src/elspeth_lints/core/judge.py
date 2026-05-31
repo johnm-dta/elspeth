@@ -1033,11 +1033,13 @@ def _call_agent_sdk(request: JudgeRequest, model_id: str, max_tokens: int) -> _T
 
     try:
         return asyncio.run(_drain_agent_query(sdk, prompt_text, options, model_id))
-    except JudgeConfigurationError:
+    except (JudgeConfigurationError, JudgeContractError, JudgeTransportError):
+        # Already-classified failures from the drain (in-band error mapping,
+        # errored ResultMessage, usage-contract guards) pass through unchanged
+        # — re-wrapping a JudgeTransportError in the generic arm below would
+        # double-prefix the message.
         raise
-    except JudgeContractError:
-        raise
-    except Exception as exc:  # SDK transport/auth surface — map by type below.
+    except Exception as exc:  # raw SDK transport/auth surface — map by type below.
         # Auth / CLI-not-found is operator-actionable configuration; everything
         # else after configuration is a transport failure. The auth-error
         # discriminator uses the real SDK exception classes (see
@@ -1056,11 +1058,21 @@ def _call_agent_sdk(request: JudgeRequest, model_id: str, max_tokens: int) -> _T
         raise JudgeTransportError(f"{type(exc).__name__}: {exc}") from exc
 
 
-# In-band auth/billing error literals carried on ``AssistantMessage.error``
-# (confirmed field against claude-agent-sdk==0.2.87). A real auth failure can
-# arrive WITHOUT raising — as a message whose ``error`` is one of these — so we
-# map these to the operator-actionable JudgeConfigurationError rather than
-# letting the call degrade to a generic "no assistant text" contract error.
+# In-band error literals carried on ``AssistantMessage.error`` (confirmed
+# against claude-agent-sdk==0.2.87; the full Literal set is
+# {authentication_failed, billing_error, rate_limit, invalid_request,
+# server_error, unknown}). These surface WITHOUT raising — the assistant
+# message carries the error and (typically) empty text — so we must classify
+# them here rather than let the call degrade to a generic "no assistant text"
+# contract crash.
+#
+# Split by remediation class:
+#   * auth/billing -> operator-actionable CONFIGURATION (credential / billing
+#     fix) -> JudgeConfigurationError.
+#   * everything else (rate_limit / invalid_request / server_error / unknown)
+#     -> TRANSPORT-class failure (transient or provider-side) ->
+#     JudgeTransportError carrying the specific literal, so the operator sees
+#     the real cause instead of a misleading malformed-verdict crash.
 _AGENT_AUTH_INBAND_ERRORS: frozenset[str] = frozenset({"authentication_failed", "billing_error"})
 
 
@@ -1068,23 +1080,27 @@ async def _drain_agent_query(sdk: Any, prompt_text: str, options: Any, requested
     """Drain the async query stream into a ``_TransportResult``.
 
     Accumulate assistant text blocks; capture the terminal ``ResultMessage``
-    for usage + served-model accounting. An in-band ``AssistantMessage.error``
-    auth/billing literal short-circuits to ``JudgeConfigurationError`` (the
-    operator-actionable path) before we treat empty text as a contract error.
+    for usage + served-model accounting. Classification of in-band failures
+    (before the empty-text contract check) is deliberate and exhaustive over
+    the SDK's error surface:
+
+    * ``AssistantMessage.error`` auth/billing literal -> ``JudgeConfigurationError``;
+      any other ``error`` literal -> ``JudgeTransportError`` (carrying the literal).
+    * An errored terminal ``ResultMessage`` (``is_error`` true and/or
+      ``api_error_status`` set) with no assistant text -> ``JudgeTransportError``
+      (a provider/transport fault), NOT a contract crash.
+
+    Only a genuinely-empty, non-errored response reaches the
+    "no assistant text -> ``JudgeContractError``" path — reserved for the case
+    where the model actually returned nothing usable as a verdict.
     """
     text_parts: list[str] = []
     result_message: Any = None
     async for message in sdk.query(prompt=prompt_text, options=options):
         if isinstance(message, sdk.AssistantMessage):
             inband_error = message.error
-            if inband_error in _AGENT_AUTH_INBAND_ERRORS:
-                raise JudgeConfigurationError(
-                    "The Claude Agent SDK could not authenticate "
-                    f"(in-band error: {inband_error!r}). The agent transport uses an "
-                    "installed + logged-in Claude Code CLI (subscription / Agent-SDK "
-                    "credit pool) OR ANTHROPIC_API_KEY OR Bedrock/Vertex/Azure. Log in "
-                    "with the Claude Code CLI, or set ANTHROPIC_API_KEY, then re-run."
-                )
+            if inband_error is not None:
+                _raise_for_agent_inband_error(inband_error)
             for block in message.content:
                 if isinstance(block, sdk.TextBlock):
                     text_parts.append(block.text)
@@ -1095,6 +1111,17 @@ async def _drain_agent_query(sdk: Any, prompt_text: str, options: Any, requested
         raise JudgeContractError("agent transport produced no ResultMessage; cannot account usage.")
     raw_text = "".join(text_parts)
     if not raw_text.strip():
+        # Before calling empty text a contract violation, consult the terminal
+        # ResultMessage's own error signal: an errored ResultMessage with no
+        # text is a TRANSPORT failure (provider/transport fault), not a
+        # malformed verdict. ``is_error`` / ``api_error_status`` are required /
+        # nullable fields on a completed ResultMessage (confirmed shape).
+        if result_message.is_error or result_message.api_error_status is not None:
+            raise JudgeTransportError(
+                "agent transport returned an errored ResultMessage with no assistant text "
+                f"(is_error={result_message.is_error!r}, api_error_status={result_message.api_error_status!r}, "
+                f"errors={result_message.errors!r})."
+            )
         raise JudgeContractError("agent transport produced no assistant text; cannot extract a verdict.")
 
     served_model_id = _agent_served_model(result_message, requested_model)
@@ -1104,6 +1131,38 @@ async def _drain_agent_query(sdk: Any, prompt_text: str, options: Any, requested
         served_model_id=served_model_id,
         prompt_tokens_total=prompt_tokens_total,
         prompt_tokens_cached=prompt_tokens_cached,
+    )
+
+
+def _raise_for_agent_inband_error(inband_error: str) -> None:
+    """Classify an ``AssistantMessage.error`` literal and raise accordingly.
+
+    Auth/billing literals are operator-actionable configuration faults;
+    every other literal (rate_limit / invalid_request / server_error /
+    unknown, plus any future literal the SDK adds) is a transport-class
+    failure. Either way the specific literal is preserved in the message.
+    """
+    if inband_error in _AGENT_AUTH_INBAND_ERRORS:
+        # Distinguish billing from authentication in the wording so the
+        # operator isn't told to "log in" when the real fault is billing.
+        if inband_error == "billing_error":
+            raise JudgeConfigurationError(
+                "The Claude Agent SDK reported a billing error "
+                f"(in-band error: {inband_error!r}). The agent transport bills against "
+                "the Claude Code CLI subscription / Agent-SDK credit pool OR "
+                "ANTHROPIC_API_KEY (per-token Anthropic billing) OR Bedrock/Vertex/Azure. "
+                "Resolve the billing/credit issue on the active credential, or switch to "
+                "--judge-transport openrouter, then re-run."
+            )
+        raise JudgeConfigurationError(
+            "The Claude Agent SDK could not authenticate "
+            f"(in-band error: {inband_error!r}). The agent transport uses an "
+            "installed + logged-in Claude Code CLI (subscription / Agent-SDK "
+            "credit pool) OR ANTHROPIC_API_KEY OR Bedrock/Vertex/Azure. Log in "
+            "with the Claude Code CLI, or set ANTHROPIC_API_KEY, then re-run."
+        )
+    raise JudgeTransportError(
+        f"agent transport in-band error {inband_error!r} (transient or provider-side; not an elspeth-lints configuration fault)."
     )
 
 
@@ -1150,13 +1209,18 @@ def _agent_cache_accounting(result_message: Any) -> tuple[int, int | None]:
     DOC-DERIVED KEY NAMES: ``input_tokens`` / ``cache_read_input_tokens`` are
     Anthropic Messages API convention. The SDK does not pin them (it forwards
     ``usage`` opaquely from the CLI), so a future CLI/API rename would surface
-    here as a ``KeyError`` (total) or a silent ``None`` (cached). The KeyError
-    is loud and correct; the cached-None degradation is acceptable (we record
-    absence, not a fabricated 0).
+    here. A missing ``input_tokens`` is the same malformed-usage fault class as
+    a ``None`` usage dict, so it raises ``JudgeContractError`` consistently
+    (rather than a bare ``KeyError`` that would be silently reclassified as a
+    transport error by ``_call_agent_sdk``'s generic except arm). The
+    ``cache_read_input_tokens`` absence is a different case — an honest
+    degradation to ``None`` (we record absence, not a fabricated 0).
     """
     usage = result_message.usage
     if usage is None:
         raise JudgeContractError("agent ResultMessage.usage is None on a completed call; cannot account usage.")
+    if "input_tokens" not in usage:
+        raise JudgeContractError(f"agent ResultMessage.usage missing 'input_tokens'; got keys {sorted(usage)}")
     total = usage["input_tokens"]
     if not isinstance(total, int):
         raise JudgeContractError(f"agent usage.input_tokens must be int; got {type(total).__name__}")

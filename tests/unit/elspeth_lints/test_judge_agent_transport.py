@@ -63,16 +63,33 @@ _GOOD_JSON = (
 )
 
 
+class _Unset:
+    """Sentinel distinguishing 'argument omitted' from an explicit ``None``.
+
+    ``_install_fake_sdk`` must be able to inject a GENUINE ``None`` for
+    ``usage`` / ``model_usage`` so the implementation's offensive None-guards
+    are reachable. A plain ``None`` default can't express that — it collapses
+    'omitted' and 'explicitly None' into one. Callers pass ``usage=None`` to
+    exercise the guard; omitting the argument keeps the realistic default dict.
+    """
+
+
+_UNSET = _Unset()
+
+
 def _install_fake_sdk(
     monkeypatch: pytest.MonkeyPatch,
     *,
     assistant_text: str,
     served: str = "claude-opus-4-7",
-    usage: dict[str, object] | None = None,
-    model_usage: dict[str, object] | None = None,
+    usage: dict[str, object] | None | _Unset = _UNSET,
+    model_usage: dict[str, object] | None | _Unset = _UNSET,
     assistant_error: str | None = None,
     raise_on_query: Exception | None = None,
     emit_result: bool = True,
+    is_error: bool = False,
+    api_error_status: int | None = None,
+    errors: list[str] | None = None,
 ) -> types.ModuleType:
     """Install a minimal fake ``claude_agent_sdk`` into ``sys.modules``.
 
@@ -80,7 +97,12 @@ def _install_fake_sdk(
     the real SDK shape introspected from ``claude-agent-sdk==0.2.87``:
     ``query()`` is an async generator yielding an ``AssistantMessage`` (with a
     ``TextBlock`` in ``.content`` and an optional in-band ``.error`` literal)
-    then a ``ResultMessage`` (``.usage`` + ``.model_usage`` dicts).
+    then a ``ResultMessage`` (``.usage`` + ``.model_usage`` dicts, plus the
+    ``.is_error`` / ``.api_error_status`` / ``.errors`` error-signal fields).
+
+    ``usage`` / ``model_usage`` accept an explicit ``None`` (distinct from the
+    ``_UNSET`` default via the ``_Unset`` sentinel) so the implementation's
+    None-guards are testable.
 
     The real ``CLINotFoundError`` / ``ProcessError`` exception classes are
     attached so ``_is_agent_auth_error`` can ``isinstance``-check against them
@@ -103,9 +125,19 @@ def _install_fake_sdk(
             self.error = error
 
     class ResultMessage:
-        def __init__(self, usage: dict[str, object] | None, model_usage: dict[str, object] | None) -> None:
+        def __init__(
+            self,
+            usage: dict[str, object] | None,
+            model_usage: dict[str, object] | None,
+            is_error: bool = False,
+            api_error_status: int | None = None,
+            errors: list[str] | None = None,
+        ) -> None:
             self.usage = usage
             self.model_usage = model_usage
+            self.is_error = is_error
+            self.api_error_status = api_error_status
+            self.errors = errors
 
     # Real SDK exception hierarchy (so isinstance-based discrimination in the
     # implementation matches what the real SDK would raise).
@@ -121,15 +153,21 @@ def _install_fake_sdk(
     class ProcessError(ClaudeSDKError):
         pass
 
-    resolved_usage: dict[str, object] = usage if usage is not None else {"input_tokens": 200, "cache_read_input_tokens": 50}
-    resolved_model_usage: dict[str, object] = model_usage if model_usage is not None else {served: {"input_tokens": 200}}
+    resolved_usage: dict[str, object] | None = {"input_tokens": 200, "cache_read_input_tokens": 50} if isinstance(usage, _Unset) else usage
+    resolved_model_usage: dict[str, object] | None = {served: {"input_tokens": 200}} if isinstance(model_usage, _Unset) else model_usage
 
     async def query(*, prompt: str, options: object) -> AsyncIterator[object]:
         if raise_on_query is not None:
             raise raise_on_query
         yield AssistantMessage(content=[TextBlock(text=assistant_text)], error=assistant_error)
         if emit_result:
-            yield ResultMessage(usage=resolved_usage, model_usage=resolved_model_usage)
+            yield ResultMessage(
+                usage=resolved_usage,
+                model_usage=resolved_model_usage,
+                is_error=is_error,
+                api_error_status=api_error_status,
+                errors=errors,
+            )
 
     mod.ClaudeAgentOptions = ClaudeAgentOptions  # type: ignore[attr-defined]
     mod.TextBlock = TextBlock  # type: ignore[attr-defined]
@@ -260,4 +298,87 @@ def test_agent_transport_generic_sdk_error_is_transport_error(monkeypatch: pytes
     proc_error = mod.ProcessError("exited 1")
     _install_fake_sdk(monkeypatch, assistant_text=_GOOD_JSON, raise_on_query=proc_error)
     with pytest.raises(JudgeTransportError):
+        call_judge(_request(), transport=TRANSPORT_AGENT)
+
+
+# --- C1: exhaustive in-band AssistantMessage.error classification ---------
+#
+# The real Literal set is {authentication_failed, billing_error, rate_limit,
+# invalid_request, server_error, unknown}. Auth/billing -> config; every other
+# literal -> transport (not a malformed-verdict crash).
+
+
+def test_agent_transport_inband_billing_error_names_billing_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    # billing_error is config-class (operator-actionable) but the wording must
+    # be about billing, not "log in".
+    _install_fake_sdk(monkeypatch, assistant_text="", assistant_error="billing_error")
+    with pytest.raises(JudgeConfigurationError, match=r"billing"):
+        call_judge(_request(), transport=TRANSPORT_AGENT)
+
+
+@pytest.mark.parametrize("literal", ["rate_limit", "server_error", "invalid_request", "unknown"])
+def test_agent_transport_inband_nonauth_error_is_transport_error(monkeypatch: pytest.MonkeyPatch, literal: str) -> None:
+    # A non-auth in-band error (transient / provider-side) must be a transport
+    # failure carrying the specific literal — NOT a "no assistant text"
+    # contract crash that discards the real cause.
+    _install_fake_sdk(monkeypatch, assistant_text="", assistant_error=literal)
+    with pytest.raises(JudgeTransportError, match=literal):
+        call_judge(_request(), transport=TRANSPORT_AGENT)
+
+
+def test_agent_transport_errored_result_message_with_no_text_is_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An errored terminal ResultMessage (is_error / api_error_status) with no
+    # assistant text is a transport fault, not a malformed verdict. The
+    # api_error_status must surface in the message so the operator sees the cause.
+    _install_fake_sdk(
+        monkeypatch,
+        assistant_text="",
+        is_error=True,
+        api_error_status=503,
+        errors=["upstream unavailable"],
+    )
+    with pytest.raises(JudgeTransportError, match=r"503|api_error_status"):
+        call_judge(_request(), transport=TRANSPORT_AGENT)
+
+
+def test_agent_transport_empty_text_non_errored_result_is_contract_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The genuinely-empty, non-errored case: the model returned nothing usable
+    # as a verdict. This is the one path that stays JudgeContractError.
+    _install_fake_sdk(monkeypatch, assistant_text="")
+    with pytest.raises(JudgeContractError, match=r"no assistant text"):
+        call_judge(_request(), transport=TRANSPORT_AGENT)
+
+
+# --- C2: the offensive None-guards must be reachable + tested -------------
+
+
+def test_agent_transport_usage_none_crashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    # usage is dict | None on the real SDK; None on a completed call cannot be
+    # accounted -> JudgeContractError. (_UNSET sentinel lets us inject a real None.)
+    _install_fake_sdk(monkeypatch, assistant_text=_GOOD_JSON, usage=None)
+    with pytest.raises(JudgeContractError, match=r"usage is None"):
+        call_judge(_request(), transport=TRANSPORT_AGENT)
+
+
+def test_agent_transport_model_usage_none_falls_back_to_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    # model_usage is dict | None; None (absent) falls back to the requested id
+    # rather than fabricating a served id.
+    _install_fake_sdk(monkeypatch, assistant_text=_GOOD_JSON, model_usage=None)
+    resp = call_judge(_request(), transport=TRANSPORT_AGENT, model_id="claude-sonnet-4-7")
+    assert resp.model_id == "claude-sonnet-4-7"
+
+
+# --- I1: a missing usage key is a contract violation, not a transport error -
+
+
+def test_agent_transport_missing_input_tokens_key_is_contract_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A usage dict present but missing 'input_tokens' is the same malformed-
+    # usage fault class as usage=None -> JudgeContractError (consistent), not a
+    # bare KeyError silently reclassified as a transport error.
+    _install_fake_sdk(monkeypatch, assistant_text=_GOOD_JSON, usage={"output_tokens": 10})
+    with pytest.raises(JudgeContractError, match=r"input_tokens"):
         call_judge(_request(), transport=TRANSPORT_AGENT)

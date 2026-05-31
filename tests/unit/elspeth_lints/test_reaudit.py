@@ -298,6 +298,98 @@ def _write_widget_lookup_entry_v2(
     return target
 
 
+# Second synthetic module, structurally distinct from widget.py so it
+# produces its OWN single R1 finding (a distinct file_path + symbol in the
+# canonical key). Used only by the two-finding sweep-completeness test so a
+# drifted entry and a good entry each match a DIFFERENT live finding and
+# never interfere. Kept isolated from _SYNTHETIC_SOURCE / _build_source_tree
+# so the existing "exactly one R1 finding" helpers stay untouched.
+_SYNTHETIC_GADGET_SOURCE = '''\
+"""Second synthetic module used in reaudit two-finding sweep tests."""
+
+
+class Gadget:
+    def fetch(self, payload: dict) -> str:
+        return payload.get("label", "unlabelled")
+'''
+
+
+def _add_gadget_source(root: Path) -> Path:
+    """Add plugins/gadget.py to an existing source root (one R1 finding)."""
+    target = root / "plugins" / "gadget.py"
+    target.write_text(_SYNTHETIC_GADGET_SOURCE, encoding="utf-8")
+    return target
+
+
+def _live_gadget_finding(root: Path) -> Any:
+    """Return the single R1 ``Finding`` for Gadget.fetch at ``root``."""
+    from elspeth_lints.rules.trust_tier.tier_model.rule import scan_file
+
+    target_file = (root / "plugins/gadget.py").resolve()
+    findings = list(scan_file(target_file, root))
+    r1_findings = [f for f in findings if f.rule_id == "R1"]
+    if len(r1_findings) != 1:
+        raise AssertionError(f"expected exactly one R1 finding in gadget.py, got {len(r1_findings)}: {r1_findings}")
+    return r1_findings[0]
+
+
+def _write_gadget_fetch_entry_v2(
+    allowlist_dir: Path,
+    *,
+    source_root: Path,
+    fingerprint: str,
+    scope_fingerprint: str,
+    yaml_name: str = "gadget.yaml",
+    judge_recorded_at: str = "2024-01-01T00:00:00+00:00",
+) -> Path:
+    """Write a v2 (scope-bound) Gadget.fetch entry to its OWN yaml file.
+
+    Mirrors ``_write_widget_lookup_entry_v2`` but targets gadget.py and a
+    distinct yaml file (the loader globs ``*.yaml``), so two v2 entries can
+    coexist in one allowlist dir without clobbering each other. The
+    signature is computed over the supplied scope_fingerprint, so passing
+    the live value yields a normally-reauditing entry and a wrong 64-hex
+    simulates drift.
+    """
+    key = f"plugins/gadget.py:R1:Gadget:fetch:fp={fingerprint}"
+    live_ast_path = _live_gadget_finding(source_root).ast_path
+    signature = compute_judge_metadata_signature(
+        key=key,
+        ast_path=live_ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime.fromisoformat(judge_recorded_at),
+        judge_model="claude-opus-4-7",
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        judge_rationale="original judge said the boundary was genuine",
+        signature_version=2,
+        scope_fingerprint=scope_fingerprint,
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
+    lines = [
+        "allow_hits:",
+        f"- key: {key}",
+        "  owner: test-owner",
+        "  reason: |-",
+        "    payload is Tier-3 external data from upstream tool-call",
+        "  safety: |-",
+        "    Suppression gated by cicd-judge; see judge_rationale below.",
+        "  expires: '2030-01-01'",
+        "  judge_verdict: ACCEPTED",
+        f"  judge_recorded_at: '{judge_recorded_at}'",
+        "  judge_model: claude-opus-4-7",
+        f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'",
+        "  judge_rationale: |-",
+        "    original judge said the boundary was genuine",
+        "  judge_signature_version: 2",
+        f"  scope_fingerprint: '{scope_fingerprint}'",
+        f"  ast_path: '{live_ast_path}'",
+        f"  judge_metadata_signature: '{signature}'",
+    ]
+    target = allowlist_dir / yaml_name
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
 def _write_duplicate_widget_lookup_entries(
     allowlist_dir: Path,
     *,
@@ -1160,7 +1252,10 @@ def test_render_json_report_is_valid_json_with_enum_strings() -> None:
     assert summary_names[2] == "JUDGE_CALL_FAILED"
     assert summary_names[3] == "JUDGE_CLASSIFICATION_FAILED"
     assert summary_names[4] == "AMBIGUOUS_FINDING_MATCH"
-    assert summary_names[5] == "WAS_ACCEPTED_NOW_BLOCKED"
+    # BINDING_DRIFT ranks among the ignorance signals (entry not re-judged
+    # because its signed binding broke) and above the verdict-change tier.
+    assert summary_names[5] == "BINDING_DRIFT"
+    assert summary_names[6] == "WAS_ACCEPTED_NOW_BLOCKED"
 
 
 def test_cause_axis_renders_in_text_markdown_and_json() -> None:
@@ -3270,17 +3365,19 @@ def test_t6b_sidecar_load_rejects_malformed_jsonl(tmp_path: Path) -> None:
 # =====================================================================
 
 
-def test_reaudit_crashes_on_v2_scope_drift_before_rejudging(tmp_path: Path) -> None:
-    """A v2 entry whose enclosing scope drifted crashes BEFORE the judge call.
+def test_reaudit_records_binding_drift_on_v2_scope_drift_before_rejudging(tmp_path: Path) -> None:
+    """A v2 entry whose enclosing scope drifted records BINDING_DRIFT, no judge call.
 
     v1 entries got tamper/drift detection at LOAD time (the whole-file
     file_fingerprint recompute crashed on drift). v2 binds the enclosing
     scope via scope_fingerprint, which is parse-dependent and verified at
-    MATCH time, not load — so reaudit lost that pre-re-judge check for v2.
-    This pins the restored check: the canonical key + ast_path still match
-    (so the finding IS found), but the persisted scope_fingerprint differs
-    from the live scope's hash → ValueError, raised before any (paid)
-    judge call is dispatched.
+    MATCH time, not load. The canonical key + ast_path still match (so the
+    finding IS found), but the persisted scope_fingerprint differs from the
+    live scope's hash. Rather than crashing the whole sweep (the prior
+    behaviour), reaudit now records a BINDING_DRIFT outcome (cause
+    CODE_DRIFT) and continues, WITHOUT dispatching a (paid) judge call —
+    the operator action is re-justify, which an automated re-judge cannot
+    perform.
     """
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
@@ -3299,19 +3396,24 @@ def test_reaudit_crashes_on_v2_scope_drift_before_rejudging(tmp_path: Path) -> N
     )
 
     with _mock_judge_call(verdict="ACCEPTED", rationale="should never be reached") as client_class:
-        with pytest.raises(ValueError, match="scope_fingerprint"):
-            reaudit_entries(
-                root=root.resolve(),
-                allowlist_dir=allowlist_dir,
-                rule_filter="trust_tier.tier_model",
-                since=None,
-                limit=None,
-                include_pre_judge=False,
-            )
-        # The crash must precede the paid judge call. ``client_class`` is
-        # the patched ``openai.OpenAI``; its return_value is the fake
-        # client whose chat.completions.create is the actual judge call.
-        client_class.return_value.chat.completions.create.assert_not_called()
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert len(report.outcomes) == 1
+    assert report.outcomes[0].divergence is ReauditDivergence.BINDING_DRIFT
+    assert report.outcomes[0].cause is ReauditCause.CODE_DRIFT
+    assert report.outcomes[0].fresh_verdict is None
+    # The drift record must precede (and therefore skip) the paid judge
+    # call. ``client_class`` is the patched ``openai.OpenAI``; its
+    # return_value is the fake client whose chat.completions.create is the
+    # actual judge call.
+    client_class.return_value.chat.completions.create.assert_not_called()
 
 
 def test_reaudit_v2_unchanged_scope_reaudits_without_crashing(tmp_path: Path) -> None:
@@ -3345,4 +3447,72 @@ def test_reaudit_v2_unchanged_scope_reaudits_without_crashing(tmp_path: Path) ->
 
     assert len(report.outcomes) == 1
     assert report.outcomes[0].divergence is ReauditDivergence.STILL_AGREES
+    client_class.return_value.chat.completions.create.assert_called_once()
+
+
+def test_reaudit_sweep_continues_past_binding_drift(tmp_path: Path) -> None:
+    """A drifted v2 entry does NOT abort the sweep over a sibling good entry.
+
+    This is the load-bearing behaviour change: before the fix, the first
+    v2 scope-drift raised ValueError and aborted the whole sweep, so any
+    healthy entries after it were never reaudited. The fix records
+    BINDING_DRIFT and continues. This sweeps TWO v2 entries — one drifted
+    (widget.py, wrong scope_fingerprint), one good (gadget.py, correct
+    scope_fingerprint) — each matching a DISTINCT live finding in its own
+    source file. It asserts BOTH outcomes are present:
+
+    * the drifted entry → BINDING_DRIFT (judge NOT called)
+    * the good entry    → STILL_AGREES (judge called)
+
+    and that the judge ran exactly once total (for the good entry only).
+    """
+    root, _target = _build_source_tree(tmp_path)
+    _add_gadget_source(root)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    # Drifted widget entry: valid-shape but wrong scope_fingerprint.
+    widget_fp = _live_fingerprint_for_widget(root)
+    widget_live_scope = _live_widget_finding(root).scope_fingerprint
+    drifted_scope = "b" * 64
+    assert drifted_scope != widget_live_scope
+    _write_widget_lookup_entry_v2(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=widget_fp,
+        scope_fingerprint=drifted_scope,
+    )
+
+    # Good gadget entry: correct live scope_fingerprint → STILL_AGREES.
+    gadget_finding = _live_gadget_finding(root)
+    gadget_live_scope = gadget_finding.scope_fingerprint
+    assert gadget_live_scope
+    _write_gadget_fetch_entry_v2(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=gadget_finding.fingerprint,
+        scope_fingerprint=gadget_live_scope,
+    )
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="boundary is still genuine") as client_class:
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert len(report.outcomes) == 2
+    by_divergence = {outcome.divergence: outcome for outcome in report.outcomes}
+    assert set(by_divergence) == {
+        ReauditDivergence.BINDING_DRIFT,
+        ReauditDivergence.STILL_AGREES,
+    }
+    # The drifted entry is the widget one (no judge call); the good entry
+    # is the gadget one (judged). Confirm the keys land on the right side.
+    assert "plugins/widget.py" in by_divergence[ReauditDivergence.BINDING_DRIFT].entry.key
+    assert "plugins/gadget.py" in by_divergence[ReauditDivergence.STILL_AGREES].entry.key
+    assert by_divergence[ReauditDivergence.BINDING_DRIFT].cause is ReauditCause.CODE_DRIFT
+    # The judge ran exactly once total: for the good entry, NOT the drifted one.
     client_class.return_value.chat.completions.create.assert_called_once()

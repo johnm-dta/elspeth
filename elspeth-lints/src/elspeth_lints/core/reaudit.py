@@ -109,6 +109,25 @@ class ReauditDivergence(StrEnum):
     The exception classname + message is captured in ``fresh_rationale``
     so the report carries the diagnostic without needing the original
     stderr. Closes elspeth-9a4e54cc01 / C3-2.
+
+    ``BINDING_DRIFT`` is the v2 match-time binding-mismatch path: a
+    judge-gated v2 entry's signed ``scope_fingerprint`` no longer
+    matches the live finding's recomputed scope fingerprint (the
+    enclosing function/class the judge inspected changed), OR the
+    ``ast_path`` no longer matches (an in-file transplant). v1 entries
+    get this drift detection at LOAD time from the whole-file
+    ``file_fingerprint`` recompute; v2's scope-scoped binding is
+    parse-dependent and can only be verified at MATCH time, here — so
+    reaudit performs it after locating the live finding and before
+    spending a (paid) judge call. This is *genuine code drift*,
+    predominantly benign development churn; the cryptographic
+    anti-forgery gate is HMAC-at-load in CI, not this check. The
+    operator action is *re-justify* (operator HMAC re-sign), which an
+    automated re-judge cannot perform — so reaudit records the drift and
+    continues WITHOUT calling the judge, mirroring ``ENTRY_OBSOLETE``'s
+    record-and-continue handling. The mismatch message is captured in
+    ``fresh_rationale`` so the report carries the diagnostic without
+    needing the original stderr.
     """
 
     STILL_AGREES = "STILL_AGREES"
@@ -139,6 +158,10 @@ class ReauditDivergence(StrEnum):
     # The current scanner returned more than one finding whose canonical key
     # matches the allowlist entry. Picking one would hide duplicate-key drift.
     AMBIGUOUS_FINDING_MATCH = "AMBIGUOUS_FINDING_MATCH"
+    # A v2 entry's signed scope_fingerprint (or ast_path) no longer matches
+    # the live finding's recomputed binding: genuine code drift, operator
+    # must re-justify. Recorded record-and-continue; the judge is NOT called.
+    BINDING_DRIFT = "BINDING_DRIFT"
 
 
 class ReauditCause(StrEnum):
@@ -179,7 +202,12 @@ class ReauditCause(StrEnum):
             ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT,
         }:
             return cls.PRE_JUDGE_BASELINE
-        if divergence is ReauditDivergence.ENTRY_OBSOLETE:
+        if divergence in {
+            ReauditDivergence.ENTRY_OBSOLETE,
+            ReauditDivergence.BINDING_DRIFT,
+        }:
+            # Both are "the judged code changed" — a dead suppression
+            # (obsolete) or a live one whose signed binding broke (drift).
             return cls.CODE_DRIFT
         if divergence is ReauditDivergence.SOURCE_EXCERPT_REJECTED:
             return cls.SOURCE_EVIDENCE_REJECTED
@@ -214,13 +242,23 @@ _DIVERGENCE_ORDER: dict[ReauditDivergence, int] = {
     ReauditDivergence.JUDGE_CALL_FAILED: 1,
     ReauditDivergence.JUDGE_CLASSIFICATION_FAILED: 2,
     ReauditDivergence.AMBIGUOUS_FINDING_MATCH: 3,
-    ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED: 4,
-    ReauditDivergence.PRE_JUDGE_FRESH_BLOCK: 5,
-    ReauditDivergence.OVERRIDE_NO_LONGER_NEEDED: 6,
-    ReauditDivergence.ENTRY_OBSOLETE: 7,
-    ReauditDivergence.OVERRIDE_STILL_NEEDED: 8,
-    ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT: 9,
-    ReauditDivergence.STILL_AGREES: 10,
+    # BINDING_DRIFT ranks among the "couldn't-complete-the-audit /
+    # ignorance" signals and ABOVE the verdict-change tier, per the
+    # rationale above (ignorance outranks verdict changes). The entry is
+    # a LIVE suppression whose signed scope binding broke: it was not
+    # re-judged this sweep and its decay status is unknown until the
+    # operator re-justifies (operator HMAC re-sign), which an automated
+    # re-judge cannot do. That unknown is more urgent than any
+    # verdict-change below it, and far more urgent than ENTRY_OBSOLETE
+    # (a *dead* suppression with nothing left to evaluate).
+    ReauditDivergence.BINDING_DRIFT: 4,
+    ReauditDivergence.WAS_ACCEPTED_NOW_BLOCKED: 5,
+    ReauditDivergence.PRE_JUDGE_FRESH_BLOCK: 6,
+    ReauditDivergence.OVERRIDE_NO_LONGER_NEEDED: 7,
+    ReauditDivergence.ENTRY_OBSOLETE: 8,
+    ReauditDivergence.OVERRIDE_STILL_NEEDED: 9,
+    ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT: 10,
+    ReauditDivergence.STILL_AGREES: 11,
 }
 
 
@@ -958,14 +996,35 @@ def _reaudit_one_entry(
     # scope-scoped and parse-dependent, verified at MATCH time, not load — so
     # restore it here against the finding we just scanned, before spending a
     # (paid) judge call. A drifted enclosing scope, or a transplanted ast_path,
-    # crashes here — consistent with v1's load-time crash-on-drift: a binding
-    # that no longer holds means the entry must be re-justified, not reaudited.
-    verify_entry_binding_against_finding(
-        entry,
-        file_path=matching_finding.file_path,
-        ast_path=matching_finding.ast_path,
-        scope_fingerprint=getattr(matching_finding, "scope_fingerprint", ""),
-    )
+    # raises ValueError here: the binding no longer holds, so the entry must be
+    # re-justified (operator HMAC re-sign), which an automated re-judge cannot
+    # do. We therefore record a BINDING_DRIFT outcome and continue — same
+    # record-and-continue handling as ENTRY_OBSOLETE — rather than aborting the
+    # whole sweep on the first drifted entry. The cryptographic anti-forgery
+    # gate remains HMAC-at-load in CI; this is benign development drift, not the
+    # forgery surface. ``getattr(..., "scope_fingerprint", "")`` is the
+    # sanctioned cross-protocol bridge (v1 findings predate the field); the
+    # verifier rejects an empty value for a v2 entry, which is the right crash —
+    # but that crash is captured here as drift, not propagated.
+    try:
+        verify_entry_binding_against_finding(
+            entry,
+            file_path=matching_finding.file_path,
+            ast_path=matching_finding.ast_path,
+            scope_fingerprint=getattr(matching_finding, "scope_fingerprint", ""),
+        )
+    except ValueError as exc:
+        return ReauditOutcome(
+            entry=entry,
+            original_verdict=entry.judge_verdict,
+            original_model_verdict=entry.judge_model_verdict,
+            fresh_verdict=None,
+            fresh_rationale=str(exc),
+            fresh_recorded_at=None,
+            divergence=ReauditDivergence.BINDING_DRIFT,
+            cause=ReauditCause.for_divergence(ReauditDivergence.BINDING_DRIFT),
+            code_snapshot=f"<scope binding drifted for {entry.key!r}; re-justify required>",
+        )
 
     # Secrets-scrubber gate (closes elspeth-ebb2b88753 / C2-2 on the
     # sweep path). ``extract_safe_excerpt`` re-runs containment (cheap)
@@ -1670,6 +1729,12 @@ def _outcome_notes(outcome: ReauditOutcome) -> str:
         # message in fresh_rationale. Surface it verbatim so the
         # operator sees the offending path without opening the JSON
         # dump. Triage signal: investigate the YAML for tampering.
+        return outcome.fresh_rationale if outcome.fresh_rationale is not None else "<no diagnostic captured>"
+    if outcome.divergence is ReauditDivergence.BINDING_DRIFT:
+        # BINDING_DRIFT carries the scope_fingerprint / ast_path mismatch
+        # message in fresh_rationale. Surface it verbatim so the operator
+        # sees which binding broke without opening the JSON dump. Triage
+        # signal: re-justify (operator HMAC re-sign) the drifted entry.
         return outcome.fresh_rationale if outcome.fresh_rationale is not None else "<no diagnostic captured>"
     if outcome.fresh_rationale is None:
         return ""

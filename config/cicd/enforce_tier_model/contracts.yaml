@@ -199,9 +199,11 @@ allow_hits:
   judge_confidence: 0.82
   judge_rationale: |-
     The except ValueError here is not defensive error swallowing — it's an explicit control-flow branch distinguishing two documented modes: production (key set, compute fingerprint) vs dev mode (no key, sanitize without fingerprint). The ValueError from get_fingerprint_key() is the documented signal for 'no key configured', and the code then re-checks fail_if_no_key and raises SecretFingerprintError in production mode. This matches the offensive-programming model: the exception is converted to a typed branch with a meaningful re-raise on the production path, not silently swallowed. R6 (broad-except / exception-as-control-flow) suppression is appropriate at this specific catch site.
-  file_fingerprint: 469d1dc62183444014de07da2f1ab48db2ad849ab7f6f8fd4f849b173fa91233
+  judge_signature_version: 2
+  scope_fingerprint: 2dcb8451d77ff38628637a63c8482f7cfa403cc5510dd43ac8256901378f5cad
+  judge_transport: openrouter
   ast_path: 'body[8]/body[4]/body[4]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:c3dedbb17f743e3c8205fc928681cb5a7f6998223606aaf11de22ecdeeda4564'
+  judge_metadata_signature: 'hmac-sha256:v2:719cfcd78f3ed55cd67c9593c6088d6cbc45f24f25525cd471e62d835f22e99c'
 - key: contracts/url.py:R6:SanitizedWebhookUrl:from_raw_url:fp=ec8dd835c4c43c96
   owner: architecture
   reason: |-
@@ -216,9 +218,11 @@ allow_hits:
   judge_confidence: 0.85
   judge_rationale: |-
     R6 flags the try/except ValueError around get_fingerprint_key(). This is not defensive suppression — it's an explicit two-branch control flow: ValueError signals 'no key configured' (dev mode), success signals 'key available' (production). The except sets have_key=False and the code then branches explicitly: if have_key compute fingerprint, elif fail_if_no_key raise SecretFingerprintError, else dev mode sanitize without fingerprint. The exception is used as a configuration probe with explicit, audited handling of both outcomes, not silent error swallowing. The code excerpt independently supports the rationale despite a duplicate prior entry.
-  file_fingerprint: 469d1dc62183444014de07da2f1ab48db2ad849ab7f6f8fd4f849b173fa91233
+  judge_signature_version: 2
+  scope_fingerprint: a0ca40a8ecf31894e0237a767120cd97d2d4edb54a9acd721c6eeda4cc902734
+  judge_transport: openrouter
   ast_path: 'body[9]/body[4]/body[14]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:ea5c3877e295e215813898806cb2c8f1b0452ba48f951077c815ed6b9651d330'
+  judge_metadata_signature: 'hmac-sha256:v2:d62fc0d1ac2f1bf4bccf873dc0d1f0fc500e9aab4b1c7b5f9dcb28e9bdc628e0'
   judge_excerpt_redactions:
     - pattern: dotenv_secret_assignment
       byte_count: 22
@@ -237,9 +241,11 @@ allow_hits:
   judge_confidence: 0.82
   judge_rationale: |-
     The code iterates over Pydantic FieldInfo.metadata, which contains heterogeneous items (plain strings, ints, marker objects, dataclass-like metadata). vars() legitimately raises TypeError on items lacking __dict__, and this is exactly the kind of structural introspection where catching TypeError to continue is meaningful — it's not swallowing a bug, it's branching on a type-system fact about the Pydantic metadata protocol. The rationale accurately describes the failure mode and the correct continuation behavior. Rule R6 (presumably broad try/except concern) is appropriately narrow here: specific exception type, specific known cause, no silent error masking.
-  file_fingerprint: 7af36ab69fb9def63b8467a3f3e2f33ad7bed2b1ae01d9f5376fce5d1f84b03c
+  judge_signature_version: 2
+  scope_fingerprint: 4daec480060aa899444cc2d333d3e2dd02d92e011a40938970cdf2fea104c45b
+  judge_transport: openrouter
   ast_path: 'body[11]/body[1]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:6c2e955fbdd29bc63ffe560054a2e9120408de78359a150d6ed85059d52a42fa'
+  judge_metadata_signature: 'hmac-sha256:v2:915565bad831ba3f111104d60b252e6b2e2f2d829a9e3dd612234364c5bf669c'
 - key: contracts/transform_contract.py:R2:_get_python_type:fp=24df5cf5593bf5fa
   owner: bugfix
   reason: |-
@@ -254,9 +260,11 @@ allow_hits:
   judge_confidence: 0.85
   judge_rationale: |-
     The getattr is used solely to construct an error message about an already-rejected unsupported type annotation. Type annotation objects like list[str] (generic aliases) genuinely lack __name__ in some Python versions/forms, while plain types have it — this is a legitimate offensive-programming use: produce a maximally informative error before raising TypeError. This is not silencing an error or fabricating data; the fallback str(unwrapped) is meaning-preserving for an error message, and the code raises immediately after. Not a Tier-3 boundary case (no external parameter; R2 is not in {R1,R5}), so the decorator does not apply.
-  file_fingerprint: df4fb6b54bccaeb7477a380dfba00fe69b09f2c86f80c415cd52de275d501669
+  judge_signature_version: 2
+  scope_fingerprint: 65714df833b8699a8e84820869c7912d25fd8f75f15332805a3f383e403d907a
+  judge_transport: openrouter
   ast_path: 'body[10]/body[5]/value'
-  judge_metadata_signature: 'hmac-sha256:v1:bb61178f93d2d8a7244a0a12c57cf5913c7a69a3ba1a461dcd14c6b287b5cadc'
+  judge_metadata_signature: 'hmac-sha256:v2:3b1d7e034cccc16f53a717434d6274030aa6f7c7a97f24394ad733b10f96fcef'
 - key: contracts/transform_contract.py:R2:_get_python_type:fp=37ef1f2fbd33537f
   owner: bugfix
   reason: |-
@@ -271,9 +279,11 @@ allow_hits:
   judge_confidence: 0.82
   judge_rationale: |-
     The getattr() here is used on Python type-annotation objects (like list[str], dict[str, Any], or generic aliases) which legitimately may not expose __name__. This is offensive programming building an informative error message: the function is already raising TypeError to surface the unsupported annotation; the getattr fallback to str(a) ensures the error message itself doesn't crash with AttributeError and obscure the real diagnostic. This is not Tier-3 external data nor silent error suppression — it's defensive message-construction inside an exception path where the alternative (raising AttributeError from inside the error-formatting code) would be strictly worse for diagnostics. The rule R2 (getattr usage) suppression is site-appropriate; the decorator does not apply (R2 is not in {R1,R5} and the data is a Python type object, not external input).
-  file_fingerprint: df4fb6b54bccaeb7477a380dfba00fe69b09f2c86f80c415cd52de275d501669
+  judge_signature_version: 2
+  scope_fingerprint: 65714df833b8699a8e84820869c7912d25fd8f75f15332805a3f383e403d907a
+  judge_transport: openrouter
   ast_path: 'body[10]/body[2]/body[4]/body[0]/value/elt'
-  judge_metadata_signature: 'hmac-sha256:v1:a03ffacc75585e76bf18a7438eff0b09009284e715fdc4f984f74691a941a9bb'
+  judge_metadata_signature: 'hmac-sha256:v2:f78bf634d1f032cfbde7c1b147e1683712d32640f1d0e16f73bf2b9a9ac8cf05'
 - key: contracts/schema_contract.py:R5:PipelineRow:to_dict:fp=19c383f767c4ed8c
   owner: architecture
   reason: |-
@@ -288,9 +298,11 @@ allow_hits:
   judge_confidence: 0.85
   judge_rationale: |-
     This is an offensive type-narrowing guard on Tier-1 internal data (PipelineRow._data, which we own). The isinstance check is paired with a TypeError raise — it crashes on invariant violation rather than silently coercing, which matches the 'Offensive Programming' pattern in policy. R5 normally flags isinstance shape-guards at Tier-3 boundaries, but here the check exists precisely to convert a possible deep_thaw contract violation into a maximally-informative crash. The code excerpt corroborates the rationale: no default, no fallback, just raise.
-  file_fingerprint: b1834077ea138b57c02c7baca8266ffe89b5a802e11846e545c1028a4a706e09
+  judge_signature_version: 2
+  scope_fingerprint: 651c12ac96d9dfd98fc94b86e123911d3cd257db13abb69be48c4e8195c22dc8
+  judge_transport: openrouter
   ast_path: 'body[12]/body[7]/body[2]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v1:cea0c9814f36317e61e676893972aa5895d7e78910c12699c17d203c18a5ae90'
+  judge_metadata_signature: 'hmac-sha256:v2:619db6cdb3fec050bb97c13dea565de29b5d3a693d70fcfaea57b889d81afdb9'
 - key: contracts/schema_contract.py:R5:PipelineRow:to_checkpoint_format:fp=13c2f8a3bfbe5f2a
   owner: architecture
   reason: |-
@@ -305,9 +317,11 @@ allow_hits:
   judge_confidence: 0.85
   judge_rationale: |-
     The isinstance check here is offensive programming, not defensive: it asserts an invariant about deep_thaw's return type on Tier-1 data (PipelineRow._data is our own checkpoint serialization path) and raises TypeError on violation rather than coercing or silently recovering. R5 typically flags defensive shape guards at boundaries, but this site crashes loudly on contract violation, which is exactly what the policy encourages for Tier-1 invariants. The decorator nudge does not apply — this is not a Tier-3 external-data boundary and the function takes no external parameter. The rationale is short but accurate and the code excerpt independently supports it.
-  file_fingerprint: b1834077ea138b57c02c7baca8266ffe89b5a802e11846e545c1028a4a706e09
+  judge_signature_version: 2
+  scope_fingerprint: 6407817c21ea388618bd580d8f954f8cca5593e92064065e79367209f6da9f01
+  judge_transport: openrouter
   ast_path: 'body[12]/body[14]/body[2]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v1:33242e69b219078d58e66465737ac70fe65e7cf997a45bc28694511f3c8dda1a'
+  judge_metadata_signature: 'hmac-sha256:v2:39d14d2715aa0cac87e57d05688e8d8eca187d1f76746972abbd794c879667c6'
 - key: contracts/contract_propagation.py:R1:merge_contract_with_output:fp=b77bb8f4e1cd3d1d
   owner: architecture
   reason: |-
@@ -322,9 +336,11 @@ allow_hits:
   judge_confidence: 0.88
   judge_rationale: |-
     This is a legitimate lookup-with-default pattern on a process-local dict (`input_originals`), not defensive access on Tier-3 external data or a typed dataclass field. The semantics are explicitly 'use input's original name if this normalized name exists in the input contract; otherwise fall back to the output field's own original_name' — both branches are meaningful, non-fabricated values sourced from contract data we constructed two lines above. This is the canonical correct use of dict.get with an explicit default: choosing between two known values, not silently swallowing absence. The R1 rule does not apply to in-function dict lookups where the default is a deliberate semantic fallback.
-  file_fingerprint: e6b2eb031ec607915f29d2c9bf18c998567b792488a86ab4a604b1391b2f3d03
+  judge_signature_version: 2
+  scope_fingerprint: 431bd12f970edcaa828a706876614e49306e7ce029bdc217f21f7c889fe60592
+  judge_transport: openrouter
   ast_path: 'body[9]/body[3]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v1:85ffb4d5d24967a659eeb5594f31976d87e4b31c85076a28266baa4c6fb5d460'
+  judge_metadata_signature: 'hmac-sha256:v2:9a1835e54fe343b1d6a99d14881906c5a86527f34393d1a5cebc0bb254638a97'
 - key: contracts/tier_registry.py:R5:tier_1_error:fp=360d94dd51a67c28
   owner: architecture
   reason: |-
@@ -339,9 +355,11 @@ allow_hits:
   judge_confidence: 0.78
   judge_rationale: |-
     This is a decorator factory validating its own kwargs at the API boundary — the isinstance(reason, str) check enforces the contract that callers pass a string, raising ValueError on violation. This is offensive programming: detect invalid state, throw meaningful exception. The check is at a public-API boundary (decorator invoked from arbitrary caller modules) and serves type-narrowing for the subsequent .strip() call. R5 suppression here is legitimate — the alternative (trusting the type annotation alone) would let a misuse like @tier_1_error(reason=None, ...) crash later with a less informative AttributeError.
-  file_fingerprint: dcb72ed124d92482d0d137ad19fe178317c30c275114531c2043c4e42621c9eb
+  judge_signature_version: 2
+  scope_fingerprint: 140166454fcbdd7347d45c8d681f71f1d2f2b9e44a303d1f3454b3dbed57e150
+  judge_transport: openrouter
   ast_path: 'body[17]/body[2]/test/values[0]/operand'
-  judge_metadata_signature: 'hmac-sha256:v1:65ed2701ae18cf5b76c8406372259fb582ac31db5e3b27c8d723d5bda16d6ead'
+  judge_metadata_signature: 'hmac-sha256:v2:979486a6a191fb920861e784fdc94f0422bdb5b2e006c207434e524e381c1a2e'
 - key: contracts/tier_registry.py:R5:tier_1_error:fp=b6d17d7d22d3b69b
   owner: architecture
   reason: |-
@@ -356,9 +374,11 @@ allow_hits:
   judge_confidence: 0.88
   judge_rationale: |-
     The isinstance check at line 129 is a trust boundary validation on a caller-supplied kwarg (caller_module) that feeds directly into the module-prefix allowlist in _register_with_module_prefix. This is offensive programming: detecting an invalid state (non-string or empty caller_module) and raising ValueError before the value can spoof the allowlist check. The decorator nudge does not apply — R5 is in the suppressible set, but tier_1_error is not a Tier-3 external-data boundary function; it is a decorator factory validating a developer-supplied kwarg as a security gate, and the appropriate remediation is the explicit isinstance guard, not @trust_boundary(tier=3). The rationale is site-specific, cites the ADR, and accurately describes the security invariant.
-  file_fingerprint: dcb72ed124d92482d0d137ad19fe178317c30c275114531c2043c4e42621c9eb
+  judge_signature_version: 2
+  scope_fingerprint: 140166454fcbdd7347d45c8d681f71f1d2f2b9e44a303d1f3454b3dbed57e150
+  judge_transport: openrouter
   ast_path: 'body[17]/body[3]/test/values[0]/operand'
-  judge_metadata_signature: 'hmac-sha256:v1:4de15230cad5198bb187b8459a312b75c7f03bf39e1fc424123bc03c25a2621b'
+  judge_metadata_signature: 'hmac-sha256:v2:9806ab06989d7b5a52f045ee8b0b9ee3ecc11edfad5564543fe44097fb509707'
 - key: contracts/tier_registry.py:R5:_register_with_module_prefix:fp=ce98be6cf59df4d5
   owner: architecture
   reason: |-
@@ -373,9 +393,11 @@ allow_hits:
   judge_confidence: 0.9
   judge_rationale: |-
     This is an offensive invariant check at a decorator API boundary, not defensive coercion. The isinstance(cls, type) and issubclass(cls, BaseException) test validates that @tier_1_error was applied to a valid target and raises TypeError on violation — textbook offensive programming per the Decision Test ('Can I detect an invalid state and throw a meaningful error?'). The decorator's input is a class object supplied by framework code at import time, not Tier-3 external data, so the @trust_boundary decorator does not apply. The check crashes loudly rather than suppressing anything.
-  file_fingerprint: dcb72ed124d92482d0d137ad19fe178317c30c275114531c2043c4e42621c9eb
+  judge_signature_version: 2
+  scope_fingerprint: 9c85e205ee9488a193a8754ccd1d2223540e90154800c56e2b28d277730f6c6e
+  judge_transport: openrouter
   ast_path: 'body[18]/body[1]/body[0]/test/operand/values[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:730cb99d3aceba41b37dc5bde6c6b74fd31b3e0e552875ca5c51731b4684672b'
+  judge_metadata_signature: 'hmac-sha256:v2:d284ae306a32f2572087ec504dfc878de80a79cae2f8428167e3d07f78bd201d'
 - key: contracts/tier_registry.py:R5:_register_with_module_prefix:fp=18d4ee87363f8490
   owner: architecture
   reason: Decorator API boundary — isinstance(class_module, str) validates the registered
@@ -398,9 +420,11 @@ allow_hits:
   judge_confidence: 0.85
   judge_rationale: |-
     The isinstance checks here are not defensive shape-guards on Tier-3 external data — they are an offensive type-dispatch in a normalization helper that crashes immediately with a meaningful TypeError on any non-list/non-tuple input. This is the encouraged 'proactively detect invalid states and throw meaningful exceptions' pattern, not the forbidden silent-coercion pattern R5 targets. The decorator nudge does not apply: the function does not receive external Tier-3 data (it normalizes internal contract bundle fields), and the isinstance branches feed an explicit raise rather than a silent fallback.
-  file_fingerprint: 7fadff8c32a67d193d020bba00cc8ff35eb6393b42214af6021b48970e38b835
+  judge_signature_version: 2
+  scope_fingerprint: 739f01b28bc7eb5b2448abac05e3331ec0952798c1f31c92fd626a3cfd122d49
+  judge_transport: openrouter
   ast_path: 'body[22]/body[1]/test'
-  judge_metadata_signature: 'hmac-sha256:v1:44758c0bc75b4ee189f1fb784badbc7ed0bc3f930ff7ed9b3d0ad9f58306a8ca'
+  judge_metadata_signature: 'hmac-sha256:v2:31fbcea7279a73e8525b2b0039e1175c89bff2c25e7d921ae071a5cdf0e128a3'
 - key: contracts/declaration_contracts.py:R5:_normalise_row_tuple:fp=2be5b2edada71a02
   owner: architecture
   reason: |-
@@ -415,9 +439,11 @@ allow_hits:
   judge_confidence: 0.82
   judge_rationale: |-
     This is a normalization helper that explicitly dispatches on input shape (list vs tuple) to produce a frozen tuple, raising TypeError on anything else. The isinstance check is not a defensive Tier-3 shape guard — it is offensive type discrimination at an internal contract boundary, choosing between two valid input shapes and crashing on invalid ones. R5 (isinstance shape guard) is technically the rule fired, but the usage here is the encouraged offensive form: detect invalid state, raise meaningful error. The rationale correctly identifies the helper's role and the tuple branch as the already-normalized path.
-  file_fingerprint: 7fadff8c32a67d193d020bba00cc8ff35eb6393b42214af6021b48970e38b835
+  judge_signature_version: 2
+  scope_fingerprint: 739f01b28bc7eb5b2448abac05e3331ec0952798c1f31c92fd626a3cfd122d49
+  judge_transport: openrouter
   ast_path: 'body[22]/body[1]/orelse[0]/test'
-  judge_metadata_signature: 'hmac-sha256:v1:037de626b6173e0f21859cca5a3256770e7e2d2894ca278e3b690eb9f00711f7'
+  judge_metadata_signature: 'hmac-sha256:v2:78d2b8511007a00ea85749a9e0e42998d731de53dbbcd2bcc1c7137a78badfa4'
 - key: contracts/declaration_contracts.py:R2:_collect_contract_sites:fp=8d6e48bba4566067
   owner: architecture
   reason: |-
@@ -432,9 +458,11 @@ allow_hits:
   judge_confidence: 0.9
   judge_rationale: |-
     This is a legitimate marker-discovery pattern: the code walks every attribute of every class in the MRO and probes for an optional decorator marker (`_DISPATCH_SITE_MARKER_ATTR`). The vast majority of attributes walked (dunder methods, helper methods, non-decorated methods) will not carry the marker, so absence is the expected normal case, not an invariant violation. The default-`None` carries real semantic meaning ('not a dispatch site'), and the code immediately branches on `site_name is None` to skip non-sites — this is offensive programming using a sentinel, not silent error suppression. Direct attribute access would crash on every undecorated attribute and make the discovery pass impossible. Not a trust-tier issue; the decorator nudge does not apply (no external parameter, R2 not in the suppressible set).
-  file_fingerprint: 7fadff8c32a67d193d020bba00cc8ff35eb6393b42214af6021b48970e38b835
+  judge_signature_version: 2
+  scope_fingerprint: 6fe5c8de46e8b51edfdec146a1d3847bbb0460d950800562f01677b0d6d73fd3
+  judge_transport: openrouter
   ast_path: 'body[55]/body[3]/body[1]/body[0]/value'
-  judge_metadata_signature: 'hmac-sha256:v1:129a0dfd86d7aeb2d72f09e3259f445dccb37c4b77d14722e42385a8fa615b78'
+  judge_metadata_signature: 'hmac-sha256:v2:e6c8c4f1f89f2ff140a0651938ce75b105c1e61f97b44d740cb0b3f12e405240'
 - key: contracts/declaration_contracts.py:R5:register_declaration_contract:fp=e770539007d53958
   owner: architecture
   reason: |-
@@ -449,9 +477,11 @@ allow_hits:
   judge_confidence: 0.9
   judge_rationale: |-
     This is offensive programming at a registry entry point, not defensive shape-guarding. The isinstance check enforces ADR-010's nominal-ABC posture by raising TypeError with a diagnostic message when a non-DeclarationContract is passed — the canonical 'detect invalid state and throw meaningful error' pattern from the Decision Test. The data is framework-internal (contract registration is system code registering system code, Tier-1), so the rule's defensive-pattern heuristic misfires here; the check exists to make framework bugs crash loudly, exactly as policy demands. R5 is in the decorator's suppressible set but the decorator is for Tier-3 external-data boundaries, not Tier-1 nominal-typing assertions, so the structural alternative does not apply.
-  file_fingerprint: 7fadff8c32a67d193d020bba00cc8ff35eb6393b42214af6021b48970e38b835
+  judge_signature_version: 2
+  scope_fingerprint: ea783209421a6de002aedc4d12fdc6c9c7675e773d654f97724df76059daa24c
+  judge_transport: openrouter
   ast_path: 'body[56]/body[1]/body[0]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v1:e818a3d91fffcff3efa5592e37be27f616165fcbb66ec33c65cb5dfe24113575'
+  judge_metadata_signature: 'hmac-sha256:v2:9418260cded6d299756ef2f5e576b06f2a7f2e924f3e389f81f73f8f7e63cd31'
 - key: contracts/declaration_contracts.py:R5:register_declaration_contract:fp=28b565efc229de07
   owner: architecture
   reason: |-
@@ -466,9 +496,11 @@ allow_hits:
   judge_confidence: 0.88
   judge_rationale: |-
     The isinstance check at line 1188 is offensive programming at a registry-entry validation gate: it detects an invalid state (payload_schema is not a type object) and raises TypeError with a clear diagnostic. This is precisely the 'Can I detect an invalid state and throw a meaningful err? Assert it (offensive)' branch of the Decision Test, not a defensive shape-guard suppressing errors. The R5 rule pattern that the @trust_boundary decorator targets is Tier-3 external-data shape guarding; this is framework-internal contract registration where bad input is a framework bug, so the decorator does not apply. The surrounding code consistently uses the same pattern for violation_class validation, confirming this is the established offensive-validation idiom at the registry boundary.
-  file_fingerprint: 7fadff8c32a67d193d020bba00cc8ff35eb6393b42214af6021b48970e38b835
+  judge_signature_version: 2
+  scope_fingerprint: ea783209421a6de002aedc4d12fdc6c9c7675e773d654f97724df76059daa24c
+  judge_transport: openrouter
   ast_path: 'body[56]/body[1]/body[2]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v1:83163b456d06748e7bd005f53a80357c3757369213d65154ee6fbd6a3edceea2'
+  judge_metadata_signature: 'hmac-sha256:v2:d9ba882f06ecc224cdab2d6ddca3fc286e768308987a9a9ea8acc8b61efb7d72'
 - key: contracts/declaration_contracts.py:R5:register_declaration_contract:fp=88e060f1276007c6
   owner: architecture
   reason: |-
@@ -483,9 +515,11 @@ allow_hits:
   judge_confidence: 0.9
   judge_rationale: |-
     The isinstance check at line 1195 is an offensive type gate validating caller-supplied contract registration shape — it raises TypeError when violation_class is not a type object. This is exactly the 'detect invalid state and throw meaningful exception' pattern encouraged by policy, not defensive suppression. The surrounding code shows a consistent validation block raising TypeErrors for framework bugs before the registry freezes; the isinstance is the necessary precondition for the issubclass call two lines later (which would itself raise TypeError on non-type input with a less informative message). R5 (isinstance shape guard) is fired by the analyzer but this is the legitimate offensive-programming use, not a Tier-3 boundary suppression — no decorator applies.
-  file_fingerprint: 7fadff8c32a67d193d020bba00cc8ff35eb6393b42214af6021b48970e38b835
+  judge_signature_version: 2
+  scope_fingerprint: ea783209421a6de002aedc4d12fdc6c9c7675e773d654f97724df76059daa24c
+  judge_transport: openrouter
   ast_path: 'body[56]/body[1]/body[4]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v1:5e034d6658ee2f39ccdf91bdf6d81c1976e16f04efa368bf2fe345ba2d7c13fe'
+  judge_metadata_signature: 'hmac-sha256:v2:3d3f8e80bfdcc72e94b8995ddfe499c70c76dee88b03b415d9995abefcfa5d85'
 - key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=8f7477d482ca1864
   owner: composer-audit
   reason: Tier 3 boundary - response_snapshot.get('usage') reads optional usage metadata
@@ -507,9 +541,11 @@ allow_hits:
   judge_confidence: 0.88
   judge_rationale: |-
     This is a legitimate trust-boundary suppression. Telemetry is the secondary channel per the primacy order (Audit fires first sync/crash-on-failure; Telemetry fires second async/best-effort), so catching transport-level network errors (OSError, ConnectionError, TimeoutError) at the telemetry emit site is correct per policy. The except is narrowly scoped to transport exceptions, explicitly lets Tier-1 and programming errors propagate, and the call has already been recorded to the Landscape before this point. The rationale accurately describes the boundary and the code matches.
-  file_fingerprint: 4c0e8bf2bcd04ff84001dfc79a4b527017f6c88fdafbd5c133e33d40f8d9d359
+  judge_signature_version: 2
+  scope_fingerprint: f49855d7090be12a889fe7ea6724ddd5cc941a057207e9c926c0c0629e0053d2
+  judge_transport: openrouter
   ast_path: 'body[17]/body[20]/body[10]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:074c50b354f9031f34eb4487a942206e8ce989156457bd7057687d360b14be08'
+  judge_metadata_signature: 'hmac-sha256:v2:34089a9c9f7ad016ab497a6f407d845be5e48680983b4b532d44079d8e5ae0b4'
 - key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=5e7b2d9d784b791f
   owner: composer-audit
   reason: |-
@@ -524,9 +560,11 @@ allow_hits:
   judge_confidence: 0.82
   judge_rationale: |-
     This is a legitimate Tier-3 boundary case. The function records validation errors for external row data that has already failed validation — by definition malformed Tier-3 input that may include NaN, Infinity, or non-serializable types. The try/except around stable_hash is narrowly scoped (catches only ValueError/TypeError from JSON canonicalization), falls back to repr_hash to preserve the audit trail (recording what we saw, not fabricating), and logs only the error type rather than swallowing silently. This aligns with the Tier-3 rule of recording what we got even when malformed. R6 is not in the decorator's suppressible set (R1/R5), so the decorator nudge does not apply.
-  file_fingerprint: 4c0e8bf2bcd04ff84001dfc79a4b527017f6c88fdafbd5c133e33d40f8d9d359
+  judge_signature_version: 2
+  scope_fingerprint: f14807a26f9691fba20e774857bcc99b5677ececa3639e69e256339e3e4986fa
+  judge_transport: openrouter
   ast_path: 'body[17]/body[21]/body[2]/orelse[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:95012a12b03d99602af23d2e12424ce5a1af5843e8c86a8c2ff4d7f1d33a06a8'
+  judge_metadata_signature: 'hmac-sha256:v2:996b11bc69b521bbd0a18527a15a7c9fdffea82a6fe0df60e033b7b6da6c5bec'
 - key: contracts/security.py:R1:get_fingerprint_key:fp=e763a5c875c64b76
   owner: architecture
   reason: |-
@@ -541,9 +579,11 @@ allow_hits:
   judge_confidence: 0.9
   judge_rationale: |-
     The finding is on os.environ.get(_ENV_VAR), which reads an environment variable — an external Tier-3 boundary. The code immediately checks the result and raises ValueError with a clear message if absent, which is exactly the offensive-programming pattern: detect invalid state at the boundary and throw a meaningful exception. There is no fabrication, no silent default, no swallowed error. os.environ.get is the standard idiom here; the alternative os.environ[_ENV_VAR] would raise KeyError with a less informative message.
-  file_fingerprint: eb608352a7e0fbb2fad032dfb70c3df798464a2a45ec796070874ffc8c5b4fa0
+  judge_signature_version: 2
+  scope_fingerprint: e3e308ac00050438e56cf2bb156c651a4739e156545fa998af28ea991f211bb9
+  judge_transport: openrouter
   ast_path: 'body[8]/body[1]/value'
-  judge_metadata_signature: 'hmac-sha256:v1:d1295b17be114cf864bb28a024df5fac46e1148715d662cb4c4cc3386d7cce80'
+  judge_metadata_signature: 'hmac-sha256:v2:3e575e8422669cc493d462e99f92ed26fc01e3f3ace4c045d29c87d089f55484'
 - key: contracts/composer_interpretation.py:R5:_validate_enum_member:fp=ffdde8578491891c
   owner: contracts
   reason: |-
@@ -558,6 +598,8 @@ allow_hits:
   judge_confidence: 0.82
   judge_rationale: |-
     The function `_validate_enum_member` is an offensive-programming validator: it takes an `object` (deliberately untyped) and asserts it conforms to an enum type, raising ValueError with a meaningful message if not. This is the exact pattern the policy encourages ('Proactively detect invalid states and throw meaningful exceptions'). The `isinstance` check here is not a defensive shape-guard suppressing an error — it IS the error-raising mechanism. R5 (isinstance shape guard) is technically matched syntactically, but the semantic intent is the offensive validator that the Decision Test endorses. The decorator nudge does not apply: the parameter is not external Tier-3 data flowing from a boundary function, it's a typed-contract construction assertion.
-  file_fingerprint: 34712f03d567ded3cdb7c8cedaac57e577a4ae6707bd9b05914748e532d1d01e
+  judge_signature_version: 2
+  scope_fingerprint: f624fff8954f5e27f52c257eee19f377a08d8e9c7d7fd88ad8c2f6c889180308
+  judge_transport: openrouter
   ast_path: 'body[15]/body[0]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v1:b8772356ba016b090511f5ac0b9ae1e1eb390d4b9eadd181018e8607f745586f'
+  judge_metadata_signature: 'hmac-sha256:v2:bf8e150b40e14d21486e8d826e081dab27c59c48a096833cc7f526362f27cdbf'

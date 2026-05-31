@@ -104,9 +104,11 @@ allow_hits:
   judge_confidence: 0.9
   judge_rationale: |-
     This is a textbook offensive isinstance check: the code detects an invalid state (gate expression returned a non-bool) and raises a meaningful CommencementGateFailedError with full context, rather than coercing via bool(result) or silently accepting truthy values. The check enforces an invariant before recording to the audit trail, which aligns with the auditability standard — non-bool results indicate a config/expression bug that must surface explicitly. R5's defensive-shape-guard concern doesn't apply here because the isinstance is used to assert-and-raise, not to branch into a silent recovery path.
-  file_fingerprint: 298390c2cc60a7174ffe5cefb8248e36a17a76292c4b0dda594199440e20e107
+  judge_signature_version: 2
+  scope_fingerprint: bab5faa4b05f2b29dabca867e9d5d8a8e3414f11e11d64cfb6a518b3678e48bb
+  judge_transport: openrouter
   ast_path: 'body[13]/body[4]/body[0]/body[2]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v1:6d4318a3e6f0038b8c3cd4e78b31ac16f66332abb67ec436ce1421c96fb72cfb'
+  judge_metadata_signature: 'hmac-sha256:v2:8c8e3cc1d2058092e01f95a487c491fdd875abc4fe49559445191d3be65dda4b'
 - key: engine/executors/state_guard.py:R5:NodeStateGuard:_extract_audit_evidence_context:fp=81df711769fff87f
   owner: architecture
   reason: Audit evidence is contractually required to serialize to a mapping before canonical_json() can
@@ -135,9 +137,11 @@ allow_hits:
   judge_confidence: 0.86
   judge_rationale: |-
     The except clause catches a specific typed exception (DeclarationContractViolation), enriches it with the authoritative contract_name, and appends to a violations list that is then re-raised at loop end — either as the original instance (N=1, reference-equality preserved) or as an AggregateDeclarationContractViolation (N>=2). This is not silent swallowing: every violation surfaces, and the post-condition documented in the docstring (audit-complete: every applicable contract runs exactly once) is the legitimate offensive-programming pattern. R6 (broad/silent exception handling) is misapplied here because the catch is narrow, the exceptions are reraised, and the collect-then-raise idiom is required by the audit-complete invariant. Decorator nudge does not apply: no external parameter, R6 not in {R1,R5}.
-  file_fingerprint: aca0e2136a1a552e962c27c38196782a4edbee023dc0a7fea9bcf100a1ebb982
+  judge_signature_version: 2
+  scope_fingerprint: d644b5df224da3348dfcc439b194177bf5169acf2b73324a2365e8b7f25ae81f
+  judge_transport: openrouter
   ast_path: 'body[9]/body[2]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:59fa7f92c01a91598197581e1d7c831c65c71188aa8bd68b4874827a07948d75'
+  judge_metadata_signature: 'hmac-sha256:v2:35cb047ff2d428a77606f5448063e182cec2d4a079764b21fa7f85d8e31ea270'
 - key: engine/_best_effort.py:R4:best_effort:fp=c48026df1d344433
   owner: architecture
   reason: |-
@@ -152,9 +156,11 @@ allow_hits:
   judge_confidence: 0.85
   judge_rationale: |-
     This is the canonical post-audit ceremony helper, and the broad-except is the helper's entire reason for existing — it consolidates scattered ceremony try/except blocks into one reviewable surface. The docstring makes the invariant explicit: it runs only after an audit-load-bearing event is recorded, and ceremony failure must not replace the in-flight event. Per CLAUDE.md's primacy order, logger is the correct last-resort channel when the ceremony/telemetry path itself is the failure, and the inner suppress(Exception) around the warning is consistent with that. The suppression is site-specific, narrowly scoped to a documented secondary-path helper, and the rationale matches the code.
-  file_fingerprint: c4781ee9c34a6aef9f0b2f834f77400c34e20c8febe7fffb6397e997c656db51
+  judge_signature_version: 2
+  scope_fingerprint: 3acfbf5a51eb8bc39ac8898f0a1a1f7012240c71a258491699669f6f5f54b9d3
+  judge_transport: openrouter
   ast_path: 'body[7]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:1c1ede25e21cda7e71cc57fafd764632af8f0ceaafaf3fe2f32bc436a674cb36'
+  judge_metadata_signature: 'hmac-sha256:v2:03c24d72f8439db037a967a76a2ac8391ea37724cc80bef48db8dcb4f8c48046'
 - key: engine/_best_effort.py:R7:best_effort:fp=437c71e49d86fee5
   owner: architecture
   reason: |-
@@ -169,9 +175,11 @@ allow_hits:
   judge_confidence: 0.86
   judge_rationale: |-
     This is the logger-of-last-resort inside an already-explicit best-effort ceremony boundary. The outer except has already captured a ceremony failure after the primary audit event was recorded; the inner suppress(Exception) guards the warning emission itself, so that a structlog/processor failure cannot mask the preserved original event. Per the telemetry primacy order, logging is the last-resort channel, and a failure to log must not propagate above ceremony scope. The suppression is narrowly scoped to a single _slog.warning call with structured context, not a broad swallow of engine logic.
-  file_fingerprint: c4781ee9c34a6aef9f0b2f834f77400c34e20c8febe7fffb6397e997c656db51
+  judge_signature_version: 2
+  scope_fingerprint: 3acfbf5a51eb8bc39ac8898f0a1a1f7012240c71a258491699669f6f5f54b9d3
+  judge_transport: openrouter
   ast_path: 'body[7]/body[1]/handlers[0]/body[1]'
-  judge_metadata_signature: 'hmac-sha256:v1:7b2b11fc01e1f239723a1ff9951941b8adff3b06f9410b0d8e1d49e8d9d61708'
+  judge_metadata_signature: 'hmac-sha256:v2:24d0a3d5e86565310484a2801db1f971ae900f7cfcc52995a09fcf121f17cfc4'
 - key: engine/orchestrator/cleanup.py:R4:cleanup_plugins:run_hook:fp=3f14e10c45af58b3
   owner: architecture
   reason: |-
@@ -186,6 +194,8 @@ allow_hits:
   judge_confidence: 0.85
   judge_rationale: |-
     Plugin cleanup is a legitimate use case for broad exception handling: best-effort lifecycle hooks must all be attempted even if individual ones fail. The code correctly re-raises Tier-1 errors (FrameworkBugError, AuditIntegrityError) via record_cleanup_error before collecting non-Tier-1 failures into a RuntimeError chained from the pending exception. This is offensive programming applied correctly — failures are surfaced via aggregated RuntimeError, not silently swallowed, and the audit-critical Tier-1 errors propagate immediately. The rule R4 (broad catch) is structurally required here by the lifecycle contract, and the single collapsed catch site is the minimal suppression surface.
-  file_fingerprint: 28afa0115b76f4e3a133baf831d1635543fd07aa6d0a637a7935c0ecad7ae1ab
+  judge_signature_version: 2
+  scope_fingerprint: 1e1978e59f1b4aa29ca33f8dd8d51c04ed36a29e4e0f8d9cbd8681d10bf5df33
+  judge_transport: openrouter
   ast_path: 'body[10]/body[5]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:4f25aad1de4565b0215c88223734f75a04c9ceae2e80f4d0cc0581fee2eb850c'
+  judge_metadata_signature: 'hmac-sha256:v2:f602e7b4d37a0779206d5801a2a55e91b23acd50e345d9f1458a5a00931b83a9'

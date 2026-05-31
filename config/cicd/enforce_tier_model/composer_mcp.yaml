@@ -27,9 +27,11 @@ allow_hits:
   judge_confidence: 0.86
   judge_rationale: |-
     This is a legitimate Tier-3 boundary catch: canonical_json/stable_hash operate on LLM-supplied arguments (external, untrusted) and can raise ValueError/TypeError on non-finite floats or non-serializable types. The except clause does not silently swallow — it builds a forensic sentinel via a shared helper, preserves the exception in canonicalization_failed for the ARG_ERROR path, and audit primacy is honored by ensuring the row still lands. This is exactly the 'wrap at trust boundary' pattern the policy encourages, not defensive recovery on Tier-2 data. R6 (broad except) is not in the decorator's suppressible set {R1, R5}, so the decorator nudge does not apply.
-  file_fingerprint: 366826c44ccae25a3f6c7502b49429035d2cffe40b55833f641489124f9702eb
+  judge_signature_version: 2
+  scope_fingerprint: d440c4521bea969796fbcf10d240abf0870beb1d482a29e073e81fa09329c45e
+  judge_transport: openrouter
   ast_path: 'body[52]/body[11]/body[5]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:b7ff68f14d532f4fa8428ac76d2e5e196fe8f0c52c7021de0f6ad9c3fb4fa17d'
+  judge_metadata_signature: 'hmac-sha256:v2:dcfb9004b812fb3a76651bf0008f949f8358bf9682da634a75d265594b392054'
 - key: composer_mcp/server.py:R6:create_server:call_tool:fp=98007a473ebfd71b
   owner: composer-audit
   reason: |-
@@ -44,6 +46,8 @@ allow_hits:
   judge_confidence: 0.78
   judge_rationale: |-
     This is a legitimate audit-trail-preservation pattern, not defensive programming on Tier-2 data. The except runs inside a finally block whose sole job is to land the audit row; if canonical_json/stable_hash raise on a non-finite float, the exception would propagate out of finally and both mask the LLM's success return AND lose the audit record — directly violating the Auditability Standard ('every decision must be traceable'). The narrow except (ValueError, TypeError) delegates to a shared sentinel builder that records the canonicalization failure explicitly rather than fabricating a value, so the audit row truthfully says 'canonicalization failed' instead of silently dropping. The rationale is site-specific, names the exact failure mode, and points at the shared sentinel discipline; this is the audit-finally pattern the policy implicitly requires.
-  file_fingerprint: 366826c44ccae25a3f6c7502b49429035d2cffe40b55833f641489124f9702eb
+  judge_signature_version: 2
+  scope_fingerprint: d440c4521bea969796fbcf10d240abf0870beb1d482a29e073e81fa09329c45e
+  judge_transport: openrouter
   ast_path: 'body[52]/body[11]/body[14]/finalbody[5]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:566819de0b2a0e8349c947bb4145a09be0a1cc10dae9139cf773d52775bd40bf'
+  judge_metadata_signature: 'hmac-sha256:v2:b9d39452073556fafd0e77adaa6bd53139295e8aea4cfab5c7e34c501cd3b634'

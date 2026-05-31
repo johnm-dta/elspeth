@@ -13,6 +13,8 @@ allow_hits:
   judge_confidence: 0.85
   judge_rationale: |-
     This is a legitimate trust boundary at module import: importlib.metadata is querying an external system (the Python package installation database), and PackageNotFoundError is a specific, narrow exception indicating the package is not installed in editable/installed mode. The fallback value 'UNKNOWN-dev-uninstalled' is honest — it records absence rather than fabricating a plausible-looking version string, which aligns with the 'record what we didn't get' principle. The except clause catches one specific exception type (not a bare except), and the dev-only context is genuine: production installs via wheel/sdist always populate metadata. This is offensive programming around a real external boundary, not defensive suppression of a code bug.
-  file_fingerprint: 0660925b916b12b99ee7801ff18010e4a872e60a71c7f316170f55dc9644627e
+  judge_signature_version: 2
+  scope_fingerprint: bc09890d7296366cf6fe1b07eafdd1e667c9ae88f86354b9de86372cfa09fa3e
+  judge_transport: openrouter
   ast_path: 'body[2]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v1:24cb93e404d1491b8653e600793ffbb74b03850e9485fbb3f42d8f0f0acd3ed6'
+  judge_metadata_signature: 'hmac-sha256:v2:b3439d8ae19e74a2a586784e12a553c90b2395330b940881c5242ce4c67009ef'

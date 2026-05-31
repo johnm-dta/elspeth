@@ -56,10 +56,11 @@ DEFAULT_JUDGE_MODEL: str = "anthropic/claude-opus-4-7"
 DEFAULT_JUDGE_MAX_TOKENS: int = 1024
 
 # Transport identities. The persisted/signed values are these strings; the
-# CLI flag spelling ("openrouter" / "agent") maps onto them in cli.py.
+# CLI flag spelling ("openrouter" / "agent") maps onto them in cli.py. The
+# valid-transport set (``_VALID_TRANSPORTS``) is derived from the ``_TRANSPORTS``
+# registry below so the two can't drift.
 TRANSPORT_OPENROUTER: str = "openrouter"
 TRANSPORT_AGENT: str = "claude_agent_sdk"
-_VALID_TRANSPORTS: frozenset[str] = frozenset({TRANSPORT_OPENROUTER, TRANSPORT_AGENT})
 
 # Per-transport default model. CRITICAL: DEFAULT_JUDGE_MODEL is an OpenRouter
 # *routing slug* ("anthropic/claude-opus-4-7" — the vendor prefix is required
@@ -743,12 +744,15 @@ class JudgeResponse:
     the audit trail loses information if we coerce ``None`` to ``0``.
 
     ``judge_transport`` records which transport produced this verdict
-    (``"openrouter"`` or ``"claude_agent_sdk"``). It is carried into the
-    HMAC-signed v2 allowlist payload — "how the verdict was produced" is
-    verdict metadata, bound to and tamper-evident with the verdict itself.
-    The era of any provider-side system prompt (the ``claude_code`` preset
-    under the agent transport) is bounded by the already-signed
-    ``recorded_at`` timestamp; no separate version is captured.
+    (``"openrouter"`` or ``"claude_agent_sdk"``). It is recorded on the
+    response now but is not yet threaded into the HMAC-signed v2 allowlist
+    payload — that wiring (justify write + migrate + validator, updated
+    atomically) is deferred to a later task. Once threaded, "how the
+    verdict was produced" will be verdict metadata bound to and
+    tamper-evident with the verdict itself; the era of any provider-side
+    system prompt (the ``claude_code`` preset under the agent transport)
+    will be bounded by the already-signed ``recorded_at`` timestamp, so no
+    separate version is captured.
     """
 
     verdict: JudgeVerdict
@@ -861,7 +865,7 @@ def _call_openrouter(request: JudgeRequest, model_id: str, max_tokens: int) -> _
             "OpenRouter via the OpenAI-compatible SDK and pins SDK "
             "environment handling through httpx. Install with:\n\n"
             "    uv pip install -e 'elspeth-lints/[judge]'\n\n"
-            "(from the repo root), or select --judge-transport agent."
+            "(from the repo root)."
         ) from exc
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -870,8 +874,7 @@ def _call_openrouter(request: JudgeRequest, model_id: str, max_tokens: int) -> _
             "OPENROUTER_API_KEY is not set. The OpenRouter transport calls "
             "OpenRouter (the project-wide LLM gateway) to gate allowlist "
             "writes. Set the key in your shell environment "
-            "(`export OPENROUTER_API_KEY=sk-or-...`) and re-run, or select "
-            "--judge-transport agent."
+            "(`export OPENROUTER_API_KEY=sk-or-...`) and re-run."
         )
 
     user_blocks = _build_user_message_blocks(request)
@@ -959,15 +962,18 @@ def _call_openrouter(request: JudgeRequest, model_id: str, max_tokens: int) -> _
 
 def _call_agent_sdk(request: JudgeRequest, model_id: str, max_tokens: int) -> _TransportResult:
     # Placeholder until Task 2 lands the Claude Agent SDK transport. Keeping
-    # it here (rather than omitting the registry key) makes the registry total
-    # over ``_VALID_TRANSPORTS`` and keeps ``call_judge``'s lookup exhaustive.
-    raise JudgeConfigurationError("The Claude Agent SDK transport is not yet available. Use --judge-transport openrouter.")
+    # it here (rather than omitting the registry key) keeps the registry
+    # exhaustive over the valid transports and ``call_judge``'s lookup total.
+    raise JudgeConfigurationError("The Claude Agent SDK transport is not yet available; use the OpenRouter transport.")
 
 
 _TRANSPORTS: dict[str, Callable[[JudgeRequest, str, int], _TransportResult]] = {
     TRANSPORT_OPENROUTER: _call_openrouter,
     TRANSPORT_AGENT: _call_agent_sdk,
 }
+# Derive the valid-transport set from the registry so the two can't drift: a
+# transport that validates but has no registry entry would KeyError on lookup.
+_VALID_TRANSPORTS: frozenset[str] = frozenset(_TRANSPORTS)
 
 
 def call_judge(

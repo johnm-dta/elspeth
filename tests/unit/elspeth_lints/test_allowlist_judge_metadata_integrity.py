@@ -1382,3 +1382,129 @@ def test_v2_entry_at_match_time_raises_not_yet_wired() -> None:
 
     with pytest.raises(ValueError, match="not yet wired"):
         verify_entry_binding_against_finding(entry, file_path="core/x.py", ast_path="body[0]")
+
+
+# ---------------------------------------------------------------------------
+# Load-time source binding: v2 is file-exists only (scope verified at match
+# time); v1 retains the whole-file byte-hash recompute.
+# ---------------------------------------------------------------------------
+
+
+def _write_v2_judge_gated_yaml(
+    *,
+    yaml_path: Path,
+    key: str,
+    scope_fingerprint: str,
+    ast_path: str,
+) -> None:
+    """Write one v2 judge-gated allowlist entry (scope-bound, no file_fingerprint)."""
+    signature = compute_judge_metadata_signature(
+        key=key,
+        ast_path=ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime(2026, 5, 23, 0, 0, 0, tzinfo=UTC),
+        judge_model="anthropic/claude-opus-4-7",
+        judge_rationale="judge accepted the suppression",
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        signature_version=2,
+        scope_fingerprint=scope_fingerprint,
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
+    lines = [
+        "allow_hits:",
+        f"  - key: {key}",
+        "    owner: test-agent",
+        "    reason: tier-3 boundary",
+        "    safety: low",
+        "    judge_verdict: ACCEPTED",
+        "    judge_recorded_at: '2026-05-23T00:00:00+00:00'",
+        "    judge_model: anthropic/claude-opus-4-7",
+        f"    judge_policy_hash: '{JUDGE_POLICY_HASH}'",
+        "    judge_rationale: judge accepted the suppression",
+        "    judge_signature_version: 2",
+        f"    scope_fingerprint: '{scope_fingerprint}'",
+        f"    ast_path: '{ast_path}'",
+        f"    judge_metadata_signature: '{signature}'",
+    ]
+    yaml_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_v2_entry_loads_when_file_present_even_if_bytes_changed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A v2 entry binds by scope, not whole-file bytes; an unrelated edit must not crash the load.
+
+    This is the relief this change delivers: under v1, any edit to the
+    source file invalidated the whole-file file_fingerprint and crashed the
+    load. v2 has no load-time whole-file hash (scope is verified at match
+    time), so editing an unrelated line leaves the load green.
+
+    The v2 LOAD path verifies only file-exists + the HMAC signature, so the
+    ``scope_fingerprint`` value is arbitrary here (no scanning needed); the
+    signature is computed over that arbitrary value with the test key.
+    """
+    source_root = tmp_path / "src"
+    src_path = _write_source(source_root, "scoped.py", "def f():\n    return 1\n")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_v2_judge_gated_yaml(
+        yaml_path=allowlist,
+        key="scoped.py:R1:f:fp=somehash",
+        scope_fingerprint="a" * 64,
+        ast_path="body[0]",
+    )
+
+    # First load succeeds with the file as written.
+    loaded = load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+    assert len(loaded.entries) == 1
+    assert loaded.entries[0].judge_signature_version == 2
+    assert loaded.entries[0].scope_fingerprint == "a" * 64
+    assert loaded.entries[0].file_fingerprint is None
+
+    # Mutate an UNRELATED line in the source. Under v1 this would flip the
+    # whole-file fingerprint and crash; under v2 the load must stay green.
+    src_path.write_text("def f():\n    return 1  # unrelated comment\n", encoding="utf-8")
+    reloaded = load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+    assert len(reloaded.entries) == 1
+
+
+def test_v2_entry_crashes_at_load_when_source_file_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The version-independent file-exists guard still fires for v2 entries."""
+    source_root = tmp_path / "src"
+    source_root.mkdir(parents=True, exist_ok=True)
+    # Deliberately do NOT create gone.py under source_root.
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_v2_judge_gated_yaml(
+        yaml_path=allowlist,
+        key="gone.py:R1:f:fp=somehash",
+        scope_fingerprint="a" * 64,
+        ast_path="body[0]",
+    )
+
+    with pytest.raises(ValueError, match="does not exist"):
+        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+
+def test_v1_entry_still_crashes_on_whole_file_byte_drift(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The retained v1 path is unchanged: a v1 entry whose source bytes changed crashes."""
+    source_root = tmp_path / "src"
+    src_path = _write_source(source_root, "v1drift.py", "# original content\n")
+    original_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key="v1drift.py:R1:fn:fp=somehash",
+        file_fingerprint=original_fp,
+        ast_path="body[0]",
+    )
+
+    # Source unchanged: v1 binding holds.
+    load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+    # Drift the bytes: the v1 whole-file recompute must crash.
+    src_path.write_text("# changed content\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="file_fingerprint mismatch"):
+        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)

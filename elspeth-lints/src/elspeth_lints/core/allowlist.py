@@ -476,7 +476,7 @@ def _parse_allow_hits(
         _validate_judge_metadata_atomic(allowlist_entry, context=ctx)
         _validate_audit_review_context(allowlist_entry, context=ctx)
         if source_root is not None and allowlist_entry.judge_verdict is not None:
-            _verify_file_fingerprint_at_load(allowlist_entry, source_root=source_root, context=ctx)
+            _verify_source_binding_at_load(allowlist_entry, source_root=source_root, context=ctx)
             _verify_judge_metadata_signature_at_load(allowlist_entry, context=ctx)
         entries.append(allowlist_entry)
     return entries
@@ -759,15 +759,21 @@ def _validate_judge_policy_hash_shape(policy_hash: str, *, context: str) -> None
         raise ValueError(f"{context}: judge_policy_hash digest must use lowercase hex")
 
 
-def _verify_file_fingerprint_at_load(entry: AllowlistEntry, *, source_root: Path, context: str) -> None:
-    """Recompute and assert the persisted ``file_fingerprint`` matches live source.
+def _verify_source_binding_at_load(entry: AllowlistEntry, *, source_root: Path, context: str) -> None:
+    """Verify a judge-gated entry's source binding at load, dispatched by version.
+
+    All versions: the source file the entry's key points at must exist
+    (a binding to a deleted file is audit-broken). v1 additionally
+    recomputes the whole-file byte hash (its binding primitive). v2's
+    binding primitive (scope_fingerprint) is parse-dependent and is
+    verified at match time in ``verify_entry_binding_against_finding``,
+    reusing the scanner's parse — not re-parsed here.
 
     Crashes on mismatch (Tier-1 doctrine: silently propagating a stale
     or transplanted judge verdict into the gate's decision is evidence
     tampering). Crashes on missing source file (the entry binds to a
     file that no longer exists — the rotation/deletion was not
-    accompanied by removing the dependent judge-gated entry, which is
-    audit-broken).
+    accompanied by removing the dependent judge-gated entry).
     """
     file_path = _file_path_from_canonical_key(entry.key)
     source_path = source_root / file_path
@@ -778,26 +784,19 @@ def _verify_file_fingerprint_at_load(entry: AllowlistEntry, *, source_root: Path
             f"the dependent allowlist entry, or the entry's key was transplanted from a "
             f"different repository layout. Refusing to load."
         )
-    live_fingerprint = _compute_file_fingerprint(source_path)
-    # ``entry.file_fingerprint`` is non-None here *for a v1 entry*: invariant 8
-    # in ``_validate_judge_metadata_atomic`` (binding co-presence) enforced its
-    # presence for v1 judge-gated entries before we got here. A v2 entry binds
-    # via ``scope_fingerprint`` and carries no ``file_fingerprint``; its
-    # live-source recompute is a later task in the v1->v2 migration (the
-    # load-time-source-binding task). Until that lands, a v2 entry reaching
-    # this v1-only recompute crashes here by design (offensive:
-    # crash-loud-on-unbound beats silently skipping the binding check). This
-    # is an explicit ``raise`` rather than a bare ``assert`` so it carries an
-    # informative message and survives ``python -O`` (a stripped assert would
-    # let a v2 entry fall into the v1 hash compare against ``None``). No real
-    # v2 entry exists yet — justify still emits v1.
     version = entry.judge_signature_version if entry.judge_signature_version is not None else 1
     if version == 2:
-        raise ValueError(
-            f"{context}: v2 scope_fingerprint live-source verification is not yet wired "
-            "(scheduled for the load-time-source-binding task); a v2 judge-gated entry "
-            f"({entry.key!r}, {file_path!r}) must not reach this v1-only file_fingerprint recompute."
-        )
+        # v2 binds via ``scope_fingerprint``, which is parse-dependent and is
+        # verified at match time in ``verify_entry_binding_against_finding``
+        # (reusing the scanner's parse). There is no whole-file hash to
+        # recompute at load; the file-exists guard above is the only load-time
+        # source-binding check for v2.
+        return
+    live_fingerprint = _compute_file_fingerprint(source_path)
+    # ``entry.file_fingerprint`` is non-None here: invariant 8 in
+    # ``_validate_judge_metadata_atomic`` (binding co-presence) enforced its
+    # presence for v1 judge-gated entries, and the v2 branch returned above, so
+    # only v1 reaches this line. The assert is genuine narrowing for mypy.
     assert entry.file_fingerprint is not None  # v1: invariant 8 guarantees presence (mypy narrowing)
     if entry.file_fingerprint != live_fingerprint:
         raise ValueError(
@@ -938,14 +937,17 @@ def _validate_judge_metadata_atomic(entry: AllowlistEntry, *, context: str) -> N
     onto an entry keyed at dangerous code; loader can't tell the
     difference), and a stray cross-version fingerprint advertises a
     binding the signed payload did not sign. The live-source recompute for
-    v1 is performed by :func:`_verify_file_fingerprint_at_load` in
+    v1 is performed by :func:`_verify_source_binding_at_load` in
     ``_parse_allow_hits`` (load-time, catches cross-file transplant and
     source drift) and by :func:`verify_entry_binding_against_finding` at
-    match time (catches in-file AST-node transplant); the v2 scope_fingerprint
-    live-source recompute is wired by a later task in this migration (until
-    then a v2 entry loaded with ``source_root`` crashes by design — see the
-    asserts in those functions). Both verifications require the fields'
-    presence, which this invariant guarantees.
+    match time (catches in-file AST-node transplant). A v2 entry has no
+    whole-file load-time recompute: :func:`_verify_source_binding_at_load`
+    checks only that the bound source file exists, and the v2
+    scope_fingerprint is verified at match time — that match-time
+    verification is wired by a later task in this migration (until then a v2
+    entry crashes by design in :func:`verify_entry_binding_against_finding`).
+    Both verifications require the fields' presence, which this invariant
+    guarantees.
 
     ``judge_metadata_signature`` is deliberately verified in
     ``_parse_allow_hits`` only when ``source_root`` is provided, because

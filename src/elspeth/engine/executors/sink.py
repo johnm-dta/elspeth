@@ -466,26 +466,7 @@ class SinkExecutor:
             raise
         except Exception as e:
             if all_states:
-                begin_error = ExecutionError(
-                    exception=str(e),
-                    exception_type=type(e).__name__,
-                    phase="begin_node_state",
-                )
-                try:
-                    self._complete_states_failed(
-                        states=all_states,
-                        duration_ms=0.0,
-                        error=begin_error,
-                    )
-                except contract_errors.TIER_1_ERRORS:
-                    raise  # Audit corruption during cleanup is higher priority than original error
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        "Cleanup of %d OPEN states also failed — original error preserved. Cleanup error: %s: %s",
-                        len(all_states),
-                        type(cleanup_exc).__name__,
-                        cleanup_exc,
-                    )
+                self._best_effort_cleanup(all_states, e, "begin_node_state")
             raise
 
         # Index by token_id for O(1) lookup in Phases 2 and 3.
@@ -549,12 +530,26 @@ class SinkExecutor:
                     sink._reset_diversion_log()
                     start = time.perf_counter()
                     write_result = sink.write(rows, ctx)
+                    # First-party plugin-contract guard: SinkWriteResult is this
+                    # system-owned sink's typed return contract (see Plugin
+                    # Ownership), so a wrong type is a plugin bug we crash on. The
+                    # isinstance->raise is offensive programming (a maximally
+                    # informative crash), not coercion and not silent recovery —
+                    # i.e. the prescribed CRASH response, not the defensive
+                    # isinstance-to-suppress that R5 targets.
                     if not isinstance(write_result, SinkWriteResult):
                         raise PluginContractViolation(
                             f"Sink '{sink.name}' returned {type(write_result).__name__}, "
                             f"expected SinkWriteResult. This is a sink plugin bug."
                         )
                     artifact_info = write_result.artifact
+                    # First-party plugin-contract guard: SinkWriteResult.artifact
+                    # must be an ArtifactDescriptor under this system-owned sink's
+                    # typed contract (see Plugin Ownership), so a wrong type is a
+                    # plugin bug we crash on. The isinstance->raise is offensive
+                    # programming (a maximally informative crash), not coercion and
+                    # not silent recovery — i.e. the prescribed CRASH response, not
+                    # the defensive isinstance-to-suppress that R5 targets.
                     if not isinstance(artifact_info, ArtifactDescriptor):
                         raise PluginContractViolation(
                             f"Sink '{sink.name}' returned SinkWriteResult with artifact of type "
@@ -789,12 +784,27 @@ class SinkExecutor:
                                 raise
 
                             failsink_write_result = failsink.write(enriched_rows, ctx)
+                            # First-party plugin-contract guard: SinkWriteResult is
+                            # this system-owned failsink's typed return contract (see
+                            # Plugin Ownership), so a wrong type is a plugin bug we
+                            # crash on. The isinstance->raise is offensive programming
+                            # (a maximally informative crash), not coercion and not
+                            # silent recovery — i.e. the prescribed CRASH response,
+                            # not the defensive isinstance-to-suppress that R5 targets.
                             if not isinstance(failsink_write_result, SinkWriteResult):
                                 raise PluginContractViolation(
                                     f"Failsink '{failsink_name}' returned {type(failsink_write_result).__name__}, "
                                     f"expected SinkWriteResult. This is a sink plugin bug."
                                 )
                             failsink_artifact_info = failsink_write_result.artifact
+                            # First-party plugin-contract guard:
+                            # SinkWriteResult.artifact must be an ArtifactDescriptor
+                            # under this system-owned failsink's typed contract (see
+                            # Plugin Ownership), so a wrong type is a plugin bug we
+                            # crash on. The isinstance->raise is offensive programming
+                            # (a maximally informative crash), not coercion and not
+                            # silent recovery — i.e. the prescribed CRASH response,
+                            # not the defensive isinstance-to-suppress that R5 targets.
                             if not isinstance(failsink_artifact_info, ArtifactDescriptor):
                                 raise PluginContractViolation(
                                     f"Failsink '{failsink_name}' returned SinkWriteResult with artifact of type "

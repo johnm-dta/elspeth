@@ -295,8 +295,8 @@ allow_hits:
 - key: core/landscape/query_repository.py:R6:QueryRepository:explain_row:fp=b81f5371dd48636a
   owner: john
   reason: |-
-    This is a narrow catch of a specific, semantically meaningful exception (PayloadNotFoundError) representing an expected state — payload purged by retention policy — not a generic except-swallow. The code correctly distinguishes 'payload absent 
-      due to retention' from 'payload corrupt/integrity failure' (which still raises AuditIntegrityError per docstring), and signals absence honestly via payload_available=False and source_data=None rather than fabricating data. This is offensive programming: a 
+    This is a narrow catch of a specific, semantically meaningful exception (PayloadNotFoundError) representing an expected state — payload purged by retention policy — not a generic except-swallow. The code correctly distinguishes 'payload absent
+      due to retention' from 'payload corrupt/integrity failure' (which still raises AuditIntegrityError per docstring), and signals absence honestly via payload_available=False and source_data=None rather than fabricating data. This is offensive programming: a
       documented domain exception is being handled as a known business outcome, while infrastructure/integrity failures continue to propagate.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -449,8 +449,8 @@ allow_hits:
 - key: core/checkpoint/recovery.py:R5:RecoveryManager:reconstruct_token_row:fp=b8840fd73f01302a
   owner: john
   reason: |-
-    Tier-1 integrity guard on the payload-store envelope: reconstruct_token_row reads a {data, contract} envelope persisted in tokens.token_data_ref (our own audit data). The isinstance/shape check raises AuditIntegrityError when the deserialized 
-      envelope is not a dict carrying both 'data' and 'contract' keys — surfacing corruption loudly rather than coercing or defaulting. This is offensive programming on Tier-1 data (crash on anomaly per the policy), not defensive suppression; well-formed envelopes 
+    Tier-1 integrity guard on the payload-store envelope: reconstruct_token_row reads a {data, contract} envelope persisted in tokens.token_data_ref (our own audit data). The isinstance/shape check raises AuditIntegrityError when the deserialized
+      envelope is not a dict carrying both 'data' and 'contract' keys — surfacing corruption loudly rather than coercing or defaulting. This is offensive programming on Tier-1 data (crash on anomaly per the policy), not defensive suppression; well-formed envelopes
       proceed and integrity failures propagate.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -467,3 +467,41 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[26]/body[7]/body[4]/test/values[0]/operand'
   judge_metadata_signature: 'hmac-sha256:v2:57df6e73183aed03d072789f9036d26eb9fdee0b976e642508d8528f6af20cb0'
+- key: core/checkpoint/recovery.py:R5:IncompleteTokenSpec:__post_init__:fp=427a1fed4efd849c
+  owner: john
+  reason: |-
+    Tier-1 identity guard. IncompleteTokenSpec is built exclusively from DB row reads (get_incomplete_tokens_by_row, a SQLAlchemy fetchall over the tokens table). token_id and row_id are the fundamental audit-identity fields: every audit record references them, and token_data_ref is dereferenced as a payload-store key before any TokenInfo guard exists. A non-str value read from a corrupt or tampered Tier-1 row must crash here (crash on any anomaly; serialization does not change trust tier). The isinstance raises TypeError as offensive detect-and-crash; it does not branch into silent recovery.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T16:20:09.033762+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    The isinstance check is offensive programming at a Tier-1 deserialization boundary: IncompleteTokenSpec is constructed from raw DB row reads, and token_id/row_id are identity fields dereferenced before any downstream guard. Per the Tier-1 policy ('crash on any anomaly; serialization doesn't change trust tier'), detecting a non-str value and raising TypeError is exactly the detect-and-crash pattern the policy encourages — there is no silent recovery branch. The rule R5 concern (isinstance masking bugs) does not apply because the check raises rather than branches into a fallback. The rationale is site-specific and accurately describes the code.
+  judge_signature_version: 2
+  scope_fingerprint: e2281df8eb7a420b92622d3dc32608319d31fdd70edcdbc55dd74db6cab96209
+  judge_transport: openrouter
+  ast_path: 'body[24]/body[10]/body[1]/body[1]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:ae220f085ba353063e805b9895209216e13e78908ecd76e0127740879b414a46'
+- key: core/checkpoint/recovery.py:R5:IncompleteTokenSpec:__post_init__:fp=0b8d412d4c743e6e
+  owner: john
+  reason: |-
+    Same Tier-1 construction site as fp=427a1fed4efd849c, the optional-lineage-field branch. The optional fields (branch_name, fork_group_id, join_group_id, expand_group_id, token_data_ref) are either NULL (legitimately not applicable) or a non-empty str; an empty or wrong-typed value from a corrupt DB row is anomalous, and token_data_ref is dereferenced as a payload-store key. The is-not-None-gated isinstance raises TypeError as an offensive Tier-1 invariant assertion, not silent recovery.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T16:20:15.289057+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    This is a Tier-1 __post_init__ invariant check on dataclass construction — the canonical offensive-programming pattern. The isinstance check is gated on `is not None` and raises TypeError on violation rather than silently recovering; it asserts that optional lineage fields are either None or a str, which is a real invariant given token_data_ref is later dereferenced as a payload-store key. The code excerpt matches the rationale: anomalous shapes crash loudly, no fabrication, no silent fallback. R5's concern (isinstance masking contract violations) does not apply when isinstance is used to raise rather than to branch into recovery.
+  judge_signature_version: 2
+  scope_fingerprint: e2281df8eb7a420b92622d3dc32608319d31fdd70edcdbc55dd74db6cab96209
+  judge_transport: openrouter
+  ast_path: 'body[24]/body[10]/body[2]/body[1]/body[0]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:aa73866f30f6af17e4f23b7e52894180736c2ad7e30697d3c3893b947715c52e'

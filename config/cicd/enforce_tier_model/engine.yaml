@@ -199,3 +199,117 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[10]/body[5]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:f602e7b4d37a0779206d5801a2a55e91b23acd50e345d9f1458a5a00931b83a9'
+- key: engine/executors/state_guard.py:R5:NodeStateGuard:_extract_audit_evidence_context:fp=86d1554e15f3f1f6
+  owner: john
+  reason: |-
+    ADR-010 Decision-1 nominal dispatch check: a class must explicitly inherit AuditEvidenceBase to contribute structured audit context, a deliberate nominal (not structural-Protocol) design chosen to prevent accidental-match spoofing. A non-AuditEvidenceBase exception has no structured evidence to contribute; returning (None, None) is honest absence, not a swallowed error. The raw exception is still fully recorded as ExecutionError(exception=str(exc_val), ...) and the FAILED node_state is durably persisted before __exit__ returns. This line is distinct from the inner Mapping guard (fp=81df) and broad-except (fp=d9eb) entries already signed for this method.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T16:20:22.213829+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    The isinstance check here implements an explicit nominal dispatch contract: only exceptions that opt in by inheriting AuditEvidenceBase contribute structured audit context. This is not a defensive shape-guard masking a bug — exc_val is genuinely of unknown type (any exception class can propagate through __exit__), and the nominal check is the intended design per ADR-010 to prevent accidental-match spoofing that a structural Protocol would allow. The raw exception is still recorded verbatim elsewhere, so returning (None, None) is honest absence of structured evidence, not silent error swallowing. R5's concern (masking contract violations) does not apply: there is no contract that exc_val is an AuditEvidenceBase — the whole point is to discriminate.
+  judge_signature_version: 2
+  scope_fingerprint: 55dcb38f12df9b1777a63808886e88bb73f6375b98e837dfdc034ca3b841e5bd
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[9]/body[1]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:3a16c393f8b77460f89e76878a4edce5333817ce4e4d2b323b7ba928a3e4c52f'
+- key: engine/executors/sink.py:R4:SinkExecutor:_best_effort_cleanup:fp=1b066df6010227f2
+  owner: john
+  reason: |-
+    Single broad-except inside the canonical post-audit cleanup helper. It re-raises contract_errors.TIER_1_ERRORS first (audit corruption during cleanup outranks the original error) and only logs genuinely-ignorable cleanup failures, so a crashing system does not strand node_states permanently OPEN, which would itself be a Tier-1 violation. Honest fault isolation matching the accepted engine/_best_effort.py:R4 pattern; logger is the last-resort channel per the primacy order when the cleanup ceremony itself is failing.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T16:20:29.125319+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    This is a legitimate broad-except at a best-effort cleanup boundary during a crashing path. The code correctly re-raises Tier-1 errors first (preserving audit-integrity primacy), only swallowing non-Tier-1 cleanup failures to ensure the original system error still propagates. Logger is appropriate here as last-resort channel because the audit/cleanup ceremony itself is what's failing. The R4 concern (suppressing bugs) is addressed: Tier-1 contract errors are explicitly re-raised, and the residual catch is scoped to genuinely-ignorable cleanup-path failures with full diagnostic context logged.
+  judge_signature_version: 2
+  scope_fingerprint: 7a88422fc915e8d72e483f3318f97f02649dfcde8273fdb309bcd9fd7267e69c
+  judge_transport: openrouter
+  ast_path: 'body[26]/body[3]/body[2]/handlers[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:64ee71f0092a08578c5e1e939951c4e485ba100ee13fd11f7f512fe924625136'
+- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=8ae24dda2209d609
+  owner: john
+  reason: |-
+    Offensive plugin-contract guard: a sink returning a non-SinkWriteResult is a sink-plugin bug. Per Plugin-Ownership, a plugin returning the wrong type must crash (PluginContractViolation), never coerce. The isinstance raises as assert-and-crash, not silent recovery.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T16:31:29.486362+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    The isinstance check guards the return value of a first-party sink plugin against its typed contract (SinkWriteResult) and raises PluginContractViolation on mismatch — this is the offensive 'assert-and-crash' pattern explicitly endorsed by Plugin Ownership policy (plugin returns wrong type => CRASH). It is not silent recovery, not coercion, and not at an external boundary; it converts a contract violation into a maximally informative crash. The rationale correctly identifies the rule's concern (isinstance masking bugs) and explains why this usage raises rather than masks.
+  judge_signature_version: 2
+  scope_fingerprint: 9037956c5b4bba8d595bc115e2330c3a920c8d72780c976b9dd536432da7855b
+  judge_transport: openrouter
+  ast_path: 'body[26]/body[8]/body[14]/body[0]/body[1]/body[5]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:7ebf87eb676c19eb0e80083569b54b63f2777b75968c7895d7e4b4f3d7b0caa7'
+- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=333193edcab82132
+  owner: john
+  reason: |-
+    Offensive plugin-contract guard: a SinkWriteResult whose artifact is not an ArtifactDescriptor is a sink-plugin bug and must crash with PluginContractViolation, never coerce. Same justification class as fp=8ae24dda2209d609.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T16:31:35.254687+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    This is an offensive isinstance check that validates a first-party plugin contract: SinkWriteResult.artifact must be an ArtifactDescriptor, and any deviation raises PluginContractViolation immediately. This matches the Plugin Ownership policy — plugin returns are first-party typed contracts, and detecting a violated invariant with a meaningful crash is exactly the offensive-programming pattern the policy encourages. The isinstance is not masking a bug; it surfaces one. Not a Tier-3 boundary (no external parameter), so the @trust_boundary decorator is inapplicable.
+  judge_signature_version: 2
+  scope_fingerprint: 9037956c5b4bba8d595bc115e2330c3a920c8d72780c976b9dd536432da7855b
+  judge_transport: openrouter
+  ast_path: 'body[26]/body[8]/body[14]/body[0]/body[1]/body[7]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:333d9c532b37cee0d9cc3091ae1809725eceb79b0bfc45f6f568e6c23375d757'
+- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=6bf4f058589b3c6f
+  owner: john
+  reason: |-
+    Offensive plugin-contract guard on the failsink write path: a failsink returning a non-SinkWriteResult is a sink-plugin bug. Per Plugin-Ownership, a plugin returning the wrong type must crash (PluginContractViolation), never coerce. The isinstance raises as assert-and-crash, not coercion and not silent recovery.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T16:52:36.978387+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    This is a first-party plugin-contract guard: SinkWriteResult is the typed return contract of a system-owned sink plugin, and per Plugin Ownership a plugin returning the wrong type must crash with a contract violation. The isinstance check here is offensive programming — it detects the invalid state and raises PluginContractViolation with a maximally informative message, rather than coercing or silently recovering. This is precisely the CRASH response prescribed by the Plugin Ownership table, not the defensive isinstance-to-suppress pattern R5 targets. The decorator does not apply (not a Tier-3 external boundary; this is a first-party return).
+  judge_signature_version: 2
+  scope_fingerprint: 9037956c5b4bba8d595bc115e2330c3a920c8d72780c976b9dd536432da7855b
+  judge_transport: openrouter
+  ast_path: 'body[26]/body[8]/body[22]/body[2]/body[3]/body[8]/body[0]/body[3]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:4c8a102d168769a68350100f8e93f7a506bfe7c0becf978b0d9035b5cbc2b40f'
+- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=00755313e7e139d5
+  owner: john
+  reason: |-
+    Offensive plugin-contract guard on the failsink write path: a failsink SinkWriteResult whose artifact is not an ArtifactDescriptor is a sink-plugin bug. Per Plugin-Ownership, a plugin returning the wrong type must crash (PluginContractViolation), never coerce. The isinstance raises as assert-and-crash, not coercion and not silent recovery.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-08-29'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-05-31T16:52:42.583563+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:3f52726032979c1f98920606d7207e66c95b7a76e43cd59622818dddfa601ad0'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    The isinstance check guards a first-party typed contract (SinkWriteResult.artifact must be ArtifactDescriptor under the system-owned sink plugin's return contract) and raises PluginContractViolation on mismatch. This is the prescribed CRASH response from the Plugin Ownership table for 'plugin returns wrong type' — offensive programming producing a maximally informative crash, not coercion or silent recovery. The rule R5 targets isinstance used to hide bugs; here it surfaces them. Not a Tier-3 boundary, so the decorator does not apply.
+  judge_signature_version: 2
+  scope_fingerprint: 9037956c5b4bba8d595bc115e2330c3a920c8d72780c976b9dd536432da7855b
+  judge_transport: openrouter
+  ast_path: 'body[26]/body[8]/body[22]/body[2]/body[3]/body[8]/body[0]/body[5]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:40461e2b1caacd3b75c21ecc22bba6e7ef4853e31711a8fb2051aa7bbefff62f'

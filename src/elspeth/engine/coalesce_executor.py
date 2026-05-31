@@ -1046,13 +1046,13 @@ class CoalesceExecutor:
                 coalesce_metadata=coalesce_metadata,
                 coalesce_name=coalesce_name,
             )
-        except Exception as merge_exc:
+        except AuditIntegrityError:
             # If the audit database is already compromised, don't write more
             # records to it — leaving node states as pending is more honest
-            # than writing FAILED to an untrustworthy database.
-            if isinstance(merge_exc, AuditIntegrityError):
-                raise
-
+            # than writing FAILED to an untrustworthy database. Re-raise without
+            # recording any further FAILED states to the untrustworthy DB.
+            raise
+        except Exception as merge_exc:
             # Generate error_hash once for all branches (consistent audit trail).
             error_hash = hashlib.sha256(str(merge_exc).encode()).hexdigest()[:16]
 

@@ -1038,6 +1038,40 @@ class TestUnionMerge:
         # Key should be in completed set (rejects late arrivals)
         assert key in executor._completed_keys, "key should be marked completed to reject late arrivals"
 
+    def test_merge_audit_integrity_error_propagates_without_recording_failed(self):
+        """An AuditIntegrityError raised during merge must re-raise WITHOUT writing
+        any further audit records.
+
+        When the audit database is already compromised, the cleanup handler must
+        NOT call complete_node_state(FAILED) or record_token_outcome(FAILED) —
+        writing more rows to an untrustworthy DB is less honest than leaving the
+        node states pending. This pins the dedicated `except AuditIntegrityError:
+        raise` clause in _execute_merge (the offensive ordering that replaced the
+        prior isinstance(merge_exc, AuditIntegrityError) shape-guard).
+        """
+        executor, execution, data_flow, _, _ = _make_executor()
+        s = _settings(branches=["a", "b"], merge="union")
+        executor.register_coalesce(s, "node_1")
+
+        # Inject audit-DB compromise at the first step inside the merge try-body.
+        executor._merge_data = Mock(  # type: ignore[method-assign]
+            side_effect=AuditIntegrityError("audit DB unreadable mid-merge")
+        )
+
+        t1 = _make_token(branch_name="a", token_id="t1", data={"x": 1})
+        t2 = _make_token(branch_name="b", token_id="t2", data={"y": 2})
+        executor.accept(t1, "merge")
+        with pytest.raises(AuditIntegrityError, match="audit DB unreadable mid-merge"):
+            executor.accept(t2, "merge")
+
+        # The compromised-DB path must record NOTHING further: no FAILED state
+        # writes and no terminal-outcome writes from the cleanup handler.
+        failed_calls = [c for c in execution.complete_node_state.call_args_list if c.kwargs.get("status") == NodeStateStatus.FAILED]
+        assert failed_calls == [], "AuditIntegrityError path must not write FAILED states to a compromised audit DB"
+        assert data_flow.record_token_outcome.call_args_list == [], (
+            "AuditIntegrityError path must not record terminal outcomes to a compromised audit DB"
+        )
+
     # ------------------------------------------------------------------
     # Orthogonality: union_collision_policy vs arrival policy
     # ------------------------------------------------------------------

@@ -51,6 +51,7 @@ from elspeth_lints.core.allowlist import (
     AllowlistEntry,
     JudgeVerdict,
     load_allowlist,
+    verify_entry_binding_against_finding,
 )
 from elspeth_lints.core.judge import JudgeContractError, JudgeRequest, JudgeTransportError, call_judge
 
@@ -951,6 +952,20 @@ def _reaudit_one_entry(
             cause=ReauditCause.for_divergence(ReauditDivergence.ENTRY_OBSOLETE),
             code_snapshot=f"<no current finding matches {entry.key!r}>",
         )
+
+    # Pre-re-judge binding check. v1 entries got this tamper/drift detection
+    # from the load-time file_fingerprint recompute; v2 entries' binding is
+    # scope-scoped and parse-dependent, verified at MATCH time, not load — so
+    # restore it here against the finding we just scanned, before spending a
+    # (paid) judge call. A drifted enclosing scope, or a transplanted ast_path,
+    # crashes here — consistent with v1's load-time crash-on-drift: a binding
+    # that no longer holds means the entry must be re-justified, not reaudited.
+    verify_entry_binding_against_finding(
+        entry,
+        file_path=matching_finding.file_path,
+        ast_path=matching_finding.ast_path,
+        scope_fingerprint=getattr(matching_finding, "scope_fingerprint", ""),
+    )
 
     # Secrets-scrubber gate (closes elspeth-ebb2b88753 / C2-2 on the
     # sweep path). ``extract_safe_excerpt`` re-runs containment (cheap)

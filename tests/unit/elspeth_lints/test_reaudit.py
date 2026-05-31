@@ -238,6 +238,66 @@ def _write_widget_lookup_entry(
     return target
 
 
+def _write_widget_lookup_entry_v2(
+    allowlist_dir: Path,
+    *,
+    source_root: Path,
+    fingerprint: str,
+    scope_fingerprint: str,
+    judge_recorded_at: str = "2024-01-01T00:00:00+00:00",
+) -> Path:
+    """Write a v2 (scope-bound, signature_version 2) Widget.lookup entry.
+
+    v2 entries bind the enclosing-scope ``scope_fingerprint`` (not the
+    whole-file ``file_fingerprint``) and carry ``judge_signature_version:
+    2``. The caller supplies ``scope_fingerprint``: passing the live
+    value yields an entry that reaudits normally; passing a valid-shape
+    but wrong 64-hex simulates a drifted enclosing scope. The signature
+    is computed over the *supplied* scope_fingerprint, so the row loads
+    successfully even when that value is wrong — v2's load-time binding
+    is file-exists-only, and the scope_fingerprint is verified at MATCH
+    time inside reaudit. ``ast_path`` is always the live value so the
+    canonical-key + ast_path match isolate the scope_fingerprint check.
+    """
+    key = f"plugins/widget.py:R1:Widget:lookup:fp={fingerprint}"
+    live_ast_path = _live_widget_finding(source_root).ast_path
+    signature = compute_judge_metadata_signature(
+        key=key,
+        ast_path=live_ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=datetime.fromisoformat(judge_recorded_at),
+        judge_model="claude-opus-4-7",
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        judge_rationale="original judge said the boundary was genuine",
+        signature_version=2,
+        scope_fingerprint=scope_fingerprint,
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
+    lines = [
+        "allow_hits:",
+        f"- key: {key}",
+        "  owner: test-owner",
+        "  reason: |-",
+        "    payload is Tier-3 external data from upstream tool-call",
+        "  safety: |-",
+        "    Suppression gated by cicd-judge; see judge_rationale below.",
+        "  expires: '2030-01-01'",
+        "  judge_verdict: ACCEPTED",
+        f"  judge_recorded_at: '{judge_recorded_at}'",
+        "  judge_model: claude-opus-4-7",
+        f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'",
+        "  judge_rationale: |-",
+        "    original judge said the boundary was genuine",
+        "  judge_signature_version: 2",
+        f"  scope_fingerprint: '{scope_fingerprint}'",
+        f"  ast_path: '{live_ast_path}'",
+        f"  judge_metadata_signature: '{signature}'",
+    ]
+    target = allowlist_dir / "plugins.yaml"
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
 def _write_duplicate_widget_lookup_entries(
     allowlist_dir: Path,
     *,
@@ -3203,3 +3263,86 @@ def test_t6b_sidecar_load_rejects_malformed_jsonl(tmp_path: Path) -> None:
     sidecar.write_text("{not json}\n", encoding="utf-8")
     with pytest.raises(SidecarCorruptError, match="malformed JSON"):
         load_sidecar(sidecar)
+
+
+# =====================================================================
+# v2 scope-binding verification before re-judging
+# =====================================================================
+
+
+def test_reaudit_crashes_on_v2_scope_drift_before_rejudging(tmp_path: Path) -> None:
+    """A v2 entry whose enclosing scope drifted crashes BEFORE the judge call.
+
+    v1 entries got tamper/drift detection at LOAD time (the whole-file
+    file_fingerprint recompute crashed on drift). v2 binds the enclosing
+    scope via scope_fingerprint, which is parse-dependent and verified at
+    MATCH time, not load — so reaudit lost that pre-re-judge check for v2.
+    This pins the restored check: the canonical key + ast_path still match
+    (so the finding IS found), but the persisted scope_fingerprint differs
+    from the live scope's hash → ValueError, raised before any (paid)
+    judge call is dispatched.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    live_scope_fp = _live_widget_finding(root).scope_fingerprint
+    assert live_scope_fp  # the tier-model scanner stamps a real scope_fingerprint
+    # Valid-shape (64-hex) but WRONG: the enclosing scope "changed" since
+    # the original judgment. Differs from live so the match-time check fires.
+    drifted_scope_fp = "b" * 64
+    assert drifted_scope_fp != live_scope_fp
+    _write_widget_lookup_entry_v2(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        scope_fingerprint=drifted_scope_fp,
+    )
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="should never be reached") as client_class:
+        with pytest.raises(ValueError, match="scope_fingerprint"):
+            reaudit_entries(
+                root=root.resolve(),
+                allowlist_dir=allowlist_dir,
+                rule_filter="trust_tier.tier_model",
+                since=None,
+                limit=None,
+                include_pre_judge=False,
+            )
+        # The crash must precede the paid judge call. ``client_class`` is
+        # the patched ``openai.OpenAI``; its return_value is the fake
+        # client whose chat.completions.create is the actual judge call.
+        client_class.return_value.chat.completions.create.assert_not_called()
+
+
+def test_reaudit_v2_unchanged_scope_reaudits_without_crashing(tmp_path: Path) -> None:
+    """A v2 entry whose scope_fingerprint matches the live finding reaudits normally.
+
+    Companion to the drift test: proves the restored match-time binding
+    check does not false-fire on an unchanged v2 entry. The persisted
+    scope_fingerprint equals the live scope's hash, so the check passes
+    and the judge runs to produce a normal divergence outcome.
+    """
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    fp = _live_fingerprint_for_widget(root)
+    live_scope_fp = _live_widget_finding(root).scope_fingerprint
+    _write_widget_lookup_entry_v2(
+        allowlist_dir,
+        source_root=root,
+        fingerprint=fp,
+        scope_fingerprint=live_scope_fp,
+    )
+
+    with _mock_judge_call(verdict="ACCEPTED", rationale="boundary is still genuine") as client_class:
+        report = reaudit_entries(
+            root=root.resolve(),
+            allowlist_dir=allowlist_dir,
+            rule_filter="trust_tier.tier_model",
+            since=None,
+            limit=None,
+            include_pre_judge=False,
+        )
+
+    assert len(report.outcomes) == 1
+    assert report.outcomes[0].divergence is ReauditDivergence.STILL_AGREES
+    client_class.return_value.chat.completions.create.assert_called_once()

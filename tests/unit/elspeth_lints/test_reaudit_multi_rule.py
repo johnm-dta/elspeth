@@ -31,20 +31,18 @@ silent reaudit miscount.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import textwrap
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict, compute_judge_metadata_signature
-from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
+from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL
 from elspeth_lints.core.reaudit import (
     _EXCLUDED_FROM_REAUDIT,
     _RULE_VOCABULARY_REGISTRY,
@@ -234,6 +232,19 @@ def test_generic_dispatch_reaudits_composer_catch_order_end_to_end(tmp_path: Pat
     ``Rule.analyze`` scanner plus canonical-key matcher. ``composer.catch_order``
     is the smallest self-contained rule that produces a deterministic
     finding without sibling allowlist state.
+
+    The entry is **pre-judge** (``judge_verdict`` absent). That is the only
+    honest shape for this rule: ``composer.catch_order`` is a generic
+    ``protocols.Finding`` rule that never stamps ``ast_path`` (it defaults
+    to ``""``), and a judge-gated entry requires a non-empty ast_path —
+    the ``justify`` write path (``cli._finding_ast_path``) refuses to sign
+    a finding with an empty ast_path, and the production match gate
+    (``trust_boundary.shared._allowlist_match``) crashes on one. So a
+    *signed* ``composer.catch_order`` entry cannot exist in production;
+    a pre-judge entry exercises the same generic dispatch + canonical-key
+    match + judge + classify path without fabricating an ast_path the
+    scanner never emits. The pre-re-judge binding check correctly
+    early-returns for pre-judge entries (no binding fields to verify).
     """
     monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
     root = tmp_path / "src_root"
@@ -261,11 +272,9 @@ def test_generic_dispatch_reaudits_composer_catch_order_end_to_end(tmp_path: Pat
         "version: 1\ndefaults:\n  fail_on_stale: false\n  fail_on_expired: false\n",
         encoding="utf-8",
     )
-    _write_signed_allow_hit(
+    _write_pre_judge_allow_hit(
         allowlist_dir / "composer.yaml",
         key=entry_key,
-        target=target,
-        ast_path="generic:composer.catch_order:CCO1",
     )
 
     with _mock_judge_call(verdict="ACCEPTED", rationale="catch-order suppression still warranted") as client_class:
@@ -275,12 +284,12 @@ def test_generic_dispatch_reaudits_composer_catch_order_end_to_end(tmp_path: Pat
             rule_filter="composer.catch_order",
             since=None,
             limit=None,
-            include_pre_judge=False,
+            include_pre_judge=True,
         )
 
     assert len(report.outcomes) == 1
     outcome = report.outcomes[0]
-    assert outcome.divergence is ReauditDivergence.STILL_AGREES
+    assert outcome.divergence is ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT
     assert outcome.fresh_verdict is JudgeVerdict.ACCEPTED
     assert "ComposerServiceError" in outcome.code_snapshot
     assert client_class.return_value.chat.completions.create.call_count == 1
@@ -296,21 +305,17 @@ def _single_catch_order_finding(*, root: Path, target: Path):
     return findings[0]
 
 
-def _write_signed_allow_hit(path: Path, *, key: str, target: Path, ast_path: str) -> None:
-    file_fingerprint = hashlib.sha256(target.read_bytes()).hexdigest()
-    recorded_at = datetime(2024, 1, 1, tzinfo=UTC)
-    judge_rationale = "original judge said the catch-order suppression was warranted"
-    signature = compute_judge_metadata_signature(
-        key=key,
-        file_fingerprint=file_fingerprint,
-        ast_path=ast_path,
-        judge_verdict=JudgeVerdict.ACCEPTED,
-        judge_recorded_at=recorded_at,
-        judge_model=DEFAULT_JUDGE_MODEL,
-        judge_rationale=judge_rationale,
-        judge_policy_hash=JUDGE_POLICY_HASH,
-        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
-    )
+def _write_pre_judge_allow_hit(path: Path, *, key: str) -> None:
+    """Write a pre-judge (judge_verdict-absent) allow-hit for ``key``.
+
+    Pre-judge entries carry no judge-metadata cluster and no binding
+    fields (file_fingerprint/scope_fingerprint/ast_path/signature) — the
+    canonical key is their only binding signal. This is the honest entry
+    shape for a generic ``Rule.analyze`` rule whose findings have an empty
+    ast_path and therefore cannot be judge-signed (see the end-to-end
+    test's docstring). Reaudit classifies it as PRE_JUDGE_FRESH_ACCEPT
+    when the fresh judge verdict is ACCEPTED.
+    """
     path.write_text(
         "\n".join(
             [
@@ -322,15 +327,6 @@ def _write_signed_allow_hit(path: Path, *, key: str, target: Path, ast_path: str
                 "  safety: |-",
                 "    Reaudit replays the generic composer.catch_order scanner before accepting the entry.",
                 "  expires: '2030-01-01'",
-                "  judge_verdict: ACCEPTED",
-                f"  judge_recorded_at: '{recorded_at.isoformat()}'",
-                f"  judge_model: {DEFAULT_JUDGE_MODEL}",
-                f"  judge_policy_hash: '{JUDGE_POLICY_HASH}'",
-                "  judge_rationale: |-",
-                f"    {judge_rationale}",
-                f"  file_fingerprint: '{file_fingerprint}'",
-                f"  ast_path: '{ast_path}'",
-                f"  judge_metadata_signature: '{signature}'",
             ]
         )
         + "\n",

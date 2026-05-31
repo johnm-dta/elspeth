@@ -16,6 +16,7 @@ import jwt
 import structlog
 from jwt.exceptions import PyJWTError
 
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity, UserProfile
 from elspeth.web.validation import has_visible_content
 
@@ -61,6 +62,15 @@ class JWKSTokenValidator:
         self._next_refresh_at: float = 0.0
         self._jwks_lock = asyncio.Lock()
 
+    @trust_boundary(
+        tier=3,
+        source="OIDC discovery document JSON fetched from the IdP's .well-known/openid-configuration endpoint",
+        source_param="discovery",
+        suppresses=("R1",),
+        invariant="raises AuthenticationError on non-dict or missing/blank 'jwks_uri'; never coerces a malformed document",
+        test_ref="tests/unit/web/auth/test_oidc_provider.py::TestJWKSValidatorBoundaryRaises::test_validate_discovery_document_non_dict_raises",
+        test_fingerprint="c05f0c70cad8dd916cab0485cd40d1dea32dcedb6b6eb53b2e049e7749ea8987",
+    )
     def _validate_discovery_document(self, discovery: Any) -> str:
         """Shape-validate the OIDC discovery document and return jwks_uri.
 
@@ -97,6 +107,15 @@ class JWKSTokenValidator:
         return jwks_uri
 
     @staticmethod
+    @trust_boundary(
+        tier=3,
+        source="JWKS document JSON fetched from the IdP's jwks_uri endpoint",
+        source_param="jwks",
+        suppresses=("R1",),
+        invariant="raises AuthenticationError on non-dict or missing 'keys' list; never coerces a malformed document",
+        test_ref="tests/unit/web/auth/test_oidc_provider.py::TestJWKSValidatorBoundaryRaises::test_validate_jwks_document_missing_keys_raises",
+        test_fingerprint="c06b1f0b8c04a6b33dd5e1b3bec1da3752bc6081c170ae076aa175f20893e09d",
+    )
     def _validate_jwks_document(jwks: Any) -> dict[str, Any]:
         """Shape-validate the JWKS document.
 
@@ -120,6 +139,15 @@ class JWKSTokenValidator:
             raise AuthenticationError(f"JWKS document contains unusable key entries: {type(exc).__name__}") from exc
 
     @staticmethod
+    @trust_boundary(
+        tier=3,
+        source="Unverified JWT header decoded from the externally-supplied bearer token",
+        source_param="header",
+        suppresses=("R1",),
+        invariant="raises AuthenticationError on missing/blank/non-string 'alg'; never coerces a malformed header",
+        test_ref="tests/unit/web/auth/test_oidc_provider.py::TestJWKSValidatorBoundaryRaises::test_get_token_algorithm_missing_alg_raises",
+        test_fingerprint="d51616a82b5ccd166afb3b2db23de04fe312d78a61cc30b3b08a11737d9ce901",
+    )
     def _get_token_algorithm(header: dict[str, Any]) -> str:
         """Return the token header algorithm as a validated non-empty string."""
         alg = header.get("alg")
@@ -128,6 +156,15 @@ class JWKSTokenValidator:
         return alg
 
     @staticmethod
+    @trust_boundary(
+        tier=3,
+        source="JWKS document JSON fetched from the IdP's jwks_uri endpoint (the matched key's 'alg' field)",
+        source_param="jwks",
+        suppresses=("R1",),
+        invariant="raises AuthenticationError when a matched JWK advertises a non-string/blank 'alg'; returns None for honest absence (no match, or matched key omits 'alg')",
+        test_ref="tests/unit/web/auth/test_oidc_provider.py::TestJWKSValidatorBoundaryRaises::test_get_jwk_algorithm_invalid_alg_raises",
+        test_fingerprint="ef13d7cd4093eca4035f4cfffb768c2c7c820cad79a5c26f531b08ef47f4b4d1",
+    )
     def _get_jwk_algorithm(jwks: dict[str, Any], *, kid: str | None) -> str | None:
         """Return the matched JWK's advertised algorithm, if it has one."""
         for raw_key in jwks["keys"]:

@@ -12,7 +12,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
-from elspeth.web.auth.oidc import OIDCAuthProvider
+from elspeth.web.auth.oidc import JWKSTokenValidator, OIDCAuthProvider
 from tests.unit.web.auth.conftest import build_rsa_jwk, make_rs256_token, make_rsa_token
 
 ISSUER = "https://login.example.com"
@@ -1597,3 +1597,47 @@ class TestOIDCProtocolConformance:
 
         provider = OIDCAuthProvider(issuer=ISSUER, audience=AUDIENCE)
         assert isinstance(provider, AuthProvider)
+
+
+class TestJWKSValidatorBoundaryRaises:
+    """Direct-call boundary tests for the @trust_boundary-decorated JWKS validators.
+
+    These tests invoke each validator with the malformed external value passed
+    DIRECTLY as the decorator's ``source_param`` (no httpx mock indirection) so
+    the trust_boundary.tests honesty gate can prove the raising invariant
+    against the named parameter. The IdP-driven shape-failure paths are also
+    exercised end-to-end through ``authenticate`` in
+    ``TestOIDCJWKSShapeValidation`` above; these direct-call tests pin the
+    boundary contract at the function granularity the decorator attests.
+    """
+
+    @staticmethod
+    def _validator() -> JWKSTokenValidator:
+        return JWKSTokenValidator(issuer=ISSUER, audience=AUDIENCE)
+
+    def test_validate_discovery_document_non_dict_raises(self) -> None:
+        """A non-object discovery payload is rejected at the boundary, not coerced."""
+        validator = self._validator()
+        with pytest.raises(AuthenticationError, match="not a JSON object"):
+            validator._validate_discovery_document(discovery=["not", "a", "dict"])
+
+    def test_validate_jwks_document_missing_keys_raises(self) -> None:
+        """A JWKS document without a 'keys' list is rejected at the boundary."""
+        with pytest.raises(AuthenticationError, match="missing 'keys' list"):
+            JWKSTokenValidator._validate_jwks_document(jwks={"not_keys": []})
+
+    def test_get_token_algorithm_missing_alg_raises(self) -> None:
+        """A token header without a non-empty string 'alg' is rejected at the boundary."""
+        with pytest.raises(AuthenticationError, match="non-empty string 'alg'"):
+            JWKSTokenValidator._get_token_algorithm(header={"kid": "k1"})
+
+    def test_get_jwk_algorithm_invalid_alg_raises(self) -> None:
+        """A matched JWK with a non-string 'alg' is rejected at the boundary.
+
+        The no-match / missing-alg paths return None (honest absence); the
+        boundary only RAISES when a matched key advertises an invalid 'alg'
+        value, which is the invariant the decorator attests.
+        """
+        jwks = {"keys": [{"kid": "k1", "alg": 42}]}
+        with pytest.raises(AuthenticationError, match="invalid non-empty string 'alg'"):
+            JWKSTokenValidator._get_jwk_algorithm(jwks=jwks, kid="k1")

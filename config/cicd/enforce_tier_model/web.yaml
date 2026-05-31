@@ -37,66 +37,33 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[11]/body[1]/value'
   judge_metadata_signature: 'hmac-sha256:v2:740aa402f6e50f9884dc546e2ea88f49d0fbfd8634d216ac32b54dd51188416e'
-- key: web/auth/oidc.py:R1:JWKSTokenValidator:decode_token:fp=c10514f46a44024c
+- key: web/auth/oidc.py:R1:JWKSTokenValidator:decode_token:fp=54a0a436e8a89380
   owner: web-auth
   reason: Tier 3 boundary — JWT header kid field is optional per RFC 7515
   safety: Missing kid falls through to AuthenticationError path (no matching key);
     no silent acceptance
   expires: null
-- key: web/auth/oidc.py:R1:JWKSTokenValidator:_validate_discovery_document:fp=e21f32481fc9784c
-  owner: web-auth
-  reason: Tier 3 boundary — discovery dict.get('jwks_uri') lets us validate type before
-    use rather than letting KeyError mask malformed JSON
-  safety: Missing or non-string raises AuthenticationError; validated string is returned
-    to caller; no caching before validation
-  expires: null
-- key: web/auth/oidc.py:R1:JWKSTokenValidator:_validate_jwks_document:fp=6494c39fcc6d20fc
-  owner: web-auth
-  reason: Tier 3 boundary — jwks.get('keys') permits shape-checking the value type
-    before handing off to PyJWKSet
-  safety: Non-list raises AuthenticationError; validation happens before cache assignment
-  expires: null
-- key: web/auth/oidc.py:R1:JWKSTokenValidator:_get_token_algorithm:fp=08a628af082bd78b
-  owner: web-auth
-  reason: Tier 3 boundary — JWT header alg is external token metadata and may be absent
-    before decode
-  safety: Missing alg raises AuthenticationError before jwt.decode selects an algorithm
-  expires: null
-- key: web/auth/oidc.py:R1:JWKSTokenValidator:_get_jwk_algorithm:fp=57b015b09222f296
-  owner: web-auth
-  reason: Tier 3 boundary — JWK kid is optional metadata and must be compared defensively
-    against the token header kid
-  safety: Missing or non-matching kid continues the search; final no-match raises
-    AuthenticationError
-  expires: null
-- key: web/auth/oidc.py:R1:JWKSTokenValidator:_get_jwk_algorithm:fp=7ad8f0d01efdbd81
-  owner: web-auth
-  reason: Tier 3 boundary — JWK alg is optional metadata and is only enforced when
-    the matched key advertises one
-  safety: None preserves honest absence; non-empty mismatches raise AuthenticationError
-    before decode
-  expires: null
-- key: web/auth/oidc.py:R1:OIDCAuthProvider:authenticate:fp=5b6d0378675eb2f2
+- key: web/auth/oidc.py:R1:OIDCAuthProvider:authenticate:fp=24172e6f3021016f
   owner: web-auth
   reason: Tier 3 boundary — preferred_username is optional in OIDC tokens, falls back
     to sub
   safety: Default is payload['sub'] which is required; absence of optional claim is
     expected
   expires: null
-- key: web/auth/oidc.py:R1:optional_profile_claim:fp=4c7ec97e16ccebc9
+- key: web/auth/oidc.py:R1:optional_profile_claim:fp=aa783cf35b18cc27
   owner: web-auth
   reason: Tier 3 boundary — optional OIDC profile claims are looked up generically
     and may be absent from the external token payload
   safety: Missing claims return None so callers preserve honest absence instead of
     fabricating display data
   expires: null
-- key: web/auth/oidc.py:R1:OIDCAuthProvider:get_user_info:fp=b8b1270a71192d97
+- key: web/auth/oidc.py:R1:OIDCAuthProvider:get_user_info:fp=98c3e6a2eb0fb6bd
   owner: web-auth
   reason: Tier 3 boundary — groups claim is optional in OIDC tokens; None = no groups
   safety: None returns empty groups; non-list raises AuthenticationError; no silent
     discard
   expires: null
-- key: web/auth/oidc.py:R1:OIDCAuthProvider:get_user_info:fp=cd4ba5b028a35026
+- key: web/auth/oidc.py:R1:OIDCAuthProvider:get_user_info:fp=afea2e03288ba5da
   owner: web-auth
   reason: Tier 3 boundary — preferred_username is optional in OIDC tokens, falls back
     to sub

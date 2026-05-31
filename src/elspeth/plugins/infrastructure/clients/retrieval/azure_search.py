@@ -11,6 +11,7 @@ import httpx
 from pydantic import BaseModel, field_validator, model_validator
 
 from elspeth.contracts.probes import CollectionReadinessResult
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.plugins.infrastructure.clients.retrieval.base import RetrievalError
 from elspeth.plugins.infrastructure.clients.retrieval.types import RetrievalChunk
 
@@ -242,6 +243,15 @@ class AzureSearchProvider:
 
         return body
 
+    @trust_boundary(
+        tier=3,
+        source="Azure AI Search /docs/search JSON response body (the result items and their per-item fields)",
+        source_param="response_data",
+        suppresses=("R1",),
+        invariant="raises RetrievalError when the top-level 'value' array is absent; per-item missing/invalid fields are coerced to a recorded skip (absence captured in skipped_items), never fabricated",
+        test_ref="tests/unit/plugins/infrastructure/clients/retrieval/test_azure_search.py::TestParseResponse::test_missing_value_key_raises",
+        test_fingerprint="af5342f173e6c43afedff0b28a3de9acf5a0fc990f0325f9dc5ff61aaa581d98",
+    )
     def _parse_response(self, response_data: dict[str, Any], min_score: float) -> tuple[list[RetrievalChunk], list[dict[str, Any]]]:
         if "value" not in response_data:
             raise RetrievalError("Azure AI Search response missing 'value' array", retryable=False)

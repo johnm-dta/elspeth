@@ -196,13 +196,26 @@ env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli rota
 # Judge-gated allowlist entry creation (audit metadata write path)
 env ELSPETH_JUDGE_METADATA_HMAC_KEY=<32-plus-byte-secret> PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli justify --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --file-path plugins/example.py --symbol MyClass._method --rationale "why this suppression is honest" --owner "$USER"
 # Writes judge_verdict, judge_rationale, source binding fields, and the HMAC
-# signature. Do not hand-edit judge metadata; production loads verify it.
+# signature. New entries bind v2 scope_fingerprint (the enclosing-scope AST
+# fingerprint, signature prefix hmac-sha256:v2:); v1 file_fingerprint (whole-
+# file hash) is the still-live legacy scheme being migrated away. Do not
+# hand-edit judge metadata; production loads verify it.
 
 # Reaudit existing judged entries during allowlist renewal / decay sweeps
 env PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli reaudit --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --format markdown --output /tmp/reaudit.md
 # If interrupted, resume with --resume <run_id> or inspect an incomplete report
 # with --render-incomplete <run_id>. When C3 override-rate fails, reaudit the
 # override-heavy directories before considering an ADR to change the threshold.
+
+# Migrate currently-valid v1 (file_fingerprint) entries to v2 (scope_fingerprint)
+# OPERATOR-ONLY (writes signed metadata; requires ELSPETH_JUDGE_METADATA_HMAC_KEY,
+# same custody constraint as justify — an agent may PROPOSE, only an operator-held
+# environment runs and signs). Re-signs WITHOUT re-running the LLM judge, gated on
+# two checks per entry: integrity (the existing v1 signature must verify — a
+# tampered entry is refused, never laundered into a clean v2 signature) and
+# relevance (the entry's canonical key must still match a live finding). --dry-run
+# reports what would migrate without writing.
+env ELSPETH_JUDGE_METADATA_HMAC_KEY=<32-plus-byte-secret> PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli migrate-judge-scope --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --owner "$USER"
 
 # CLI
 elspeth run --settings pipeline.yaml --execute        # Execute pipeline
@@ -306,8 +319,9 @@ shells an agent drives).
 
 An agent that holds the key can bypass the judge entirely: hand-write
 `judge_verdict: ACCEPTED` with a fabricated rationale and a correct
-(publicly-computable) `file_fingerprint`/`ast_path`, compute a valid signature,
-and pass **every** automated gate — putting a forged-but-validly-signed verdict
+(publicly-computable) source binding — `scope_fingerprint`/`ast_path` for v2
+entries, the legacy `file_fingerprint`/`ast_path` for v1 — compute a valid
+signature, and pass **every** automated gate — putting a forged-but-validly-signed verdict
 into the audit trail, indistinguishable from a real one. The HMAC stops a
 *keyless* agent and makes tampering of signed entries detectable; it does nothing
 against a key-holding agent.

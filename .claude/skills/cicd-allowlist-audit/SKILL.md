@@ -40,8 +40,12 @@ As of the cicd-judge merge (RC5.2, 2026-05-30 — merge `fd4830b42`), new
 suppression passes through an Opus **judge** that decides whether the
 defensive-pattern finding is an *honest* trust boundary (legitimately exempt)
 or *debt* (defensive code that should be fixed). The judge's verdict, rationale,
-the source binding (file fingerprint + AST path), and an HMAC signature are
-written into the entry.
+the source binding (AST path + a fingerprint), and an HMAC signature are
+written into the entry. The forward binding primitive is the v2
+`scope_fingerprint` (the enclosing-scope AST fingerprint, signature prefix
+`hmac-sha256:v2:`) minted by `justify`; the legacy v1 `file_fingerprint`
+(whole-file hash, prefix `hmac-sha256:v1:`) is still live for already-signed
+entries and is being migrated away via `migrate-judge-scope`.
 
 This reframes what the audit audits:
 
@@ -68,6 +72,7 @@ orientation, not a substitute (verdict enums and flags evolve).
 | `justify` | Propose a new entry; the judge (Opus) returns `ACCEPTED`/`BLOCKED`; signs accepted entries. | Yes — new entry |
 | `audit-verdict` | Human post-review of a judge-**ACCEPTED** entry — confirm or reverse the judge. | Yes — review block |
 | `reaudit` | Re-run the judge across existing entries to detect decay. **Read-only on YAML**; emits a triage report. | No |
+| `migrate-judge-scope` | **Operator-only** (signs; needs the HMAC key). Re-signs currently-valid v1 (`file_fingerprint`) entries as v2 (`scope_fingerprint`) **without re-running the judge**, gated on integrity (existing v1 signature must verify) + relevance (key still matches a live finding). | Yes — re-signed entries |
 | `check-judge-coverage` (C1) | CI gate: every new entry must carry signed judge metadata (pre-judge entries grandfathered, rotation-stable). | No |
 | `check-override-rate` (C3) | CI gate: rolling-30d operator-override rate must stay under `--max-rate` (workflow-pinned 0.10). | No |
 | `check-judge-quality` (VAL) | CI gate, trusted contexts only: judge accuracy on a labelled corpus ≥ 0.90 (regression tripwire, not a guarantee). | No |

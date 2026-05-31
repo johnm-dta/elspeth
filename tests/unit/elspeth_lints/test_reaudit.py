@@ -271,6 +271,7 @@ def _write_widget_lookup_entry_v2(
         judge_rationale="original judge said the boundary was genuine",
         signature_version=2,
         scope_fingerprint=scope_fingerprint,
+        judge_transport="openrouter",
         hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
     )
     lines = [
@@ -364,6 +365,7 @@ def _write_gadget_fetch_entry_v2(
         judge_rationale="original judge said the boundary was genuine",
         signature_version=2,
         scope_fingerprint=scope_fingerprint,
+        judge_transport="openrouter",
         hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
     )
     lines = [

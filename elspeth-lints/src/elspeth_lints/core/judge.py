@@ -745,15 +745,15 @@ class JudgeResponse:
     the audit trail loses information if we coerce ``None`` to ``0``.
 
     ``judge_transport`` records which transport produced this verdict
-    (``"openrouter"`` or ``"claude_agent_sdk"``). It is recorded on the
-    response now but is not yet threaded into the HMAC-signed v2 allowlist
-    payload — that wiring (justify write + migrate + validator, updated
-    atomically) is deferred to a later task. Once threaded, "how the
-    verdict was produced" will be verdict metadata bound to and
-    tamper-evident with the verdict itself; the era of any provider-side
-    system prompt (the ``claude_code`` preset under the agent transport)
-    will be bounded by the already-signed ``recorded_at`` timestamp, so no
-    separate version is captured.
+    (``"openrouter"`` or ``"claude_agent_sdk"``) and is bound into the
+    HMAC-signed v2 allowlist payload (justify write + migrate + validator
+    all sign it). "How the verdict was produced" is therefore verdict
+    metadata bound to and tamper-evident with the verdict itself: a forged
+    or edited transport label on a signed v2 entry fails the load-time HMAC
+    recompute. The era of any provider-side system prompt (the
+    ``claude_code`` preset under the agent transport) is bounded by the
+    already-signed ``recorded_at`` timestamp, so no separate version is
+    captured.
     """
 
     verdict: JudgeVerdict

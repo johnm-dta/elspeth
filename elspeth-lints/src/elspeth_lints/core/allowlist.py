@@ -568,7 +568,7 @@ def compute_judge_metadata_signature(
     signature_version: int = 1,
     file_fingerprint: str | None = None,
     scope_fingerprint: str | None = None,
-    judge_transport: str = "openrouter",
+    judge_transport: str | None = None,
     judge_model_verdict: JudgeVerdict | None = None,
     judge_confidence: float | None = None,
     judge_excerpt_redactions: tuple[RedactionRecord, ...] = (),
@@ -602,11 +602,15 @@ def compute_judge_metadata_signature(
     if signature_version == 2:
         if scope_fingerprint is None:
             raise ValueError("compute_judge_metadata_signature: scope_fingerprint is required for signature_version 2")
+        if judge_transport is None:
+            raise ValueError("compute_judge_metadata_signature: judge_transport is required for signature_version 2")
         # ``judge_transport`` is bound into the v2 payload ONLY — never the v1
         # branch below. v1 is legacy (deleted in a later task) and its signed
-        # payload shape must not change. The function-parameter default
-        # ("openrouter") keeps direct unit callers that omit it green; the
-        # atomic validator enforces presence on persisted v2 entries.
+        # payload shape must not change. Required (no default): the validator
+        # enforces PRESENCE but not CORRECTNESS, so a silent "openrouter"
+        # default would let a forgetful future v2 sign site mislabel a signed
+        # audit field undetectably. Mirroring ``scope_fingerprint``'s
+        # required-for-v2 contract closes that seam (offensive programming).
         binding: dict[str, str] = {
             "scope_fingerprint": scope_fingerprint,
             "judge_transport": judge_transport,

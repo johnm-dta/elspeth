@@ -1276,6 +1276,12 @@ _AWARE_DT = datetime(2026, 5, 23, tzinfo=UTC)
 
 
 def _sig(**overrides: object) -> str:
+    # ``judge_transport`` defaults to "openrouter" at the HELPER level (not in
+    # the production signer, which now requires it for v2 — see
+    # ``test_v2_signature_requires_judge_transport``). The helper supplies the
+    # value explicitly so its v2 callers that don't care about transport stay
+    # green; a caller can still override it (or pass None to exercise the
+    # required-for-v2 raise).
     base: dict[str, object] = {
         "key": "core/x.py:R6:C:m:fp=abc",
         "ast_path": "body[0]/body[0]",
@@ -1284,6 +1290,7 @@ def _sig(**overrides: object) -> str:
         "judge_model": "anthropic/claude-opus",
         "judge_rationale": "external call boundary",
         "judge_policy_hash": "sha256:" + "0" * 64,
+        "judge_transport": "openrouter",
         "hmac_key": _TEST_KEY,
     }
     base.update(overrides)
@@ -1351,6 +1358,7 @@ def test_v2_payload_bytes_match_independent_reimplementation() -> None:
         key=key,
         signature_version=2,
         scope_fingerprint=scope_fingerprint,
+        judge_transport="openrouter",
         ast_path=ast_path,
         judge_verdict=JudgeVerdict.ACCEPTED,
         judge_recorded_at=_AWARE_DT,
@@ -1380,16 +1388,30 @@ def test_v2_signature_includes_judge_transport() -> None:
     assert not hmac.compare_digest(a, b)
 
 
-def test_v2_signature_default_transport_is_openrouter() -> None:
-    """Omitting ``judge_transport`` defaults to openrouter (the function default).
+def test_v2_signature_helper_default_transport_is_openrouter() -> None:
+    """The ``_sig`` HELPER supplies judge_transport="openrouter" by default.
 
-    This is what keeps scope-fingerprint's transport-agnostic signing helpers
-    (which never pass ``judge_transport``) green and unchanged — exactly as the
-    ``signature_version=1`` default does for the version argument.
+    The production signer no longer defaults judge_transport (it requires it
+    for v2 — see ``test_v2_signature_requires_judge_transport``). The
+    transport-agnostic test helper carries its own "openrouter" default so its
+    v2 callers stay green; this pins that the helper default and an explicit
+    "openrouter" produce the same signature.
     """
-    omitted = _sig(signature_version=2, scope_fingerprint="a" * 64)
+    via_helper_default = _sig(signature_version=2, scope_fingerprint="a" * 64)
     explicit = _sig(signature_version=2, scope_fingerprint="a" * 64, judge_transport="openrouter")
-    assert hmac.compare_digest(omitted, explicit)
+    assert hmac.compare_digest(via_helper_default, explicit)
+
+
+def test_v2_signature_requires_judge_transport() -> None:
+    """The production signer raises when judge_transport is None for v2.
+
+    Mirrors ``test_v2_requires_scope_fingerprint``: judge_transport is a
+    required v2 binding field with NO production default, so a forgetful future
+    v2 sign site cannot silently mislabel the signed transport as "openrouter".
+    (``_sig`` passes None explicitly to override its own helper default.)
+    """
+    with pytest.raises(ValueError, match="judge_transport"):
+        _sig(signature_version=2, scope_fingerprint="a" * 64, judge_transport=None)
 
 
 # ---------------------------------------------------------------------------
@@ -1591,6 +1613,7 @@ def _write_v2_judge_gated_yaml(
         judge_policy_hash=JUDGE_POLICY_HASH,
         signature_version=2,
         scope_fingerprint=scope_fingerprint,
+        judge_transport="openrouter",
         hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
     )
     lines = [

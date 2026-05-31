@@ -250,6 +250,12 @@ first clarifying questions.
   LLM seed + audit record, never a human notification. This often makes reset
   unnecessary: the operator just supplies the missing value and continues. It is
   the behaviour that would have served the original session.
+  > **SCOPE UPDATE (2026-05-31 plan review):** this refinement is **split out of
+  > the Stage 3 implementation plan into a separate follow-up** (it was Task 6).
+  > It is the riskiest piece — it touches the hot compose-loop finalize path and
+  > the tutorial-invisibility guarantee, and needs a real (non-stub) test plus a
+  > code-verified hook point. Stage 3 ships the reset feature without it; the
+  > follow-up owns this refinement. The design intent here is unchanged.
 - **Record reset as a named, audited Landscape event** (`reset_from` → new
   session): reversible-by-reference (nothing destroyed) and a clean eval signal
   for tracking composer convergence across model/skill versions.
@@ -359,6 +365,19 @@ hero example — then normalizes + caches the result (`_normalise_tutorial_*`,
   existing `export_yaml` — carries NULL `payload_digest`/`expires_at`, so the
   existing biconditional CHECKs are satisfied without change). Recommend this over
   a new table. **Remaining operator call:** approve the `event_type` extension.
+  > **RESOLVED (2026-05-31 plan review): operator APPROVED the `session_reset`
+  > `event_type` extension.** Scope of approval is narrow — only the
+  > `session_reset` value carrying NULL `payload_digest`/`expires_at` (like
+  > `export_yaml`). Two implementation corrections from the same review: (1) the
+  > Python mirror of the verb set is `_CompletionVerb` `Literal` +
+  > `_KNOWN_COMPLETION_VERBS` at `web/composer/telemetry_phase8.py:145-146`, **not**
+  > a `StrEnum` in `contracts/`; (2) there is **no** `record_completion_event`
+  > service method — the row is written by a direct insert into
+  > `composer_completion_events_table` (see the `export_yaml` site at
+  > `routes/composer.py:1218`). Adding the column also requires a
+  > `SESSION_SCHEMA_EPOCH` bump (`web/sessions/schema.py`), and the resulting
+  > `data/sessions.db` delete-and-recreate is a **gated destructive OPERATOR
+  > ACTION**. See the Stage 3 plan's "Operator gates & pre-execution corrections".
 - **C3 — no `reset_from` column** on `sessions`; needs a schema add (project DB
   policy: delete-and-recreate, no migration) + a new `SessionRecord` field, or
   overload `forked_from_session_id`.

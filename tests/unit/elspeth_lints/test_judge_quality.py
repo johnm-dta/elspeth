@@ -10,7 +10,7 @@ import pytest
 
 from elspeth_lints.core.allowlist import JudgeVerdict
 from elspeth_lints.core.cli import main
-from elspeth_lints.core.judge import JudgeRequest, JudgeResponse
+from elspeth_lints.core.judge import TRANSPORT_OPENROUTER, JudgeRequest, JudgeResponse
 from elspeth_lints.core.judge_quality import (
     JUDGE_QUALITY_MAX_CASES,
     JUDGE_QUALITY_MIN_CASES,
@@ -179,4 +179,5 @@ def _response(verdict: JudgeVerdict, *, should_use_decorator: str | None = None)
         prompt_tokens_total=100,
         prompt_tokens_cached=50,
         policy_hash="sha256:test",
+        judge_transport=TRANSPORT_OPENROUTER,
     )

@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -53,6 +54,20 @@ from elspeth_lints.core.allowlist import JudgeVerdict
 # configurable per-project.
 DEFAULT_JUDGE_MODEL: str = "anthropic/claude-opus-4-7"
 DEFAULT_JUDGE_MAX_TOKENS: int = 1024
+
+# Transport identities. The persisted/signed values are these strings; the
+# CLI flag spelling ("openrouter" / "agent") maps onto them in cli.py.
+TRANSPORT_OPENROUTER: str = "openrouter"
+TRANSPORT_AGENT: str = "claude_agent_sdk"
+_VALID_TRANSPORTS: frozenset[str] = frozenset({TRANSPORT_OPENROUTER, TRANSPORT_AGENT})
+
+# Per-transport default model. CRITICAL: DEFAULT_JUDGE_MODEL is an OpenRouter
+# *routing slug* ("anthropic/claude-opus-4-7" — the vendor prefix is required
+# by OpenRouter, see above). The Claude Agent SDK (Claude Code CLI /
+# ANTHROPIC_API_KEY) expects an UNPREFIXED Anthropic/Claude-Code model id and
+# will reject the slug. Each transport therefore has its own default; call_judge
+# resolves by transport when the caller passes no explicit model_id.
+DEFAULT_AGENT_JUDGE_MODEL: str = "claude-opus-4-7"  # confirm the SDK-accepted id post-install (Task 2)
 
 # OpenRouter endpoint. The OpenAI SDK is pointed here rather than at
 # OpenAI's own endpoint so model identity (and therefore which family's
@@ -633,6 +648,26 @@ class JudgeContractError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class _TransportResult:
+    """What a transport extracts from its provider response.
+
+    The transport-specific code (OpenRouter SDK vs Claude Agent SDK) reduces
+    its provider response to exactly these four values; everything downstream
+    of here (verdict parsing, contract validation, JudgeResponse construction)
+    is shared and transport-agnostic.
+
+    ``prompt_tokens_cached`` preserves the ``None``-vs-``0`` distinction the
+    JudgeResponse docstring is explicit about: ``None`` = the provider did not
+    report a cached-token count; ``0`` = caching was on but produced no hit.
+    """
+
+    raw_text: str
+    served_model_id: str
+    prompt_tokens_total: int
+    prompt_tokens_cached: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class SimilarAllowlistEntry:
     """Compact existing-entry context supplied to the judge."""
 
@@ -706,6 +741,14 @@ class JudgeResponse:
     it) from ``0`` (caching was on but produced no hit on this call,
     e.g. the first call within a TTL window). Don't conflate the two —
     the audit trail loses information if we coerce ``None`` to ``0``.
+
+    ``judge_transport`` records which transport produced this verdict
+    (``"openrouter"`` or ``"claude_agent_sdk"``). It is carried into the
+    HMAC-signed v2 allowlist payload — "how the verdict was produced" is
+    verdict metadata, bound to and tamper-evident with the verdict itself.
+    The era of any provider-side system prompt (the ``claude_code`` preset
+    under the agent transport) is bounded by the already-signed
+    ``recorded_at`` timestamp; no separate version is captured.
     """
 
     verdict: JudgeVerdict
@@ -717,6 +760,7 @@ class JudgeResponse:
     prompt_tokens_total: int
     prompt_tokens_cached: int | None
     policy_hash: str
+    judge_transport: str
 
 
 def _truncate_untrusted_text(text: str, *, field_name: str, char_limit: int) -> tuple[str, bool]:
@@ -783,13 +827,8 @@ def _build_user_message_blocks(request: JudgeRequest) -> list[dict[str, str]]:
     ]
 
 
-def call_judge(
-    request: JudgeRequest,
-    *,
-    model_id: str = DEFAULT_JUDGE_MODEL,
-    max_tokens: int = DEFAULT_JUDGE_MAX_TOKENS,
-) -> JudgeResponse:
-    """Send a judge request to OpenRouter and return the parsed verdict.
+def _call_openrouter(request: JudgeRequest, model_id: str, max_tokens: int) -> _TransportResult:
+    """OpenRouter transport: OpenAI-compatible SDK pointed at OpenRouter.
 
     Transport: the OpenAI SDK pointed at OpenRouter's chat-completions
     endpoint. The static policy block is wrapped in
@@ -798,16 +837,15 @@ def call_judge(
     (file path, rationale, surrounding code) goes in the user message
     and is NOT cached.
 
+    Reduces the OpenRouter completion to the transport-agnostic
+    ``_TransportResult``; verdict parsing and contract validation live in
+    the shared ``call_judge`` dispatcher.
+
     Raises:
         JudgeConfigurationError: SDK not installed, or
             ``OPENROUTER_API_KEY`` env var missing.
         JudgeTransportError: OpenRouter / SDK transport failed after
             configuration succeeded.
-        JudgeContractError: the model returned a malformed response
-            (missing fields, unexpected verdict value, bad JSON). We
-            crash rather than coerce per the project's offensive-
-            programming policy — a malformed judge response is never an
-            acceptable audit primitive.
     """
     # Lazy import: keeping ``openai`` out of module-level scope means
     # importing ``elspeth_lints.core.judge`` does not require the SDK to
@@ -818,24 +856,23 @@ def call_judge(
         from openai import APIError, OpenAI
     except ImportError as exc:
         raise JudgeConfigurationError(
-            "The openai SDK and httpx are required. The `justify` subcommand "
-            "routes LLM calls through OpenRouter via the OpenAI-compatible "
-            "SDK and pins SDK environment handling through httpx. Install with:\n\n"
+            "The openai SDK and httpx are required for the OpenRouter "
+            "transport. The `justify` subcommand routes LLM calls through "
+            "OpenRouter via the OpenAI-compatible SDK and pins SDK "
+            "environment handling through httpx. Install with:\n\n"
             "    uv pip install -e 'elspeth-lints/[judge]'\n\n"
-            "(from the repo root), or add `openai` to your dev "
-            "environment."
+            "(from the repo root), or select --judge-transport agent."
         ) from exc
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise JudgeConfigurationError(
-            "OPENROUTER_API_KEY is not set. The `justify` subcommand calls "
+            "OPENROUTER_API_KEY is not set. The OpenRouter transport calls "
             "OpenRouter (the project-wide LLM gateway) to gate allowlist "
             "writes. Set the key in your shell environment "
-            "(`export OPENROUTER_API_KEY=sk-or-...`) and re-run."
+            "(`export OPENROUTER_API_KEY=sk-or-...`) and re-run, or select "
+            "--judge-transport agent."
         )
-    if max_tokens <= 0:
-        raise ValueError(f"max_tokens must be positive, got {max_tokens}")
 
     user_blocks = _build_user_message_blocks(request)
 
@@ -899,7 +936,80 @@ def call_judge(
         raise JudgeTransportError(f"{type(exc).__name__}: {exc}") from exc
 
     raw_text = _extract_text_block(completion)
-    parsed = _parse_judge_payload(raw_text)
+    prompt_tokens_total, prompt_tokens_cached = _extract_cache_accounting(completion)
+
+    # Record the *served* model id (what OpenRouter actually routed to),
+    # not the requested one. OpenRouter may re-route to a fallback when
+    # the primary route is saturated; if we record the requested id and
+    # the served id diverges, the audit trail loses the actual provenance
+    # of the verdict — a subsequent reaudit of "the same model" would
+    # silently be against a different one. Falling back to the requested
+    # `model_id` only when the transport didn't surface a served value
+    # honours the Tier-3 record-what-we-got contract: don't fabricate a
+    # served id, but don't drop the audit primitive on transports that
+    # omit the field either. Closes elspeth-0e1d0978fa (C1-1).
+    served_model_id = completion.model if completion.model else model_id
+    return _TransportResult(
+        raw_text=raw_text,
+        served_model_id=served_model_id,
+        prompt_tokens_total=prompt_tokens_total,
+        prompt_tokens_cached=prompt_tokens_cached,
+    )
+
+
+def _call_agent_sdk(request: JudgeRequest, model_id: str, max_tokens: int) -> _TransportResult:
+    # Placeholder until Task 2 lands the Claude Agent SDK transport. Keeping
+    # it here (rather than omitting the registry key) makes the registry total
+    # over ``_VALID_TRANSPORTS`` and keeps ``call_judge``'s lookup exhaustive.
+    raise JudgeConfigurationError("The Claude Agent SDK transport is not yet available. Use --judge-transport openrouter.")
+
+
+_TRANSPORTS: dict[str, Callable[[JudgeRequest, str, int], _TransportResult]] = {
+    TRANSPORT_OPENROUTER: _call_openrouter,
+    TRANSPORT_AGENT: _call_agent_sdk,
+}
+
+
+def call_judge(
+    request: JudgeRequest,
+    *,
+    model_id: str | None = None,
+    max_tokens: int = DEFAULT_JUDGE_MAX_TOKENS,
+    transport: str = TRANSPORT_OPENROUTER,
+    transport_impl: Callable[[JudgeRequest, str, int], _TransportResult] | None = None,
+) -> JudgeResponse:
+    """Send a judge request through the selected transport and return the verdict.
+
+    ``transport`` selects the provider path (``TRANSPORT_OPENROUTER`` /
+    ``TRANSPORT_AGENT``). When ``model_id`` is omitted, the default is resolved
+    **by transport** — the OpenRouter slug and the Agent-SDK model id are
+    different namespaces (see ``DEFAULT_AGENT_JUDGE_MODEL``). ``transport_impl``
+    is a test seam: inject a fake to exercise the shared validation path without
+    a real provider call. Both transports funnel their extracted assistant text
+    through the identical ``_parse_judge_payload`` → validators path, so a
+    verdict is validated the same way regardless of origin.
+
+    Raises:
+        JudgeConfigurationError: transport SDK not installed, or auth missing.
+        JudgeTransportError: the provider call failed after configuration succeeded.
+        JudgeContractError: the model returned a malformed response. We crash
+            rather than coerce — a malformed judge response is never an
+            acceptable audit primitive.
+    """
+    if max_tokens <= 0:
+        raise ValueError(f"max_tokens must be positive, got {max_tokens}")
+    if transport not in _VALID_TRANSPORTS:
+        raise ValueError(f"unknown judge transport {transport!r}; expected one of {sorted(_VALID_TRANSPORTS)}")
+
+    if model_id is None:
+        # Resolve the default by transport: the OpenRouter routing slug
+        # ("anthropic/...") is invalid for the Agent SDK and vice versa.
+        model_id = DEFAULT_AGENT_JUDGE_MODEL if transport == TRANSPORT_AGENT else DEFAULT_JUDGE_MODEL
+
+    impl = transport_impl if transport_impl is not None else _TRANSPORTS[transport]
+    result = impl(request, model_id, max_tokens)
+
+    parsed = _parse_judge_payload(result.raw_text)
     verdict = _verdict_from_string(parsed["verdict"])
     rationale = _required_str_field(parsed, "rationale")
     confidence = _required_confidence_field(parsed, "confidence")
@@ -922,30 +1032,17 @@ def call_judge(
             "is being rejected)."
         )
 
-    prompt_tokens_total, prompt_tokens_cached = _extract_cache_accounting(completion)
-
-    # Record the *served* model id (what OpenRouter actually routed to),
-    # not the requested one. OpenRouter may re-route to a fallback when
-    # the primary route is saturated; if we record the requested id and
-    # the served id diverges, the audit trail loses the actual provenance
-    # of the verdict — a subsequent reaudit of "the same model" would
-    # silently be against a different one. Falling back to the requested
-    # `model_id` only when the transport didn't surface a served value
-    # honours the Tier-3 record-what-we-got contract: don't fabricate a
-    # served id, but don't drop the audit primitive on transports that
-    # omit the field either. Closes elspeth-0e1d0978fa (C1-1).
-    served_model_id = completion.model if completion.model else model_id
-
     return JudgeResponse(
         verdict=verdict,
-        model_id=served_model_id,
+        model_id=result.served_model_id,
         judge_rationale=rationale,
         recorded_at=datetime.now(UTC),
         should_use_decorator=should_use_decorator,
         confidence=confidence,
-        prompt_tokens_total=prompt_tokens_total,
-        prompt_tokens_cached=prompt_tokens_cached,
+        prompt_tokens_total=result.prompt_tokens_total,
+        prompt_tokens_cached=result.prompt_tokens_cached,
         policy_hash=JUDGE_POLICY_HASH,
+        judge_transport=transport,
     )
 
 

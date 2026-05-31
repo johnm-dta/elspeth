@@ -18,6 +18,14 @@ dependencies = ["pyyaml>=6.0,<7"]
 #     uv pip install -e ".[judge]"  (from the elspeth-lints/ directory)
 # or include the extra in the root project's dev install.
 judge = ["openai>=1.0,<2"]
+# The 'judge-agent' extra pulls in the Claude Agent SDK used by the
+# `--judge-transport agent` path. Like 'judge' it is optional: the lint
+# tool runs in CI lanes that carry neither SDK. The agent transport
+# authenticates via an installed + logged-in Claude Code CLI (subscription
+# / Agent-SDK credit pool) or ANTHROPIC_API_KEY or Bedrock/Vertex/Azure.
+# Install with:
+#     uv pip install -e ".[judge-agent]"  (from the elspeth-lints/ directory)
+judge-agent = ["claude-agent-sdk>=0.1"]
 
 [project.scripts]
 elspeth-lints = "elspeth_lints.core.cli:main"

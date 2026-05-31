@@ -36,7 +36,15 @@ import pytest
 
 from elspeth_lints.core.allowlist import JudgeVerdict, load_allowlist
 from elspeth_lints.core.cli import main
-from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JudgeRequest, call_judge
+from elspeth_lints.core.judge import (
+    DEFAULT_JUDGE_MODEL,
+    TRANSPORT_AGENT,
+    TRANSPORT_OPENROUTER,
+    JudgeContractError,
+    JudgeRequest,
+    _TransportResult,
+    call_judge,
+)
 
 # Small synthetic source: an R1 finding inside a function whose external-data
 # parameter is named ``arguments`` — the canonical decorator-suggestion case
@@ -629,3 +637,110 @@ def test_justify_operator_override_past_decorator_suggestion_records_both_signal
     # past a structured decorator nudge specifically.
     assert "use @trust_boundary" in text
     assert "source_param='arguments'" in text
+
+
+# ---------- call_judge: transport seam (refactor regression guards) ----------
+#
+# These exercise the transport/transport_impl seam on call_judge directly,
+# without a real provider. The ``transport_impl`` test seam injects a fake
+# transport that returns a ``_TransportResult`` carrier; everything downstream
+# (verdict parsing, contract validation, JudgeResponse construction) is shared
+# and transport-agnostic, so these prove the verdict path is identical
+# regardless of transport origin.
+
+
+_TRANSPORT_SEAM_GOOD_JSON = (
+    '{"verdict": "ACCEPTED", "rationale": "external boundary; coercion recorded", "confidence": 0.8, "should_use_decorator": null}'
+)
+
+
+def _transport_seam_request() -> JudgeRequest:
+    return JudgeRequest(
+        file_path="core/x.py",
+        rule_id="R1",
+        symbol="f",
+        fingerprint="abc",
+        rationale="external call boundary",
+        surrounding_code="def f(x):\n    return x.get('a')\n",
+    )
+
+
+def _fake_transport(raw_text: str, served: str = "anthropic/claude-opus-4-7") -> Any:
+    def _impl(request: JudgeRequest, model_id: str, max_tokens: int) -> _TransportResult:
+        assert isinstance(request, JudgeRequest)
+        return _TransportResult(
+            raw_text=raw_text,
+            served_model_id=served,
+            prompt_tokens_total=123,
+            prompt_tokens_cached=10,
+        )
+
+    return _impl
+
+
+def test_call_judge_stamps_openrouter_transport_by_default() -> None:
+    resp = call_judge(_transport_seam_request(), transport_impl=_fake_transport(_TRANSPORT_SEAM_GOOD_JSON))
+    assert resp.judge_transport == TRANSPORT_OPENROUTER
+    assert resp.verdict is JudgeVerdict.ACCEPTED
+    assert resp.model_id == "anthropic/claude-opus-4-7"
+    assert resp.prompt_tokens_total == 123
+    assert resp.prompt_tokens_cached == 10
+
+
+def test_call_judge_records_selected_transport_name() -> None:
+    resp = call_judge(
+        _transport_seam_request(),
+        transport=TRANSPORT_AGENT,
+        transport_impl=_fake_transport(_TRANSPORT_SEAM_GOOD_JSON),
+    )
+    assert resp.judge_transport == TRANSPORT_AGENT
+
+
+def test_call_judge_rejects_unknown_transport() -> None:
+    with pytest.raises(ValueError, match="transport"):
+        call_judge(
+            _transport_seam_request(),
+            transport="carrier-pigeon",
+            transport_impl=_fake_transport(_TRANSPORT_SEAM_GOOD_JSON),
+        )
+
+
+def test_both_transports_share_one_validation_path() -> None:
+    # The shared parser's should_use_decorator<->BLOCKED cross-check must fire
+    # identically regardless of transport origin.
+    bad = '{"verdict": "ACCEPTED", "rationale": "x", "confidence": 0.5, "should_use_decorator": "arguments"}'
+    with pytest.raises(JudgeContractError):
+        call_judge(_transport_seam_request(), transport=TRANSPORT_AGENT, transport_impl=_fake_transport(bad))
+
+
+def _capture_model_impl(captured: dict[str, Any]) -> Any:
+    def _impl(request: JudgeRequest, model_id: str, max_tokens: int) -> _TransportResult:
+        captured["model_id"] = model_id
+        return _TransportResult(
+            raw_text=_TRANSPORT_SEAM_GOOD_JSON,
+            served_model_id="claude-opus-4-7",
+            prompt_tokens_total=1,
+            prompt_tokens_cached=None,
+        )
+
+    return _impl
+
+
+def test_openrouter_default_model_keeps_vendor_slug() -> None:
+    captured: dict[str, Any] = {}
+    call_judge(_transport_seam_request(), transport_impl=_capture_model_impl(captured))
+    assert captured["model_id"] == "anthropic/claude-opus-4-7"  # OpenRouter routing slug
+
+
+def test_agent_transport_default_model_is_unprefixed() -> None:
+    # The agent transport must NOT receive the OpenRouter "anthropic/..." slug —
+    # the SDK rejects it. call_judge resolves the per-transport default.
+    captured: dict[str, Any] = {}
+    call_judge(_transport_seam_request(), transport=TRANSPORT_AGENT, transport_impl=_capture_model_impl(captured))
+    assert "/" not in captured["model_id"]
+
+
+def test_explicit_model_id_overrides_transport_default() -> None:
+    captured: dict[str, Any] = {}
+    call_judge(_transport_seam_request(), model_id="some/explicit-model", transport_impl=_capture_model_impl(captured))
+    assert captured["model_id"] == "some/explicit-model"

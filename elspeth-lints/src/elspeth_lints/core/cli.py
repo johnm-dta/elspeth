@@ -1374,20 +1374,35 @@ def _run_justify(args: argparse.Namespace) -> int:
         write_verdict = response.verdict
         model_verdict = None
 
-    # C8-3 binding: reuse the source-file fingerprint that
-    # ``extract_safe_excerpt`` already computed when it read the bytes
-    # for the excerpt + scrubber salt. A single read-and-hash is the
-    # source of truth for both the binding fingerprint persisted into
-    # the YAML quartet AND the per-file salt the scrubber baked into
-    # ``RedactionRecord.redacted_hash`` — re-reading the file here
-    # would race against a concurrent edit and (worse) risk drifting
-    # the two fingerprints out of sync. The persisted quartet remains
-    # cryptographically bound to the bytes + AST node the judge
+    # C8-3 binding (v2 scheme): bind the persisted entry to the
+    # enclosing-scope AST fingerprint the judge inspected, not the whole
+    # file. ``scope_fingerprint`` is stamped on the finding by the
+    # tier-model scanner; it survives edits elsewhere in the same file
+    # that the v1 whole-file ``file_fingerprint`` did not (an unrelated
+    # edit to a neighbouring function invalidated a v1 binding and
+    # crashed the load — see the v2 migration). The single read-and-hash
+    # ``extract_safe_excerpt`` already performed remains the source of
+    # truth for the per-file scrubber salt baked into
+    # ``RedactionRecord.redacted_hash``; that salt is independent of the
+    # binding scheme and is unchanged here. The persisted entry stays
+    # cryptographically bound to the scope + AST node the judge
     # inspected; the loader/matcher pair (allowlist.load_allowlist and
-    # allowlist.verify_entry_binding_against_finding) reads them back
-    # and asserts the binding still holds, closing the quartet-
-    # transplant attack vector.
-    file_fingerprint = safe_excerpt.file_fingerprint
+    # allowlist.verify_entry_binding_against_finding) reads the
+    # scope_fingerprint back and asserts the binding still holds at match
+    # time, closing the entry-transplant attack vector. v2 justify is
+    # tier-model-only today: ``_finding_scope_fingerprint`` raises
+    # fail-closed on a trust_boundary finding (whose scanner does not yet
+    # stamp the field).
+    try:
+        scope_fingerprint = _finding_scope_fingerprint(finding)
+    except ValueError as exc:
+        # Fail-closed: v2 justify is tier-model-only today. A
+        # trust_boundary finding lacks scope_fingerprint, so we cannot
+        # mint a v2 entry for it. Surface a clean diagnostic (no
+        # traceback) rather than crashing — and do NOT fall back to a v1
+        # whole-file binding, which would defeat the migration.
+        sys.stderr.write(f"Cannot justify finding: {exc}\n")
+        return 2
     target_yaml = _suggest_yaml_target(finding=finding, allowlist_dir=allowlist_dir)
 
     def build_signed_yaml_entry() -> str:
@@ -1402,7 +1417,7 @@ def _run_justify(args: argparse.Namespace) -> int:
             judge_confidence=response.confidence,
             policy_hash=response.policy_hash,
             model_verdict=model_verdict,
-            file_fingerprint=file_fingerprint,
+            scope_fingerprint=scope_fingerprint,
             ast_path=_finding_ast_path(finding),
             excerpt_redactions=safe_excerpt.redactions,
         )
@@ -1808,6 +1823,26 @@ def _finding_ast_path(finding: Any) -> str:
     return ast_path
 
 
+def _finding_scope_fingerprint(finding: Any) -> str:
+    """Return the finding's enclosing-scope fingerprint for a v2 binding.
+
+    Tier-model findings carry ``scope_fingerprint`` (stamped by the scanner).
+    A trust_boundary ``protocols.Finding`` does NOT — so v2 justify is
+    TIER-MODEL-ONLY today; justifying a trust_boundary rule raises here
+    (fail-closed) until that scanner stamps the field. Do not fabricate a
+    value: an empty/absent scope_fingerprint cannot bind a v2 entry.
+    """
+    scope_fingerprint = getattr(finding, "scope_fingerprint", "")
+    if not isinstance(scope_fingerprint, str) or not scope_fingerprint:
+        raise ValueError(
+            f"finding {_finding_canonical_key(finding)} has no scope_fingerprint; "
+            "judge-gated v2 entries must bind to the enclosing scope the judge inspected. "
+            "The scanner must stamp scope_fingerprint on every finding (v2 justify is "
+            "tier-model-only until trust_boundary's scanner stamps the field)."
+        )
+    return scope_fingerprint
+
+
 def _suggest_yaml_target(*, finding: Any, allowlist_dir: Path) -> Path:
     """Pick the per-module YAML file under ``--allowlist-dir`` for this finding.
 
@@ -1838,7 +1873,7 @@ def _build_yaml_entry_text(
     judge_rationale: str,
     judge_confidence: float | None,
     policy_hash: str,
-    file_fingerprint: str,
+    scope_fingerprint: str,
     ast_path: str,
     excerpt_redactions: tuple[Any, ...] = (),  # tuple[RedactionRecord, ...]
     model_verdict: Any = None,  # JudgeVerdict | None; populated only on override
@@ -1883,7 +1918,8 @@ def _build_yaml_entry_text(
     persisted_judge_confidence = _persisted_judge_confidence(judge_confidence)
     judge_metadata_signature = compute_judge_metadata_signature(
         key=key,
-        file_fingerprint=file_fingerprint,
+        signature_version=2,
+        scope_fingerprint=scope_fingerprint,
         ast_path=ast_path,
         judge_verdict=verdict,
         judge_model_verdict=model_verdict,
@@ -1915,13 +1951,19 @@ def _build_yaml_entry_text(
     lines.append("  judge_rationale: |-")
     for rationale_line in judge_rationale.splitlines() or [""]:
         lines.append(f"    {rationale_line}")
-    # C8-3 binding fields. ``file_fingerprint`` is the SHA-256 of the
-    # source-file bytes the judge inspected; ``ast_path`` is the AST
-    # field/index path from the module root to the finding's subject
-    # node. Together they bind the persisted quartet to source+AST so
-    # the loader/matcher pair can detect quartet transplant and
-    # source drift. Both are scalars; emit inline.
-    lines.append(f"  file_fingerprint: {_yaml_inline_scalar(file_fingerprint)}")
+    # C8-3 binding fields (v2 scheme). ``scope_fingerprint`` is the
+    # AST fingerprint of the enclosing scope the judge inspected (the
+    # finding's containing function/class/module body), not the whole
+    # file — so an unrelated edit elsewhere in the file no longer
+    # invalidates this binding. ``ast_path`` is the AST field/index path
+    # from the module root to the finding's subject node. Together they
+    # bind the persisted entry to scope+AST so the loader/matcher pair
+    # can detect entry transplant and scope drift. ``judge_signature_version``
+    # selects the v2 binding scheme and is signed inside the HMAC payload
+    # so a v1<->v2 flip is itself unforgeable. All are scalars; emit
+    # inline (the version is a bare int).
+    lines.append("  judge_signature_version: 2")
+    lines.append(f"  scope_fingerprint: {_yaml_inline_scalar(scope_fingerprint)}")
     lines.append(f"  ast_path: {_yaml_inline_scalar(ast_path)}")
     lines.append(f"  judge_metadata_signature: {_yaml_inline_scalar(judge_metadata_signature)}")
     # Excerpt-redaction audit record (closes elspeth-9bbb9df9a5 / C2-2).

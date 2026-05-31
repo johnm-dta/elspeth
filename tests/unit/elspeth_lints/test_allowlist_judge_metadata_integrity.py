@@ -76,6 +76,47 @@ def _expected_judge_metadata_signature(
     return f"hmac-sha256:v1:{digest}"
 
 
+def _expected_judge_metadata_signature_v2(
+    *,
+    key: str,
+    scope_fingerprint: str,
+    ast_path: str,
+    judge_verdict: str = "ACCEPTED",
+    judge_model_verdict: str | None = None,
+    judge_recorded_at: str = "2026-05-23T00:00:00+00:00",
+    judge_model: str = "anthropic/claude-opus-4-7",
+    judge_rationale: str = "judge accepted the suppression",
+    judge_policy_hash: str = JUDGE_POLICY_HASH,
+    judge_excerpt_redactions: tuple[dict[str, int | str], ...] = (),
+) -> str:
+    """Return the v2 judge-metadata HMAC, hand-built to pin v2 payload bytes.
+
+    Independent reimplementation of the v2 signed payload (the twin of the
+    v1 ``_expected_judge_metadata_signature`` above). v2 binds
+    ``scope_fingerprint`` instead of ``file_fingerprint`` and stamps
+    ``"version": 2`` inside the signed payload; the prefix is
+    ``hmac-sha256:v2:``. All other keys/order match v1. This freezes the
+    v2 payload bytes so an accidental v2-payload change is caught — the
+    persisted v2 entries minted by ``justify`` depend on these bytes.
+    """
+    payload = {
+        "version": 2,
+        "key": key,
+        "scope_fingerprint": scope_fingerprint,
+        "ast_path": ast_path,
+        "judge_verdict": judge_verdict,
+        "judge_model_verdict": judge_model_verdict,
+        "judge_recorded_at": judge_recorded_at,
+        "judge_model": judge_model,
+        "judge_rationale": judge_rationale,
+        "judge_policy_hash": judge_policy_hash,
+        "judge_excerpt_redactions": list(judge_excerpt_redactions),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    digest = hmac.new(_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
+    return f"hmac-sha256:v2:{digest}"
+
+
 # ---------------------------------------------------------------------------
 # Invariant 1: OVERRIDDEN_BY_OPERATOR entries must record judge_model_verdict
 # ---------------------------------------------------------------------------
@@ -1252,8 +1293,10 @@ def test_v1_requires_file_fingerprint() -> None:
 def test_default_signature_version_is_v1() -> None:
     """Omitting ``signature_version`` keeps the v1 prefix (load-bearing default).
 
-    Direct callers that predate the v2 migration (notably the justify write
-    path) omit the version argument; they must keep emitting v1 signatures.
+    The default is v1 for back-compatibility with any direct caller that
+    omits the version argument. (The justify write path now passes
+    ``signature_version=2`` explicitly and mints v2 entries — it does NOT
+    rely on this default.)
     """
     sig = _sig(file_fingerprint="b" * 64)
     assert sig.startswith("hmac-sha256:v1:")
@@ -1262,6 +1305,45 @@ def test_default_signature_version_is_v1() -> None:
 def test_unknown_signature_version_crashes() -> None:
     with pytest.raises(ValueError, match="unknown signature_version"):
         _sig(signature_version=3, file_fingerprint="b" * 64)
+
+
+def test_v2_payload_bytes_match_independent_reimplementation() -> None:
+    """Pin the v2 signed-payload bytes against a hand-built twin.
+
+    Mirrors the v1 ``_expected_judge_metadata_signature`` discipline: an
+    accidental change to the v2 payload dict (key order, version stamp,
+    scope_fingerprint placement) would silently invalidate every persisted
+    v2 entry minted after the operator migration. The hand-built twin
+    freezes the bytes so such a change is caught here. Compared via
+    ``hmac.compare_digest`` (constant-time, the production-equivalent
+    comparison).
+    """
+    key = "core/x.py:R6:C:m:fp=abc"
+    scope_fingerprint = "a" * 64
+    ast_path = "body[0]/body[0]"
+    actual = compute_judge_metadata_signature(
+        key=key,
+        signature_version=2,
+        scope_fingerprint=scope_fingerprint,
+        ast_path=ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=_AWARE_DT,
+        judge_model="anthropic/claude-opus",
+        judge_rationale="external call boundary",
+        judge_policy_hash="sha256:" + "0" * 64,
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
+    expected = _expected_judge_metadata_signature_v2(
+        key=key,
+        scope_fingerprint=scope_fingerprint,
+        ast_path=ast_path,
+        judge_recorded_at=_AWARE_DT.isoformat(),
+        judge_model="anthropic/claude-opus",
+        judge_rationale="external call boundary",
+        judge_policy_hash="sha256:" + "0" * 64,
+    )
+    assert hmac.compare_digest(actual, expected)
+    assert actual.startswith("hmac-sha256:v2:")
 
 
 # ---------------------------------------------------------------------------

@@ -621,7 +621,8 @@ def test_justify_accepted_writes_entry_with_judge_metadata(tmp_path: Path) -> No
     assert f"judge_model: {DEFAULT_JUDGE_MODEL}" in text
     assert f"judge_policy_hash: '{JUDGE_POLICY_HASH}'" in text
     assert "judge_confidence: 0.91" in text
-    assert "judge_metadata_signature: 'hmac-sha256:v1:" in text
+    assert "judge_metadata_signature: 'hmac-sha256:v2:" in text
+    assert "judge_signature_version: 2" in text
     assert "genuine Tier-3 boundary" in text
     assert "plugins/widget.py:R1:Widget:lookup:fp=" in text
     # B3: owner is recorded verbatim from --owner, not fabricated from $USER.
@@ -673,7 +674,23 @@ def test_justify_signed_confidence_round_trips_through_source_root_loader(tmp_pa
     assert loaded.entries[0].judge_confidence == pytest.approx(confidence)
 
 
-def test_justify_can_write_trust_boundary_honesty_gate_entry(tmp_path: Path) -> None:
+def test_justify_trust_boundary_fails_closed_under_v2_scope_binding(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """v2 justify is tier-model-only today: trust_boundary findings fail closed.
+
+    A trust_boundary ``protocols.Finding`` does NOT carry a
+    ``scope_fingerprint`` (only the tier_model scanner stamps it), so the
+    justify write path — which now binds v2 entries to scope_fingerprint
+    — cannot mint an entry for it. ``_finding_scope_fingerprint`` raises
+    fail-closed; the CLI surfaces a clean diagnostic (no traceback,
+    exit 2) and writes nothing. This is the documented, intended
+    regression of the v1->v2 migration: justifying a trust_boundary
+    suppression is unsupported until that scanner stamps the field. We do
+    NOT fall back to a v1 whole-file binding (that would defeat the
+    migration).
+    """
     root = tmp_path / "src_root"
     root.mkdir()
     (root / "boundary.py").write_text(
@@ -716,16 +733,14 @@ def handler(payload):
     with _mock_judge_call(verdict="ACCEPTED", rationale="narrow trust-boundary false positive"):
         exit_code = main(argv)
 
-    assert exit_code == 0
-    target_yaml = allowlist_dir / "boundary.yaml"
-    assert target_yaml.exists()
-    text = target_yaml.read_text(encoding="utf-8")
-    assert "boundary.py:TBS2:handler:fp=" in text
-    assert "judge_verdict: ACCEPTED" in text
-    assert "ast_path: 'decorator:" in text
-
-    allowlist = load_allowlist(target_yaml, valid_rule_ids={"TBS2"})
-    assert allowlist.entries[0].judge_verdict is JudgeVerdict.ACCEPTED
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "Cannot justify finding" in captured.err
+    assert "scope_fingerprint" in captured.err
+    assert "Traceback" not in captured.err
+    # Nothing was written: the fail-closed branch returns before the YAML
+    # append.
+    assert not (allowlist_dir / "boundary.yaml").exists()
 
 
 def test_justify_sends_duplicate_rationale_context_to_judge(tmp_path: Path) -> None:
@@ -2584,25 +2599,32 @@ def test_justify_rule_default_package_id_remains_no_op(tmp_path: Path) -> None:
 # =============================================================================
 
 
-def test_justify_writes_file_fingerprint_and_ast_path(tmp_path: Path) -> None:
-    """An ACCEPTED entry written by justify carries both C8-3 binding fields.
+def test_justify_writes_v2_scope_fingerprint_and_ast_path(tmp_path: Path) -> None:
+    """An ACCEPTED entry written by justify is a v2 (scope-bound) entry.
 
-    Asserts: the emitted YAML contains a ``file_fingerprint:`` whose
-    value is the SHA-256 hex digest of plugins/widget.py's bytes, and
-    an ``ast_path:`` whose value matches what the tier_model rule
-    emits for the same Widget.lookup R1 finding.
+    Asserts the emitted YAML:
+      * carries ``judge_signature_version: 2``;
+      * carries a 64-hex ``scope_fingerprint:`` matching what the
+        tier_model scanner stamps for the same Widget.lookup R1 finding;
+      * does NOT carry a v1 ``file_fingerprint:`` line;
+      * has a ``judge_metadata_signature`` with the ``hmac-sha256:v2:``
+        prefix;
+      * reloads clean with ``source_root`` (HMAC verify + v2 match-time
+        binding check) and the live finding still matches.
     """
-    import hashlib
+    import re
 
     from elspeth_lints.rules.trust_tier.tier_model.rule import scan_file
 
     root, target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
-    expected_file_fp = hashlib.sha256(target.read_bytes()).hexdigest()
-    # Pull the live ast_path from the same scanner the writer uses.
+    # Pull the live ast_path + scope_fingerprint from the same scanner
+    # the writer uses.
     findings = [f for f in scan_file(target, root) if f.rule_id == "R1"]
     assert len(findings) == 1
     expected_ast_path = findings[0].ast_path
+    expected_scope_fp = findings[0].scope_fingerprint
+    assert re.fullmatch(r"[0-9a-f]{64}", expected_scope_fp)
 
     argv = [
         "justify",
@@ -2624,20 +2646,25 @@ def test_justify_writes_file_fingerprint_and_ast_path(tmp_path: Path) -> None:
 
     target_yaml = allowlist_dir / "plugins.yaml"
     text = target_yaml.read_text(encoding="utf-8")
-    assert f"file_fingerprint: {expected_file_fp}" in text
-    assert "judge_metadata_signature: 'hmac-sha256:v1:" in text
+    assert "judge_signature_version: 2" in text
+    assert f"scope_fingerprint: {expected_scope_fp}" in text
+    assert "file_fingerprint:" not in text
+    assert "judge_metadata_signature: 'hmac-sha256:v2:" in text
     # ast_path contains '[' / ']' so the writer single-quotes it
     # (see _yaml_inline_scalar's conservative-quoting rule); accept
     # either quoted or bare form for forward compatibility.
     assert f"ast_path: '{expected_ast_path}'" in text or f"ast_path: {expected_ast_path}" in text
 
-    # The loader (with source_root) verifies the binding lives — proves
-    # the writer-side fingerprint actually matches the live source bytes.
+    # The loader (with source_root) verifies the v2 binding lives —
+    # proves the writer-side scope fingerprint actually matches the live
+    # source AND that the HMAC over the v2 payload verifies.
     with patch.dict(os.environ, {"ELSPETH_JUDGE_METADATA_HMAC_KEY": "test-judge-metadata-hmac-key-2026-05-24"}, clear=False):
         loaded = load_allowlist(target_yaml, valid_rule_ids={"R1"}, source_root=root)
     assert len(loaded.entries) == 1
     entry = loaded.entries[0]
-    assert entry.file_fingerprint == expected_file_fp
+    assert entry.judge_signature_version == 2
+    assert entry.scope_fingerprint == expected_scope_fp
+    assert entry.file_fingerprint is None
     assert entry.ast_path == expected_ast_path
 
 
@@ -2650,10 +2677,14 @@ def test_justify_override_also_writes_binding_fields(tmp_path: Path, monkeypatch
     operator overrode — otherwise the override path becomes the
     transplant vector.
     """
+    from elspeth_lints.rules.trust_tier.tier_model.rule import scan_file
+
     _set_operator_override_authority(monkeypatch)
     root, target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
-    expected_file_fp = hashlib.sha256(target.read_bytes()).hexdigest()
+    findings = [f for f in scan_file(target, root) if f.rule_id == "R1"]
+    assert len(findings) == 1
+    expected_scope_fp = findings[0].scope_fingerprint
 
     argv = [
         "justify",
@@ -2678,7 +2709,9 @@ def test_justify_override_also_writes_binding_fields(tmp_path: Path, monkeypatch
     text = target_yaml.read_text(encoding="utf-8")
     assert "judge_verdict: OVERRIDDEN_BY_OPERATOR" in text
     assert "judge_model_verdict: BLOCKED" in text
-    assert f"file_fingerprint: {expected_file_fp}" in text
+    assert "judge_signature_version: 2" in text
+    assert f"scope_fingerprint: {expected_scope_fp}" in text
+    assert "file_fingerprint:" not in text
     assert "ast_path:" in text
 
 
@@ -2712,6 +2745,6 @@ def test_build_yaml_entry_text_refuses_whitespace_only_rationale(blank_rationale
             policy_hash=JUDGE_POLICY_HASH,
             judge_rationale=blank_rationale,
             judge_confidence=0.5,
-            file_fingerprint="0" * 64,
+            scope_fingerprint="0" * 64,
             ast_path="Module.body[0]",
         )

@@ -586,8 +586,9 @@ def compute_judge_metadata_signature(
       fingerprint of the scope the finding lives in). Prefix
       ``hmac-sha256:v2:``.
 
-    ``signature_version`` defaults to ``1``: direct callers that omit it
-    (notably the ``justify`` write path) keep producing v1 signatures.
+    ``signature_version`` defaults to ``1`` for back-compatibility with
+    callers that omit it; the ``justify`` write path passes
+    ``signature_version=2`` explicitly and mints v2 (scope-bound) entries.
     Operators may still edit administrative fields such as owner/expiry,
     but changing what the judge supposedly said, which source location it
     judged, which secrets were scrubbed, or which binding scheme was used

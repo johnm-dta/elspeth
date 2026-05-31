@@ -453,7 +453,7 @@ def test_build_yaml_entry_text_quotes_all_helper_routed_fields(sentinel: str) ->
     """Every field that flows through ``_yaml_inline_scalar`` must round-trip.
 
     Today the operator/source-derived helper-routed fields are
-    ``owner``, ``judge_model``, ``judge_policy_hash``, ``file_fingerprint``,
+    ``owner``, ``judge_model``, ``judge_policy_hash``, ``scope_fingerprint``,
     and ``ast_path``. The generated ``judge_metadata_signature`` also routes through the
     helper and is asserted separately. This test sets each operator/
     source-derived field to the same sentinel and asserts the full entry
@@ -471,7 +471,7 @@ def test_build_yaml_entry_text_quotes_all_helper_routed_fields(sentinel: str) ->
             policy_hash=sentinel,
             judge_rationale="judge agrees",
             judge_confidence=0.5,
-            file_fingerprint=sentinel,
+            scope_fingerprint=sentinel,
             ast_path=sentinel,
         )
     full_yaml = "allow_hits:\n" + text
@@ -483,10 +483,10 @@ def test_build_yaml_entry_text_quotes_all_helper_routed_fields(sentinel: str) ->
     assert e["owner"] == sentinel and isinstance(e["owner"], str)
     assert e["judge_model"] == sentinel and isinstance(e["judge_model"], str)
     assert e["judge_policy_hash"] == sentinel and isinstance(e["judge_policy_hash"], str)
-    assert e["file_fingerprint"] == sentinel and isinstance(e["file_fingerprint"], str)
+    assert e["scope_fingerprint"] == sentinel and isinstance(e["scope_fingerprint"], str)
     assert e["ast_path"] == sentinel and isinstance(e["ast_path"], str)
     assert isinstance(e["judge_metadata_signature"], str)
-    assert e["judge_metadata_signature"].startswith("hmac-sha256:v1:")
+    assert e["judge_metadata_signature"].startswith("hmac-sha256:v2:")
 
 
 def test_build_audit_review_text_quotes_all_helper_routed_fields() -> None:
@@ -523,7 +523,7 @@ def test_yaml_inline_scalar_call_sites_are_inventoried() -> None:
     The check is byte-grep over ``cli.py`` for the helper's name. The
     expected count is 10:
       6 entry-level scalars (owner, judge_model, judge_policy_hash,
-        file_fingerprint, ast_path, judge_metadata_signature)
+        scope_fingerprint, ast_path, judge_metadata_signature)
       2 redaction-record fields per nested ``judge_excerpt_redactions``
         entry (pattern, redacted_hash) — these route through the same
         helper because a maliciously-crafted source file could in

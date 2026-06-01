@@ -160,3 +160,67 @@ def test_different_symbol_skipped() -> None:
         scope_depth=1,
     )
     assert got is None
+
+
+def test_blocked_entry_skipped() -> None:
+    entry = AllowlistEntry(
+        key="m.py:R6:C:f:fp=old",
+        owner="t",
+        reason="r",
+        safety="s",
+        expires=None,
+        ast_path="body[0]/body[0]/value",
+        scope_fingerprint=SCOPE,
+        judge_signature_version=2,
+        judge_verdict=JudgeVerdict.BLOCKED,
+    )
+    got = find_scope_fallback_entry(
+        [entry],
+        canonical_key="m.py:R6:C:f:fp=new",
+        scope_fingerprint=SCOPE,
+        ast_path="body[1]/body[0]/value",
+        scope_depth=1,
+    )
+    assert got is None
+
+
+def test_empty_suffix_no_matching_entry_returns_none() -> None:
+    # A finding whose node IS its enclosing scope: scope_depth == component
+    # count, so the within-scope suffix is []. Must not raise; returns None
+    # when no entry matches.
+    entry = _v2(key="other.py:R6:C:f:fp=old", ast_path="body[0]")
+    assert (
+        find_scope_fallback_entry(
+            [],
+            canonical_key="m.py:R6:C:f:fp=new",
+            scope_fingerprint=SCOPE,
+            ast_path="body[0]",
+            scope_depth=1,
+        )
+        is None
+    )
+    assert (
+        find_scope_fallback_entry(
+            [entry],
+            canonical_key="m.py:R6:C:f:fp=new",
+            scope_fingerprint=SCOPE,
+            ast_path="body[0]",
+            scope_depth=1,
+        )
+        is None
+    )
+
+
+def test_module_level_scope_depth_zero_fails_closed_on_scope_change() -> None:
+    # Module-level finding (scope_depth=0): the "enclosing scope" is the whole
+    # module body, so any module-body edit (e.g. adding an import) changes the
+    # scope_fingerprint and the entry is intentionally NOT rescued.
+    entry = _v2(key="m.py:R6:C:f:fp=old", ast_path="body[0]/value")
+    got = find_scope_fallback_entry(
+        [entry],
+        canonical_key="m.py:R6:C:f:fp=new",
+        scope_fingerprint="d" * 64,
+        ast_path="body[1]/value",
+        scope_depth=0,
+    )
+    assert got is None

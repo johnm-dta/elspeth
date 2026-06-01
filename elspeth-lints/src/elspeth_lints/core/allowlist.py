@@ -595,10 +595,24 @@ def find_scope_fallback_entry(
         return None
     finding_prefix = _key_without_fp(canonical_key)
     live_components = ast_path.split("/")
+    # scope_depth == len(live_components) (empty suffix) is REACHABLE and safe:
+    # a finding whose node IS its enclosing scope (e.g. an R_TB_MALFORMED
+    # diagnostic on a FunctionDef) has K == component count. Do NOT assert
+    # scope_depth < len(...) — that would crash the gate on such diagnostics.
+    # At most one finding per scope is the scope node itself, so an empty suffix
+    # cannot wrong-bind two distinct findings; non-judge-gated findings match 0
+    # candidates and return None.
     live_suffix = live_components[scope_depth:]
     candidates: list[AllowlistEntry] = []
     for entry in entries:
         if entry.judge_verdict is None or entry.scope_fingerprint is None or entry.ast_path is None:
+            continue
+        if entry.judge_verdict is JudgeVerdict.BLOCKED:
+            # Defense-in-depth: BLOCKED is an in-memory-only verdict meaning the entry
+            # was rejected and NOT written. The loader (_validate_judge_metadata_atomic
+            # invariant 5) already crashes on any persisted BLOCKED entry, so this cannot
+            # occur from a real load — but a suppression gate must never honour a BLOCKED
+            # verdict even if one is constructed in-memory.
             continue
         if _key_without_fp(entry.key) != finding_prefix:
             continue

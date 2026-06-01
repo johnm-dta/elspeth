@@ -103,13 +103,15 @@ class Finding:
     (never reverse-resolved from ``ast_path``) and verified at match time.
 
     ``scope_depth`` is K, the count of ``ast_path`` components strictly above
-    the enclosing scope (``node_stack.index(enclosing_scope)``). The scope-
-    relative suffix ``ast_path.split("/")[K:]`` is invariant under module-body
-    shifts (adding/removing a module-level statement moves only the leading
-    index, which lives in the first K components). It is the within-scope
-    discriminator the allowlist key-match fallback uses to tell two same-rule
-    findings in one scope apart. Module-level findings have no def/class scope,
-    so K=0 and the fallback does not apply to them.
+    the enclosing scope (the index of the enclosing scope node in
+    ``node_stack``). The scope-relative suffix ``ast_path.split("/")[K:]`` is
+    invariant under module-body shifts (adding/removing a module-level statement
+    moves only the leading index, which lives in the first K components). It is
+    the within-scope discriminator the allowlist key-match fallback uses to tell
+    two same-rule findings in one scope apart. Module-level findings have no
+    def/class scope, so K=0 and the fallback always returns None for them: any
+    module-body edit (e.g. adding an import) changes the module's
+    scope_fingerprint, so the scope-fingerprint-equality check fails.
     """
 
     rule_id: str
@@ -577,7 +579,9 @@ class TierModelVisitor(ast.NodeVisitor):
         added/removed) and the within-scope suffix is ``path_stack[K:]`` (stable).
 
         Returns 0 when the current node has no enclosing def/class (module level):
-        the whole path is "scope-relative" and the fallback does not apply.
+        the whole path is "scope-relative" and the fallback always returns None
+        for them: any module-body edit (e.g. adding an import) changes the
+        module's scope_fingerprint, so the scope-fingerprint-equality check fails.
         """
         scope = enclosing_scope_node(list(reversed(self.node_stack)))
         if scope is None:

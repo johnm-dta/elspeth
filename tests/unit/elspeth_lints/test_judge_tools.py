@@ -447,3 +447,21 @@ def test_cli_readonly_with_openrouter_rejected(tmp_path: Path, capsys: pytest.Ca
     )
     assert _run_reaudit(args) == 2
     assert "requires --judge-transport agent" in capsys.readouterr().err
+
+
+def test_cli_justify_readonly_with_openrouter_rejected(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # Parity: justify (the signing path) accepts --judge-tools just like reaudit,
+    # and rejects readonly+openrouter the same way, before any finding scan / HMAC.
+    import argparse
+
+    from elspeth_lints.core.cli import _run_justify
+
+    args = argparse.Namespace(
+        root=tmp_path,
+        repo_root=None,
+        allowlist_dir=tmp_path,
+        judge_transport="openrouter",
+        judge_tools="readonly",
+    )
+    assert _run_justify(args) == 2
+    assert "requires --judge-transport agent" in capsys.readouterr().err

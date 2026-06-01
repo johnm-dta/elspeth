@@ -442,6 +442,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output format for the verdict",
     )
     _add_judge_transport_arg(justify)
+    _add_judge_tools_arg(justify)
 
     audit_verdict = subparsers.add_parser(
         "audit-verdict",
@@ -1264,6 +1265,19 @@ def _run_justify(args: argparse.Namespace) -> int:
     if not allowlist_dir.is_dir():
         sys.stderr.write(f"--allowlist-dir: {allowlist_dir} is not a directory\n")
         return 2
+
+    # Resolve the judge transport + (optional) read-only tool scope up front so a
+    # bad flag combination fails before any finding scan / HMAC handling. The
+    # agent transport is a first-class peer of openrouter here; readonly tools
+    # are the agent's superset capability (openrouter has no tool loop).
+    transport: str = _CLI_TRANSPORT_CHOICES[args.judge_transport]
+    tool_scope: AgentToolScope | None = None
+    if args.judge_tools == "readonly":
+        if transport != TRANSPORT_AGENT:
+            sys.stderr.write("--judge-tools readonly requires --judge-transport agent (the openrouter transport has no tool loop).\n")
+            return 2
+        tool_scope = build_readonly_tool_scope(root=root, allowlist_dir=allowlist_dir)
+
     if args.operator_override:
         authorization_error = _operator_override_authorization_error()
         if authorization_error is not None:
@@ -1463,7 +1477,8 @@ def _run_justify(args: argparse.Namespace) -> int:
         response: JudgeResponse = call_judge(
             request,
             max_tokens=args.max_tokens or DEFAULT_JUDGE_MAX_TOKENS,
-            transport=_CLI_TRANSPORT_CHOICES[args.judge_transport],
+            transport=transport,
+            tool_scope=tool_scope,
         )
     except JudgeConfigurationError as exc:
         sys.stderr.write(f"Judge configuration error: {exc}\n")

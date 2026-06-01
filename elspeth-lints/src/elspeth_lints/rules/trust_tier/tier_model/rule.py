@@ -40,6 +40,7 @@ from elspeth_lints.core.allowlist import (
 from elspeth_lints.core.allowlist import AllowlistEntry as AllowlistEntry
 from elspeth_lints.core.allowlist import (
     FindingKey,
+    find_scope_fallback_entry,
     load_allowlist,
     verify_entry_binding_against_finding,
 )
@@ -2290,6 +2291,24 @@ def _match_finding(allowlist: Allowlist, finding: Finding) -> AllowlistEntry | P
             )
             entry.matched = True
             return entry
+    # Exact key missed. A judge-gated v2 entry whose module-rooted ast_path
+    # drifted (an unrelated module-level statement shifted the leading index)
+    # but whose enclosing scope + within-scope position are unchanged is the
+    # same suppression, relocated. The fallback's predicate (scope_fingerprint
+    # equality + within-scope ast_path suffix equality) IS its binding check and
+    # is at least as strong as the exact-match transplant defence, so we do NOT
+    # also call verify_entry_binding_against_finding (which asserts ast_path
+    # equality and would crash by construction on the fallback path).
+    fallback = find_scope_fallback_entry(
+        allowlist.entries,
+        canonical_key=finding.canonical_key,
+        scope_fingerprint=finding.scope_fingerprint,
+        ast_path=finding.ast_path,
+        scope_depth=finding.scope_depth,
+    )
+    if fallback is not None:
+        fallback.matched = True
+        return fallback
     return None
 
 

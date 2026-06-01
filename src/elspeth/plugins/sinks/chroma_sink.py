@@ -175,7 +175,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:eab66a25fd4ce2a7"
+    source_file_hash: str | None = "sha256:bb0aa7295b1f55e8"
     config_model = ChromaSinkConfig
     supports_resume = False
 
@@ -289,7 +289,9 @@ class ChromaSink(BaseSink):
         valid_indices: list[int] = []
 
         for i, row in enumerate(rows):
-            # Required fields: id and document must be present and string-typed.
+            # Required fields: id and document must be present.
+            # Tier-2 type contract: raw_id/raw_doc must be str (source validated).
+            # Missing field = per-row data problem; wrong type = upstream bug → crash.
             try:
                 raw_id = row[fm.id_field]
                 raw_doc = row[fm.document_field]
@@ -298,21 +300,6 @@ class ChromaSink(BaseSink):
                     row,
                     row_index=i,
                     reason=f"Missing required field: {exc}",
-                )
-                continue
-
-            if not isinstance(raw_id, str):
-                self._divert_row(
-                    row,
-                    row_index=i,
-                    reason=f"Field '{fm.id_field}' must be str, got {type(raw_id).__name__}",
-                )
-                continue
-            if not isinstance(raw_doc, str):
-                self._divert_row(
-                    row,
-                    row_index=i,
-                    reason=f"Field '{fm.document_field}' must be str, got {type(raw_doc).__name__}",
                 )
                 continue
 

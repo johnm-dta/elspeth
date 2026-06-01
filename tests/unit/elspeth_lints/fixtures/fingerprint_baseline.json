@@ -2397,11 +2397,11 @@
     },
     {
       "file_path": "plugins/sinks/chroma_sink.py",
-      "fingerprint": "12aaa412bd91a810"
+      "fingerprint": "459fb5a3b1e6a043"
     },
     {
       "file_path": "plugins/sinks/chroma_sink.py",
-      "fingerprint": "817edacea0609417"
+      "fingerprint": "801f187823d20f74"
     },
     {
       "file_path": "plugins/sinks/chroma_sink.py",
@@ -2409,15 +2409,7 @@
     },
     {
       "file_path": "plugins/sinks/chroma_sink.py",
-      "fingerprint": "87156d7ec508a40b"
-    },
-    {
-      "file_path": "plugins/sinks/chroma_sink.py",
-      "fingerprint": "d7e05b8fc5f239a9"
-    },
-    {
-      "file_path": "plugins/sinks/chroma_sink.py",
-      "fingerprint": "fe6fa1b761d7dd9c"
+      "fingerprint": "c52a6a2457cc3cdc"
     },
     {
       "file_path": "plugins/sinks/csv_sink.py",
@@ -3102,10 +3094,6 @@
     {
       "file_path": "plugins/transforms/web_scrape.py",
       "fingerprint": "922ac0bb4c76376b"
-    },
-    {
-      "file_path": "plugins/transforms/web_scrape.py",
-      "fingerprint": "f919002b3beb8525"
     },
     {
       "file_path": "telemetry/exporters/azure_monitor.py",

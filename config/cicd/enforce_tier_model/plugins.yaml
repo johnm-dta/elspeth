@@ -1019,69 +1019,32 @@ allow_hits:
   safety: Missing metadata fields silently omitted from the per-row metadata dict;
     no data fabrication
   expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=12aaa412bd91a810
-  owner: bugfix
-  pattern: external-boundary-validator
-  reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
-    values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected
-    rows instead of crashing the batch
-  safety: Non-finite float rows diverted via _divert_row() with per-field detail;
-    valid rows written normally; no silent data loss
-  expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=87156d7ec508a40b
-  owner: bugfix
-  pattern: external-boundary-validator
-  reason: Tier 2→external trust boundary — isinstance(float) guards non-finite metadata
-    values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected
-    rows instead of crashing the batch
-  safety: Non-finite float rows diverted via _divert_row() with per-field detail;
-    valid rows written normally; no silent data loss
-  expires: null
-- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=fe6fa1b761d7dd9c
+- key: plugins/sinks/chroma_sink.py:R6:ChromaSink:write:fp=c52a6a2457cc3cdc
   owner: feature
   reason: Per-row KeyError catch for optional metadata fields — missing metadata field
     skipped (metadata is optional per-field)
   safety: Missing metadata fields silently omitted from the per-row metadata dict;
     no data fabrication
   expires: null
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=817edacea0609417
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=459fb5a3b1e6a043
   owner: bugfix
   reason: |-
-    Tier 2→external trust boundary — isinstance(float) guards non-finite metadata values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected rows instead of crashing the batch
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:27:26.067185+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.78
-  judge_rationale: |-
-    The isinstance guard at line 331 sits at the Tier-2 → external (ChromaDB) trust boundary inside a sink: row values that passed source validation are about to be handed to an external system (ChromaDB) whose API constrains metadata to str|int|float|bool|None. The sink correctly diverts rows with incompatible types rather than crashing the batch, which is the documented behaviour for per-row data problems at external boundaries. The rule is R5 but the subject is a row field about to cross into an external system, not an external parameter to the function — the @trust_boundary decorator (which keys on a named source_param) does not structurally apply here. The duplicate rationale count reflects multiple structurally-identical guards in the same function, which the excerpt independently supports.
-  judge_signature_version: 2
-  scope_fingerprint: a7acaa0bcda077f1ee43b0b4ca3576a36856fd6f0fd444c832d971f19aba8a67
-  judge_transport: openrouter
-  ast_path: 'body[29]/body[11]/body[9]/body[3]/body[2]/body[1]/test/values[1]/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:573ba50bab2984edfea68fc485b7dae3aecf06cc58b07132c79cc9dbab2532a2'
-- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=d7e05b8fc5f239a9
+    Tier-2 operation-unsafe guard — isinstance(value, (str, int, float, bool)) checks
+    ChromaDB-compatible metadata types before handing off to the external ChromaDB API.
+    A wrong-typed metadata value (e.g. dict, datetime) is value-unsafe at this
+    Tier-2→external boundary; per-row divert prevents an unattributable batch failure.
+    Needs operator re-signing (scope shifted after raw_id/raw_doc Tier-2 reify).
+  safety: Incompatible-type metadata rows diverted via _divert_row; valid rows written.
+  expires: '2026-08-30'
+- key: plugins/sinks/chroma_sink.py:R5:ChromaSink:write:fp=801f187823d20f74
   owner: bugfix
   reason: |-
-    Tier 2→external trust boundary — isinstance(float) guards non-finite metadata values (NaN/Infinity) before they reach canonical_json() hashing; diverts affected rows instead of crashing the batch
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-28'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-05-30T04:27:35.834995+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:ee8359775f8cd9b8849912ecc4155fa4df8f2d86fabad8289b5acf1e795c87b6'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    This is a sink boundary check: ChromaDB is an external system with documented type constraints (str|int|float|bool|None, and floats must be finite to survive canonical_json hashing). The isinstance(float) guard on line 333 is at the Tier-2→external boundary, validating per-row data before crossing into the external system, and diverts offending rows rather than crashing the batch — the policy-correct behavior for user-data validation at a sink boundary. The decorator nudge does not apply: R5 is in scope, but the function is not a Tier-3 ingress (no external parameter feeding the check; data originates from upstream pipeline rows being prepared for an external sink). The duplicate-rationale count reflects that this same pattern recurs legitimately across metadata-field validation sites in the same write method.
-  judge_signature_version: 2
-  scope_fingerprint: a7acaa0bcda077f1ee43b0b4ca3576a36856fd6f0fd444c832d971f19aba8a67
-  judge_transport: openrouter
-  ast_path: 'body[29]/body[11]/body[9]/body[3]/body[2]/body[1]/orelse[0]/test/values[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:81883e806008eefda5154b9e0cd62eb12e2b07a1d0da29d72d30ef11797c5494'
+    Tier-2 operation-unsafe guard — isinstance(value, float) narrows before math.isfinite()
+    to guard non-finite floats (NaN/Infinity) that ChromaDB would reject. The type is
+    correct (float) but the value causes an operation failure at the external boundary.
+    Needs operator re-signing (scope shifted after raw_id/raw_doc Tier-2 reify).
+  safety: Non-finite float metadata rows diverted via _divert_row; valid rows written.
+  expires: '2026-08-30'
 - key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=7be036c024aeeefe
   owner: source-boundary
   reason: |-
@@ -1386,15 +1349,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[27]/body[7]/body[0]/test'
   judge_metadata_signature: 'hmac-sha256:v2:6ef2e8e60f707a9dc38f1763ceb64786f4355f44391df35fa486933c1f44f5ba'
-- key: plugins/transforms/web_scrape.py:R5:WebScrapeTransform:get_post_call_hints:fp=f919002b3beb8525
-  owner: composer-jit-hints
-  reason: Tier 3 boundary — config_snapshot is the LLM-supplied options dict passed
-    to get_post_call_hints; sep value type is unknown at this seam. The isinstance
-    guard is the correct way to narrow before the substring membership check.
-  safety: Non-str sep skips the hint silently; the override returns () and the composer
-    surfaces no coaching, which is the right failure mode for malformed config (the
-    validator catches the real config error separately).
-  expires: null
 - key: plugins/sinks/azure_blob_sink.py:R6:AzureBlobSink:write:fp=304f148f13df7df3
   owner: trust-tier-maintenance
   reason: ALLOWLIST-FRESH — no stale entry matched this finding during fingerprint

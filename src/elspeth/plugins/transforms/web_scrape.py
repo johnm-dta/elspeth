@@ -418,7 +418,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:c5faf7a4a9af9a81"
+    source_file_hash: str | None = "sha256:a63ae9957968b6cd"
     config_model = WebScrapeConfig
     passes_through_input = True
 
@@ -592,7 +592,8 @@ class WebScrapeTransform(BaseTransform):
         if config_snapshot["format"] != "text":
             return ()
         sep = config_snapshot["text_separator"]
-        if isinstance(sep, str) and "\n" not in sep:
+        # text_separator is str per WebScrapeConfig schema (Tier-2 type contract)
+        if "\n" not in sep:  # type: ignore[operator]
             hints.append(
                 "format: 'text' with a non-newline text_separator collapses page lines into one string. "
                 "Downstream line_explode cannot recover boundaries. Either set text_separator: '\\n' or switch format: 'markdown'."

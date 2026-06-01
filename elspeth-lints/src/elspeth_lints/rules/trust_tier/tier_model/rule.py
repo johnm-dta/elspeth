@@ -100,6 +100,15 @@ class Finding:
     scope in the same file no longer invalidates an entry's signature. It
     is computed *forward* by the visitor from the live ``node_stack``
     (never reverse-resolved from ``ast_path``) and verified at match time.
+
+    ``scope_depth`` is K, the count of ``ast_path`` components strictly above
+    the enclosing scope (``node_stack.index(enclosing_scope)``). The scope-
+    relative suffix ``ast_path.split("/")[K:]`` is invariant under module-body
+    shifts (adding/removing a module-level statement moves only the leading
+    index, which lives in the first K components). It is the within-scope
+    discriminator the allowlist key-match fallback uses to tell two same-rule
+    findings in one scope apart. Module-level findings have no def/class scope,
+    so K=0 and the fallback does not apply to them.
     """
 
     rule_id: str
@@ -112,6 +121,7 @@ class Finding:
     message: str
     ast_path: str = ""
     scope_fingerprint: str = ""
+    scope_depth: int = 0
 
     @property
     def canonical_key(self) -> str:
@@ -555,6 +565,28 @@ class TierModelVisitor(ast.NodeVisitor):
         assert isinstance(module, ast.Module)  # node_stack[0] is always the module root
         return compute_scope_fingerprint(None, module=module)
 
+    def _scope_depth_for_current_node(self) -> int:
+        """Return K = the count of ast_path components above the enclosing scope.
+
+        ``path_stack`` and ``node_stack`` are index-aligned: ``path_stack[i]`` is
+        the edge ``node_stack[i] -> node_stack[i+1]`` (the descent helpers push the
+        edge label, then ``visit`` pushes the child). So for enclosing scope
+        ``S = node_stack[K]`` the components strictly above ``S`` are
+        ``path_stack[0:K]`` (these shift when a module-level statement is
+        added/removed) and the within-scope suffix is ``path_stack[K:]`` (stable).
+
+        Returns 0 when the current node has no enclosing def/class (module level):
+        the whole path is "scope-relative" and the fallback does not apply.
+        """
+        scope = enclosing_scope_node(list(reversed(self.node_stack)))
+        if scope is None:
+            return 0
+        for index, node in enumerate(self.node_stack):
+            if node is scope:
+                return index
+        # enclosing_scope_node only ever returns a node drawn from node_stack.
+        raise AssertionError("enclosing scope not found in node_stack")
+
     def _get_code_snippet(self, lineno: int) -> str:
         """Get the source line for a given line number."""
         if 1 <= lineno <= len(self.source_lines):
@@ -664,6 +696,7 @@ class TierModelVisitor(ast.NodeVisitor):
                 message=message,
                 ast_path="/".join(self.path_stack) or "<module-root>",
                 scope_fingerprint=self._scope_fingerprint_for_current_node(),
+                scope_depth=self._scope_depth_for_current_node(),
             )
         )
 
@@ -691,6 +724,7 @@ class TierModelVisitor(ast.NodeVisitor):
                 ),
                 ast_path="/".join(self.path_stack) or "<module-root>",
                 scope_fingerprint=self._scope_fingerprint_for_current_node(),
+                scope_depth=self._scope_depth_for_current_node(),
             )
         )
 
@@ -719,6 +753,7 @@ class TierModelVisitor(ast.NodeVisitor):
                 # diagnostic and is never judge-gated, so the exact value is
                 # don't-care — only the non-empty invariant is load-bearing.
                 scope_fingerprint=self._scope_fingerprint_for_current_node(),
+                scope_depth=self._scope_depth_for_current_node(),
             )
         )
 
